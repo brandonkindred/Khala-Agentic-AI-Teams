@@ -20,6 +20,7 @@ from shared.temporal.activity_utils import is_last_attempt
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
+    add_pending_questions,
     update_job,
 )
 
@@ -493,22 +494,31 @@ def plan_project_activity(
     repo_path: str,
     spec_parse_result: Dict[str, Any],
     trace_id: str = "",
+    resume_token: Optional[str] = None,
+    submitted_answers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Phase 2: Run Planning workflow.
 
-    Returns PlanResult as a dict. ``trace_id`` (workflow-supplied, or freshly
-    generated when blank) is bound for the duration of this activity — see
-    ``parse_spec_activity`` for why it must be passed explicitly here rather than
-    inherited via contextvars.
+    Returns PlanResult as a dict, or a ``{"outcome": "paused", ...}`` dict when Planning
+    raises a clarification question (see ``_plan_project_activity_body``). ``trace_id``
+    (workflow-supplied, or freshly generated when blank) is bound for the duration of this
+    activity — see ``parse_spec_activity`` for why it must be passed explicitly here rather
+    than inherited via contextvars. ``resume_token``/``submitted_answers`` are supplied by
+    the calling workflow when re-invoking this activity after a prior pause was resolved by
+    a ``submit_planning_answers`` signal; omitted on a fresh (unpaused) invocation.
     """
     with bind_trace_id(trace_id or new_trace_id()):
-        return _plan_project_activity_body(job_id, repo_path, spec_parse_result)
+        return _plan_project_activity_body(
+            job_id, repo_path, spec_parse_result, resume_token, submitted_answers
+        )
 
 
 def _plan_project_activity_body(
     job_id: str,
     repo_path: str,
     spec_parse_result: Dict[str, Any],
+    resume_token: Optional[str] = None,
+    submitted_answers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block.
 
@@ -522,8 +532,29 @@ def _plan_project_activity_body(
         ``spec_data.spec_content`` via the LLM — avoids a second, nondeterministic parse and
         an unnecessary spec-intake LLM dependency; required for the sprint path, where
         ``spec_data.spec_content`` is synthesized Markdown, not LLM-parseable prose.
+
+        When Planning raises a clarification question and ``submitted_answers`` is ``None``
+        (a fresh pause, not a resume), this never reaches Planning's own success/failure
+        branches: it persists the questions (mirroring thread-mode's
+        ``orchestrator._build_planning_answer_callback``) and returns
+        ``{"outcome": "paused", "resume_token": ..., "pending_questions": ...}`` instead of a
+        ``PlanResult``, so the calling workflow can durably wait for a
+        ``submit_planning_answers`` signal (via ``PlanningAnswerSignalMixin``) instead of this
+        activity blocking. Matches thread-mode's invariant that Planning is never silently
+        auto-answered (``auto_answer_questions=False`` in both modes) via a durable signal
+        instead of a blocking poll loop.
     """
+    from planning_team.temporal.answer_signal import (
+        PlanningAnswerPauseSignal,
+        build_temporal_planning_answer_callback,
+    )
+    from software_engineering_team.pause_cycle import mint_resume_token
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
+
+    resume_token = resume_token or mint_resume_token(job_id)
+    answer_callback = build_temporal_planning_answer_callback(
+        resume_token, submitted_answers=submitted_answers
+    )
 
     try:
         from software_engineering_team.orchestrator import _check_cancellation, _get_agents
@@ -571,6 +602,8 @@ def _plan_project_activity_body(
             llm=get_client("project_planning"),
             job_updater=_planning_updater,
             run_architecture_fn=_run_architecture,
+            answer_callback=answer_callback,
+            auto_answer_questions=False,
         )
         if not planning_result.get("success"):
             err = planning_result.get("failure_reason") or "Planning failed"
@@ -598,6 +631,26 @@ def _plan_project_activity_body(
             spec_content_for_planning=spec_content_for_planning,
             requirements_title=adapter_result.requirements.title,
         ).model_dump()
+
+    except PlanningAnswerPauseSignal as exc:
+        from software_engineering_team.orchestrator import _convert_to_structured_questions
+
+        texts = [
+            (q.get("question_text") or q.get("text") or "") if isinstance(q, dict) else str(q)
+            for q in exc.pending_questions
+        ]
+        structured = _convert_to_structured_questions(texts, source="planning")
+        for sq, oq in zip(structured, exc.pending_questions):
+            if isinstance(oq, dict) and oq.get("id"):
+                sq["id"] = str(oq["id"])
+                if oq.get("options"):
+                    sq["options"] = oq["options"]
+        add_pending_questions(job_id, structured)
+        return {
+            "outcome": "paused",
+            "resume_token": exc.resume_token,
+            "pending_questions": structured,
+        }
 
     except Exception as e:
         logger.exception(

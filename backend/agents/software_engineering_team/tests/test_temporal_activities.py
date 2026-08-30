@@ -979,3 +979,123 @@ def test_phase_activities_generate_a_trace_id_when_none_supplied(
     with pytest.raises(RuntimeError):
         activities.parse_spec_activity("ps-notrace", str(tmp_path))
     assert seen["trace_id"]
+
+
+def test_plan_project_activity_pauses_on_planning_clarification_question(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """A fresh clarification question durably pauses instead of blocking or auto-answering.
+
+    Regression guard for the Temporal-mode HITL gap (issue #7446): when Planning's
+    ``answer_callback`` is invoked with no ``submitted_answers`` yet, the primitive from
+    ``planning_team.temporal.answer_signal`` raises ``PlanningAnswerPauseSignal`` instead of
+    returning a default. The activity must catch it, persist the question via
+    ``add_pending_questions`` (the same call thread-mode's own
+    ``orchestrator._build_planning_answer_callback`` makes), and return a discriminated
+    ``{"outcome": "paused", ...}`` dict rather than a ``PlanResult`` or a raised exception.
+    """
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-pause", repo_path=str(tmp_path))
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": None},
+    )
+
+    def _fake_run_workflow(*args, **kwargs):
+        answer_callback = kwargs["answer_callback"]
+        assert kwargs["auto_answer_questions"] is False
+        # Never returns: the callback raises PlanningAnswerPauseSignal for a fresh pause.
+        return answer_callback(
+            [
+                {
+                    "id": "q1",
+                    "question_text": "Which auth provider?",
+                    "options": [{"id": "okta", "label": "Okta"}],
+                }
+            ]
+        )
+
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", _fake_run_workflow)
+
+    result = activities.plan_project_activity(
+        "pp-pause",
+        str(tmp_path),
+        {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+    )
+
+    assert result["outcome"] == "paused"
+    assert isinstance(result["resume_token"], str) and result["resume_token"]
+    assert result["pending_questions"][0]["question_text"] == "Which auth provider?"
+    assert result["pending_questions"][0]["id"] == "q1"
+    assert result["pending_questions"][0]["options"] == [{"id": "okta", "label": "Okta"}]
+
+    job = js.get_job("pp-pause")
+    assert job["waiting_for_answers"] is True
+    assert job["pending_questions"][0]["question_text"] == "Which auth provider?"
+    # Never marked failed by the generic exception handler — a pause is not a failure.
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
+def test_plan_project_activity_resumes_with_submitted_answers(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Re-invoking with ``resume_token``/``submitted_answers`` resolves the same question
+    instead of pausing again, and Planning proceeds to completion."""
+    from unittest.mock import MagicMock
+
+    from shared.dev_models.models import ProductRequirements
+    from software_engineering_team.planning_adapter import PlanningAdapterResult
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-resume", repo_path=str(tmp_path))
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": MagicMock()},
+    )
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_run_workflow(*args, **kwargs):
+        answer_callback = kwargs["answer_callback"]
+        captured["answers"] = answer_callback(
+            [{"id": "q1", "question_text": "Which auth provider?"}]
+        )
+        return {
+            "success": True,
+            "summary": "done",
+            "handoff_package": {"summary": "Build a widget API."},
+            "open_questions": [],
+            "resolved_questions": [],
+        }
+
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", _fake_run_workflow)
+
+    adapter_result = PlanningAdapterResult(
+        requirements=ProductRequirements(
+            title="Test", description="Desc", acceptance_criteria=["Ship it"], constraints=[]
+        ),
+        project_overview={"goals": "Ship", "features_and_functionality_doc": "API"},
+        open_questions=[],
+        assumptions=[],
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.planning_adapter.adapt_planning_result",
+        lambda *a, **kw: adapter_result,
+    )
+
+    result = activities.plan_project_activity(
+        "pp-resume",
+        str(tmp_path),
+        {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+        resume_token="pp-resume:abc123",
+        submitted_answers=[{"question_id": "q1", "selected_option_id": "okta"}],
+    )
+
+    assert captured["answers"] == [{"question_id": "q1", "selected_option_id": "okta"}]
+    assert "outcome" not in result or result.get("outcome") != "paused"
+    assert result["requirements_title"] == "Test"
