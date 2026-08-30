@@ -10,7 +10,6 @@ from investment_team.agents import (
     PolicyGuardianAgent,
     PromotionGateAgent,
 )
-from investment_team.execution.risk_filter import RiskLimits
 from investment_team.models import (
     IPS,
     AdvisorSessionStatus,
@@ -1210,8 +1209,8 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
         )
 
 
-def test_strategy_spec_max_concurrent_positions_derives_from_risk_limits_default() -> None:
-    """Omitting both fields derives from RiskLimits's own default (10), not a hardcoded 1."""
+def test_strategy_spec_max_concurrent_positions_defaults_to_one() -> None:
+    """Omitting the field preserves today's implicit one-position-per-symbol behavior."""
     spec = StrategySpec(
         strategy_id="s-mcp-default",
         authored_by="test",
@@ -1220,13 +1219,13 @@ def test_strategy_spec_max_concurrent_positions_derives_from_risk_limits_default
         signal_definition="s",
         timeframe="1d",
     )
-    assert spec.max_concurrent_positions == RiskLimits.model_fields["max_open_positions"].default
+    assert spec.max_concurrent_positions == 1
 
 
-def test_strategy_spec_max_concurrent_positions_derives_from_explicit_risk_limits() -> None:
-    """Omitting the field alone derives it from an explicit risk_limits.max_open_positions."""
+def test_strategy_spec_max_concurrent_positions_default_ignores_risk_limits() -> None:
+    """The default does not derive from risk_limits.max_open_positions, even when the latter is set explicitly."""
     spec = StrategySpec(
-        strategy_id="s-mcp-derived",
+        strategy_id="s-mcp-default-with-risk-limits",
         authored_by="test",
         asset_class="stocks",
         hypothesis="h",
@@ -1234,21 +1233,7 @@ def test_strategy_spec_max_concurrent_positions_derives_from_explicit_risk_limit
         timeframe="1d",
         risk_limits={"max_open_positions": 4},
     )
-    assert spec.max_concurrent_positions == 4
-
-
-def test_strategy_spec_max_concurrent_positions_rejects_derived_value_above_ceiling() -> None:
-    """A risk_limits.max_open_positions above the ceiling fails construction, not just an explicit value."""
-    with pytest.raises(ValidationError):
-        StrategySpec(
-            strategy_id="s-mcp-derived-ceiling",
-            authored_by="test",
-            asset_class="stocks",
-            hypothesis="h",
-            signal_definition="s",
-            timeframe="1d",
-            risk_limits={"max_open_positions": 25},
-        )
+    assert spec.max_concurrent_positions == 1
 
 
 def test_strategy_spec_max_concurrent_positions_accepts_valid_value() -> None:

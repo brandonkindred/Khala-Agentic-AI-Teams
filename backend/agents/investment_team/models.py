@@ -351,30 +351,31 @@ class StrategySpec(BaseModel):
     # instead of the asset-class default universe, so a hypothesis naming
     # QQQ doesn't get silently backtested on AAPL.
     target_symbols: List[str] = Field(default_factory=list)
+    # Defaults to 1 so every existing spec/caller that omits this field keeps
+    # today's implicit one-position-per-symbol behavior exactly — this is a
+    # hard backward-compatibility requirement, not just a convenience default.
     # This field is purely declarative for now: nothing reads it yet, so its
     # value has no effect on current runtime behavior. The runtime's actual
     # (and only) concurrency gate today is ``risk_limits.max_open_positions``
-    # (RiskFilter.can_enter). To avoid two independently-defaulted sources of
-    # truth for the same concept, an omitted value is derived from
-    # ``risk_limits.max_open_positions`` (see
-    # ``_derive_max_concurrent_positions_default`` below) rather than
-    # hardcoded — so the common case (both omitted) agrees by construction.
-    # An explicit value always wins over the derived one. The ceiling still
-    # applies to a derived value too: a ``risk_limits.max_open_positions``
-    # above ``_MAX_CONCURRENT_POSITIONS`` now fails spec construction rather
-    # than silently diverging.
+    # (default 10, RiskFilter.can_enter) — this field does NOT derive from or
+    # reconcile with that default; doing so would silently change the
+    # effective default for every spec that omits both fields. Reconciling
+    # the two into a single source of truth is deferred to the follow-up
+    # readiness/sizing validation step, which is where the field gets an
+    # actual consumer.
     max_concurrent_positions: int = Field(
         default=1,
         ge=1,
         le=_MAX_CONCURRENT_POSITIONS,
         description=(
             "Maximum number of positions this spec may hold open "
-            "concurrently across target_symbols. When omitted, derived from "
-            "``risk_limits.max_open_positions`` so the two fields agree by "
-            "default; an explicit value overrides the derivation. Not yet "
-            "consumed by any readiness check or the trading engine — "
-            "``risk_limits.max_open_positions`` (via ``RiskFilter.can_enter``) "
-            "remains the actual runtime enforcement point."
+            "concurrently across target_symbols. Defaults to 1, preserving "
+            "today's implicit one-position-per-symbol behavior for any spec "
+            "that omits it. Not yet consumed by any readiness check or the "
+            "trading engine — today's actual runtime concurrency gate is "
+            "``risk_limits.max_open_positions`` (default 10, via "
+            "``RiskFilter.can_enter``); reconciling the two is deferred to "
+            "follow-up work."
         ),
     )
     # Phase 3: risk_limits is validated at spec construction time.  Dicts
@@ -413,39 +414,6 @@ class StrategySpec(BaseModel):
         if not (info.context and info.context.get("legacy_spec")):
             return data
         return _coerce_legacy_strategy_spec_dict(data)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_max_concurrent_positions_default(cls, data: Any) -> Any:
-        """Fill an omitted ``max_concurrent_positions`` from ``risk_limits.max_open_positions``.
-
-        Postconditions: when ``max_concurrent_positions`` is absent or
-        ``None`` in ``data``, sets it to whatever ``max_open_positions``
-        would resolve to on ``risk_limits`` — read off a dict, an already-
-        constructed ``RiskLimits`` instance, or (when ``risk_limits`` itself
-        is absent/``None``) ``RiskLimits``'s own field default — so the two
-        fields agree by default instead of silently diverging (10 vs. 1). An
-        explicit ``max_concurrent_positions`` (including an explicit invalid
-        one) is left untouched and always wins. Runs before field-level
-        validation, so a derived value above ``_MAX_CONCURRENT_POSITIONS``
-        still raises ``ValidationError`` there — this only supplies a value,
-        it never bypasses the bound.
-        """
-        if not isinstance(data, dict):
-            return data
-        if data.get("max_concurrent_positions") is not None:
-            return data
-        risk_limits = data.get("risk_limits")
-        if isinstance(risk_limits, RiskLimits):
-            max_open = risk_limits.max_open_positions
-        elif isinstance(risk_limits, dict):
-            max_open = risk_limits.get("max_open_positions")
-            if max_open is None:
-                max_open = RiskLimits.model_fields["max_open_positions"].default
-        else:
-            max_open = RiskLimits.model_fields["max_open_positions"].default
-        data["max_concurrent_positions"] = max_open
-        return data
 
     @classmethod
     def parse_persisted(cls, raw: Any) -> "StrategySpec":
