@@ -351,18 +351,27 @@ class StrategySpec(BaseModel):
     # instead of the asset-class default universe, so a hypothesis naming
     # QQQ doesn't get silently backtested on AAPL.
     target_symbols: List[str] = Field(default_factory=list)
-    # Default of 1 reproduces today's implicit one-position-per-symbol
-    # behavior exactly. The ceiling bounds the concurrency budget to a
-    # sane order of magnitude relative to target_symbols cardinality; see
-    # _MAX_CONCURRENT_POSITIONS above.
+    # This field is purely declarative for now: nothing reads it yet, so its
+    # default has no effect on current runtime behavior. The runtime's
+    # actual (and only) concurrency gate today is
+    # ``risk_limits.max_open_positions`` (default 10, RiskFilter.can_enter) —
+    # this field does NOT reproduce that default on purpose, since
+    # reconciling the two into a single source of truth (or deriving one
+    # from the other) is the explicit subject of the follow-up readiness/
+    # sizing validation step, not this one. The ceiling bounds the declared
+    # budget to a sane order of magnitude relative to target_symbols
+    # cardinality; see _MAX_CONCURRENT_POSITIONS above.
     max_concurrent_positions: int = Field(
         default=1,
         ge=1,
         le=_MAX_CONCURRENT_POSITIONS,
         description=(
             "Maximum number of positions this spec may hold open "
-            "concurrently across target_symbols. Defaults to 1, matching "
-            "today's implicit one-position-per-symbol behavior."
+            "concurrently across target_symbols. Defaults to 1. Not yet "
+            "consumed by any readiness check or the trading engine — "
+            "today's actual concurrency gate is "
+            "``risk_limits.max_open_positions`` (default 10); reconciling "
+            "the two is deferred to follow-up work."
         ),
     )
     # Phase 3: risk_limits is validated at spec construction time.  Dicts
