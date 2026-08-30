@@ -59,7 +59,7 @@ interface RunRowVm {
   run: CodingTeamJobListItem;
   issueNumber?: number;
   prNumber?: number;
-  /** "#42" for an issue-driven run, "PR #42" for a PR-remediation run; '' when neither is known. */
+  /** "#42" for an issue-driven run, "#42 (PR)" for a PR-remediation run; '' when neither is known. */
   displayLabel: string;
   /** "owner/repo" of the run's repository, so rows from different repos are tellable apart. */
   repoLabel: string;
@@ -1114,11 +1114,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   /** Issue/PR number for the run-detail header, preferring the freshest known source. */
   get selectedRunDisplayNumber(): number | null {
-    return (
-      this.jobStatus?.github_context?.issue_number ??
-      this.jobStatus?.github_context?.pr_number ??
-      this.selectedRunNumber
-    );
+    const ctx = this.jobStatus?.github_context ?? this.selectedRun?.github_context;
+    return runIdentity(ctx)?.number ?? this.selectedRunNumber;
   }
 
   /**
