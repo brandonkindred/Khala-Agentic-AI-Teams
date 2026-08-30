@@ -796,16 +796,27 @@ The primitive #7445-B builds must satisfy:
 
 **`document_production_pra_submit_activity` (§4.3.1 — separately scheduled, `NO_RETRY`)**
 - *Preconditions:* Called with the Planning `job_id` **and** the post-synthesis `context`
-  (specifically `repo_path` and the synthesized spec content) — the same inputs
-  `document_production_activity` receives today (`temporal/activities.py:286-289`). `run_pra`
-  requires `repo_path`/`spec_content` (`adapters/product_analysis.py:33-48`); at the point this
-  activity runs, that content exists only in the workflow's in-memory `context` threaded from the
-  synthesis phase (`temporal/workflows.py:176-181`), not yet durably written anywhere the submit
-  activity could otherwise read it from — the job record at this point carries `repo_path` but not
-  the synthesized spec (`DocumentProductionAgent.run` is what writes `initial_spec.md`, and it
-  hasn't run yet). The workflow must pass `context` (or the specific `repo_path`/`spec_content`
-  fields) into this activity's call, not just `job_id`. The `"planning_team"`-namespaced job record
-  is readable; scheduled by the workflow with `retry_policy=NO_RETRY`.
+  (specifically `repo_path`, `spec_content`, **and `initial_brief`** — not `repo_path`/`spec_content`
+  alone) — the same inputs `document_production_activity` receives today
+  (`temporal/activities.py:286-289`). `run_pra` requires `repo_path`/`spec_content`
+  (`adapters/product_analysis.py:33-48`), but the content PRA actually gets is **not** the raw
+  `spec_content` field — `DocumentProductionAgent.run` derives `spec_to_use = spec_content or
+  initial_brief or "# Specification\n\n(To be refined.)"` (`agent.py:70-72`) and calls
+  `run_pra(repo_path=repo_path, spec_content=spec_to_use)` (`agent.py:92`) with that *derived*
+  value. A brief-only request (`spec_content=None`, `initial_brief` set — a valid
+  `PlanningRunRequest` shape) would submit no spec at all if the submit activity used raw
+  `spec_content` instead of the same fallback. At the point this activity runs, none of this content
+  is durably available anywhere the submit activity could otherwise read it from — it exists only in
+  the workflow's in-memory `context` threaded from the synthesis phase (`temporal/workflows.py:176-181`);
+  the job record at this point carries `repo_path` but not the synthesized spec or brief
+  (`DocumentProductionAgent.run` is what writes `initial_spec.md`, and it hasn't run yet).
+  **Contract requirement:** the workflow must pass `context` (or the specific
+  `repo_path`/`spec_content`/`initial_brief` fields) into this activity's call, not just `job_id`
+  and not `repo_path`/`spec_content` alone; the submit activity must derive `spec_to_use` with the
+  identical fallback (`spec_content or initial_brief or <same default>`) before calling `run_pra`,
+  matching `agent.py:70-72` exactly rather than reinventing the derivation. The
+  `"planning_team"`-namespaced job record is readable; scheduled by the workflow with
+  `retry_policy=NO_RETRY`.
 - *Postconditions:* Checks `load_checkpoint("planning_team", job_id, "document_production_pra")`
   first. If present, returns immediately (no-op — a prior successful run already submitted). If
   absent, calls `run_pra(...)`. **`run_pra`/`run_product_analysis` returns `None` when the
