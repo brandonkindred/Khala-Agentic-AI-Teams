@@ -334,6 +334,9 @@ def build_spec_from_dict(
             failure_phase="design",
             last_spec=spec,
             last_code="",
+            # The wrong asset_class is itself the defect — a re-entry needs
+            # a new design pass to pick a supported one, not a resume.
+            spec_implicated=True,
         )
     return spec
 
@@ -1520,12 +1523,20 @@ class DesignMixin:
         exit-boundary phase-transition emission; this method only sequences
         them and checks ``.record`` after each call.
 
-        Checkpoint resume (``ADR-012``): ``resume_spec``/``resume_rationale``/
+        Checkpoint resume (``ADR-012``, same-attempt Temporal crash
+        recovery, and ``checkpoints.py``'s cross-attempt ``ReviewCheckpoint``
+        exception): ``resume_spec``/``resume_rationale``/
         ``resume_design_context`` let a caller skip Phase 1 (design + review)
-        entirely when it already has that phase's converged output from a
-        prior, crashed execution of this exact attempt -- ``resume_spec is
-        not None`` if and only if ``resume_design_context is not None``
-        (``resume_rationale`` may independently be ``None``/``""``).
+        entirely when it already has that phase's converged output --
+        ``resume_spec is not None`` if and only if ``resume_design_context
+        is not None`` (``resume_rationale`` may independently be
+        ``None``/``""``). There is no equivalent parameter for Phase 1b
+        (code synthesis): a checkpoint that converged through SYNTHESIS is
+        never used to resume, even by ``checkpoints.py``'s
+        ``spec_implicated=False`` exception, since that exception makes no
+        claim about any already-synthesized code's soundness — see
+        ``checkpoints.py`` for the full contract.
+
         ``checkpoint_hook``, when not ``None``, is invoked exactly once,
         immediately after Phase 1 converges on a non-resumed run (never on
         the short-circuit/not-ready path, nor when resuming, since Phase 1
@@ -1632,6 +1643,10 @@ class DesignMixin:
         )
 
         # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
+        # Always runs fresh, even when Phase 1 was resumed from a checkpoint:
+        # a ``spec_implicated=False`` exception makes no claim about any
+        # already-synthesized code's soundness, so there is no boundary that
+        # skips synthesis itself -- see ``checkpoints.py``.
         code_synthesis = self._synthesize_initial_code(
             spec=spec,
             config=config,
