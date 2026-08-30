@@ -108,3 +108,43 @@ def test_get_llm_returns_llm_client(monkeypatch):
     # _get_llm now imports get_client at module top, so patch the name in its module.
     monkeypatch.setattr(api_main, "get_client", lambda agent_key=None: sentinel)
     assert api_main._get_llm() is sentinel
+
+
+def test_run_workflow_propagates_planning_answer_pause_signal(tmp_path, monkeypatch):
+    """A durable-signal ``answer_callback`` (see ``build_temporal_planning_answer_callback``)
+    raising ``PlanningAnswerPauseSignal`` must propagate all the way out of ``run_workflow``
+    uncaught -- never folded into a normal ``success: False`` failure result by the outer
+    ``except Exception``. Regression guard: a caller catching this signal at an activity
+    boundary (``software_engineering_team.temporal.activities``) can only see it if
+    ``run_workflow`` lets it through unconverted.
+    """
+    import pytest
+
+    from planning_team.orchestrator import run_workflow
+    from planning_team.temporal.answer_signal import (
+        PlanningAnswerPauseSignal,
+        build_temporal_planning_answer_callback,
+    )
+
+    monkeypatch.setattr("planning_team.adapters.run_product_analysis", lambda **kw: "pra-job-1")
+    monkeypatch.setattr(
+        "planning_team.adapters.wait_for_product_analysis_completion",
+        lambda job_id, answer_callback=None: answer_callback(
+            [{"id": "q1", "question_text": "Which stack?"}]
+        ),
+    )
+
+    callback = build_temporal_planning_answer_callback("job-1:tok1", submitted_answers=None)
+
+    with pytest.raises(PlanningAnswerPauseSignal) as exc_info:
+        run_workflow(
+            repo_path=str(tmp_path),
+            initial_brief="Build a small app",
+            use_product_analysis=True,
+            use_market_research=False,
+            llm=None,
+            job_updater=None,
+            answer_callback=callback,
+            auto_answer_questions=False,
+        )
+    assert exc_info.value.resume_token == "job-1:tok1"
