@@ -633,18 +633,9 @@ def _plan_project_activity_body(
         ).model_dump()
 
     except PlanningAnswerPauseSignal as exc:
-        from software_engineering_team.orchestrator import _convert_to_structured_questions
+        from software_engineering_team.orchestrator import _structure_planning_questions
 
-        texts = [
-            (q.get("question_text") or q.get("text") or "") if isinstance(q, dict) else str(q)
-            for q in exc.pending_questions
-        ]
-        structured = _convert_to_structured_questions(texts, source="planning")
-        for sq, oq in zip(structured, exc.pending_questions):
-            if isinstance(oq, dict) and oq.get("id"):
-                sq["id"] = str(oq["id"])
-                if oq.get("options"):
-                    sq["options"] = oq["options"]
+        structured = _structure_planning_questions(exc.pending_questions, source="planning")
         add_pending_questions(job_id, structured)
         # Persisted separately from add_pending_questions' own atomic write (the shared
         # run-team job store has no combined call for both) so POST /run-team/{job_id}/answers

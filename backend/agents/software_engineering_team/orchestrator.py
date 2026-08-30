@@ -370,6 +370,38 @@ def _run_se_decision_gate(
     return answers_to_resolved(submitted, structured), True
 
 
+def _structure_planning_questions(
+    questions: List[Any], source: str = "planning"
+) -> List[Dict[str, Any]]:
+    """Convert Planning's raw question dicts to structured questions, preserving id/options.
+
+    Shared by thread-mode's :func:`_build_planning_answer_callback` and the Temporal
+    activity's ``PlanningAnswerPauseSignal`` handler (``temporal/activities.py``), so both
+    modes persist pending questions in exactly the same shape.
+
+    Preconditions:
+        - ``questions`` is Planning's raw pending-question list (dicts with optional
+          ``question_text``/``text``, ``id``, ``options``; a non-dict entry is coerced via
+          ``str()``).
+    Postconditions:
+        - Returns one structured dict per input question (via
+          ``_convert_to_structured_questions``), with each result's ``id``/``options``
+          overwritten from the matching input question when present, so submitted answers
+          map straight back to Planning's own question ids.
+    """
+    texts = [
+        (q.get("question_text") or q.get("text") or "") if isinstance(q, dict) else str(q)
+        for q in questions
+    ]
+    structured = _convert_to_structured_questions(texts, source=source)
+    for sq, oq in zip(structured, questions):
+        if isinstance(oq, dict) and oq.get("id"):
+            sq["id"] = str(oq["id"])
+            if oq.get("options"):
+                sq["options"] = oq["options"]
+    return structured
+
+
 def _build_planning_answer_callback(job_id: str) -> Callable[[list], list]:
     """Build an escalating answer callback for Planning PRA — surface questions, never auto-decide.
 
@@ -383,16 +415,7 @@ def _build_planning_answer_callback(job_id: str) -> Callable[[list], list]:
     """
 
     def _cb(questions: list) -> list:
-        texts = [
-            (q.get("question_text") or q.get("text") or "") if isinstance(q, dict) else str(q)
-            for q in questions
-        ]
-        structured = _convert_to_structured_questions(texts, source="planning")
-        for sq, oq in zip(structured, questions):
-            if isinstance(oq, dict) and oq.get("id"):
-                sq["id"] = str(oq["id"])
-                if oq.get("options"):
-                    sq["options"] = oq["options"]
+        structured = _structure_planning_questions(questions, source="planning")
         add_pending_questions(job_id, structured)
         if slack_notify_open_questions:
             slack_notify_open_questions(job_id, structured, source="run-team")
