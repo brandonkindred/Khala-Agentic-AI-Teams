@@ -1559,8 +1559,12 @@ def resolve_exit_leg_attachments(
         # ``(0, stop_price)`` and the engine's ``protective_limit_price``/
         # trailing math at materialization stays positive and on the
         # protective side.
-        limit_offset = stop_price * leg.limit_offset_pct if leg.kind == OrderType.STOP_LIMIT else None
-        trail_offset = stop_price * leg.trail_offset_pct if leg.kind == OrderType.TRAILING_STOP else None
+        limit_offset = (
+            stop_price * leg.limit_offset_pct if leg.kind == OrderType.STOP_LIMIT else None
+        )
+        trail_offset = (
+            stop_price * leg.trail_offset_pct if leg.kind == OrderType.TRAILING_STOP else None
+        )
         attachments.append(
             StopAttachment(
                 stop_price=stop_price,
@@ -1587,7 +1591,9 @@ def _bracket_to_leg_specs(bracket: OcoBracketRule) -> list[ExitLegSpec]:
         ExitLegSpec(
             kind=stop_kind,
             pct=bracket.stop_loss.pct,
-            limit_offset_pct=bracket.stop_loss.limit_offset_pct if stop_kind == OrderType.STOP_LIMIT else None,
+            limit_offset_pct=bracket.stop_loss.limit_offset_pct
+            if stop_kind == OrderType.STOP_LIMIT
+            else None,
         ),
         ExitLegSpec(kind=OrderType.LIMIT, pct=bracket.take_profit.pct),
     ]
@@ -1616,7 +1622,9 @@ def resolve_bracket_attachments(
         ValueError: if ``ref_price <= 0``, or if a resolved ``stop_price`` /
             ``limit_price`` is non-positive.
     """
-    stop_attachment, limit_attachment = resolve_exit_leg_attachments(_bracket_to_leg_specs(bracket), side, ref_price)
+    stop_attachment, limit_attachment = resolve_exit_leg_attachments(
+        _bracket_to_leg_specs(bracket), side, ref_price
+    )
     return stop_attachment, limit_attachment  # type: ignore[return-value]
 
 

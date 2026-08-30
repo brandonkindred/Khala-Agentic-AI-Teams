@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import pytest
 
-from investment_team.strategy_lab.spec_dsl import BracketStopLeg, BracketTakeProfitLeg, OcoBracketRule
+from investment_team.strategy_lab.spec_dsl import (
+    BracketStopLeg,
+    BracketTakeProfitLeg,
+    OcoBracketRule,
+)
 from investment_team.trading_service.service import (
     _bracket_to_leg_specs,
     resolve_bracket_attachments,

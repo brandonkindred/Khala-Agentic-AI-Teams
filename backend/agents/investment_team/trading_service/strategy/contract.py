@@ -169,7 +169,12 @@ class ExitLegSpec(BaseModel):
         secondary offset field is set without (or missing despite) its
         owning ``kind``.
         """
-        if self.kind not in (OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP, OrderType.LIMIT):
+        if self.kind not in (
+            OrderType.STOP,
+            OrderType.STOP_LIMIT,
+            OrderType.TRAILING_STOP,
+            OrderType.LIMIT,
+        ):
             raise ValueError(
                 f"ExitLegSpec.kind must be one of STOP/STOP_LIMIT/TRAILING_STOP/LIMIT, got {self.kind!r}"
             )
