@@ -27,34 +27,22 @@ from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import workflow
 
+from planning_team.exceptions import PlanningAnswerPauseSignal
+
+__all__ = [
+    "SUBMIT_PLANNING_ANSWERS_SIGNAL",
+    "PlanningAnswerPauseSignal",
+    "build_temporal_planning_answer_callback",
+    "PlanningAnswerSignalMixin",
+]
+
 # Wire shape fixed by system_design/planning_hitl_temporal_contract.md.
 SUBMIT_PLANNING_ANSWERS_SIGNAL = "submit_planning_answers"
 
-
-class PlanningAnswerPauseSignal(Exception):
-    """Internal control-flow signal: no answer is available yet for a Planning
-    clarification question batch.
-
-    Raised by a callback built via ``build_temporal_planning_answer_callback``
-    when constructed with ``submitted_answers=None``. Carries the exact
-    discriminated-result payload a Temporal activity wrapper needs to return
-    to its calling workflow instead of blocking (mirroring
-    ``pause_cycle._ActivityPauseSignal``).
-
-    Invariants:
-        - Never crosses a workflow boundary — only ever raised inside plain
-          Python / activity code, caught there and translated into a
-          discriminated return value (e.g. ``{"outcome": "paused", ...}``),
-          never propagated into ``@workflow.defn`` code.
-    """
-
-    def __init__(self, resume_token: str, pending_questions: List[Dict[str, Any]]) -> None:
-        assert isinstance(resume_token, str) and resume_token, (
-            "PlanningAnswerPauseSignal requires a non-empty resume_token"
-        )
-        self.resume_token = resume_token
-        self.pending_questions = pending_questions
-        super().__init__(f"paused: resume_token={resume_token}")
+# PlanningAnswerPauseSignal itself now lives in planning_team.exceptions (no Temporal
+# dependency), so planning_team.orchestrator can catch it without importing this
+# subpackage. Re-exported here (imported above) since this module raises it and is
+# where existing callers already look for it.
 
 
 def build_temporal_planning_answer_callback(
