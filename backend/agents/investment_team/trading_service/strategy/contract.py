@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ``runtime_window`` is a top-level module in the flat sandbox (copied in by
 # ``StreamingHarness``, same as ``indicators``/``_streaming_indicators``), or
@@ -160,6 +160,13 @@ class ExitLegSpec(BaseModel):
     ``resolve_exit_leg_attachments``.
     """
 
+    # Frozen so the "validated, immutable leg spec" postcondition below is
+    # actually enforced — without this a caller could mutate ``kind`` or
+    # ``limit_offset_pct`` after construction and silently break the
+    # kind/offset coupling ``_validate_kind_fields`` exists to guarantee
+    # (Pydantic validators run on construction, not on attribute assignment).
+    model_config = ConfigDict(frozen=True)
+
     kind: OrderType
     pct: float = Field(gt=0, lt=1.0)
     limit_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
@@ -171,9 +178,11 @@ class ExitLegSpec(BaseModel):
 
         Preconditions: ``kind`` is a valid ``OrderType`` (Pydantic-enforced).
         Postconditions: returns ``self`` when consistent; raises
-        ``ValueError`` when ``kind`` is not a supported leg kind, or when
-        ``limit_offset_pct`` is set without (or missing despite) ``kind ==
-        STOP_LIMIT``.
+        ``ValueError`` when ``kind`` is not a supported leg kind, when
+        ``kind == STOP_LIMIT`` and ``limit_offset_pct`` is missing, or when
+        ``limit_offset_pct`` is set on a non-``STOP_LIMIT`` leg — the same
+        coupling, and the same two distinct messages for the missing-vs-
+        extraneous cases, as ``BracketStopLeg._validate_limit_style``.
         """
         if self.kind not in (
             OrderType.STOP,
@@ -184,8 +193,11 @@ class ExitLegSpec(BaseModel):
             raise ValueError(
                 f"ExitLegSpec.kind must be one of STOP/STOP_LIMIT/TRAILING_STOP/LIMIT, got {self.kind!r}"
             )
-        if (self.kind == OrderType.STOP_LIMIT) != (self.limit_offset_pct is not None):
-            raise ValueError("ExitLegSpec.limit_offset_pct is required iff kind == STOP_LIMIT")
+        if self.kind == OrderType.STOP_LIMIT:
+            if self.limit_offset_pct is None:
+                raise ValueError("ExitLegSpec.kind=STOP_LIMIT requires limit_offset_pct")
+        elif self.limit_offset_pct is not None:
+            raise ValueError("ExitLegSpec.limit_offset_pct is only valid when kind == STOP_LIMIT")
         return self
 
 

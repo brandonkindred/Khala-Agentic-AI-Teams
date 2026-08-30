@@ -199,14 +199,17 @@ def test_rejects_overflowed_stop_price() -> None:
 
 
 def test_stop_limit_leg_requires_limit_offset_pct() -> None:
-    """A STOP_LIMIT leg without limit_offset_pct is rejected."""
-    with pytest.raises(ValueError, match="limit_offset_pct is required"):
+    """A STOP_LIMIT leg without limit_offset_pct is rejected with a message
+    distinct from the extraneous-field case below, so a caller can tell a
+    missing required field from an unexpected one apart."""
+    with pytest.raises(ValueError, match="STOP_LIMIT requires limit_offset_pct"):
         ExitLegSpec(kind=OrderType.STOP_LIMIT, pct=0.03)
 
 
 def test_non_stop_limit_leg_rejects_limit_offset_pct() -> None:
-    """A non-STOP_LIMIT leg carrying limit_offset_pct is rejected."""
-    with pytest.raises(ValueError, match="limit_offset_pct is required"):
+    """A non-STOP_LIMIT leg carrying limit_offset_pct is rejected with a message
+    distinct from the missing-field case above."""
+    with pytest.raises(ValueError, match="limit_offset_pct is only valid"):
         ExitLegSpec(kind=OrderType.STOP, pct=0.03, limit_offset_pct=0.01)
 
 
@@ -223,6 +226,16 @@ def test_leg_pct_must_be_in_open_unit_interval(pct: float) -> None:
     generalizes."""
     with pytest.raises(ValueError):
         ExitLegSpec(kind=OrderType.STOP, pct=pct)
+
+
+def test_leg_is_frozen() -> None:
+    """A constructed ExitLegSpec is immutable, matching its documented
+    postcondition — mutating a field after construction (which would bypass
+    ``_validate_kind_fields`` and could silently break the kind/offset
+    coupling) is rejected."""
+    leg = _leg(OrderType.STOP, pct=0.03)
+    with pytest.raises(ValueError):
+        leg.pct = 0.5
 
 
 # ---------------------------------------------------------------------------
