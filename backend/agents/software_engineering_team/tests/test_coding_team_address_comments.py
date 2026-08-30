@@ -1208,6 +1208,44 @@ class TestRunAddressComments:
         assert "sha1" not in refs_used
         assert refs_used[0] != refs_used[1]
 
+    def test_stops_processing_when_pr_closes_mid_run(self, address_env, monkeypatch) -> None:
+        """If the PR is merged/closed by someone else while an earlier
+        comment's workflow was still running, the loop must stop rather than
+        keep dispatching workflows (which would push commits, reply,
+        resolve, and label a PR that is no longer accepting any of that) —
+        and the run must never be mistaken for a fully successful one."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        fake.review_comments = [_comment(2), _comment(5)]
+        fake.threads = [
+            ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),
+            ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
+        ]
+
+        calls = {"n": 0}
+        real_pr = fake.pr
+
+        def _get_pull_request(_o, _r, _n):
+            calls["n"] += 1
+            # The pre-loop fetch, _clear_waiting_for_review's own fetch, and
+            # comment 2's own refresh all see it open; comment 5's refresh
+            # discovers it was closed in the meantime.
+            if calls["n"] <= 3:
+                return real_pr
+            return replace(real_pr, state="closed")
+
+        fake.get_pull_request = _get_pull_request  # type: ignore[assignment]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
+        assert final
+        # Only comment 2 was ever handled; comment 5 was never attempted.
+        assert final[-1]["review_summary"]["counts"].get("not_an_issue") == 1
+        assert final[-1]["review_summary"]["total_comments"] == 1
+        # The run must not be mistaken for fully successful — no waiting-for-review label.
+        assert fake.labels_set == []
+
     def test_cleans_up_checkout_on_full_success_when_flagged(
         self, address_env, monkeypatch
     ) -> None:

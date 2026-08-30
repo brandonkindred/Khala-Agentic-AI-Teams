@@ -1423,6 +1423,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     )
 
             outcomes: List[CommentOutcome] = []
+            pr_closed_mid_run = False
             for comment in unresolved:
                 # Refresh PR metadata before each comment: an earlier comment's
                 # real-issue workflow may have already pushed a new head commit,
@@ -1438,6 +1439,29 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                         comment.id,
                         scrub_token_from_text(str(e)),
                     )
+                else:
+                    if pr.state != "open":
+                        # The PR was merged or closed by someone else while an
+                        # earlier comment's implementation workflow was still
+                        # running. Dispatching further workflows now would push
+                        # commits to (and reply/resolve/label) a PR that is no
+                        # longer accepting them — stop here rather than working
+                        # through the rest of `unresolved`. The remaining
+                        # comments are simply left unaddressed; they are not
+                        # recorded as failures (nothing was attempted for them),
+                        # and `all_succeeded` below is forced False so this run
+                        # is never mistaken for a clean, complete one.
+                        logger.info(
+                            "address-comments: PR %s/%s#%s is no longer open (state=%s); "
+                            "stopping before comment %s and any comment after it",
+                            owner,
+                            repo,
+                            pr_number,
+                            pr.state,
+                            comment.id,
+                        )
+                        pr_closed_mid_run = True
+                        break
                 outcome = _handle_comment(
                     client,
                     job_id,
@@ -1456,8 +1480,16 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
 
             # Every comment handled without failure AND every retry-resolve
             # succeeded: nothing is still owed to the reviewer, AS FAR AS THIS
-            # RUN'S INITIAL SNAPSHOT SAW.
-            all_succeeded = retry_resolve_ok and all(o.outcome != "failed" for o in outcomes)
+            # RUN'S INITIAL SNAPSHOT SAW. A run that stopped early because the
+            # PR closed mid-run is never "succeeded" even if every comment it
+            # DID reach came back clean — comments after the stop point were
+            # never attempted at all, and labelling/cleanup would be moot (and
+            # potentially wrong, e.g. reopened-and-repushed) for a closed PR.
+            all_succeeded = (
+                retry_resolve_ok
+                and not pr_closed_mid_run
+                and all(o.outcome != "failed" for o in outcomes)
+            )
             if all_succeeded:
                 # A reviewer can open a brand-new thread — or resolve/reply to an
                 # existing one — while an earlier comment's implementation
