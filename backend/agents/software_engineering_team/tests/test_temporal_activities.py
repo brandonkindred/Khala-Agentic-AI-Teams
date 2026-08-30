@@ -1055,6 +1055,14 @@ def test_plan_project_activity_resumes_with_submitted_answers(
     from software_engineering_team.temporal import activities
 
     js.create_job("pp-resume", repo_path=str(tmp_path), job_type="run_team")
+    # Simulate the pause envelope a prior invocation already persisted -- the resume path
+    # must clear it atomically once it consumes this exact token, not leave it stale.
+    js.update_job(
+        "pp-resume",
+        waiting_for_answers=True,
+        resume_token="pp-resume:abc123",
+        pending_questions=[{"id": "q1", "question_text": "Which auth provider?"}],
+    )
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     monkeypatch.setattr(
         "software_engineering_team.orchestrator._get_agents",
@@ -1102,3 +1110,49 @@ def test_plan_project_activity_resumes_with_submitted_answers(
     assert captured["answers"] == [{"question_id": "q1", "selected_option_id": "okta"}]
     assert "outcome" not in result or result.get("outcome") != "paused"
     assert result["requirements_title"] == "Test"
+
+    job = js.get_job("pp-resume")
+    assert job["waiting_for_answers"] is False
+    assert job["pending_questions"] == []
+    assert job["resume_token"] is None
+
+
+def test_plan_project_activity_retry_reemits_persisted_pause_without_rerunning(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """A Temporal activity retry of the ORIGINAL (fresh) invocation -- no resume_token, no
+    submitted_answers, exactly the args the workflow's first execute_activity call used --
+    must detect the pause a prior attempt already persisted and re-emit that exact
+    resume_token/pending_questions, never re-run Planning and mint a second, different
+    token (which would strand whichever token the user was already shown)."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-retry", repo_path=str(tmp_path), job_type="run_team")
+    js.update_job(
+        "pp-retry",
+        waiting_for_answers=True,
+        resume_token="pp-retry:orig-token",
+        pending_questions=[{"id": "q1", "question_text": "Which auth provider?"}],
+    )
+
+    def _must_not_run(*a, **kw):  # pragma: no cover
+        raise AssertionError("a retry re-entry must never re-run Planning")
+
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", _must_not_run)
+
+    result = activities.plan_project_activity(
+        "pp-retry",
+        str(tmp_path),
+        {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+    )
+
+    assert result == {
+        "outcome": "paused",
+        "resume_token": "pp-retry:orig-token",
+        "pending_questions": [{"id": "q1", "question_text": "Which auth provider?"}],
+    }
+    # The persisted pause is untouched -- re-emitting it is not the same as re-pausing it.
+    job = js.get_job("pp-retry")
+    assert job["resume_token"] == "pp-retry:orig-token"
+    assert job["waiting_for_answers"] is True

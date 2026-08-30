@@ -548,8 +548,40 @@ def _plan_project_activity_body(
         PlanningAnswerPauseSignal,
         build_temporal_planning_answer_callback,
     )
-    from software_engineering_team.pause_cycle import mint_resume_token
+    from software_engineering_team.pause_cycle import (
+        _check_pending_pause_reentry,
+        mint_resume_token,
+    )
+    from software_engineering_team.shared.job_store import get_job
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
+
+    # Re-entry check (mirrors the coding team's own pattern, coding_team_orchestrator.py
+    # ~lines 814-846): tell a genuine resume (resume_token matches a persisted, unresolved
+    # pause) apart from a pre-work Temporal activity retry of the SAME original invocation
+    # (a prior attempt already persisted the pause via add_pending_questions below, but its
+    # completion was lost before Temporal recorded it) apart from "no pause outstanding"
+    # (proceed normally). Must run before any Planning work: a retry must never re-run
+    # Planning and mint a second, different resume_token -- that would strand whichever
+    # token the user was already shown and duplicate the persisted pending_questions.
+    existing = get_job(job_id) or {}
+    reentry = _check_pending_pause_reentry(existing, resume_token)
+    if reentry is not None:
+        if not reentry["consume"]:
+            return {
+                "outcome": "paused",
+                "resume_token": reentry["resume_token"],
+                "pending_questions": reentry["pending_questions"],
+            }
+        # Consume: atomically clear the pause envelope (sole responsibility of this
+        # activity, never the answers-submission route) before continuing normally --
+        # otherwise a client polling status after the job completes would still see a
+        # stale "waiting_for_answers" pause pointing at an already-resolved token.
+        update_job(
+            job_id,
+            waiting_for_answers=False,
+            pending_questions=[],
+            resume_token=None,
+        )
 
     resume_token = resume_token or mint_resume_token(job_id)
     answer_callback = build_temporal_planning_answer_callback(
