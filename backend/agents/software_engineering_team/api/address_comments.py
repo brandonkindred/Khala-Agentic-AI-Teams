@@ -351,25 +351,33 @@ def _unresolved_comments(
             continue
         seen_thread_ids.add(thread.id)
         messages = thread_messages.get(thread.id) or []
-        if not messages:
-            # An unresolved thread with ZERO fetched messages means thread
-            # state is incomplete, not empty — every review thread has at
-            # least a root comment. This happens when list_review_comments'
-            # REST traversal cap (MAX_REVIEW_COMMENTS_TRAVERSED) truncates
-            # before reaching this thread's comments while list_review_
-            # threads' separate GraphQL pagination still returned the
-            # thread itself. Silently skipping it would drop it from BOTH
-            # triage and retry processing, and the caller's final re-list
-            # would make the same omission — the run could then label the
-            # PR waiting for review and reclaim its checkout with this
-            # thread's feedback never handled. Fail closed instead, exactly
+        fetched_ids = {m.id for m in messages}
+        missing_ids = set(thread.comment_ids) - fetched_ids
+        if not messages or missing_ids:
+            # An unresolved thread whose fetched messages don't cover EVERY
+            # id in `thread.comment_ids` (zero fetched, or some subset) means
+            # thread state is incomplete, not empty — every review thread has
+            # at least a root comment, and GraphQL's `comment_ids` is the
+            # authoritative membership list. This happens when list_review_
+            # comments' REST traversal cap (MAX_REVIEW_COMMENTS_TRAVERSED)
+            # truncates before reaching all of this thread's comments while
+            # list_review_threads' separate GraphQL pagination still returned
+            # the thread (and its full id list) intact. A PARTIAL fetch is
+            # just as dangerous as an empty one: an early message inside the
+            # cap can still look like a complete, current `messages` list —
+            # silently treating it as the latest would ground triage on
+            # stale history and let a stale verdict resolve the thread, and
+            # dropping the thread from processing would let the caller's
+            # final re-list make the same omission and reclaim the checkout
+            # with real feedback never handled. Fail closed instead, exactly
             # like the "REST comment has no discoverable thread" case above.
             raise ReviewThreadsUnavailableError(
                 owner,
                 repo,
                 pr_number,
-                f"thread {thread.id} is unresolved but has no fetched messages "
-                "(likely truncated by list_review_comments' traversal cap)",
+                f"thread {thread.id} is unresolved but only fetched {sorted(fetched_ids)} of its "
+                f"{sorted(thread.comment_ids)} known comments (likely truncated by "
+                "list_review_comments' traversal cap)",
             )
         latest = messages[-1]
         if _is_khala_authored(latest, authenticated_login):

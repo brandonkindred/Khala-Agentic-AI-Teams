@@ -575,6 +575,24 @@ class TestUnresolvedComments:
         with pytest.raises(ReviewThreadsUnavailableError):
             ac.unresolved_comments(fake, "o", "r", 7)
 
+    def test_fails_closed_when_unresolved_thread_is_only_partially_fetched(
+        self, address_env
+    ) -> None:
+        """A thread with SOME (but not all) of its comment ids present in the
+        REST listing is just as dangerous as one with zero: the early message
+        inside the traversal cap can look like a complete `messages` list and
+        get silently treated as the latest, grounding triage on stale
+        history. GraphQL's `comment_ids` is the authoritative membership
+        list — any id missing from the fetched messages must fail closed."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        # Only comment 2 (the thread's root) came back from the REST listing;
+        # comment 3 (a later reply) was truncated by the traversal cap.
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        with pytest.raises(ReviewThreadsUnavailableError):
+            ac.unresolved_comments(fake, "o", "r", 7)
+
     def test_thread_with_marked_reply_that_is_already_resolved_is_not_retried(
         self, address_env
     ) -> None:

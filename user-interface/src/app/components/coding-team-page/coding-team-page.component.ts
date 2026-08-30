@@ -592,6 +592,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.pulls = [];
     this.pullsLoaded = false;
     this.pullError = null;
+    // Invalidate any in-flight loadPulls() for the PREVIOUS repo and reset the loading flag:
+    // without this, switching away mid-load leaves `loadingPulls` stuck true until that stale
+    // request settles, blocking the Pulls-tab auto-load guard (`!loadingPulls`) for the newly
+    // selected repo — its panel would stay blank until a manual Refresh. Advancing the token
+    // here (rather than only in loadPulls) makes the stale response's own `isCurrent` check
+    // fail too, so it can never overwrite the new repo's state even if it lands afterward.
+    this.pullsLoad.next();
+    this.loadingPulls = false;
   }
 
   /** Repos matching `repoSearch` (case-insensitive substring of `full_name`); all repos when empty. */

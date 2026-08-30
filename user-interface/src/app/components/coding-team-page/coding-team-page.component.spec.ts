@@ -1991,6 +1991,35 @@ describe('CodingTeamPageComponent', () => {
       expect(component.pullError).toBe('boom');
     });
 
+    it('switching repos mid-load lets the new repo auto-load its own PRs, and the stale response cannot overwrite it', async () => {
+      const slowA = new Subject<GitHubPullRequestItem[]>();
+      integrationsSpy.getGitHubPullRequests.mockReturnValueOnce(slowA);
+      await setup();
+      const repoB: GitHubRepoItem = { ...component.repos[0], name: 'gadgets', full_name: 'acme/gadgets' };
+      component.repos = [component.repos[0], repoB];
+
+      // Expand repo A and open the Pulls tab: loadPulls() fires and is left in flight.
+      component.toggleRepo(component.repos[0]);
+      showView('pulls');
+      expect(component.loadingPulls).toBe(true);
+
+      // Switch to repo B before A's request settles.
+      integrationsSpy.getGitHubPullRequests.mockReturnValueOnce(of([ghPull(9)]));
+      component.toggleRepo(repoB);
+
+      // The switch must not leave `loadingPulls` stuck true — B's own Pulls-tab
+      // auto-load guard (`!loadingPulls`) would otherwise refuse to fire.
+      expect(component.loadingPulls).toBe(false);
+      showView('pulls');
+      expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith({ owner: 'acme', repo: 'gadgets' });
+      expect(component.pulls.map((p) => p.number)).toEqual([9]);
+
+      // A's stale response arriving late must not clobber B's already-loaded state.
+      slowA.next([ghPull(1), ghPull(2)]);
+      slowA.complete();
+      expect(component.pulls.map((p) => p.number)).toEqual([9]);
+    });
+
     it('addressPrComments starts the job, toasts, and clears the in-flight guard', async () => {
       integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
       integrationsSpy.addressPrComments.mockReturnValue(
