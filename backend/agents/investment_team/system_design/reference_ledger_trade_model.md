@@ -1,0 +1,309 @@
+# Reference Ledger — Trade Data Model
+
+This doc designs the trade record shape and module boundary for an
+independent, pure reference-ledger simulator: a second, standalone
+implementation of a spec's entry/exit decision logic that a later
+trade-matching module can diff against the production ledger
+(`TradeRecord`, documented in [`trade_record_schema.md`](./trade_record_schema.md))
+to catch drift between what a spec says and what the live engine actually
+does. This document is a design only — it specifies the record schema, the
+module's public interface, and per-exit-rule fill semantics precisely enough
+for a later implementation step to build directly against it. No simulator
+code exists yet.
+
+## 1. Purpose & scope
+
+The reference ledger answers one question: *given a spec's entry/exit rules
+and a fixed sequence of bars, what trades should a faithful, side-effect-free
+re-implementation of the decision logic produce?* It exists to be diffed
+against the production engine's actual trade output, so a mismatch signals
+either a spec-compilation bug or an engine-fidelity regression.
+
+It is **not** a fill-cost engine. Explicitly out of scope:
+
+- **Slippage and transaction costs.** Reference prices are exact bar-derived
+  levels (a resting order's authored price, or worse-of-open-and-level on a
+  gap), not slippage-adjusted fills. See §3 for exactly which production
+  field this corresponds to.
+- **Order-book / partial-fill mechanics.** No order queue, no
+  participation-cap clipping, no multi-slice fills. One trigger, one fill,
+  at a single price.
+- **Position sizing mechanics beyond what a rule needs.** Quantity per trade
+  is whatever the rule's own fraction implies (e.g. a ladder rung's
+  `qty_fraction * original_qty`); sizing-rule resolution (`FixedFractionSizing`
+  / `VolatilityTargetSizing` / `FixedNotionalSizing`) for the *entry* qty
+  itself is assumed as an input, not derived here.
+
+## 2. Module boundary
+
+```python
+def simulate(
+    spec: StrategySpec,
+    bars: Mapping[str, Sequence[Bar]],
+) -> List[ReferenceTrade]:
+    """Pure re-simulation of spec.entry_rules / spec.exit_rules over bars.
+    """
+```
+
+- `spec` is the existing `StrategySpec` Pydantic model (`models.py`) — reused
+  verbatim, no translation layer.
+- `bars` is keyed by symbol, each value an existing `Bar` sequence
+  (`trading_service/strategy/contract.py`) — keyed because `StrategySpec`
+  can target more than one symbol and every existing decision structure
+  (`PositionState`, `ExitIntent`) is already symbol-scoped. A single-symbol
+  spec simply passes a one-entry mapping.
+- Return value: one `ReferenceTrade` per closed trade, in emission order. A
+  scaled-take-profit ladder emits one row per fired rung (mirroring how
+  production emits one `TradeRecord` per rung close), never a nested
+  sub-fills list.
+
+### Reuse
+
+The module must reuse the existing pure rule-decision evaluators rather than
+re-deriving *whether* a rule fires:
+
+- `strategy_lab/executor/predicate_evaluator.py::evaluate_entry_rules`,
+  `evaluate_signal_exit_rules` — entry and signal-exit trigger decisions.
+- `strategy_lab/executor/rule_compiler.py::evaluate_exit_rules_for_position`
+  / `first_exit_intent_for_position`, and its `PositionState`, `BarSnapshot`,
+  `ExitIntent`, `ExitRuleKind` types — stop/take-profit/scaled-take-profit
+  trigger decisions and rule-priority resolution.
+
+What these evaluators do **not** cover, and what this module's simulate loop
+must newly implement, is resting-order *fill-price* mechanics: gap handling
+(worse-of-open-and-level), trailing-stop watermark ratcheting, ladder-rung
+sequencing across bars, and stop-limit arm/latch behavior. Today that logic
+lives inside the production fill engine, which this module must not depend
+on (see below) — so it is modeled here at the semantic level described in
+§5, as new pure code, not imported from the production engine.
+
+### Exclusions
+
+This module must not import, directly or transitively:
+
+- `trading_service/service.py` (the live dispatchers and their engine-exit
+  reason-string constant),
+- `trading_service/engine/fill_simulator.py` (the order book, pending-order
+  state machine, trailing-stop and stop-limit mechanics),
+- `trading_service/engine/execution_model.py` (slippage/reference-price
+  derivation),
+- `trading_service/engine/portfolio.py` (the live position/portfolio state
+  carrier).
+
+The one dependency this design leaves open for the implementation step to
+confirm rather than resolve here: a `signal_exit` rule's predicate can
+reference indicators, so `simulate()` needs some form of history/indicator
+view over the raw `bars` it receives. `predicate_evaluator.py`'s
+`PandasHistoryView` is the natural candidate — it already exists independent
+of the live engine — but the implementation step should confirm it carries
+no import chain back into the excluded modules above before relying on it.
+
+### Contract
+
+**Preconditions:**
+- `spec` is a validated `StrategySpec` (Pydantic's own validators already
+  enforce its internal invariants — e.g. at most one `OcoBracketRule`,
+  strictly increasing ladder `pct` values).
+- For every symbol `spec` references, `bars[symbol]` is non-empty and
+  strictly increasing by `timestamp`.
+
+**Postconditions:**
+- The returned list is ordered by non-decreasing `entry_bar` within each
+  symbol.
+- Every `ReferenceTrade` satisfies `0 <= entry_bar <= exit_bar <
+  len(bars[symbol])`.
+- A fired ladder rung produces its own `ReferenceTrade`, sharing the
+  position's `entry_bar`/`entry_price` with its sibling rungs but carrying a
+  distinct `level_index`.
+- No forbidden import (§2 Exclusions) occurs as a result of calling
+  `simulate`.
+
+**Invariants:**
+- `simulate` has no side effects: it does not mutate `spec` or `bars`, and
+  performs no I/O.
+- `simulate` is deterministic — identical `(spec, bars)` inputs always
+  produce an identical output list. This is required for it to function as
+  a reference oracle; a non-deterministic simulator cannot be diffed
+  meaningfully against a single production run.
+
+## 3. `ReferenceTrade` schema
+
+`ReferenceTrade` is a frozen value type (a plain `dataclass(frozen=True)`,
+not a Pydantic model — it is a comparison fixture the later matching module
+consumes, not a wire-serialized object, matching the style already used by
+`rule_compiler.ExitIntent`/`PositionState`). Construction validates its own
+invariants immediately and raises `ValueError` on violation (the same
+fail-fast shape as `ExitIntent.__post_init__`), rather than admitting an
+inconsistent record silently.
+
+| Field | Type | Corresponding `TradeRecord` field | Notes |
+|---|---|---|---|
+| `trade_num` | `int` | `trade_num` | 1-based, assigned in emission order. |
+| `symbol` | `str` | `symbol` | Verbatim. |
+| `side` | `Literal["long", "short"]` | `side` | Verbatim (production stores a plain `str`; this is the stricter reference form). |
+| `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened. Primary key for this module's own bookkeeping (ladder rungs, per-position running state). |
+| `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where this trade (or rung) closed. |
+| `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp` — the actual comparison key against production, since `TradeRecord` carries no bar index. |
+| `exit_date` | `str` | `exit_date` | `bars[symbol][exit_bar].timestamp`. |
+| `entry_price` | `float` | `entry_bid_price` | Pre-slippage reference level — **not** `entry_fill_price` or the legacy `entry_price` alias (both are post-slippage in production). See rationale below. |
+| `exit_price` | `float` | `exit_bid_price` | Same pre-slippage correspondence. |
+| `qty` | `float` | `shares` | Renamed to match this module's own vocabulary (`ExitIntent.qty_fraction`, `PositionState.qty`); the matching module maps `qty` ↔ `shares`. |
+| `exit_rule_kind` | `Optional[str]` | *(none — derived from `exit_reason` today)* | One of the values in §4's vocabulary table. `None` only for a trade force-closed with no rule firing (e.g. ran off the end of `bars`). |
+| `exit_rule_index` | `Optional[int]` | *(none)* | Which `spec.exit_rules[i]` fired — mirrors `ExitIntent.rule_index`. `None` iff `exit_rule_kind` is `None`. |
+| `level_index` | `Optional[int]` | *(none)* | Set only when `exit_rule_kind == "scaled_take_profit"`, identifying which ladder rung fired — mirrors `ExitIntent.level_index`. |
+
+**Why `entry_price`/`exit_price` map to the bid fields, not the fill fields:**
+production's `entry_fill_price`/`exit_fill_price` (and their legacy
+`entry_price`/`exit_price` aliases) already have slippage baked in
+(`entry_bid_price × (1 ± total_slip_bps / 10_000)`, per
+[`trade_record_schema.md`](./trade_record_schema.md)). Since this module
+explicitly excludes slippage/cost modeling (§1), its own `entry_price`/
+`exit_price` are the pre-slippage reference levels — directly comparable to
+production's `entry_bid_price`/`exit_bid_price`, not the fill prices.
+
+**Why both a bar index and a date string:** `entry_bar`/`exit_bar` are this
+module's own primary keys — needed internally to track ladder-rung
+sequencing and per-position running state (trailing watermarks, stop-limit
+arm/latch) across the `bars` sequence. `entry_date`/`exit_date` exist because
+they are what a `TradeRecord` actually has; the later matching module keys
+its trade-to-trade comparison off `(symbol, entry_date, exit_date, side)`-
+style fields, not bar indices, since production carries no bar index at all.
+Carrying both from the start means the matching module never has to derive
+one from the other.
+
+**Deliberately excluded** (all downstream cost/execution-mechanics fields,
+out of scope per §1): `position_value`, `gross_pnl`, `net_pnl`, `return_pct`,
+`outcome`, `cumulative_pnl`, `entry_fill_price`, `exit_fill_price`,
+`entry_order_type`, `exit_order_type`, `participation_clipped`,
+`partial_fill_count`, `total_unfilled_qty`, `hold_days` (trivially derivable
+by the matching module from the two dates), `entry_reason`/`exit_reason`
+free text (superseded by the structured `exit_rule_kind`/`exit_rule_index`/
+`level_index` triple).
+
+### Invariants (as a value object)
+
+- `entry_bar <= exit_bar`.
+- `qty > 0`.
+- `entry_price > 0` and `exit_price > 0`.
+- `side in ("long", "short")`.
+- `exit_rule_kind is None` if and only if `exit_rule_index is None`.
+- `level_index is not None` implies `exit_rule_kind == "scaled_take_profit"`.
+
+## 4. `exit_rule_kind` vocabulary
+
+The base vocabulary is the existing `rule_compiler.ExitRuleKind` literal,
+reused as the single source of truth rather than redefined:
+`"stop_loss" | "take_profit" | "scaled_take_profit" | "signal_exit"`. Because
+a `StrategySpec` can legally carry an `OcoBracketRule` as its sole price exit
+(optionally alongside a `signal_exit`), this module extends that vocabulary
+with two bracket-specific values so a bracket's legs are distinguishable in
+the reference output the same way production distinguishes them:
+`"bracket_stop_loss"` and `"bracket_take_profit"`.
+
+| `exit_rule_kind` | Corresponding production `exit_reason` |
+|---|---|
+| `stop_loss` | `engine_exit:stop_loss` |
+| `take_profit` | `engine_exit:take_profit` |
+| `scaled_take_profit` | `engine_exit:scaled_take_profit` |
+| `signal_exit` | `engine_exit:signal_exit[{exit_rule_index}]` |
+| `bracket_stop_loss` | `engine_exit:bracket_sl` |
+| `bracket_take_profit` | `engine_exit:bracket_tp` |
+
+This module keeps `exit_rule_kind` prefix-agnostic — it does not construct or
+depend on the `engine_exit:` string form, which is owned by the production
+dispatcher this module must not import. The later trade-matching module,
+which already needs `trading_service/service.py` to interpret production
+trades, owns translating between this table's two columns in both
+directions.
+
+## 5. Per-exit-rule-kind fill semantics
+
+Each subsection specifies: the trigger condition (reusing the existing
+pure evaluator's trigger logic), the fill price, and the fill bar.
+
+### `stop_loss`
+
+Covers all `basis` × `style` combinations from `StopLossRule`.
+
+- **`style="market"`** (any `basis`): fires the bar the price level is
+  breached. Fill price is the level itself, or — on a gap where the bar's
+  open already lies past the level — the bar's open (worse-of-open-and-level,
+  the same rule the existing OCO-bracket stop-loss precedent follows). Fill
+  bar is the trigger bar.
+- **`basis="trailing_high"` / `"trailing_low"`**: the protective level ratchets
+  favorably as price moves in the position's favor. This module must track
+  its own per-position running watermark (`max` of `bar.high` since entry
+  for a long's trailing-high stop, `min` of `bar.low` for a short's
+  trailing-low stop) and re-derive the effective stop level from it each
+  bar, since the reused decision evaluator is stateless per call and does
+  not itself carry this history. Fill-price/fill-bar rule is otherwise
+  identical to the static case above.
+- **`style="limit"`**: modeled as a resting stop-limit. If a gap carries
+  price past the limit price in the same move that crosses the stop, the
+  order does **not** fill that bar — it stays "armed," and only fills on a
+  later bar where price recovers back into the limit's reachable range.
+  This module models that arming/latching at the semantic level (a boolean
+  per-position flag once the stop level is first breached), not by
+  replicating the production `PendingOrder` state machine's exact fields.
+
+### `take_profit`
+
+Modeled as a resting limit at the exact target price
+(`entry_price * (1 ± pct)`). Always fills at the exact target — a limit
+order's defining property is that it never fills worse than its price, so
+unlike `stop_loss` there is no worse-of-open-and-level adjustment here, even
+on a gap through the target. Fill bar is the trigger bar.
+
+### `scaled_take_profit`
+
+A ladder of resting limit orders, one per `TakeProfitLevel`, each at
+`entry_price * (1 ± level.pct)`. Each rung's quantity is
+`level.qty_fraction * original_qty`, fixed at entry — not a fraction of the
+live (already-reduced) position size. Sequencing mirrors the production
+ladder cursor's per-rule-index "next un-fired rung" counter: only the
+lowest un-fired rung is eligible to trigger on a given bar, and a single bar
+advances the cursor by exactly one rung even if the bar's range would have
+cleared several rungs at once — this module must maintain that same
+one-rung-per-position-per-bar advancement rule, matching the counter's
+semantics rather than firing every technically-reachable rung in one step.
+Each fired rung emits its own `ReferenceTrade` (§3), sharing `entry_bar`/
+`entry_price` with its siblings but carrying a distinct `level_index`. Fill
+price for a firing rung follows the same exact-price rule as standalone
+`take_profit`. Fill bar is the trigger bar.
+
+### `signal_exit`
+
+Unchanged from current (and post-resting-exit-epic) engine semantics: a
+bar-close predicate decision, filled at the **next** bar's open. This is the
+one exit kind where the fill bar differs from the trigger bar —
+`exit_bar = trigger_bar + 1` — unlike every resting-order kind above, where
+trigger bar and fill bar coincide. If the predicate fires on the final bar
+of `bars`, there is no next bar to fill on; this module treats that as "no
+trade emitted for this trigger" rather than fabricating a fill past the end
+of the data.
+
+### `oco_bracket`
+
+Both legs are modeled as resting orders using the same rules as their
+standalone counterparts: the stop leg (`BracketStopLeg`) follows the
+`stop_loss` worse-of-open-and-level rule (its `style="limit"` variant follows
+the same arm/latch behavior); the take-profit leg (`BracketTakeProfitLeg`)
+follows the `take_profit` exact-price rule. The two legs are mutually
+exclusive by construction — whichever fires first closes the whole position,
+and the sibling leg is not evaluated further for that position. This module
+must suppress the non-firing leg entirely (no `ReferenceTrade` emitted for
+it), the same one-cancels-other behavior production implements by canceling
+the sibling order once either leg fills. A `signal_exit` rule may legally
+coexist alongside a bracket in the same spec and is evaluated independently
+per §5's `signal_exit` rules above.
+
+## 6. Forward references
+
+This schema is designed to be consumed by a later trade-matching module that
+diffs a `ReferenceTrade` list against a production trade list
+(`TradeRecord`), using `entry_date`/`exit_date`/`symbol`/`side` as the
+comparison key and `exit_rule_kind`/`exit_rule_index`/`level_index` to
+confirm the two ledgers agree on *why* each trade closed, not just its price.
+That module owns the `engine_exit:` string construction/parsing (§4) and any
+tolerance banding for price comparison; neither concern belongs in this
+schema or in the `simulate()` function this doc specifies.
