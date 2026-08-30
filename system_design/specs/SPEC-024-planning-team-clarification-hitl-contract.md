@@ -284,6 +284,20 @@ and the identical signal-handler rules (`temporal/coding_team_workflow.py:282-34
 This is a **copy, not a redesign** — the state machine is proven (see the integration tests listed
 in §6) and Planning's clarification gate has no property that would require a different one.
 
+**Recommended extraction (decision for #7445-B, not mandated here, consistent with §4.3's identical
+recommendation for `mint_resume_token`/`_check_pending_pause_reentry`):** copying this state
+machine field-for-field into `PlanningWorkflow` creates a second implementation of the same
+capability that will diverge from `CodingTeamWorkflow`'s on any future bug fix or
+race-condition improvement to either. `_active_resume_token`/`_submitted_answers`/
+`_buffered_signals`, the `submit_answers` signal handler, and the arm/consume/clear rules have no
+coding-team-specific logic — they operate purely on workflow instance state and the signal
+payload. #7445-B should consider extracting this into a shared, composable HITL primitive (e.g., a
+mixin or a small shared component alongside the already-recommended `backend/shared/hitl/pause_cycle.py`)
+that both `CodingTeamWorkflow` and `PlanningWorkflow` compose, rather than each workflow carrying
+its own copy. As with the other "recommended extraction" notes in this spec, the contract this
+section defines is what both implementations must behave like; the extraction's exact shape is
+an implementation decision for #7445-B.
+
 ### 4.3 Retry/continuation shape
 
 `PlanningWorkflow.run` wraps the `document_production_activity` call in the same loop shape as
@@ -321,7 +335,7 @@ while result.get("outcome") == "paused":
     result = await workflow.execute_activity(
         document_production_activity, request,
         start_to_close_timeout=activity_timeout, heartbeat_timeout=HEARTBEAT_TIMEOUT,
-    retry_policy=SAFE_RETRY,
+        retry_policy=SAFE_RETRY,
     )
     request.pop("acknowledged_resume_token", None)
 ```
@@ -660,20 +674,35 @@ like an ordinary PRA failure and (per its existing, unrelated error handling) re
 workflow would advance past document production having never paused at all — the opposite of this
 contract's purpose. **Contract requirement, superseding raise-and-catch for this call path
 specifically:** the pause must be signaled as a **return value**, not an exception, starting at the
-point closest to where it originates. `poll_until_terminal` must be extended (a small,
-backward-compatible change: existing callers whose `on_poll` returns `None` are unaffected) so that
-when `on_poll` returns a non-`None` value, polling stops immediately and that value is returned
-directly as `poll_until_terminal`'s own result, instead of continuing to poll toward a terminal
-status. `wait_for_product_analysis_completion`'s `_on_poll` must then, when a genuine pause (not
-auto-answering) is needed, *return* a structured pause marker (e.g., `{"status": "paused",
-"pending_questions": [...]}`) rather than calling `answer_callback` in a way that could raise — and
-`wait_pra`'s own return value is what the calling code (`DocumentProductionAgent.run`, and in turn
-the `work` callable passed to `_guarded`) must inspect for that marker and convert into this
-contract's `{"outcome": "paused", ...}` shape. `_ActivityPauseSignal`-the-exception, and the
-inside-`_guarded`'s-`work`-callable catch point above, remain correct for a pause signaled from
-somewhere *outside* this specific polling call chain (should one ever exist); through
-`wait_pra`/`poll_until_terminal` specifically, the mechanism is return-value propagation the whole
-way, not exception unwinding at any point.
+point closest to where it originates. `wait_for_product_analysis_completion`'s `_on_poll` must,
+when a genuine pause (not auto-answering) is needed, communicate that back to
+`wait_for_product_analysis_completion`'s own return value without going through
+`poll_until_terminal`'s exception path (which swallows it) or its terminal-status path (which
+`waiting_for_answers` isn't).
+
+**Keep `poll_until_terminal` itself generic — do not repurpose its `on_poll` return value as a
+pause-propagation channel.** An earlier version of this requirement proposed extending
+`poll_until_terminal` (`shared/http/job_polling.py:361-416`) so a non-`None` `on_poll` return
+stops polling and becomes the helper's own result. That couples a low-level, team-agnostic HTTP
+polling utility (used well beyond this one call site) to one team's HITL pause/resume lifecycle,
+and introduces a hidden control path: any other caller whose `on_poll` callback ever returns a
+non-`None` value (a list, a bool, a progress dict) would silently and unexpectedly stop that
+caller's polling too — the helper's current contract (`on_poll: Callable[[Dict[str, Any]], None]`)
+promises no such thing. **Contract requirement instead:** implement the pause detection entirely
+within `wait_for_product_analysis_completion` (a Planning-specific wrapper, `adapters/product_analysis.py`)
+around its call to `poll_until_terminal`, not inside `poll_until_terminal` itself — e.g., check the
+polled status for `waiting_for_answers` *before* invoking `answer_callback`/`poll_until_terminal`'s
+`on_poll` at all, and short-circuit `wait_for_product_analysis_completion`'s own return without
+needing `poll_until_terminal` to learn anything about pauses; or introduce a distinct,
+explicitly-named helper (e.g. `poll_until_terminal_or_pause`) with its own documented pause
+contract, leaving `poll_until_terminal` itself untouched for every other caller. Either shape keeps
+`shared/http/job_polling.py` generic; this contract does not mandate which.
+
+`_ActivityPauseSignal`-the-exception, and the inside-`_guarded`'s-`work`-callable catch point
+above, remain correct for a pause signaled from somewhere *outside* this specific polling call
+chain (should one ever exist); through `wait_pra` specifically, the mechanism is return-value
+propagation the whole way, not exception unwinding at any point, and it must not be implemented by
+widening the shared polling helper's contract.
 
 ### 4.3.2 Rollout compatibility for the activity signature change
 
