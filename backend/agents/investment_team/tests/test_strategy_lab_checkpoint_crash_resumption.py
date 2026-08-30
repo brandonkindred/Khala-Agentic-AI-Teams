@@ -576,6 +576,15 @@ def test_cross_attempt_resume_llm_call_count_bounded_to_resumed_portion(
 
     from .test_strategy_lab_phase_transitions import _stub_pipeline_for_happy_path
 
+    # Pin both env-derived limits rather than rely on their (generous, but
+    # environment-overridable) defaults: this fixture needs >= 2 review
+    # rounds per attempt and, on the full-restart contrast test, >= 2x this
+    # attempt's charges -- a smaller configured limit would exhaust the
+    # budget or cap review rounds before the forced failure, for reasons
+    # unrelated to re-entry (Codex review finding).
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "20")
+
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
     phase1_calls = _charging_design_stubs(monkeypatch, orch, review_not_ready_rounds=1)
@@ -625,6 +634,12 @@ def test_full_restart_reentry_pays_full_pipeline_llm_call_cost(
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 
     from .test_strategy_lab_phase_transitions import _stub_pipeline_for_happy_path
+
+    # Pin both env-derived limits -- see the identical note on the bounded-
+    # resume test above; this contrast case needs headroom for TWICE one
+    # attempt's charges (a full restart pays design+review twice).
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "20")
 
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
