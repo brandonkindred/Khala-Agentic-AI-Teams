@@ -46,8 +46,7 @@ def reentry_outcome(**overrides: Any) -> Dict[str, Any]:
         # (``exceptions.py``) — every current production raise site passes
         # this explicitly as ``True``, so the default here keeps every
         # existing test's full-restart behavior unchanged unless a test
-        # deliberately overrides it to exercise cross-attempt resume
-        # (issue #7318).
+        # deliberately overrides it to exercise cross-attempt resume.
         "spec_implicated": True,
         "convergence_tracker_state": {"trial_count": 0},
         "gate_results": [],

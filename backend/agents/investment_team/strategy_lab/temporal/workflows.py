@@ -345,8 +345,7 @@ class StrategyLabCycleWorkflow:
         -- code synthesis always still runs fresh, since ``spec_implicated``
         makes no claim about any already-synthesized code's soundness. This
         mirrors thread mode's ``orchestrator.py::run_cycle`` gated
-        cross-attempt resume (issue #7318, #7282's second step, parity with
-        #7315/PR #7469) -- see ``checkpoints.py`` for the full contract.
+        cross-attempt resume -- see ``checkpoints.py`` for the full contract.
     """
 
     @workflow.run
@@ -406,13 +405,12 @@ class StrategyLabCycleWorkflow:
         last_failure_phase: Optional[str] = None
         last_design_context: Optional[dict] = None
 
-        # Second step of #7282 (Temporal-mode parity with thread mode's
-        # #7309/#7315, landed as PR #7469): the resume-point determination
-        # for each failed attempt's checkpoint. One entry per completed
-        # re-entry, in order -- the next stage a resumed attempt *could*
-        # start from (per ``determine_resume_stage``), or ``None`` when no
-        # usable checkpoint was captured. Surfaced on the terminal return
-        # dicts below for test observability (as it was before this step).
+        # Temporal-mode parity with thread mode's resume-point determination:
+        # the next stage a resumed attempt *could* start from (per
+        # ``determine_resume_stage``), or ``None`` when no usable checkpoint
+        # was captured, for each failed attempt's checkpoint. One entry per
+        # completed re-entry, in order. Surfaced on the terminal return dicts
+        # below for test observability.
         resume_stage_determinations: List[Optional[str]] = []
 
         # Cross-attempt resume state for the *next* loop iteration, set by

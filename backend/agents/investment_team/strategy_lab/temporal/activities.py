@@ -1029,10 +1029,10 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             ``persist_run_state_activity``'s own default-generation
             backward-compat convention.
           - ``resume_spec``/``resume_rationale``/``resume_design_context``
-            (all optional): cross-attempt resume state (issue #7318,
-            Temporal-mode parity with thread mode's ``orchestrator.py::
-            run_cycle`` cross-attempt resume, #7315/PR #7469) -- the calling
-            workflow's own ``StrategyLabCycleWorkflow.run`` supplies these,
+            (all optional): cross-attempt resume state, Temporal-mode parity
+            with thread mode's ``orchestrator.py::run_cycle`` gated
+            cross-attempt resume -- the calling workflow's own
+            ``StrategyLabCycleWorkflow.run`` supplies these,
             wire-shaped exactly like the ADR-012 same-attempt checkpoint
             fields below, only when a *prior* attempt's
             ``SpecImplementabilityError.spec_implicated`` was ``False`` and
@@ -1282,8 +1282,8 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 resume_rationale = checkpoint.rationale
                 resume_design_context = checkpoint_design_context
 
-    # ── Cross-attempt resume (issue #7318, Temporal-mode parity with thread
-    # mode's #7315/PR #7469) ─────────────────────────────────────────────
+    # ── Cross-attempt resume (Temporal-mode parity with thread mode's
+    # gated cross-attempt resume) ────────────────────────────────────────
     # Only consulted when the ADR-012 same-attempt lookup just above found
     # nothing -- the two never actually collide, since an ADR-012 checkpoint
     # is keyed to THIS exact ``design_attempt_index`` crashing mid-execution,

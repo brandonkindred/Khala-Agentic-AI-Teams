@@ -1144,7 +1144,7 @@ def test_run_design_attempt_activity_returns_reentry_outcome(monkeypatch):
     assert out["budget_calls"] == 7
     # SpecImplementabilityError.spec_implicated's own default (exceptions.py)
     # -- the reentry outcome must mirror it so the calling workflow's
-    # cross-attempt resume gate (issue #7318) sees the same value.
+    # cross-attempt resume gate sees the same value.
     assert out["spec_implicated"] is True
 
 
@@ -1152,7 +1152,7 @@ def test_run_design_attempt_activity_reentry_outcome_reports_spec_implicated_fal
     """A raise site that has proven its failure doesn't implicate the
     checkpointed spec (``spec_implicated=False`` -- none does in production
     today) must have that declaration surface on the reentry outcome, since
-    the calling workflow gates cross-attempt resume on it (issue #7318)."""
+    the calling workflow gates cross-attempt resume on it."""
     from investment_team.models import StrategySpec
     from investment_team.strategy_lab.exceptions import SpecImplementabilityError
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
@@ -1733,8 +1733,8 @@ def test_run_design_attempt_activity_resumes_from_valid_checkpoint(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# run_design_attempt_activity — cross-attempt resume (issue #7318, Temporal-
-# mode parity with thread mode's #7315/PR #7469). Distinct from the ADR-012
+# run_design_attempt_activity — cross-attempt resume (Temporal-mode parity
+# with thread mode's gated cross-attempt resume). Distinct from the ADR-012
 # same-attempt checkpoint tests above: here ``run_id`` is absent (or the
 # same-attempt lookup simply finds nothing), so the only source of resume
 # state is the calling workflow's own ``resume_spec``/``resume_rationale``/
@@ -1787,8 +1787,8 @@ def test_run_design_attempt_activity_without_cross_attempt_resume_params_forward
     monkeypatch,
 ):
     """Absent ``resume_spec``/``resume_rationale``/``resume_design_context``
-    params (today's baseline, and every attempt after the first re-entry
-    step landed by #7474 alone) -- full restart, unchanged."""
+    params (today's baseline, and every attempt when the calling workflow
+    hasn't determined a usable checkpoint) -- full restart, unchanged."""
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 
     class _FakeRecord:

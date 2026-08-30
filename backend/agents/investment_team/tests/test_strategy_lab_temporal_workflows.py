@@ -815,10 +815,10 @@ def test_resume_determination_computed_but_not_acted_on_across_reentries_to_shor
 
 
 # ---------------------------------------------------------------------------
-# Cross-attempt resume consumption (issue #7318, second step of #7282 --
-# Temporal-mode parity with thread mode's gated cross-attempt resume,
-# #7315/PR #7469). The determination computed above is now *acted on*: the
-# next attempt's activity params carry the checkpoint's state, but only when
+# Cross-attempt resume consumption -- Temporal-mode parity with thread
+# mode's gated cross-attempt resume. The determination computed above is
+# now *acted on*: the next attempt's activity params carry the checkpoint's
+# state, but only when
 # the raising exception declared ``spec_implicated=False`` AND the
 # determination is ``PipelineStage.SYNTHESIS`` (a ``ReviewCheckpoint``).
 # Every current production raise site still sets ``spec_implicated=True``

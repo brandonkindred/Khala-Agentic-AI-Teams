@@ -284,8 +284,9 @@ def _review_checkpoint_json(**overrides: Any) -> Dict[str, Any]:
 async def test_replay_after_cross_attempt_resume_is_deterministic_and_preserves_evidence_chain() -> (
     None
 ):
-    """Issue #7318's own required proof: a ``spec_implicated=False`` re-entry
-    whose checkpoint converged through REVIEW resumes the next attempt with
+    """Required proof that a resumed cycle's evidence chain matches a
+    non-resumed one: a ``spec_implicated=False`` re-entry whose checkpoint
+    converged through REVIEW resumes the next attempt with
     that checkpoint's exact spec/rationale/design_context and history --
     replaying the resulting workflow history without a nondeterminism error
     (the evidence chain a resumed cycle hands to its next stage is real
