@@ -434,9 +434,15 @@ clean error.
 **Contract requirement:** the answer-submission path must tag each persisted answer batch with the
 `resume_token` of the pause round it resolves (not just append to one undifferentiated list), and
 `resolve_pra_answers(..., answer_callback=<from job record>)` on resume must filter to *only* the
-batch whose `resume_token` matches the round currently being resumed — equivalently, only answers
-whose `question_id` is a member of that round's persisted `pending_questions`. Once a round's
-batch has been consumed by a resume, it must be marked consumed (or moved into
+batch whose `resume_token` matches the round currently being resumed. **Selection must be by
+`resume_token` alone — never by question-id membership, not even as an "equivalent" fallback.**
+The two are not equivalent when a `q{index}` fallback id (§4.3's already-established
+cross-round-collision risk) repeats across rounds: filtering by id membership in that case returns
+*both* the stale round's answer and the current round's answer for the same reused id, and
+`shared.hitl.validation.validate_answers`'s own duplicate-answer rejection (`validation.py:56-69`,
+required of PRA's route by this contract) then rejects the resulting POST outright — degrading to
+the same silent-hang failure mode this section already flags for a rejected resubmission. Once a
+round's batch has been consumed by a resume, it must be marked consumed (or moved into
 `resolved_questions`, which `HandoffPackage` already carries — `planning_team/models.py:193-207`)
 so a later round's callback never sees it again. This is the same token-scoping discipline §4.2
 already requires of the workflow's signal handler, applied here to the job-record answer store the
@@ -444,8 +450,7 @@ activity reads from.
 
 **Recommended shape (decision for #7445-B, not mandated here):** store `submitted_answers` keyed
 by `resume_token` — `{"<resume_token>": [AnswerSubmission, ...]}` — rather than one flat list, so
-"only this round's answers" is a single dict lookup rather than a filter over question ids that
-could theoretically collide across rounds.
+"only this round's answers" is a single dict lookup, with no id-based filtering step to get wrong.
 
 **Recommended extraction (decision for #7445-B, not mandated here):** `mint_resume_token` and
 `_check_pending_pause_reentry` have no coding-team-specific logic — they operate purely on a job
@@ -732,12 +737,18 @@ substitutes for the other.
 ### 4.4 Explicit hitl.py / pause_cycle.py reuse statement
 
 This design reuses, unmodified in behavior:
-- The `_ActivityPauseSignal`-style unwind: an internal control-flow signal raised deep inside the
-  document-production call path, caught **inside the `_guarded`-wrapped `work`/`_work` callable
-  itself** — not merely "at the activity function's own boundary" as a loose description might
-  suggest — and translated into the `{"outcome": "paused", ...}` return value there, before
-  `_guarded` ever sees an exception (§4.3.1's `_guarded`-interaction requirement below spells out
-  why this placement specifically is load-bearing).
+- The `_ActivityPauseSignal`-*style* discriminated-pause-payload shape: `{outcome, job_id,
+  resume_token, pause_kind, pause_context, pending_questions}`, reused as a value shape only — via
+  the `document_production_pra_submit_activity`/`document_production_activity` split (§4.3.1) and
+  return-value propagation through `wait_pra`/`poll_until_terminal` all the way to `work`'s return
+  (§4.3.1's `poll_until_terminal`-swallows-exceptions correction), **not** the coding team's literal
+  exception-raise-and-catch mechanism, which cannot survive `poll_until_terminal`'s own
+  `except Exception` on this call path (verified, not assumed — §4.3.1 above). Where the coding
+  team unwinds a stack frame via a raised exception, Planning's document-production path unwinds
+  via an ordinary return value threaded up through the same call chain — the *destination* shape
+  (`{"outcome": "paused", ...}`) is reused verbatim; the *mechanism* that gets there is necessarily
+  different, because this call path passes through a shared polling helper the coding team's
+  analogous path does not.
 - `mint_resume_token`'s exact format and one-mint-per-pause-round rule.
 - `_check_pending_pause_reentry`'s three-way classification (no pause / consume / re-emit
   unchanged).
