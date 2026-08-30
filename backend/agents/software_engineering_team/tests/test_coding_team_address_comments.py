@@ -270,6 +270,7 @@ class _FakeClient:
         self.resolve_result = True  # what resolve_review_thread returns
         self.labels_set: list[list[str]] = []
         self.authenticated_login = "khala-bot"
+        self.web_host = "github.com"
         self.pr = PullRequestDetail(
             number=7,
             html_url="https://example/pull/7",
@@ -363,6 +364,16 @@ def _comment(
     return ReviewComment(
         id=cid, path=path, line=line, body=body, html_url=f"https://example/c/{cid}", author=author
     )
+
+
+def _khala_reply(ac, cid: int) -> ReviewComment:
+    """A synthetic Khala-generated reply comment, built from the production
+    module's own marker constant (`ac._KHALA_COMMENT_MARKER`) and the
+    `_FakeClient`'s default `authenticated_login` ("khala-bot") rather than
+    hardcoding either literal here — so a change to the production marker or
+    bot identity can't silently stop these tests from exercising the
+    retry-resolve path they're meant to cover."""
+    return _comment(cid, body=f"Addressed by the SE team. {ac._KHALA_COMMENT_MARKER}", author="khala-bot")
 
 
 @pytest.fixture
@@ -527,9 +538,7 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(
-                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
-            ),
+            _khala_reply(ac, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -548,9 +557,7 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(
-                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
-            ),
+            _khala_reply(ac, 3),
             _comment(4, body="this fix is incomplete, the null case is still broken"),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
@@ -601,9 +608,7 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(
-                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
-            ),
+            _khala_reply(ac, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=True, comment_ids=(2, 3))]
 
@@ -711,6 +716,16 @@ class TestPrHeadRemote:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.pr = replace(fake.pr, head_repo_full_name="")
         assert ac._pr_head_remote("o", "r", fake.pr) is None
+
+    def test_fork_pr_uses_the_given_web_host(self, address_env) -> None:
+        """A GitHub Enterprise Server deployment's fork remote must resolve
+        against ITS OWN web host, not the hardcoded github.com Cloud host."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.pr = replace(fake.pr, head_repo_full_name="contributor/r")
+        assert (
+            ac._pr_head_remote("o", "r", fake.pr, web_host="ghes.example.com")
+            == "https://ghes.example.com/contributor/r.git"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1085,8 +1100,9 @@ class TestHandleComment:
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         plan = ac._plan_resolution(_comment(2), "code", [_comment(2)])
         assert plan is not None
-        # "A" (sum 30) must rank ahead of "B" (sum 20).
-        assert plan.candidate_solutions[0].summary == "A"
+        # "A" (sum 30) must rank ahead of "B" (sum 20) — and no candidate must
+        # be dropped or an extra one injected along the way.
+        assert [c.summary for c in plan.candidate_solutions] == ["A", "B"]
 
 
 # ---------------------------------------------------------------------------
@@ -1198,9 +1214,7 @@ class TestRunAddressComments:
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(
-                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
-            ),
+            _khala_reply(ac, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -1295,9 +1309,7 @@ class TestRunAddressComments:
         # `outcomes` stay empty.
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(
-                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
-            ),
+            _khala_reply(ac, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -1317,9 +1329,7 @@ class TestRunAddressComments:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _comment(
-                3, body="Addressed by the SE team. <!-- khala-generated -->", author="khala-bot"
-            ),
+            _khala_reply(ac, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
 
@@ -1751,13 +1761,11 @@ class TestRunAddressComments:
         assert fake.replies == []
         assert fake.resolved == []
 
-    def test_triage_and_plan_prompts_include_full_thread_history(
-        self, address_env, monkeypatch
-    ) -> None:
+    def test_triage_prompt_includes_full_thread_history(self, address_env, monkeypatch) -> None:
         """A short context-dependent follow-up ("still broken") is unintelligible
-        in isolation — triage and planning must ground on the thread's full
-        conversation (root concern + any earlier reply), not just the latest
-        message, so the LLM can tell what "still" refers to."""
+        in isolation — triage must ground on the thread's full conversation
+        (root concern + any earlier reply), not just the latest message, so
+        the LLM can tell what "still" refers to."""
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
         root = _comment(2, body="This null-check is missing entirely")
@@ -1793,6 +1801,50 @@ class TestRunAddressComments:
         assert len(seen_prompts) == 1  # triage only — raises_issue=False short-circuits planning
         assert "This null-check is missing entirely" in seen_prompts[0]
         assert "still broken" in seen_prompts[0]
+
+    def test_planning_prompt_includes_full_thread_history(self, address_env, monkeypatch) -> None:
+        """Same as triage: planning is a SEPARATE LLM round-trip, run only on
+        the real-issue path, and it too must ground on the thread's full
+        conversation — not just the comment it was handed — or a plan for a
+        context-dependent follow-up would be built without the context that
+        makes it intelligible."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
+        root = _comment(2, body="This null-check is missing entirely")
+        follow_up = _comment(6, body="still broken")
+        fake.review_comments = [root, follow_up]
+        fake.threads = [thread]
+
+        seen_prompts: list[str] = []
+
+        def _gen(prompt, *, schema, **kw):
+            seen_prompts.append(prompt)
+            if schema is ac.CommentTriage:
+                return ac.CommentTriage(raises_issue=True, is_false_positive=False, issue_summary="s")
+            return ac.IssueResolutionPlan(chosen_plan="p")
+
+        monkeypatch.setattr(ac._main, "generate_structured", _gen)
+        monkeypatch.setattr(ac, "_dispatch_implementation", lambda *a, **kw: "child-job")
+
+        ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            follow_up,
+            thread,
+            [root, follow_up],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert len(seen_prompts) == 2  # triage, then planning
+        for prompt in seen_prompts:
+            assert "This null-check is missing entirely" in prompt
+            assert "still broken" in prompt
 
     def test_does_not_mark_waiting_for_review_when_a_comment_fails(
         self, address_env, monkeypatch
@@ -2021,11 +2073,10 @@ class TestAddressCommentsRoute:
     def test_thread_launch_failure_terminalizes_created_job(self, route_env, monkeypatch) -> None:
         from software_engineering_team.api import address_comments as ac
 
-        monkeypatch.setattr(
-            ac,
-            "start_address_comments_thread",
-            lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
-        )
+        def _raise_thread_unavailable(*_a, **_kw):
+            raise RuntimeError("thread unavailable")
+
+        monkeypatch.setattr(ac, "start_address_comments_thread", _raise_thread_unavailable)
         resp = route_env["client"].post(
             "/pulls/7/address-comments",
             json={

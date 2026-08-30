@@ -345,8 +345,9 @@ def post_address_comments(
         # An operator-pinned repo_path is shared (unnamespaced) across every PR
         # of that repo, so the PR-scoped check above cannot see a running job
         # for a DIFFERENT PR on the SAME checkout. `_running_sibling_on_checkout`
-        # closes that: no sentinel job_id exists yet to exclude, so pass one no
-        # active job could ever carry. But the outer `_pr_review_admission` lock
+        # closes that: called with no `own_job_id` (no job has been created yet
+        # to exclude), so any running job found on the checkout is a genuine
+        # conflicting sibling. But the outer `_pr_review_admission` lock
         # alone is keyed per-PR, so it does NOT serialize this scan against a
         # concurrent request for a DIFFERENT PR sharing the same checkout — both
         # could take their own per-PR lock, both see nothing running yet, and

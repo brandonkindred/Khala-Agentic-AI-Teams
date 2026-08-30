@@ -579,7 +579,7 @@ def _plan_resolution(
 # ---------------------------------------------------------------------------
 
 
-def _pr_head_remote(owner: str, repo: str, pr: Any) -> Optional[str]:
+def _pr_head_remote(owner: str, repo: str, pr: Any, web_host: str = "github.com") -> Optional[str]:
     """Resolve the git remote to fetch/push the PR's head branch through.
 
     ``PullRequestDetail.head`` is only the branch's short ref, which is
@@ -592,12 +592,17 @@ def _pr_head_remote(owner: str, repo: str, pr: Any) -> Optional[str]:
         - ``owner``/``repo`` are the PR's own (base) repository.
         - ``pr`` carries a ``head_repo_full_name`` attribute (see
           :class:`PullRequestDetail`).
+        - ``web_host`` is the clone/browse host to build the fork URL against
+          (see :attr:`GitHubClient.web_host`) — defaults to ``"github.com"``
+          for callers (mostly tests) that don't have a live client handy.
     Postconditions:
         - Returns ``"origin"`` when the head branch lives in ``owner/repo``
           itself (the ordinary, same-repo case) — the checkout's existing
           origin remote is already correct.
-        - Returns an HTTPS clone URL for the head repository when it differs
-          from ``owner/repo`` (a fork-opened PR). A URL is valid anywhere git
+        - Returns an HTTPS clone URL (against ``web_host``, so this resolves
+          correctly against a GitHub Enterprise Server deployment too, not
+          just github.com Cloud) for the head repository when it differs from
+          ``owner/repo`` (a fork-opened PR). A URL is valid anywhere git
           accepts a remote name, so the existing token-based auth (injected
           via env, not the URL) applies to it exactly as it does to "origin";
           whether the token can actually push there is GitHub's decision at
@@ -614,7 +619,7 @@ def _pr_head_remote(owner: str, repo: str, pr: Any) -> Optional[str]:
         return None
     if head_repo_full_name.casefold() == f"{owner}/{repo}".casefold():
         return "origin"
-    return f"https://github.com/{head_repo_full_name}.git"
+    return f"https://{web_host}/{head_repo_full_name}.git"
 
 
 def _dispatch_implementation(
@@ -979,6 +984,12 @@ def _mark_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int)
         - The PR carries ``WAITING_FOR_REVIEW_LABEL`` in addition to its existing
           labels. Never raises — the label is a convenience signal, so a failure to
           apply it does not fail the job (the comments are already addressed).
+        - Read-modify-write, NOT atomic: the fetch and the ``update_issue`` replace
+          are two separate API calls, so a label change made by another process
+          (or a concurrent run) in between is silently overwritten by whichever
+          call lands last. Accepted as a known best-effort limitation, same as
+          the rest of this label's convenience-signal contract — GitHub's REST
+          API has no compare-and-swap for label sets.
     """
     try:
         pr = client.get_pull_request(owner, repo, pr_number)
@@ -1009,7 +1020,8 @@ def _clear_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int
     Postconditions:
         - The PR's labels no longer include ``WAITING_FOR_REVIEW_LABEL``.
           Never raises — the label is a best-effort convenience signal, same
-          as :func:`_mark_waiting_for_review`.
+          as :func:`_mark_waiting_for_review`, including its same non-atomic
+          read-modify-write limitation (see that function's docstring).
     """
     try:
         pr = client.get_pull_request(owner, repo, pr_number)
@@ -1253,9 +1265,7 @@ def _start_address_comments_thread(
 # route.
 
 
-def unresolved_comments(
-    client: Any, owner: str, repo: str, pr_number: int
-) -> tuple[List[ReviewComment], Dict[int, ReviewThread], List[str]]:
+def unresolved_comments(client: Any, owner: str, repo: str, pr_number: int) -> UnresolvedCommentsResult:
     """Public entry point for :func:`_unresolved_comments` (see its contract)."""
     return _unresolved_comments(client, owner, repo, pr_number)
 
@@ -1318,7 +1328,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         )
         with address_hb, _main.GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
-            pr_remote = _pr_head_remote(owner, repo, pr)
+            pr_remote = _pr_head_remote(owner, repo, pr, client.web_host)
             unresolved, thread_by_comment_id, retry_resolve_threads, thread_history_by_comment_id = (
                 _unresolved_comments(client, owner, repo, pr_number)
             )
@@ -1468,7 +1478,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             # a failed comment or a still-open retried thread means work is owed,
             # so the PR is not yet ready for another look. A run consisting SOLELY
             # of successful resolve-only retries (outcomes empty, retry_resolve_
-            # thread_ids non-empty) still did real work and must be labelled too —
+            # threads non-empty) still did real work and must be labelled too —
             # only a true no-op run (neither outcomes nor retries) skips this,
             # matching the original intent for a PR that never had comments.
             if (outcomes or retry_resolve_threads) and all_succeeded:

@@ -222,15 +222,23 @@ def get_running_job_on_checkout(repo_path: str) -> dict[str, object] | None:
     module's underscore-prefixed helper.
 
     Preconditions:
-        - ``repo_path`` is the checkout path to check; non-empty.
+        - ``repo_path`` is the checkout path to check; non-empty. Enforced
+          here rather than left implicit: ``os.path.realpath("")`` resolves
+          to the server process's OWN current working directory, so a silent
+          empty-string precondition violation would not fail loudly — it
+          would canonicalize to an unrelated real path and report a
+          plausible-looking (and almost certainly wrong) answer instead.
     Postconditions:
         - Returns the sibling job dict when a live, non-terminal job (any
           kind) is using this EXACT checkout (canonical-path compared), or
           ``None`` when none is running. No job is excluded from the scan —
           this is a pure pre-check, not called by a job checking against its
-          own already-created row. Never raises (see
+          own already-created row. Raises ``ValueError`` when ``repo_path``
+          is empty; otherwise never raises (see
           :func:`_running_sibling_on_checkout`'s own fail-closed contract).
     """
+    if not repo_path:
+        raise ValueError("get_running_job_on_checkout requires a non-empty repo_path")
     return _running_sibling_on_checkout(repo_path)
 
 

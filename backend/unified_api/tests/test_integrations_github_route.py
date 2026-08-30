@@ -78,13 +78,13 @@ class _FakeAsyncClient:
 
     ``calls`` records every ``post`` as a ``(url, json_payload)`` tuple; use
     ``last_payload()`` to read the JSON body of the most recent request rather
-    than indexing the tuple structure directly. ``get`` handles both the
-    ``_assert_pat_can_reach_repo`` reachability probe (any ``/repos/...`` URL),
-    answering with ``repo_access_status`` (200 by default, i.e. "reachable") so
-    routes that don't exercise that gate are unaffected — the probe's own calls
-    are recorded separately in ``repo_checks``, not ``calls`` — and the
-    ``GET .../checkout/running`` admission pre-check, answering
-    ``checkout_running_job_id`` (``None`` by default, i.e. nothing running).
+    than indexing the tuple structure directly. ``get`` branches on the URL:
+    a URL ending in ``/checkout/running`` is the admission pre-check, answered
+    with ``checkout_running_job_id`` (``None`` by default, i.e. nothing
+    running); every OTHER ``get`` is treated as the ``_assert_pat_can_reach_repo``
+    reachability probe — answered with ``repo_access_status`` (200 by default,
+    i.e. "reachable") so routes that don't exercise that gate are unaffected —
+    and its URL is recorded separately in ``repo_checks``, not ``calls``.
     """
 
     def __init__(
@@ -1023,10 +1023,11 @@ def test_resolve_repo_path_pr_and_issue_never_collide(monkeypatch):
 
 
 def test_resolve_repo_path_uses_se_workspace_dir_with_pr(monkeypatch):
-    """SE_WORKSPACE_DIR (highest priority) yields <root>/<owner>_<repo>/pr-N."""
+    """SE_WORKSPACE_DIR wins over WORKSPACE_ROOT and AGENT_CACHE even when all
+    three are set, yielding <root>/<owner>_<repo>/pr-N."""
     monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
-    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", "/workspace")
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
     path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=9)
     assert path == "/work/acme_widget/pr-9"
 

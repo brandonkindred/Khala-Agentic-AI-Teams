@@ -794,9 +794,14 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
     """
     if "://" not in remote:
         return remote, None
-    rc, msg = _main._git(repo_path, "remote", "add", _FORK_REMOTE_NAME, remote)
+    # `--` ends option parsing before the name/URL positionals: the only caller
+    # of this URL branch (`_pr_head_remote`) always builds an "https://..."
+    # value from GitHub's own API response, which can never start with `-`, but
+    # this stays consistent with the option-injection guard already used for
+    # the `fetch` calls below rather than relying on that invariant alone.
+    rc, msg = _main._git(repo_path, "remote", "add", "--", _FORK_REMOTE_NAME, remote)
     if rc != 0:
-        rc, msg = _main._git(repo_path, "remote", "set-url", _FORK_REMOTE_NAME, remote)
+        rc, msg = _main._git(repo_path, "remote", "set-url", "--", _FORK_REMOTE_NAME, remote)
         if rc != 0:
             return remote, f"could not register fork remote {_FORK_REMOTE_NAME!r}: {msg}"
     return _FORK_REMOTE_NAME, None
@@ -998,13 +1003,31 @@ def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, O
 def _push_branch(
     repo_path: str, remote: str, branch: str, token: Optional[str] = None
 ) -> Tuple[bool, Optional[str]]:
+    """Force-with-lease push ``branch`` to ``remote``, setting its upstream.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout the caller can write to.
+        - ``remote`` is either an existing remote NAME (e.g. ``"origin"``, an
+          operator's custom name) or a bare HTTPS clone URL (a fork-opened
+          PR's head, see ``address_comments._pr_head_remote``) — either form
+          the same ``_prepare_issue_branch`` accepts.
+    Postconditions:
+        - When ``remote`` is a URL, it is registered as a durable local git
+          remote (see ``_ensure_named_remote``) BEFORE the push — a bare URL
+          pushes fine directly, but ``--set-upstream``/``-u`` below has
+          nothing to name the tracking branch after without a registered
+          remote. The registered remote is left in place afterward (not
+          cleaned up); ``_ensure_named_remote``'s own registration is
+          idempotent, so a retry on the same checkout re-registers the same
+          name rather than erroring.
+        - Returns ``(True, None)`` on a successful push with upstream set;
+          ``(False, message)`` otherwise — an unsafe ``branch`` name, a failed
+          remote registration, or a failed ``git push`` are all reported this
+          way, never raised.
+    """
     if not _is_safe_ref(branch):
         return False, f"unsafe branch name: {branch!r}"
-    # A bare URL pushes fine directly, but --set-upstream (-u) below has
-    # nothing to name the tracking branch after without a registered remote;
-    # resolve it the same way _prepare_issue_branch does, so a fork PR's
-    # remote behaves identically to "origin" here too.
-    remote, remote_err = _ensure_named_remote(repo_path, remote)
+    remote_name, remote_err = _ensure_named_remote(repo_path, remote)
     if remote_err:
         return False, remote_err
     # Push is a network op against the (HTTPS) origin; supply the transient
@@ -1016,7 +1039,7 @@ def _push_branch(
         "push",
         "--force-with-lease",
         "-u",
-        remote,
+        remote_name,
         branch,
         timeout=180,
         env=_git_auth_env(token) if token else None,

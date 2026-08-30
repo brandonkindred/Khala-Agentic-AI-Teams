@@ -17,6 +17,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -33,26 +34,32 @@ from .client_http import (
 
 logger = logging.getLogger(__name__)
 
+# Per-thread comment page size used by BOTH review-thread GraphQL queries below.
+# A thread whose comments exceed this in one page trips the `hasNextPage` check
+# near the "review thread has more than N comments" error — named so that check
+# (and its error message) can never drift from the query's actual `first:` value.
+_REVIEW_THREAD_COMMENTS_PAGE_SIZE = 100
+
 # GraphQL query for review-thread resolution state: GitHub's REST API has no
 # "resolved" field on a review comment, so thread resolution (the "Resolve
 # conversation" button on GitHub) can only be read via GraphQL's `isResolved`.
-_REVIEW_THREADS_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!, $after: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100, after: $after) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
+_REVIEW_THREADS_QUERY = f"""
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
+  repository(owner: $owner, name: $repo) {{
+    pullRequest(number: $number) {{
+      reviewThreads(first: 100, after: $after) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
           isResolved
-          comments(first: 100) {
-            pageInfo { hasNextPage }
-            nodes { databaseId }
-          }
-        }
-      }
-    }
-  }
-}
+          comments(first: {_REVIEW_THREAD_COMMENTS_PAGE_SIZE}) {{
+            pageInfo {{ hasNextPage }}
+            nodes {{ databaseId }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
 """
 
 # GraphQL query for the FULL review-thread listing (resolution state + the thread's
@@ -65,24 +72,24 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
 # ``pageInfo { hasNextPage }`` inside ``comments`` — the two queries are not identical
 # in shape, only distinct in PURPOSE: this one needs the thread ``id`` and per-comment
 # ``databaseId``, the other needs neither).
-_REVIEW_THREADS_FULL_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!, $after: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100, after: $after) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
+_REVIEW_THREADS_FULL_QUERY = f"""
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
+  repository(owner: $owner, name: $repo) {{
+    pullRequest(number: $number) {{
+      reviewThreads(first: 100, after: $after) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
           id
           isResolved
-          comments(first: 100) {
-            pageInfo { hasNextPage }
-            nodes { databaseId }
-          }
-        }
-      }
-    }
-  }
-}
+          comments(first: {_REVIEW_THREAD_COMMENTS_PAGE_SIZE}) {{
+            pageInfo {{ hasNextPage }}
+            nodes {{ databaseId }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
 """
 
 # GraphQL mutation that resolves a review thread (the "Resolve conversation"
@@ -454,6 +461,28 @@ class GitHubClient(_GitHubHttpMixin):
         self._max_retries = max(1, max_retries)
         self._sleep = sleep
         self._client = httpx.Client(timeout=timeout)
+
+    @property
+    def web_host(self) -> str:
+        """The web (clone/browse) host matching this client's configured API host.
+
+        Postconditions:
+            - Returns ``"github.com"`` for the default ``api.github.com`` host
+              (github.com Cloud's API and web hosts differ by an "api." prefix).
+            - For any other host (a GitHub Enterprise Server instance, whose API
+              and web UI share one host, typically at an ``/api/v3`` path),
+              returns that host unchanged — GHES's clone URLs use the bare host,
+              not the API path. Falls back to the input host on any parse error
+              rather than raising, since this only feeds a display/clone-URL
+              convenience, never an auth-relevant decision.
+        """
+        try:
+            host = urlsplit(self._base_url).netloc or self._base_url
+        except ValueError:
+            return self._base_url
+        if host == "api.github.com":
+            return "github.com"
+        return host
 
     def get_repo(self, owner: str, repo: str) -> Repo:
         """Fetch repository metadata (``GET /repos/{owner}/{repo}``).
@@ -1099,7 +1128,10 @@ class GitHubClient(_GitHubHttpMixin):
                         )
                     if (comments.get("pageInfo") or {}).get("hasNextPage"):
                         raise ReviewThreadsUnavailableError(
-                            owner, repo, number, "review thread has more than 100 comments"
+                            owner,
+                            repo,
+                            number,
+                            f"review thread has more than {_REVIEW_THREAD_COMMENTS_PAGE_SIZE} comments",
                         )
                     comment_ids_list: list[int] = []
                     for comment in comments["nodes"]:

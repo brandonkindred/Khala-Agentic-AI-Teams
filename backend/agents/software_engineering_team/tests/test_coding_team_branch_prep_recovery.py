@@ -1243,7 +1243,7 @@ class TestPrepareIssueBranchFromFork:
         origin_main_tip = _must(remote, "rev-parse", "main")
 
         ok, err, _notes = api._prepare_issue_branch(
-            clone, fork_url, "main", "feature", None, issue_number=None
+            clone, fork_url, "main", "feature", token=None, issue_number=None
         )
 
         assert ok is True, err

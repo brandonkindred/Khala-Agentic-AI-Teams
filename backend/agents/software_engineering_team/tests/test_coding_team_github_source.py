@@ -367,6 +367,21 @@ class TestClientLifecycle:
         assert client._client.is_closed  # type: ignore[attr-defined]
 
 
+class TestClientWebHost:
+    def test_default_api_host_maps_to_github_com(self) -> None:
+        client = GitHubClient(token="t", sleep=lambda _s: None)
+        assert client.web_host == "github.com"
+
+    def test_ghes_api_host_is_returned_unchanged(self) -> None:
+        client = GitHubClient(token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None)
+        assert client.web_host == "ghes.example.com"
+
+    def test_honors_github_api_url_env_var(self, monkeypatch) -> None:
+        monkeypatch.setenv("GITHUB_API_URL", "https://ghes.other.com/api/v3")
+        client = GitHubClient(token="t", sleep=lambda _s: None)
+        assert client.web_host == "ghes.other.com"
+
+
 class TestClientTransportErrorRetry:
     def test_retries_on_transport_error_then_succeeds(self) -> None:
         calls = {"n": 0}
