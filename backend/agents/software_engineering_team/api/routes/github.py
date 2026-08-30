@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
-    AddressCommentsAdmissionResponse,
+    CheckoutRunningResponse,
     RunFromGitHubRequest,
     RunFromGitHubResponse,
 )
@@ -164,8 +164,8 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
 
 
-@router.get("/checkout/running", response_model=AddressCommentsAdmissionResponse)
-def get_checkout_running(repo_path: str = Query(..., min_length=1)) -> AddressCommentsAdmissionResponse:
+@router.get("/checkout/running", response_model=CheckoutRunningResponse)
+def get_checkout_running(repo_path: str = Query(..., min_length=1)) -> CheckoutRunningResponse:
     """Lightweight pre-check: is ANY active job (issue run or PR remediation) already using this checkout?
 
     Generic counterpart to ``GET /pulls/{pr_number}/address-comments/running``'s
@@ -186,6 +186,6 @@ def get_checkout_running(repo_path: str = Query(..., min_length=1)) -> AddressCo
           eventual admitting route's own checks as the authority.
     """
     sibling = _main._running_sibling_on_checkout(repo_path, "<admission-precheck>")
-    return AddressCommentsAdmissionResponse(
+    return CheckoutRunningResponse(
         running_job_id=sibling.get("job_id") if sibling is not None else None
     )

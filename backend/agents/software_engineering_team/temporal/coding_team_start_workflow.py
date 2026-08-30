@@ -78,9 +78,14 @@ def execute_coding_team_workflow(
     to or resolved merely because Temporal accepted a workflow start.
 
     Preconditions:
-        - ``job_id`` is unique per review comment and names an existing child job.
-        - ``github`` contains no plaintext token; activities resolve credentials
-          from the child job's encrypted token or ``GITHUB_TOKEN``.
+        - ``job_id`` is a non-empty str, unique per review comment, naming an
+          existing child job.
+        - ``repo_path`` is a non-empty str.
+        - ``github`` is a REQUIRED ``dict`` of GitHub PR/comment metadata and
+          must not contain a plaintext token; activities resolve credentials
+          from the child job's encrypted token or ``GITHUB_TOKEN`` instead.
+        - ``plan_input``, when not ``None``, is a JSON-serializable plan dict
+          (it is sent verbatim as a Temporal workflow argument).
     Postconditions:
         - Blocks until ``CodingTeamWorkflow`` reaches a terminal result and returns
           that result. A pause remains durable in Temporal and is resumed through
@@ -98,6 +103,8 @@ def execute_coding_team_workflow(
         raise ValueError("execute_coding_team_workflow requires a non-empty job_id")
     if not repo_path:
         raise ValueError("execute_coding_team_workflow requires a non-empty repo_path")
+    if not isinstance(github, dict):
+        raise ValueError("execute_coding_team_workflow requires github to be a dict")
     if "token" in github:
         raise ValueError("github workflow payload must not include a token")
     payload: Dict[str, Any] = {

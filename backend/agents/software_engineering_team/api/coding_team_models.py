@@ -308,6 +308,23 @@ class AddressCommentsAdmissionResponse(BaseModel):
     )
 
 
+class CheckoutRunningResponse(BaseModel):
+    """Response for ``GET /checkout/running``: a generic, best-effort pre-check
+    for ANY active job (any kind — issue run, PR review, address-comments) on a
+    given checkout path. Distinct from :class:`AddressCommentsAdmissionResponse`
+    (PR-scoped, address-comments/review specific) even though the shape is
+    identical today — this endpoint is meant for any caller that owns a shared,
+    mutable checkout resource, not just the address-comments flow, so it must
+    not be coupled to that flow's own response model if either evolves
+    independently later."""
+
+    running_job_id: Optional[str] = Field(
+        default=None,
+        description="job_id of the live, non-terminal job (any kind) using this exact "
+        "checkout, or null when none is running.",
+    )
+
+
 class ReviewRunItem(BaseModel):
     """One persisted code-review run for a pull request (GET /reviews)."""
 

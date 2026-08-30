@@ -505,7 +505,10 @@ class TestUnresolvedComments:
             ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
         ]
         unresolved, _by_comment, _retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
-        assert [c.id for c in unresolved] == [3, 5]
+        # The relative order between independent threads is not part of the
+        # contract — each unresolved thread contributes its latest comment,
+        # but which thread's comment comes first is an implementation detail.
+        assert {c.id for c in unresolved} == {3, 5}
 
     def test_thread_with_marked_reply_excluded_even_via_unmarked_root(self, address_env) -> None:
         """A thread whose root comment carries no marker but whose LATER reply

@@ -60,6 +60,10 @@ WAITING_FOR_REVIEW_LABEL = "waiting for review"
 # are also skipped so the flow never chases its own replies.
 _KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
 
+# Cap on cited file content included in an LLM prompt (triage and planning both use
+# this), to bound prompt size regardless of the actual file's length.
+_MAX_CITED_CODE_CHARS = 20000
+
 
 def _is_khala_authored(comment: ReviewComment, authenticated_login: str) -> bool:
     """True iff ``comment`` is trustworthy as Khala's own generated reply.
@@ -426,7 +430,7 @@ def _triage_comment(
         "\"still broken\" or \"use the other approach\" is referring to)\n"
         f"{_format_thread_history(thread_history)}\n\n"
         "## Cited file content (may be empty if unavailable)\n"
-        f"{cited_code[:20000] if cited_code else '(unavailable)'}\n\n"
+        f"{cited_code[:_MAX_CITED_CODE_CHARS] if cited_code else '(unavailable)'}\n\n"
         "Decide whether the thread's LAST message raises a real, actionable issue, and "
         "whether that issue is a false positive given the actual code. Respond as JSON."
     )
@@ -466,7 +470,7 @@ def _plan_resolution(
         "earlier messages give it context)\n"
         f"{_format_thread_history(thread_history)}\n\n"
         "## Cited file content (may be empty if unavailable)\n"
-        f"{cited_code[:20000] if cited_code else '(unavailable)'}\n\n"
+        f"{cited_code[:_MAX_CITED_CODE_CHARS] if cited_code else '(unavailable)'}\n\n"
         "Identify the resolution requirements for the thread's LAST message, the top THREE "
         "candidate solutions (each scored 1-10 on requirement fit, computational performance, "
         "memory usage, and inverted code complexity), and a concrete implementation plan for "
@@ -782,12 +786,13 @@ def _reply_and_resolve(
           reply would close the thread with no explanatory comment ever
           posted, and since a resolved thread is never re-triaged, the
           reviewer's concern would be silently dropped.
-        - Checks the thread's LIVE state (:func:`_thread_has_new_reviewer_feedback`)
-          BEFORE posting anything: a reviewer may have posted follow-up feedback
-          on this thread while this comment's implementation workflow was
-          running (between when ``comment`` was snapshotted and now). When
-          newer, non-Khala feedback is found, this call posts NEITHER the reply
-          NOR the resolution and reports failure — the check must run before the
+        - WHEN ``thread`` is known, checks the thread's LIVE state
+          (:func:`_thread_has_new_reviewer_feedback`) BEFORE posting anything:
+          a reviewer may have posted follow-up feedback on this thread while
+          this comment's implementation workflow was running (between when
+          ``comment`` was snapshotted and now). When newer, non-Khala
+          feedback is found, this call posts NEITHER the reply NOR the
+          resolution and reports failure — the check must run before the
           reply, not just before the resolve: a reply posted first would itself
           become the thread's new latest message, and since it carries Khala's
           own marker, the NEXT run's ``_unresolved_comments`` would then route
@@ -795,7 +800,10 @@ def _reply_and_resolve(
           human feedback that prompted skipping the resolve in the first place.
           Leaving the thread exactly as found lets the next run's latest-message
           check correctly see the human's feedback as the thread's live latest
-          message.
+          message. WHEN ``thread`` is ``None`` (should not normally happen —
+          see the reply-target precondition above), there is no thread id to
+          re-check against, so the reply is posted directly to ``comment.id``
+          with NO live-state verification at all.
     """
     if thread is not None and _thread_has_new_reviewer_feedback(
         client,

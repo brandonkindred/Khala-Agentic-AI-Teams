@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import urllib.parse
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -1502,6 +1503,9 @@ class AddressPrCommentsRequest(BaseModel):
     Kicks off the flow that addresses & responds to every unresolved review comment
     on the PR. Target repository: blank ``owner``/``repo`` falls back to the legacy
     configured default; the PAT's own authorization decides reachability.
+
+    ``base_branch`` names the branch the PR targets (used when preparing the local
+    checkout); when omitted, the repository's default branch is resolved instead.
     """
 
     base_branch: str | None = None
@@ -2952,7 +2956,12 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         )
     finally:
         if lock_held:
-            await loop.run_in_executor(None, lock_cm.__exit__, None, None, None)
+            # Pass the ACTIVE exception info (not a hardcoded None, None, None) so this
+            # manual __exit__ call is semantically equivalent to a real `with` block —
+            # matters if lock_cm is ever swapped for a context manager that inspects or
+            # reacts to exception info (e.g. to suppress a specific error).
+            exc_type, exc_val, exc_tb = sys.exc_info()
+            await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
     try:
         return RunGitHubIssueResponse(
             job_id=data["job_id"],
@@ -3206,7 +3215,12 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
         )
     finally:
         if lock_held:
-            await loop.run_in_executor(None, lock_cm.__exit__, None, None, None)
+            # Pass the ACTIVE exception info (not a hardcoded None, None, None) so this
+            # manual __exit__ call is semantically equivalent to a real `with` block —
+            # matters if lock_cm is ever swapped for a context manager that inspects or
+            # reacts to exception info (e.g. to suppress a specific error).
+            exc_type, exc_val, exc_tb = sys.exc_info()
+            await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
     try:
         return AddressPrCommentsResponse(
             job_id=data["job_id"],

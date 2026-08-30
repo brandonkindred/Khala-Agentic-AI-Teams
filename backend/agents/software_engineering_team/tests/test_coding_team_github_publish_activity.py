@@ -574,6 +574,10 @@ def test_publish_activity_registered_under_expected_temporal_name() -> None:
 def test_pr_publish_activity_pushes_existing_head_and_completes_child(
     monkeypatch: pytest.MonkeyPatch, api: Any
 ) -> None:
+    """When the task graph has no failed tasks, github_pr_publish_activity
+    fast-forwards the integration branch onto the development branch, pushes
+    it to the PR remote, clears the PR marker from the store, and returns a
+    'completed' status with the PR URL."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_pr_publish_activity,
     )

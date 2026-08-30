@@ -196,7 +196,12 @@ def test_502_on_unreachable(mock_cfg, mock_cred, mock_path, mock_clone, monkeypa
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_propagates_upstream_error(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+def test_wraps_upstream_5xx_error_in_generic_message(
+    mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch
+):
+    """A 5xx from the coding-team service is deliberately NOT propagated
+    verbatim (it could carry an internal stack trace) — `_forward_to_coding_
+    team` wraps it in a generic, client-safe message instead."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(502, {"detail": "github api error"}))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -262,7 +267,11 @@ class _SpyLock:
     """Stand-in for shared.concurrency.flock_lock: records enter/exit order (in
     the module-level ``_lock_events`` list — tests must ``.clear()`` it, not
     reassign it, since each instance appends to that same shared record) and
-    can be made to fail acquisition."""
+    can be made to fail acquisition. Uses ``"lock_enter"``/``"lock_exit"``
+    tokens (rather than bare ``"enter"``/``"exit"``) so a test can interleave
+    them with other instrumented steps (HTTP calls, the clone) in the SAME
+    list and assert the full ordering, not just that the lock was taken and
+    released exactly once."""
 
     def __init__(self, path, *, fail: bool = False):
         self._fail = fail
@@ -270,11 +279,11 @@ class _SpyLock:
     def __enter__(self):
         if self._fail:
             raise OSError("lock busy")
-        _lock_events.append("enter")
+        _lock_events.append("lock_enter")
         return self
 
     def __exit__(self, *exc_info):
-        _lock_events.append("exit")
+        _lock_events.append("lock_exit")
         return False
 
 
@@ -286,15 +295,38 @@ class _SpyLock:
 def test_checkout_lock_held_around_the_whole_flow(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     """The admission pre-check, clone/fetch, and forward POST all run under one
     lock on the checkout — closing the window where two simultaneous requests
-    could each observe "nothing running" and then both mutate the checkout."""
+    could each observe "nothing running" and then both mutate the checkout.
+
+    Asserting just ["lock_enter", "lock_exit"] would only prove the lock was
+    taken and released exactly once — an implementation that released the
+    lock before the network calls and reacquired it afterward would still
+    pass that check while violating the actual invariant. Instrumenting the
+    admission GET, the clone, and the forward POST into the SAME ordered
+    event list proves they all happen strictly BETWEEN the lock's enter and
+    exit, not just that enter/exit happened somewhere in the test.
+    """
     _lock_events.clear()
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
-    fake = _FakeAsyncClient(result=_FakeResp(200, _OK))
+
+    class _EventedAsyncClient(_FakeAsyncClient):
+        async def get(self, url, params=None):
+            _lock_events.append("http_get")
+            return await super().get(url, params=params)
+
+        async def post(self, url, json=None):
+            _lock_events.append("http_post")
+            return await super().post(url, json=json)
+
+    def _clone_side_effect(*_args, **_kwargs):
+        _lock_events.append("clone")
+        return None
+
+    mock_clone.side_effect = _clone_side_effect
+    fake = _EventedAsyncClient(result=_FakeResp(200, _OK))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_URL, json={})
     assert resp.status_code == 200
-    # Entered once before any coding-team call, exited once after the POST.
-    assert _lock_events == ["enter", "exit"]
+    assert _lock_events == ["lock_enter", "http_get", "clone", "http_post", "lock_exit"]
     mock_clone.assert_called_once_with(
         "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, hold_lock=False
     )
