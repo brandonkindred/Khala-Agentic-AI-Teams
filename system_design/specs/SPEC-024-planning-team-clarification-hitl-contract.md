@@ -188,6 +188,27 @@ rollout must forward `q["allow_multiple"]` in this status conversion, alongside 
 `AnswerSubmission`/validator/PRA-route changes above; all four pieces are one change, not
 independently shippable.
 
+**The same status conversion also flips `required`'s effective default.** `OpenQuestion`
+(`planning_team/models.py:224-234`) has no `required` field at all — it is a
+dict-key convention only, applied at the two edges independently and inconsistently.
+`api/routes/product_analysis.py:210` reconstructs the shared `PendingQuestion` with
+`required=q.get("required", False)`, while the answers route's own validation
+(`api/routes/product_analysis.py:263`) computes `required_ids` with
+`q.get("required", True)` against the same underlying dict. Every PRA question that never had
+`required` set explicitly — the common case, since `OpenQuestion` has no such field to set —
+therefore reports as **optional** to a polling client reading status, while PRA itself still
+**requires an answer for it**. A client (Planning's mandated shared validator included) can
+accept a submission omitting that question as complete, submit it, and have PRA's own answers
+route reject the batch with 400 for a missing required answer; because the polling adapter
+(`planning_team/adapters/product_analysis.py`'s `wait_for_product_analysis_completion`/`_on_poll`)
+does not inspect the submission's result, the resumed activity then keeps polling an unresolved
+job until it times out rather than surfacing the mismatch. **Contract requirement:** the same
+rollout that fixes `allow_multiple` must also make the status conversion default `required` to
+`True` — matching the answers route's own effective default — or, preferably, add and persist an
+explicit `required` field on `OpenQuestion` so neither edge depends on an implicit default at all.
+This is a fifth piece of the same one-change rollout above, not a separate, independently
+shippable fix.
+
 **The shared validator needs the same fix, not just the model.** Adding the field to
 `AnswerSubmission` is necessary but not sufficient: `shared.hitl.validation.validate_answers`
 (`shared/hitl/validation.py:81-118`, the coding team's own answer-validation entry point, and the
