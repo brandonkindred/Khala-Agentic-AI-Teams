@@ -701,7 +701,9 @@ def test_resolve_repo_path_operator_override_returned_verbatim():
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch):
+def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(
+    mock_cfg, mock_cred, mock_clone, monkeypatch, tmp_path
+):
     """An auto-derived run clones the per-issue folder and forwards repo_path +
     cleanup_checkout_on_success=True to the coding team."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -709,7 +711,16 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_ok_resp())
-    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+    # run_github_issue now takes a real flock on clone_lock_path(repo_path) at the
+    # route level (not just inside the mocked _ensure_repo_clone), so its parent-dir
+    # mkdir must land somewhere writable — "/cache" itself isn't creatable by the
+    # test process. Route the lock file under tmp_path while payload assertions
+    # below still see the real "/cache/..." repo_path (only the lock's own location
+    # is redirected).
+    with (
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+        patch(f"{_M}.clone_lock_path", return_value=tmp_path / "issue-7.clone.lock"),
+    ):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 200
     payload = fake.last_payload()
@@ -730,7 +741,7 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, monkeypatch):
+def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, monkeypatch, tmp_path):
     """A body-supplied owner/repo runs the issue in THAT repository — the configured
     default is only a fallback; the PAT's own authorization is the access list."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -738,7 +749,13 @@ def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, m
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_ok_resp())
-    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+    # See test_run_issue_forwards_per_issue_checkout_and_cleanup_flag: the route-level
+    # flock now touches the filesystem for real, so redirect the lock file under
+    # tmp_path (the "/cache/..." repo_path assertions below are unaffected).
+    with (
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+        patch(f"{_M}.clone_lock_path", return_value=tmp_path / "issue-7.clone.lock"),
+    ):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7, "owner": "other", "repo": "thing"})
     assert resp.status_code == 200
     payload = fake.last_payload()
