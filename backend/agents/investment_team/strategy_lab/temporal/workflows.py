@@ -60,11 +60,6 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
-from investment_team.strategy_lab.checkpoints import (
-    determine_resume_stage,
-    find_latest_checkpoint_for_attempt,
-    parse_checkpoint,
-)
 from investment_team.strategy_lab.temporal import activities as act
 from investment_team.strategy_lab.temporal.dto import (
     convergence_tracker_from_wire,
@@ -475,6 +470,21 @@ class StrategyLabCycleWorkflow:
             # placeholder value is never consulted -- there is nothing to
             # filter, so ``find_latest_checkpoint_for_attempt`` returns
             # ``None`` regardless of what's passed for ``cycle_scope``.
+            #
+            # Imported here, not at module top: ``checkpoints.py`` imports
+            # ``investment_team.models``, whose transitive graph
+            # (``execution.risk_filter``, ``strategy_lab.spec_dsl``, etc.)
+            # this module's own top-level code -- which runs inside the
+            # temporalio workflow sandbox's restricted re-import -- must not
+            # drag in, matching ``dto.py``'s documented deferred-import
+            # discipline and ``activities.py``'s own local-import convention
+            # for ``investment_team.models`` types.
+            from investment_team.strategy_lab.checkpoints import (
+                determine_resume_stage,
+                find_latest_checkpoint_for_attempt,
+                parse_checkpoint,
+            )
+
             attempt_checkpoints = [
                 parse_checkpoint(raw) for raw in outcome.get("pipeline_checkpoints", [])
             ]
