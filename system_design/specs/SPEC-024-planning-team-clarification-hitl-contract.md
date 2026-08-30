@@ -1095,6 +1095,29 @@ this contract:
   must reload the job record and re-emit the *winning* attempt's persisted envelope (same
   `resume_token`, `pending_questions`, etc.) as its own return value, so both attempts converge on
   one token regardless of which one Temporal ultimately delivers.
+
+  **The `waiting_for_answers`-falsy guard alone is necessary but not sufficient — it does not fence
+  a stale attempt that resurfaces after a *later* attempt has already completed an entire round.**
+  Because a lost heartbeat gives no signal the attempt has been superseded (above), a delayed
+  attempt can reach this same write arbitrarily later — not just concurrently with the attempt that
+  replaced it, but *after* that later attempt has already published a pause, had it answered, and
+  cleared the envelope (or the job has finished). At that point `waiting_for_answers` is falsy
+  again — legitimately, because the real round already resolved — so the stale attempt's guard
+  passes, and it publishes a brand-new pause envelope carrying its own (now-orphaned) token and
+  the *original* `pending_questions` it observed long ago. Temporal discards this stale attempt's
+  return value once a later attempt has already completed, so the workflow never arms a
+  `wait_condition` on this orphaned token — the job record is left claiming `waiting_for_answers:
+  True` for a pause nothing will ever resume, silently hanging the job (or, worse, resurrecting an
+  already-answered round if a client still holds a stale status response naming it). **Contract
+  requirement:** the conditional write's guard must also be fenced by a monotonic value scoped to
+  this job's document-production execution — e.g. `activity.info().attempt` (Temporal's own
+  per-invocation attempt counter, available inside the activity) recorded alongside the pause
+  envelope and required to be strictly greater than whatever attempt number (if any) the job
+  record already carries for this phase — so a write from an attempt number the job record has
+  already moved past can never succeed, regardless of what `waiting_for_answers` currently reads.
+  A losing (stale-fenced) attempt follows the same reload-and-re-emit rule above, but reloads
+  whatever the job record's *current* state actually is (paused on a newer round, or already
+  completed) rather than assuming its own now-invalid pending-questions snapshot is still current.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
