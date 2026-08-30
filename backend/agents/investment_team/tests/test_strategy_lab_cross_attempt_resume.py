@@ -18,9 +18,17 @@ Temporal crash recovery via ``ADR-012``'s ``DesignAttemptCheckpoint``) and
 2. When a raise site instead declares ``spec_implicated=False`` (no
    production site does today -- this is exercised via a directly
    constructed exception, standing in for a future site that has proven
-   its failure doesn't implicate the checkpointed spec), the next attempt
-   *does* resume from that checkpoint's spec/design_context (and code, for
-   a ``SynthesisCheckpoint``), skipping the now-redundant re-derivation.
+   its failure doesn't implicate the checkpointed spec) AND the
+   determination is ``PipelineStage.SYNTHESIS`` (checkpoint converged
+   through REVIEW), the next attempt *does* resume from that checkpoint's
+   spec/design_context, skipping the now-redundant re-derivation -- and
+   carries the checkpoint's own spec/code/gate history into the resumed
+   attempt's drift collector, so the final record's provenance still shows
+   how the reused spec was actually derived. A checkpoint that converged
+   through SYNTHESIS is never used to resume (even with
+   ``spec_implicated=False``): that would additionally reuse the
+   checkpoint's *code*, and a spec-not-implicated exception makes no claim
+   about the code's soundness -- see ``checkpoints.py``.
 
 An unconditional version of (2) -- resuming regardless of what the raising
 exception said -- was implemented and reverted: every current production
@@ -49,7 +57,6 @@ from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.phases import PHASE_TRANSITION_EVENT_NAME, Phase
 
 from .test_strategy_lab_phase_transitions import (
-    _VALID_CODE,
     _spec_dict,
     _stub_pipeline_for_happy_path,
 )
@@ -233,12 +240,42 @@ def test_spec_implicated_false_resumes_from_review_checkpoint(
     """When the raising exception declares ``spec_implicated=False``, and the
     just-failed attempt's checkpoint converged through REVIEW, the next
     attempt resumes into synthesis instead of re-running DESIGN+REVIEW: the
-    design agent runs only once for the whole cycle, and only two transition
-    boundaries fire for attempt 1 (CODE_SYNTHESIS onward), not the full four.
+    design agent runs only once for the whole cycle, only two transition
+    boundaries fire for attempt 1 (CODE_SYNTHESIS onward, not the full
+    four), and the resumed attempt's final record carries the checkpoint's
+    own spec-revision history forward (Codex review finding: a resumed
+    attempt's drift collector must not silently drop the provenance of the
+    design work it's reusing).
+
+    The design loop takes one real revision round before converging (unlike
+    the shared happy-path stub's immediate ready=True) specifically so the
+    checkpoint's ``spec_history`` is non-empty -- otherwise the seeding
+    assertion below would pass trivially whether or not seeding actually
+    happened.
     """
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
     design_run_calls = _wrap_with_call_counter(monkeypatch, orch.design_agent, "run")
+
+    review_call_count = {"n": 0}
+
+    def _review_with_one_revision(*_a: Any, **_kw: Any) -> SpecCritique:
+        review_call_count["n"] += 1
+        if review_call_count["n"] == 1:
+            return SpecCritique(ready=False, rationale="tighten entry threshold")
+        return SpecCritique(ready=True, rationale="ok")
+
+    def _revised_spec_dict() -> Dict[str, Any]:
+        revised = _spec_dict()
+        revised["hypothesis"] = "RSI mean reversion, revised threshold"
+        return revised
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review_with_one_revision)
+    monkeypatch.setattr(
+        orch.design_agent, "revise", lambda *_a, **_kw: (_revised_spec_dict(), "revised rationale")
+    )
 
     real_synthesize = orch._synthesize_initial_code
 
@@ -270,60 +307,24 @@ def test_spec_implicated_false_resumes_from_review_checkpoint(
     ]
     assert record.backtest.status.startswith("failed")
 
-
-def test_spec_implicated_false_resumes_from_synthesis_checkpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the raising exception declares ``spec_implicated=False``, and the
-    just-failed attempt's checkpoint converged through SYNTHESIS (the
-    realistic shape -- every production raiser fires from inside the
-    refinement loop), the next attempt resumes into refinement, skipping
-    both DESIGN+REVIEW and CODE_SYNTHESIS: neither the design agent nor
-    ``_synthesize_initial_code`` runs a second time.
-    """
-    orch = StrategyLabOrchestrator()
-    _stub_pipeline_for_happy_path(monkeypatch, orch)
-    design_run_calls = _wrap_with_call_counter(monkeypatch, orch.design_agent, "run")
-    synthesize_calls = _wrap_with_call_counter(monkeypatch, orch, "_synthesize_initial_code")
-
-    real_refine_align = orch._orchestrate_refinement_and_alignment
-    resume_codes_seen: List[Any] = []
-    real_run_design_attempt = orch._run_design_attempt
-
-    def _tracking_run_design_attempt(**kwargs: Any) -> Any:
-        resume_codes_seen.append(kwargs.get("resume_code"))
-        return real_run_design_attempt(**kwargs)
-
-    monkeypatch.setattr(orch, "_run_design_attempt", _tracking_run_design_attempt)
-
-    def _refine_align_raise_on_first_attempt(**kwargs: Any) -> Any:
-        if kwargs["design_attempt"] == 0:
-            raise SpecImplementabilityError(
-                "forced fail at refinement boundary, not spec-implicated",
-                failure_phase="refinement",
-                last_spec=kwargs["spec"],
-                last_code=kwargs["code"],
-                spec_implicated=False,
-            )
-        return real_refine_align(**kwargs)
-
-    monkeypatch.setattr(
-        orch, "_orchestrate_refinement_and_alignment", _refine_align_raise_on_first_attempt
-    )
-
-    transitions, record = _drive_cycle(orch)
-
-    assert orch.last_resume_determination is PipelineStage.REFINEMENT
-    # Neither design nor synthesis ran a second time -- attempt 1 resumed
-    # past both boundaries using the checkpointed spec/design_context/code.
-    assert design_run_calls["n"] == 1
-    assert synthesize_calls["n"] == 1
-    assert resume_codes_seen == [None, _VALID_CODE]
-    seq = [(t["from_phase"], t["to_phase"], t["attempt"]) for t in transitions]
-    assert seq == [
-        (Phase.DESIGN.value, Phase.DESIGN_REVIEW.value, 0),
-        (Phase.DESIGN_REVIEW.value, Phase.CODE_SYNTHESIS.value, 0),
-        (Phase.CODE_SYNTHESIS.value, Phase.BACKTEST_AND_VERIFICATION.value, 1),
-        (Phase.BACKTEST_AND_VERIFICATION.value, None, 1),
+    # The checkpoint attempt 0 converged with (through REVIEW) carries the
+    # one revision round above -- confirm it's non-empty so the prefix-match
+    # assertion below is a real regression guard, not a vacuous one.
+    review_checkpoints = [
+        cp
+        for cp in orch.pipeline_checkpoints
+        if cp.design_attempt == 0 and cp.stage is PipelineStage.REVIEW
     ]
-    assert record.backtest.status.startswith("failed")
+    assert len(review_checkpoints) == 1
+    checkpoint = review_checkpoints[0]
+    assert len(checkpoint.spec_history) == 1
+
+    # The resumed attempt's final record carries that checkpointed history
+    # forward as a prefix -- the design work that produced the reused spec
+    # is not silently dropped from the persisted evidence chain.
+    assert list(record.spec_history[: len(checkpoint.spec_history)]) == list(
+        checkpoint.spec_history
+    )
+    assert list(record.code_history[: len(checkpoint.code_history)]) == list(
+        checkpoint.code_history
+    )

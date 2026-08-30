@@ -1502,7 +1502,6 @@ class DesignMixin:
         resume_spec: Optional[StrategySpec] = None,
         resume_rationale: Optional[str] = None,
         resume_design_context: Optional[_DesignPersistContext] = None,
-        resume_code: Optional[str] = None,
         checkpoint_hook: Optional[PhaseCallback] = None,
         checkpoint_capture: Optional[PipelineCheckpointCapture] = None,
     ) -> StrategyLabRecord:
@@ -1524,25 +1523,19 @@ class DesignMixin:
         exit-boundary phase-transition emission; this method only sequences
         them and checks ``.record`` after each call.
 
-        Checkpoint resume, two independent boundaries:
-
-        - ``resume_spec``/``resume_rationale``/``resume_design_context``
-          (``ADR-012``, same-attempt Temporal crash recovery, and
-          ``checkpoints.py``'s cross-attempt ``ReviewCheckpoint`` exception)
-          let a caller skip Phase 1 (design + review) entirely when it
-          already has that phase's converged output -- ``resume_spec is
-          not None`` if and only if ``resume_design_context is not None``
-          (``resume_rationale`` may independently be ``None``/``""``).
-        - ``resume_code`` additionally lets a caller skip Phase 1b (code
-          synthesis) too, when it already has *that* phase's converged
-          output as well -- the ``checkpoints.py`` cross-attempt
-          ``SynthesisCheckpoint`` exception, reached only when the
-          triggering ``SpecImplementabilityError`` declared
-          ``spec_implicated=False``. ``resume_code is not None`` requires
-          ``resume_spec is not None`` (there is no boundary that skips
-          synthesis but not design+review); it is never required the other
-          way -- ``resume_spec`` alone (``resume_code is None``) still
-          skips only Phase 1, exactly as before this parameter existed.
+        Checkpoint resume (``ADR-012``, same-attempt Temporal crash
+        recovery, and ``checkpoints.py``'s cross-attempt ``ReviewCheckpoint``
+        exception): ``resume_spec``/``resume_rationale``/
+        ``resume_design_context`` let a caller skip Phase 1 (design + review)
+        entirely when it already has that phase's converged output --
+        ``resume_spec is not None`` if and only if ``resume_design_context
+        is not None`` (``resume_rationale`` may independently be
+        ``None``/``""``). There is no equivalent parameter for Phase 1b
+        (code synthesis): a checkpoint that converged through SYNTHESIS is
+        never used to resume, even by ``checkpoints.py``'s
+        ``spec_implicated=False`` exception, since that exception makes no
+        claim about any already-synthesized code's soundness — see
+        ``checkpoints.py`` for the full contract.
 
         ``checkpoint_hook``, when not ``None``, is invoked exactly once,
         immediately after Phase 1 converges on a non-resumed run (never on
@@ -1558,8 +1551,7 @@ class DesignMixin:
 
         Preconditions:
             ``resume_spec is None`` if and only if ``resume_design_context
-            is None``. ``resume_code is not None`` implies ``resume_spec is
-            not None``.
+            is None``.
             ``signal_briefs`` is a required argument that may be ``None`` or
             a map of allowed asset class -> per-category signal-intelligence
             brief (see
@@ -1574,8 +1566,6 @@ class DesignMixin:
             raise ValueError(
                 "resume_spec and resume_design_context must both be set or both be None"
             )
-        if resume_code is not None and resume_spec is None:
-            raise ValueError("resume_code requires resume_spec to also be set")
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
         # Fresh, attempt-scoped backtest memo. Discarding it per attempt keeps
@@ -1653,30 +1643,21 @@ class DesignMixin:
         )
 
         # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
-        if resume_code is not None:
-            # Checkpoint resume: synthesis already converged (and was
-            # durably checkpointed) for this exact evidence chain -- the
-            # triggering exception declared the checkpoint's state isn't
-            # implicated in the failure. Skip the compiler/synthesis-agent
-            # call entirely -- the checkpoint's code is reused verbatim,
-            # only the shared post-code bookkeeping (fee-default
-            # normalization, original_spec/original_code snapshot, boundary
-            # emission) still needs to run.
-            code_synthesis = self._finalize_synthesized_code(
-                spec=spec, code=resume_code, config=config, design_context=design_context, emit=emit
-            )
-        else:
-            code_synthesis = self._synthesize_initial_code(
-                spec=spec,
-                config=config,
-                rationale=rationale,
-                all_gate_results=all_gate_results,
-                design_attempt=design_attempt,
-                phase_back_count=phase_back_count,
-                drift_collector=drift_collector,
-                design_context=design_context,
-                emit=emit,
-            )
+        # Always runs fresh, even when Phase 1 was resumed from a checkpoint:
+        # a ``spec_implicated=False`` exception makes no claim about any
+        # already-synthesized code's soundness, so there is no boundary that
+        # skips synthesis itself -- see ``checkpoints.py``.
+        code_synthesis = self._synthesize_initial_code(
+            spec=spec,
+            config=config,
+            rationale=rationale,
+            all_gate_results=all_gate_results,
+            design_attempt=design_attempt,
+            phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
+            design_context=design_context,
+            emit=emit,
+        )
         if code_synthesis.record is not None:
             return code_synthesis.record
         code = code_synthesis.code

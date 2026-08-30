@@ -28,14 +28,13 @@ requires for every other kind of attempt-local state — a failed attempt's
 mutations must never leak into the next attempt's reasoning.
 
 The exception: ``run_cycle``'s re-entry branch *may* let attempt ``N+1``
-consume attempt ``N``'s **``ReviewCheckpoint``** or **``SynthesisCheckpoint``**
-— and only those two stages, via ``_run_design_attempt``'s
-``resume_spec``/``resume_design_context``/``resume_code`` parameters — but
-only when the ``SpecImplementabilityError`` that triggered the re-entry
-itself declares ``spec_implicated=False`` (see ``exceptions.py``). This
-gate exists because a cross-attempt amendment was first attempted
-*unconditionally* and reverted: every ``SpecImplementabilityError`` raise
-site that existed at the time (``orchestrator_synthesis.py``'s
+consume attempt ``N``'s **``ReviewCheckpoint``** — and only that stage, via
+``_run_design_attempt``'s ``resume_spec``/``resume_design_context``
+parameters — but only when the ``SpecImplementabilityError`` that
+triggered the re-entry itself declares ``spec_implicated=False`` (see
+``exceptions.py``). This gate exists because a cross-attempt amendment was
+first attempted *unconditionally* and reverted: every ``SpecImplementabilityError``
+raise site that existed at the time (``orchestrator_synthesis.py``'s
 ``ENTRY_WITH_NO_EXIT`` redesign-required raise; ``_apply_updates``'s
 stray-key-mutation and risk-limits-loosening trips in ``orchestrator.py``)
 exists specifically *because* the checkpointed spec needs a design-level
@@ -59,6 +58,18 @@ its failure doesn't implicate the checkpointed spec — that per-site
 soundness analysis is deliberately out of scope here (see ``exceptions.py``'s
 ``SpecImplementabilityError.spec_implicated`` docstring for the contract a
 new raise site must satisfy before setting it ``False``).
+
+**A ``SynthesisCheckpoint`` boundary was considered and deliberately
+excluded.** ``spec_implicated=False`` is a claim about the checkpointed
+*spec*, not about any already-synthesized *code* — a raise site could set
+it because it has proven the spec is sound while the code is exactly what's
+defective. Letting resume additionally skip code synthesis (reusing a
+``SynthesisCheckpoint``'s ``code`` verbatim, as an earlier version of this
+amendment did) would then replay that same defective code into every
+subsequent attempt, the identical failure mode this whole gate exists to
+prevent — just shifted from the spec to the code. A future extension past
+the REVIEW boundary needs its own, separate code-soundness signal before it
+could be sound; it is not implied by ``spec_implicated`` alone.
 
 Serialization relies entirely on Pydantic's built-in ``model_dump(mode="json")``
 / ``model_validate`` — the same mechanism already proven for
@@ -189,20 +200,20 @@ class PipelineCheckpoint(BaseModel):
         identically-shaped ``design_context: Dict[str, Any]`` field.
 
     Invariants:
-      - **Cross-attempt only for a REVIEW- or SYNTHESIS-stage checkpoint,
-        and only when the triggering exception declares
-        ``spec_implicated=False``; never otherwise.** A checkpoint captured
-        while running ``design_attempt=N`` is, by default, never read or
-        considered while running ``design_attempt=N+1`` — a design
-        re-entry (``SpecImplementabilityError``) starts a fresh attempt
-        with its own fresh state, exactly as ``RETRY_STATE_ISOLATION.md``
-        already requires for other attempt-local state. ``ReviewCheckpoint``
-        and ``SynthesisCheckpoint`` are the one documented exception (see
-        the module docstring), and only fire when the raising exception's
-        ``spec_implicated`` is ``False`` — no production raise site sets
-        this today, so this family's resume scenario remains, in practice,
-        strictly same-attempt crash recovery (see the module docstring);
-        it is not a mechanism any current attempt actually uses to reuse a
+      - **Cross-attempt only for a REVIEW-stage checkpoint, and only when
+        the triggering exception declares ``spec_implicated=False``; never
+        otherwise.** A checkpoint captured while running
+        ``design_attempt=N`` is, by default, never read or considered while
+        running ``design_attempt=N+1`` — a design re-entry
+        (``SpecImplementabilityError``) starts a fresh attempt with its own
+        fresh state, exactly as ``RETRY_STATE_ISOLATION.md`` already
+        requires for other attempt-local state. ``ReviewCheckpoint`` is the
+        one documented exception (see the module docstring), and only
+        fires when the raising exception's ``spec_implicated`` is
+        ``False`` — no production raise site sets this today, so this
+        family's resume scenario remains, in practice, strictly
+        same-attempt crash recovery (see the module docstring); it is not
+        a mechanism any current attempt actually uses to reuse a
         prior attempt's partial convergence.
       - **Never survives a generation bump.** A checkpoint minted under an
         older fencing generation is stale the instant a restart mints a new
@@ -434,17 +445,18 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
 # where a subsequent attempt could resume from -- that computation is
 # consumed by ``orchestrator.run_cycle``'s ``except SpecImplementabilityError``
 # branch, but only when the caught exception's ``spec_implicated`` is
-# ``False``, for the two actionable cases: when the result is
-# ``PipelineStage.SYNTHESIS`` (the located checkpoint's ``stage`` is
-# ``PipelineStage.REVIEW``), ``run_cycle`` hands that ``ReviewCheckpoint``'s
-# state to the next ``design_attempt`` via ``_run_design_attempt``'s
-# ``resume_spec``/``resume_design_context``; when it is
-# ``PipelineStage.REFINEMENT`` (the checkpoint's ``stage`` is
-# ``PipelineStage.SYNTHESIS``), ``run_cycle`` additionally hands over its
-# ``code`` via ``resume_code``, skipping synthesis too. Every other result
-# (``REVIEW``, ``ALIGNMENT``, or ``None``) has no matching resume parameter
-# on ``_run_design_attempt`` and is left for a future, separately-scoped
-# amendment. No production raise site sets ``spec_implicated=False`` today
+# ``False`` and the result is ``PipelineStage.SYNTHESIS`` (the located
+# checkpoint's ``stage`` is ``PipelineStage.REVIEW``): ``run_cycle`` hands
+# that ``ReviewCheckpoint``'s state to the next ``design_attempt`` via
+# ``_run_design_attempt``'s ``resume_spec``/``resume_design_context``. Every
+# other result (``REVIEW``, ``REFINEMENT``, ``ALIGNMENT``, or ``None``) has
+# no matching resume parameter on ``_run_design_attempt`` and is left for a
+# future, separately-scoped amendment -- ``REFINEMENT`` (a checkpoint that
+# converged through SYNTHESIS) deliberately included, since resuming past
+# code synthesis would need its own code-soundness signal that
+# ``spec_implicated`` alone doesn't provide (see the module docstring's
+# "SynthesisCheckpoint boundary was considered and deliberately excluded"
+# paragraph). No production raise site sets ``spec_implicated=False`` today
 # (an earlier, unconditional version of this consumption was tried and
 # reverted -- see the module docstring's "cross-attempt amendment was
 # attempted once" paragraph for why), so the "never cross-attempt"
