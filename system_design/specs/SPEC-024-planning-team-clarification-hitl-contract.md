@@ -166,10 +166,19 @@ as "not a decision," with no awareness of `selected_option_ids` at all; its retu
 (`validation.py:110-118`) doesn't carry the plural field either, so even an answer that somehow
 passed validation would have its multi-select content silently dropped before it ever reaches the
 job store. **Contract requirement:** `validate_answers` must recognize a populated
-`selected_option_ids` as a valid decision (validating each id against the question's own options,
-mirroring the singular-field check at lines 92-99), and must include `selected_option_ids` in the
-dict it returns. Without this, every compliant multi-select submission — through the coding team's
-existing route or any Planning route that reuses this validator — is rejected with a 400.
+`selected_option_ids` as a valid decision, validating each id against the question's own options
+**while special-casing `"other"` within that list exactly as the singular-field check already does
+for `selected_option_id == "other"`** (`validation.py:86-91`) — i.e., an id of `"other"` inside
+`selected_option_ids` requires non-blank `other_text` rather than being checked against the
+question's stored options, mirroring PRA's own `apply_answers`
+(`product_requirements_analysis_agent/user_communication.py:210-219`), which already treats
+`"other"` the same way inside a multi-select submission. Every non-`"other"` id in the list is
+validated against the question's options exactly as the singular check does (`validation.py:92-99`).
+The validator must include `selected_option_ids` in the dict it returns. Without this, every
+compliant multi-select submission — through the coding team's existing route or any Planning route
+that reuses this validator — is rejected with a 400, and a multi-select answer that legitimately
+combines a stored option with a free-text `"other"` entry is specifically and incorrectly rejected
+even after the plural-field-awareness fix alone.
 
 **Why the same name, not `planning_submit_answers` or similar:** `backend/shared/hitl/models.py`
 was deliberately built as a cross-team superset so both teams share one vocabulary. A single
@@ -233,6 +242,13 @@ in §6) and Planning's clarification gate has no property that would require a d
 `CodingTeamWorkflow.run` (`temporal/coding_team_workflow.py:546-579`):
 
 ```python
+# Initial call. retry_policy is required here too -- every execute_activity call is its own
+# independent command; omitting it falls back to the SDK's unbounded default, which _guarded's
+# finite-max_attempts contract (§4.3.1) cannot tolerate on either call.
+result = await workflow.execute_activity(
+    document_production_activity, request,
+    start_to_close_timeout=activity_timeout, retry_policy=SAFE_RETRY,
+)
 while result.get("outcome") == "paused":
     resume_token = result.get("resume_token")
     if not isinstance(resume_token, str) or not resume_token:
@@ -249,7 +265,8 @@ while result.get("outcome") == "paused":
     self._submitted_answers = None
     self._active_resume_token = None
     result = await workflow.execute_activity(
-        document_production_activity, request, start_to_close_timeout=activity_timeout
+        document_production_activity, request,
+        start_to_close_timeout=activity_timeout, retry_policy=SAFE_RETRY,
     )
     request.pop("acknowledged_resume_token", None)
 ```
@@ -677,31 +694,50 @@ The primitive #7445-B builds must satisfy:
   duplicate submission. A checkpoint is never persisted with a `None`/falsy `pra_job_id`.
 
 **`document_production_activity` (entry — every invocation, paused or not)**
-- *Preconditions:* **On the patched branch** (`workflow.patched(_CLARIFICATION_PAUSE_PATCH)` is
-  `True`, §4.3.2), called with a `request` dict optionally carrying `acknowledged_resume_token`.
-  **On the legacy branch** (`not workflow.patched(...)` — a `PlanningWorkflow` execution whose
-  history predates this feature), called with the original three positional args (`job_id`,
-  `repo_path`, ... — `temporal/workflows.py:189-191`'s current shape), never a `request` dict, and
-  never with `acknowledged_resume_token` (the legacy branch skips
-  `document_production_pra_submit_activity` and the retry/continuation loop entirely — §4.3.2 — so
-  this precondition holds trivially there: there is no pause to resume from). The activity
-  implementation must decode/normalize both call shapes into one internal `request`-dict-equivalent
-  before proceeding, per §4.3.2's activity-level compatibility requirement. In all cases: the
-  `"planning_team"`-namespaced job record for the job is readable; **when
-  `request["use_product_analysis"]` is `True`** (patched branch only — the legacy branch's
-  `use_product_analysis` positional arg governs identically, just without this contract's pause
-  machinery),
-  `load_checkpoint(...)` for `"document_production_pra"` already returns a checkpoint (the workflow
-  only enters this activity after `document_production_pra_submit_activity` above has completed) —
-  when `False`, no checkpoint precondition applies, since PRA (and this whole pause contract) never
-  engages; runs under `SAFE_RETRY` specifically (§4.3.1 — not `NO_RETRY`, and not the SDK's
-  unbounded default, which is incompatible with the `_guarded` wrapper's finite-`max_attempts`
-  contract).
-- *Postconditions:* Loads the checkpoint and calls `wait_pra(job_id=<checkpointed pra_job_id>,
-  ...)` directly. This activity **never** calls `run_pra` itself, under any circumstance.
-- *Invariants:* Every entry (fresh call, Temporal retry, or workflow-driven resume) reuses the
-  checkpointed `pra_job_id` unconditionally; retrying this activity can never trigger a second PRA
+This contract's pause machinery (checkpoint-before-`run_pra`, the new `SAFE_RETRY` policy, the
+retry/continuation loop) applies to **exactly one** of three cases: **patched branch AND
+`use_product_analysis=True`**. The other two cases retain today's behavior entirely, unchanged by
+this contract:
+
+- *Preconditions (patched branch, `use_product_analysis=True` — the only case this contract's
+  pause machinery governs):* Called with a `request` dict optionally carrying
+  `acknowledged_resume_token` (§4.3.2's `workflow.patched(_CLARIFICATION_PAUSE_PATCH)` gate);
+  `request["use_product_analysis"]` is `True`; the `"planning_team"`-namespaced job record is
+  readable; `load_checkpoint(...)` for `"document_production_pra"` already returns a checkpoint
+  (the workflow only enters this activity after `document_production_pra_submit_activity` has
+  completed — §4.3.1); scheduled by the workflow with `retry_policy=SAFE_RETRY` specifically on
+  **every** `workflow.execute_activity(document_production_activity, ...)` call this branch makes
+  — the initial call and every re-invocation inside the §4.3 retry/continuation loop alike, since
+  each `execute_activity` call is its own independent command and none may silently fall back to
+  the SDK's unbounded default, which is incompatible with `_guarded`'s finite-`max_attempts`
+  contract (§4.3.1).
+- *Postconditions (same case):* Loads the checkpoint and calls `wait_pra(job_id=<checkpointed
+  pra_job_id>, ...)` directly. This activity never calls `run_pra` itself in this case.
+- *Invariants (same case):* Every entry (fresh call, Temporal retry, or workflow-driven resume)
+  reuses the checkpointed `pra_job_id`; retrying this activity can never trigger a second PRA
   submission, because the only code path that submits lives in the other, `NO_RETRY` activity.
+
+- **Patched branch, `use_product_analysis=False`:** no checkpoint exists or is expected (PRA never
+  engages); the activity runs its ordinary non-PRA document-production work. This contract does not
+  govern this case — it is unaffected, not merely relaxed.
+- **Legacy branch** (`not workflow.patched(...)` — a `PlanningWorkflow` execution whose history
+  predates this feature, per §4.3.2): called with the original three positional args (`job_id`,
+  `repo_path`, ... — `temporal/workflows.py:189-197`'s current shape, `use_product_analysis` among
+  them), never a `request` dict, never with `acknowledged_resume_token` — the legacy branch skips
+  `document_production_pra_submit_activity` and the retry/continuation loop entirely (§4.3.2).
+  **Retains its exact recorded `retry_policy=NO_RETRY`** — Temporal's replay determinism binds the
+  scheduled activity's parameters, retry policy included, to what history recorded; this contract
+  must not change it on the legacy branch even though it changes it on the patched branch. Because
+  `retry_policy` stays `NO_RETRY` here, `_guarded`'s `max_attempts` for this call must stay
+  `SINGLE_ATTEMPT` (matching, per its own precondition — `activities.py:87-88`) — never
+  `RETRYABLE_MAX_ATTEMPTS`/`SAFE_RETRY`'s count, which `_guarded` would use to gate `is_final_attempt`
+  against a Temporal attempt count that will never actually reach it. When `use_product_analysis`
+  is `True` on this branch, `run_pra` is called exactly as it is today (no checkpoint, no submit
+  activity) — the legacy branch's PRA behavior is unmodified by this contract, not merely
+  compatible with it. The activity implementation must still decode/normalize the legacy
+  three-positional-arg call shape into an internal representation before proceeding (§4.3.2's
+  activity-level compatibility requirement), but that decoding must not route the legacy branch
+  into any of the new checkpoint/pause logic above.
 
 **`document_production_activity` (paused-return path)**
 - *Preconditions:* PRA reports unanswered `OpenQuestion`s and no matching persisted pause is being
