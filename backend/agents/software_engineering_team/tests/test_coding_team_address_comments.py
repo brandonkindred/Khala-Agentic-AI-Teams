@@ -560,6 +560,21 @@ class TestUnresolvedComments:
         assert [c.id for c in unresolved] == [4]
         assert retry_resolve == []
 
+    def test_fails_closed_when_unresolved_thread_has_no_fetched_messages(
+        self, address_env
+    ) -> None:
+        """An unresolved thread whose comment ids never showed up in the REST
+        comment listing (e.g. truncated by list_review_comments' traversal
+        cap) must fail closed rather than be silently skipped — dropping it
+        would omit it from both triage and the caller's final re-list check,
+        letting the run wrongly declare the PR waiting for review."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = []  # comment 9 never came back from the REST listing
+        fake.threads = [ReviewThread(id="T9", is_resolved=False, comment_ids=(9,))]
+
+        with pytest.raises(ReviewThreadsUnavailableError):
+            ac.unresolved_comments(fake, "o", "r", 7)
+
     def test_thread_with_marked_reply_that_is_already_resolved_is_not_retried(
         self, address_env
     ) -> None:
@@ -1075,13 +1090,16 @@ class TestRunAddressComments:
             ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
         ]
 
-        pr_shas = ["sha1", "sha2", "sha3"]
+        # A unique SHA per call, rather than a small fixed list: the run now
+        # makes several get_pull_request calls beyond the one this test cares
+        # about (the waiting-for-review label check, the head-freshness
+        # re-checks around triage/planning), and pinning an exact call count
+        # here would make the test fragile to those unrelated additions.
         call_count = {"n": 0}
 
         def _get_pr(_o: str, _r: str, _n: int) -> PullRequestDetail:
-            idx = min(call_count["n"], len(pr_shas) - 1)
             call_count["n"] += 1
-            return replace(fake.pr, head_sha=pr_shas[idx])
+            return replace(fake.pr, head_sha=f"sha{call_count['n']}")
 
         monkeypatch.setattr(fake, "get_pull_request", _get_pr)
 
@@ -1095,9 +1113,12 @@ class TestRunAddressComments:
 
         ac._run_address_comments("job1", req, "tok")
 
-        # First get_pull_request call (index 0 -> sha1) is the pre-loop fetch;
-        # each comment then gets its own refresh (sha2, sha3) before triage.
-        assert refs_used == ["sha2", "sha3"]
+        # Each comment's cited-code read used its own freshly-refreshed SHA —
+        # never the original "sha1" captured on the PR fixture, and never the
+        # same SHA reused across both comments.
+        assert len(refs_used) == 2
+        assert "sha1" not in refs_used
+        assert refs_used[0] != refs_used[1]
 
     def test_cleans_up_checkout_on_full_success_when_flagged(
         self, address_env, monkeypatch
@@ -1223,6 +1244,27 @@ class TestRunAddressComments:
         assert "bug" in fake.labels_set[-1]
         final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
         assert final and final[-1]["review_summary"]["counts"]["resolved"] == 1
+
+    def test_clears_stale_waiting_for_review_label_when_new_work_starts(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A previous successful run can leave WAITING_FOR_REVIEW_LABEL on the
+        PR. When THIS run finds genuinely new unresolved feedback, that stale
+        label must be cleared up front rather than kept until this run's own
+        (possibly failing, possibly long-running) outcome is known."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+        fake.pr = replace(fake.pr, labels=("bug", ac.WAITING_FOR_REVIEW_LABEL))
+
+        ac._run_address_comments("job1", req, "tok")
+
+        # First label write clears the stale label before work begins...
+        assert ac.WAITING_FOR_REVIEW_LABEL not in fake.labels_set[0]
+        assert "bug" in fake.labels_set[0]
+        # ...and the final write re-adds it once this run's own work succeeds.
+        assert ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
 
     def test_marks_waiting_for_review_on_retry_only_success(self, address_env) -> None:
         """A run consisting SOLELY of successful resolve-only retries (no fresh
@@ -1602,6 +1644,56 @@ class TestRunAddressComments:
 
         assert outcome.outcome == "failed"
         assert "sha1" in outcome.detail and "sha2" in outcome.detail
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_stale_pr_head_after_planning_blocks_dispatch(self, address_env, monkeypatch) -> None:
+        """A push can land during planning's own LLM round-trip too, not just
+        during triage. The post-triage freshness check alone would miss this
+        window and dispatch an implementation job grounded on stale code."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        calls = {"n": 0}
+        real_pr = fake.pr
+
+        def _get_pull_request(_o: str, _r: str, _n: int):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_pr  # post-triage check: head unchanged
+            return replace(real_pr, head_sha="sha2")  # post-planning check: head moved
+
+        fake.get_pull_request = _get_pull_request  # type: ignore[assignment]
+
+        dispatched = {"called": False}
+        monkeypatch.setattr(
+            ac,
+            "_dispatch_implementation",
+            lambda *a, **kw: dispatched.__setitem__("called", True) or "child-job",
+        )
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "sha1" in outcome.detail and "sha2" in outcome.detail
+        assert "planned" in outcome.detail or "planning" in outcome.detail
+        assert dispatched["called"] is False
         assert fake.replies == []
         assert fake.resolved == []
 

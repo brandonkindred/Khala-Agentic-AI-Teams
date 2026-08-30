@@ -352,7 +352,25 @@ def _unresolved_comments(
         seen_thread_ids.add(thread.id)
         messages = thread_messages.get(thread.id) or []
         if not messages:
-            continue
+            # An unresolved thread with ZERO fetched messages means thread
+            # state is incomplete, not empty — every review thread has at
+            # least a root comment. This happens when list_review_comments'
+            # REST traversal cap (MAX_REVIEW_COMMENTS_TRAVERSED) truncates
+            # before reaching this thread's comments while list_review_
+            # threads' separate GraphQL pagination still returned the
+            # thread itself. Silently skipping it would drop it from BOTH
+            # triage and retry processing, and the caller's final re-list
+            # would make the same omission — the run could then label the
+            # PR waiting for review and reclaim its checkout with this
+            # thread's feedback never handled. Fail closed instead, exactly
+            # like the "REST comment has no discoverable thread" case above.
+            raise ReviewThreadsUnavailableError(
+                owner,
+                repo,
+                pr_number,
+                f"thread {thread.id} is unresolved but has no fetched messages "
+                "(likely truncated by list_review_comments' traversal cap)",
+            )
         latest = messages[-1]
         if _is_khala_authored(latest, authenticated_login):
             # Nothing has been said since Khala's reply — the fix already
@@ -968,9 +986,76 @@ def _mark_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int)
         )
 
 
+def _clear_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int) -> None:
+    """Remove the "waiting for review" label from the PR (best-effort).
+
+    A previous successful run may have applied ``WAITING_FOR_REVIEW_LABEL``.
+    If a reviewer then opens new feedback, admitting a run to address it means
+    the PR is no longer actually ready for another look — the old label would
+    otherwise stay stuck advertising "ready" through however long this new
+    run takes, or even after a run that fails outright, since the label is
+    only ever ADDED (on success), never removed. Called once, up front, as
+    soon as this run knows it has actionable comments to work through — not
+    conditioned on this run's own eventual success.
+
+    Postconditions:
+        - The PR's labels no longer include ``WAITING_FOR_REVIEW_LABEL``.
+          Never raises — the label is a best-effort convenience signal, same
+          as :func:`_mark_waiting_for_review`.
+    """
+    try:
+        pr = client.get_pull_request(owner, repo, pr_number)
+        if WAITING_FOR_REVIEW_LABEL not in pr.labels:
+            return
+        remaining = [label for label in pr.labels if label != WAITING_FOR_REVIEW_LABEL]
+        client.update_issue(owner, repo, pr_number, labels=remaining)
+    except Exception as e:  # noqa: BLE001 - status label is best-effort
+        logger.warning(
+            "address-comments: could not clear waiting-for-review label on PR %s/%s#%s: %s",
+            owner,
+            repo,
+            pr_number,
+            scrub_token_from_text(str(e)),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Per-comment driver
 # ---------------------------------------------------------------------------
+
+
+def _pr_head_moved(
+    client: Any,
+    request: AddressCommentsRequest,
+    comment_id: int,
+    pr_head_sha: str,
+    stage: str,
+) -> Optional[str]:
+    """Re-check whether the PR's head SHA has moved past ``pr_head_sha``.
+
+    Preconditions:
+        - ``pr_head_sha`` is the head SHA captured before the LLM round-trip
+          (triage or planning) named by ``stage`` (used only in log lines).
+    Postconditions:
+        - Returns the new head SHA if a live re-fetch succeeds and differs
+          from ``pr_head_sha``. Returns ``None`` both when the head is
+          unchanged and when the re-fetch itself fails — a failed check is
+          best-effort and must not block the run, so it degrades to
+          proceeding on the original snapshot rather than raising.
+    """
+    try:
+        current_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
+    except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block the run
+        logger.warning(
+            "address-comments: could not re-check PR head after comment %s was %s: %s",
+            comment_id,
+            stage,
+            scrub_token_from_text(str(e)),
+        )
+        return None
+    if current_pr.head_sha != pr_head_sha:
+        return current_pr.head_sha
+    return None
 
 
 def _handle_comment(
@@ -1034,19 +1119,10 @@ def _handle_comment(
         # redundant with what the newer commit did. Best-effort: a failed
         # re-fetch degrades to proceeding on the original verdict rather than
         # blocking indefinitely on a transient API issue.
-        try:
-            current_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
-        except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block the run
-            logger.warning(
-                "address-comments: could not re-check PR head before acting on comment %s's "
-                "triage verdict: %s",
-                comment.id,
-                scrub_token_from_text(str(e)),
-            )
-            current_pr = None
-        if current_pr is not None and current_pr.head_sha != pr_head_sha:
+        moved_sha = _pr_head_moved(client, request, comment.id, pr_head_sha, "triaged")
+        if moved_sha is not None:
             base.detail = (
-                f"PR head moved from {pr_head_sha} to {current_pr.head_sha} while this comment "
+                f"PR head moved from {pr_head_sha} to {moved_sha} while this comment "
                 "was being triaged; skipped so the next run re-triages against the current code."
             )
             return base
@@ -1074,6 +1150,19 @@ def _handle_comment(
         plan = _plan_resolution(comment, cited_code, thread_history)
         if plan is None:
             base.detail = "Could not produce a resolution plan."
+            return base
+
+        # Re-check the PR's head SHA again after planning: planning is itself
+        # another LLM round-trip on top of triage, so a push can land during
+        # this window too, not just during triage. Without this second check,
+        # a plan built for pre-triage code could still be dispatched even
+        # though the post-triage check above already passed.
+        moved_sha = _pr_head_moved(client, request, comment.id, pr_head_sha, "planned")
+        if moved_sha is not None:
+            base.detail = (
+                f"PR head moved from {pr_head_sha} to {moved_sha} while a resolution "
+                "was being planned; skipped so the next run re-triages against the current code."
+            )
             return base
 
         # Re-check the thread's LIVE state right before dispatching the
@@ -1225,6 +1314,16 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             unresolved, thread_by_comment_id, retry_resolve_threads, thread_history_by_comment_id = (
                 _unresolved_comments(client, owner, repo, pr_number)
             )
+
+            if unresolved:
+                # New, actionable feedback is about to be worked through — a
+                # stale WAITING_FOR_REVIEW_LABEL from an earlier successful run
+                # would otherwise keep advertising "ready" for however long
+                # THIS run takes, or forever if it fails outright (the label
+                # is only ever added on success, never removed on failure).
+                # Clear it up front rather than conditioning removal on this
+                # run's own eventual outcome.
+                _clear_waiting_for_review(client, owner, repo, pr_number)
 
             # A thread already carrying a Khala-generated reply was already
             # implemented and published; only the resolve mutation is retried
