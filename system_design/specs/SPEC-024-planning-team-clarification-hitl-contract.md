@@ -37,7 +37,10 @@ The coding team already solved this exact problem for its own Tech-Lead clarific
 (`SPEC-023-coding-team-human-in-the-loop.md`, `backend/agents/software_engineering_team/hitl.py`,
 `pause_cycle.py`, `temporal/coding_team_workflow.py`). SPEC-023 §4.3.3 and §7 explicitly deferred
 Planning's Temporal-mode pause semantics as future work. This spec is that follow-up, and its
-central design decision is: **reuse that pattern verbatim rather than inventing a second one.**
+central design decision is: **reuse that signal/pause-cycle workflow state-machine pattern
+verbatim, extending only the payload fields Planning needs, rather than inventing a second one**
+(§4.1 spells out exactly which payload fields are extended and why "verbatim" here scopes to the
+state machine, not to the payload bytes).
 
 ---
 
@@ -126,9 +129,10 @@ synthesis → **document_production** → sub_agent_provisioning → finalize. N
 ### 4.1 Signal name and payload
 
 Reuse the coding team's signal **name and destination payload shape** — not a byte-for-byte
-verbatim reuse, since the payload requires one extension below; "reuse" here means the same
-`@workflow.signal(name="submit_answers")` name and the same core envelope, deliberately extended
-rather than copied unchanged:
+verbatim reuse of the whole pattern (§2's "verbatim" scopes to the signal/pause-cycle workflow
+state machine, not to the payload bytes), since the payload requires one extension below; "reuse"
+here means the same `@workflow.signal(name="submit_answers")` name and the same core envelope,
+deliberately extended rather than copied unchanged:
 
 ```python
 @workflow.signal(name="submit_answers")
@@ -466,13 +470,22 @@ the two calls. **Contract requirement:** #7445-B MUST add a new job-service prim
 scoped to this guard — e.g. `update_job_if_resume_token_matches(job_id, expected_resume_token,
 **fields)` — implemented as a single server-side conditional `UPDATE` exactly mirroring
 `update_job_if_not_cancelled`'s existing shape and its `True`/`False`/`None` return convention
-(write performed / job exists but guard failed / job does not exist), substituting a
-`data->>'resume_token' = %s` (or `IS NULL`, for the very first write when no `resume_token` has
-been persisted yet) comparison for that function's `status != 'cancelled'` one. This is not a
-generic CAS API to design from scratch; it is the same proven conditional-`UPDATE` pattern
+(write performed / job exists but guard failed / job does not exist), substituting a strict
+`data->>'resume_token' = %s` comparison for that function's `status != 'cancelled'` one. This is
+not a generic CAS API to design from scratch; it is the same proven conditional-`UPDATE` pattern
 `update_job_if_not_cancelled` already establishes, applied to a second, narrowly-scoped guard
 condition. A broad, arbitrary-field-equality primitive is explicitly **not** required — only this
-one resume-token-guarded shape, which is all this contract needs.
+one resume-token-guarded shape, which is all this contract needs. **The guard must be strict
+equality only — no `IS NULL` branch.** This primitive's only described caller is the
+answer-submission route, which always supplies a concrete `expected_resume_token` from the
+client's request; a job record with no `resume_token` persisted means no pause is currently
+active for a client to answer at all, and that case must be rejected with the same mismatch
+outcome as a stale/wrong token — never accepted as if it were "the very first write." Accepting an
+`IS NULL` match would let a request populate an answer slot while no workflow is waiting on it,
+creating a stale answer record that can later collide with a genuine pause round — exactly the
+silent stale-persistence failure mode this atomic guard exists to close. (The pause-creation
+activity's own "no pause active yet" write, above, is a *different* guard on `waiting_for_answers`,
+not this primitive, and is unaffected by this correction.)
 
 **The `resume_token`-match guard alone is not write-once — it must also condition on the
 token-scoped answer slot itself.** `resume_token` does not change when an answer batch is written
