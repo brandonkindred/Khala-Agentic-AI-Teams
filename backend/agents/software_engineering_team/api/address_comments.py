@@ -678,16 +678,19 @@ def _thread_has_new_reviewer_feedback(
         - Returns True when the thread's CURRENT comment set (re-fetched live)
           contains EITHER (a) an id greater than ``since_comment_id`` that is
           not Khala's own authenticated reply — genuine new reviewer feedback
-          the triage that ran never saw — OR (b) a live comment matching ANY
-          id in ``since_history`` whose body no longer matches that entry's
-          snapshotted body — GitHub retains a comment's id across an edit, so
-          a reviewer who edits an ALREADY-triaged message in place (rather
-          than posting a reply) would otherwise be invisible to the id-only
-          check and get silently resolved over, whether that message was the
-          representative comment or an earlier one in the same history — OR
-          (c) the LIVE thread is already resolved: a reviewer can resolve a
-          thread by hand (via the GitHub UI) while triage/planning/
-          implementation for it is still running, which supersedes the
+          the triage that ran never saw — OR (b) ANY id in ``since_history``
+          that is now either MISSING from the live comment set (the reviewer
+          deleted a message the triage/plan was grounded on — context they
+          withdrew is exactly as invalidating as an edit) or present with a
+          body that no longer matches that entry's snapshotted body — GitHub
+          retains a comment's id across an edit, so a reviewer who edits an
+          ALREADY-triaged message in place (rather than posting a reply)
+          would otherwise be invisible to the id-only check and get silently
+          resolved over, whether that message was the representative comment
+          or an earlier one in the same history — OR (c) the LIVE thread is
+          already resolved: a reviewer can resolve a thread by hand (via the
+          GitHub UI) while triage/planning/implementation for it is still
+          running, which supersedes the
           in-flight work just as decisively as new feedback would —
           dispatching (or pushing) a fix for a concern the reviewer already
           closed is wasted work at best — OR (d) the thread can no longer be
@@ -721,7 +724,13 @@ def _thread_has_new_reviewer_feedback(
         comments_by_id = {c.id: c for c in all_comments}
         for snapshotted in since_history or ():
             live = comments_by_id.get(snapshotted.id)
-            if live is not None and (live.body or "") != (snapshotted.body or ""):
+            if live is None:
+                # A message that WAS part of the triaged history is now gone
+                # (the reviewer deleted it, or it fell out of the REST listing
+                # mid-run) — the plan/verdict was grounded on context the
+                # reviewer withdrew, exactly as invalidating as an edit.
+                return True
+            if (live.body or "") != (snapshotted.body or ""):
                 return True
         for cid in fresh_thread.comment_ids:
             if cid <= since_comment_id:
@@ -908,6 +917,11 @@ def _handle_comment(
           resolved only when both succeed), or ``resolved`` (implementation
           workflow completed, the fix was pushed to the PR, then the reply and
           resolution succeeded). Never raises; one comment's failure is recorded.
+        - If the PR's head SHA has moved since ``pr_head_sha`` (a push landed
+          while triage's LLM call(s) were in flight), acts on NONE of triage's
+          verdict — records ``failed`` with an explanatory detail instead, so
+          the next run re-triages against the current code rather than
+          resolving a false-positive (or planning a fix) against a stale read.
     """
     base = CommentOutcome(
         comment_id=comment.id,
@@ -925,6 +939,33 @@ def _handle_comment(
         # branch there, either way grounding triage on the wrong (or no) code.
         cited_code = _read_cited_code(client, request.owner, request.repo, comment, pr_head_sha)
         triage = _triage_comment(comment, cited_code, thread_history)
+
+        # Re-check the PR's head SHA right after triage: the LLM call(s) above
+        # can take a while, and the PR author can push a new commit in that
+        # window. `pr_head_sha` is captured once before this call (refreshed
+        # per-comment, not per-LLM-round-trip), so a push mid-triage leaves the
+        # verdict grounded on code that is no longer current — a false-positive
+        # would then resolve the thread over an obsolete read, and a real-issue
+        # plan could recommend a change that no longer applies or is already
+        # redundant with what the newer commit did. Best-effort: a failed
+        # re-fetch degrades to proceeding on the original verdict rather than
+        # blocking indefinitely on a transient API issue.
+        try:
+            current_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
+        except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block the run
+            logger.warning(
+                "address-comments: could not re-check PR head before acting on comment %s's "
+                "triage verdict: %s",
+                comment.id,
+                scrub_token_from_text(str(e)),
+            )
+            current_pr = None
+        if current_pr is not None and current_pr.head_sha != pr_head_sha:
+            base.detail = (
+                f"PR head moved from {pr_head_sha} to {current_pr.head_sha} while this comment "
+                "was being triaged; skipped so the next run re-triages against the current code."
+            )
+            return base
 
         if not triage.raises_issue:
             base.outcome = "not_an_issue"

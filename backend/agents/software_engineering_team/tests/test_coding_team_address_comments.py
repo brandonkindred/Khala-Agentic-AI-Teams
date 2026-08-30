@@ -1522,6 +1522,80 @@ class TestRunAddressComments:
         assert fake.replies == []
         assert fake.resolved == []
 
+    def test_dispatch_time_freshness_check_blocks_deleted_history_message(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer can delete an EARLIER message in the triaged history
+        while leaving the thread and the representative comment intact — the
+        live comment set then has no entry at all for that id. This must
+        still block, same as an edit would: the plan/verdict was grounded on
+        context the reviewer withdrew."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 4))
+        root_snapshot = _comment(2, body="please fix the null check")
+        latest = _comment(4, body="still broken")
+        # The LIVE comment set no longer has comment 2 at all (deleted).
+        fake.review_comments = [latest]
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            latest,
+            thread,
+            [root_snapshot, latest],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "superseded" in outcome.detail
+        assert address_env["child_jobs"] == []
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_stale_pr_head_after_triage_blocks_acting_on_the_verdict(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The PR author can push a new commit while triage's LLM call is in
+        flight, after `pr_head_sha` was captured for this comment. Acting on
+        a verdict grounded on the now-stale code — resolving a false positive,
+        or dispatching a plan — must be skipped so the next run re-triages
+        against the current head."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        # The LIVE PR head has moved past what was passed as pr_head_sha.
+        fake.pr = replace(fake.pr, head_sha="sha2")
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",  # the (now stale) SHA triage's cited_code was read at
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "sha1" in outcome.detail and "sha2" in outcome.detail
+        assert fake.replies == []
+        assert fake.resolved == []
+
     def test_triage_and_plan_prompts_include_full_thread_history(
         self, address_env, monkeypatch
     ) -> None:
