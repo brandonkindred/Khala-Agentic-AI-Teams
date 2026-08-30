@@ -246,8 +246,6 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
 
 _PR_PUBLISH_REQUIRED_FIELDS = (
     "job_id",
-    "owner",
-    "repo",
     "repo_path",
     "pr_number",
     "integration_branch",
@@ -262,14 +260,24 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
     from issue metadata. It fast-forwards the existing PR head from the coding
     team's development branch and pushes that same head branch.
 
+    Preconditions:
+        - ``request`` contains every field in ``_PR_PUBLISH_REQUIRED_FIELDS``
+          (``job_id``, ``repo_path``, ``pr_number``, ``integration_branch``);
+          ``remote`` and ``pr_url`` are optional (``remote`` defaults to
+          ``"origin"``).
+        - The job row for ``job_id`` already exists (its task-graph state,
+          read via ``_main.get_job`` and ``_main._failed_tasks``, decides the
+          terminal status below).
+        - ``repo_path`` is a git checkout containing both ``integration_branch``
+          and ``_main.DEVELOPMENT_BRANCH``.
     Postconditions:
-        - The job's terminal status is ``"completed"`` only when every task in
-          ``task_graph_snapshot`` landed; a run with any ``failed`` task ends
-          ``"completed_with_failures"`` instead — mirroring
-          ``_publish_merged_work``'s ``failed = _failed_tasks(...)`` check for
-          the issue-driven flow. Some tasks may have merged while others
-          failed; the branch is still pushed (partial progress is real
-          progress).
+        - The job's terminal status is ``JobStatus.COMPLETED.value`` only when
+          every task in ``task_graph_snapshot`` landed; a run with any
+          ``failed`` task ends ``JobStatus.COMPLETED_WITH_FAILURES.value``
+          instead — mirroring ``_publish_merged_work``'s
+          ``failed = _failed_tasks(...)`` check for the issue-driven flow.
+          Some tasks may have merged while others failed; the branch is still
+          pushed (partial progress is real progress).
         - Returns the job row (:func:`_main.get_job`) after that status update;
           when the job service does not return one, falls back to a dict
           carrying the SAME just-computed ``status``/``status_text`` (never a

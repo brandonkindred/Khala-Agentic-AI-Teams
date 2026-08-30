@@ -734,7 +734,7 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(
         "widget",
         "ghp_token",
         platform_owned=True,
-        hold_lock=False,
+        acquire_lock=False,
     )
 
 
@@ -768,7 +768,7 @@ def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, m
         "thing",
         "ghp_token",
         platform_owned=True,
-        hold_lock=False,
+        acquire_lock=False,
     )
 
 
@@ -803,7 +803,7 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     # path, and platform_owned=False so it does NOT require a sibling lock (the
     # operator's parent dir may be read-only).
     mock_clone.assert_called_once_with(
-        "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False, hold_lock=False
+        "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False, acquire_lock=False
     )
 
 

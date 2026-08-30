@@ -178,14 +178,14 @@ def get_checkout_running(repo_path: str = Query(..., min_length=1)) -> CheckoutR
         - ``repo_path`` is non-empty.
     Postconditions:
         - Returns the job_id of a live, non-terminal job (any kind) using this
-          EXACT checkout (:func:`_running_sibling_on_checkout`, canonical-path
+          EXACT checkout (:func:`_main.get_running_job_on_checkout`, canonical-path
           compared), or ``running_job_id=None`` when none is running. Read-only:
           takes no lock, creates no job. Best-effort only — the same TOCTOU
           window every other admission pre-check in this codebase already lives
           with; a caller needing a stronger guarantee must still rely on the
           eventual admitting route's own checks as the authority.
     """
-    sibling = _main._running_sibling_on_checkout(repo_path, "<admission-precheck>")
+    sibling = _main.get_running_job_on_checkout(repo_path)
     return CheckoutRunningResponse(
         running_job_id=sibling.get("job_id") if sibling is not None else None
     )

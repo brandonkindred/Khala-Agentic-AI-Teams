@@ -188,7 +188,9 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     return None
 
 
-def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Dict[str, Any]]:
+def _running_sibling_on_checkout(
+    repo_path: str, own_job_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """Return another non-terminal job using this checkout, if any.
 
     Branch prep mutates the working tree (dirty-tree recovery commits files,
@@ -198,6 +200,12 @@ def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Di
     job store can answer liveness (a deleted job is not running) even though
     it cannot answer leftover attribution — that remains the marker's job.
 
+    Preconditions:
+        - ``own_job_id``, when given, is the calling job's OWN id (excluded
+          from the scan so a job never reports itself as its own sibling).
+          Omit it (``None``) for a pure pre-check with no job created yet —
+          there is nothing to exclude, so callers no longer need a sentinel
+          string like ``"<not-yet-created>"`` to stand in for one.
     Postconditions:
         - Returns the sibling job dict when one exists with a non-terminal
           status and the same checkout; None otherwise. Paths are compared

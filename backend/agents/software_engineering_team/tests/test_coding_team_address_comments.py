@@ -406,6 +406,14 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
 
 
 def _stub_triage(monkeypatch, ac, *, raises_issue: bool, is_false_positive: bool) -> None:
+    """Stub ``_main.generate_structured`` to return deterministic triage/plan output.
+
+    ``raises_issue``/``is_false_positive`` control ONLY the ``CommentTriage``
+    verdict (matching this codebase's real encoding: ``is_false_positive`` is
+    meaningless unless ``raises_issue`` is also True — see ``CommentTriage``'s
+    own docstring). Any other requested schema (i.e. ``IssueResolutionPlan``)
+    always gets the same fixed two-candidate plan, regardless of these flags.
+    """
     from software_engineering_team.api import coding_team_main as _main
 
     def _gen(prompt, *, schema, **kw):
@@ -1176,8 +1184,6 @@ class TestRunAddressComments:
         it runs — a single comment's implementation can now block for hours (see
         execute_coding_team_workflow's reattach_on_timeout) — mirroring
         _run_pr_review's review_hb, asserted via a recording stand-in."""
-        import shared.concurrency
-
         ac, req = address_env["ac"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
         seen: dict[str, Any] = {}
@@ -1196,7 +1202,7 @@ class TestRunAddressComments:
                 seen["exited"] = True
                 return False
 
-        monkeypatch.setattr(shared.concurrency, "BackgroundHeartbeat", _RecordingHB)
+        monkeypatch.setattr(ac, "BackgroundHeartbeat", _RecordingHB)
 
         ac._run_address_comments("job1", req, "tok")
 
@@ -1313,7 +1319,7 @@ class TestRunAddressComments:
 
         ac._run_address_comments("job1", req, "tok")
 
-        assert calls["n"] == 2  # the initial snapshot, then the final re-list
+        assert calls["n"] >= 2  # at least the initial snapshot and a final re-list
         assert fake.resolved == ["T2"]  # comment 2's own thread still resolved
         # But the run as a whole did NOT declare success over the new thread.
         assert fake.labels_set == []

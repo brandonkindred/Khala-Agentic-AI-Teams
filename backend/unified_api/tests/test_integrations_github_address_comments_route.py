@@ -128,7 +128,7 @@ def test_success_proxies_with_token_and_path(mock_cfg, mock_cred, mock_path, moc
     assert sent["repo_path"] == "/tmp/acme_widget/pr-7"
     # The checkout is materialized (cloned/fetched) before the job is forwarded.
     mock_clone.assert_called_once_with(
-        "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, hold_lock=False
+        "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, acquire_lock=False
     )
     # Platform-owned (no repo_path override) → the coding team is told it may
     # reclaim the per-PR checkout once every comment is handled successfully.
@@ -153,7 +153,7 @@ def test_operator_pinned_checkout_is_never_cleaned_up(mock_cfg, mock_cred, mock_
     _url, sent = fake.calls[1]
     assert sent["cleanup_checkout_on_success"] is False
     mock_clone.assert_called_once_with(
-        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, hold_lock=False
+        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, acquire_lock=False
     )
 
 
@@ -328,7 +328,7 @@ def test_checkout_lock_held_around_the_whole_flow(mock_cfg, mock_cred, mock_path
     assert resp.status_code == 200
     assert _lock_events == ["lock_enter", "http_get", "clone", "http_post", "lock_exit"]
     mock_clone.assert_called_once_with(
-        "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, hold_lock=False
+        "/tmp/acme_widget/pr-7", "acme", "widget", "ghp", platform_owned=True, acquire_lock=False
     )
 
 
@@ -363,5 +363,5 @@ def test_operator_pinned_lock_failure_degrades_gracefully(mock_cfg, mock_cred, m
         resp = client.post(_URL, json={})
     assert resp.status_code == 200
     mock_clone.assert_called_once_with(
-        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, hold_lock=False
+        "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, acquire_lock=False
     )

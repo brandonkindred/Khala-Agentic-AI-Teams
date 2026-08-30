@@ -356,7 +356,7 @@ def post_address_comments(
         # row) exists — so once a job IS created here, this blocks a sibling
         # for that job's ENTIRE run, not just a momentary admission window.
         with _main._checkout_admission(request.repo_path):
-            sibling = _main._running_sibling_on_checkout(request.repo_path, "<not-yet-created>")
+            sibling = _main._running_sibling_on_checkout(request.repo_path)
             if sibling is not None:
                 sib_ctx = sibling.get("github_context") or {}
                 raise HTTPException(
@@ -465,7 +465,7 @@ def get_address_comments_running(
     """
     running_job_id = _main._running_review_for_pr(owner, repo, pr_number)
     if running_job_id is None and repo_path:
-        sibling = _main._running_sibling_on_checkout(repo_path, "<admission-precheck>")
+        sibling = _main.get_running_job_on_checkout(repo_path)
         if sibling is not None:
             running_job_id = sibling.get("job_id")
     return AddressCommentsAdmissionResponse(running_job_id=running_job_id)

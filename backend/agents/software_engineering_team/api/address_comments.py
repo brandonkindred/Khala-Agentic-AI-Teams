@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
 
+from shared.concurrency import BackgroundHeartbeat
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import AddressCommentsRequest
 from software_engineering_team.github_source import (
@@ -63,6 +64,14 @@ _KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
 # Cap on cited file content included in an LLM prompt (triage and planning both use
 # this), to bound prompt size regardless of the actual file's length.
 _MAX_CITED_CODE_CHARS = 20000
+
+# Named pieces of _unresolved_comments' return type, factored out so the function's
+# own signature doesn't carry one unreadable nested 4-tuple annotation.
+RetryResolveEntry = Tuple[str, int]
+ThreadHistoryByCommentId = Dict[int, List[ReviewComment]]
+UnresolvedCommentsResult = Tuple[
+    List[ReviewComment], Dict[int, ReviewThread], List[RetryResolveEntry], ThreadHistoryByCommentId
+]
 
 
 def _is_khala_authored(comment: ReviewComment, authenticated_login: str) -> bool:
@@ -96,7 +105,20 @@ def _is_khala_authored(comment: ReviewComment, authenticated_login: str) -> bool
 
 
 class CommentTriage(BaseModel):
-    """LLM verdict on whether a review comment raises a real, actionable issue."""
+    """LLM verdict on whether a review comment raises a real, actionable issue.
+
+    ``raises_issue``/``is_false_positive`` map to exactly three outcomes
+    :func:`_handle_comment` acts on: ``raises_issue=False`` — not an issue,
+    skipped regardless of ``is_false_positive`` (which is meaningless in that
+    case — the caller never inspects it); ``raises_issue=True,
+    is_false_positive=True`` — a real-looking comment whose concern the cited
+    code disproves; ``raises_issue=True, is_false_positive=False`` — a real
+    issue to plan and implement. ``is_false_positive`` is only ever consulted
+    when ``raises_issue`` is True, so the two are NOT independent booleans
+    despite the flat schema — do not add a mutual-exclusion validator here,
+    since ``(True, True)`` is the valid, load-bearing false-positive
+    encoding, not a contradiction.
+    """
 
     raises_issue: bool = Field(
         description="True when the comment identifies a concrete problem to fix (a bug, a missing "
@@ -104,8 +126,10 @@ class CommentTriage(BaseModel):
         "compliment, or a non-actionable remark."
     )
     is_false_positive: bool = Field(
-        description="True when, after checking the cited code, the comment's concern does NOT hold "
-        "for the actual codebase (the issue it describes is not real)."
+        description="Only meaningful when raises_issue is True. True when, after checking the "
+        "cited code, the comment's concern does NOT hold for the actual codebase (the issue it "
+        "describes is not real) — this is the false-positive verdict. Ignored when raises_issue "
+        "is False (the comment is skipped as not-an-issue regardless of this field)."
     )
     issue_summary: str = Field(
         description="One or two sentences restating the concrete issue the comment raises, or why "
@@ -206,7 +230,7 @@ class CommentOutcome(BaseModel):
 
 def _unresolved_comments(
     client: Any, owner: str, repo: str, pr_number: int
-) -> tuple[List[ReviewComment], Dict[int, ReviewThread], List[Tuple[str, int]], Dict[int, List[ReviewComment]]]:
+) -> UnresolvedCommentsResult:
     """Return the PR's unresolved review comments plus a comment-id → thread map.
 
     Preconditions:
@@ -389,8 +413,37 @@ def _format_thread_history(thread_history: List[ReviewComment]) -> str:
     lines = []
     for msg in thread_history:
         speaker = "Khala" if _KHALA_COMMENT_MARKER in (msg.body or "") else "Reviewer"
-        lines.append(f"{speaker}: {msg.body}")
+        lines.append(f"{speaker}: {msg.body or ''}")
     return "\n\n".join(lines)
+
+
+def _format_comment_prompt_context(
+    comment: ReviewComment,
+    cited_code: str,
+    thread_history: List[ReviewComment],
+    thread_history_note: str,
+) -> str:
+    """Render the File/Line + discussion-thread + cited-code header shared by
+    both :func:`_triage_comment` and :func:`_plan_resolution`'s prompts.
+
+    Preconditions:
+        - ``thread_history_note`` is the phase-specific parenthetical describing
+          what the thread's LAST message means for THIS call (triage vs.
+          planning word it differently) — the two callers intentionally keep
+          distinct wording here, only the surrounding structure is shared.
+    Postconditions:
+        - Returns the header block verbatim as both callers previously built
+          it inline, ending after the cited-code section (callers append
+          their own task-specific instructions after this).
+    """
+    return (
+        f"File: {comment.path or '(none)'}\n"
+        f"Line: {comment.line if comment.line is not None else '(file-level)'}\n\n"
+        f"## Discussion thread (oldest to newest; {thread_history_note})\n"
+        f"{_format_thread_history(thread_history)}\n\n"
+        "## Cited file content (may be empty if unavailable)\n"
+        f"{cited_code[:_MAX_CITED_CODE_CHARS] if cited_code else '(unavailable)'}\n\n"
+    )
 
 
 class TriageUnavailableError(RuntimeError):
@@ -423,15 +476,15 @@ def _triage_comment(
     """
     prompt = (
         "## Review comment\n"
-        f"File: {comment.path or '(none)'}\n"
-        f"Line: {comment.line if comment.line is not None else '(file-level)'}\n\n"
-        "## Discussion thread (oldest to newest; the LAST message is the current concern "
-        "to triage — earlier messages are context, e.g. what a short follow-up like "
-        "\"still broken\" or \"use the other approach\" is referring to)\n"
-        f"{_format_thread_history(thread_history)}\n\n"
-        "## Cited file content (may be empty if unavailable)\n"
-        f"{cited_code[:_MAX_CITED_CODE_CHARS] if cited_code else '(unavailable)'}\n\n"
-        "Decide whether the thread's LAST message raises a real, actionable issue, and "
+        + _format_comment_prompt_context(
+            comment,
+            cited_code,
+            thread_history,
+            "the LAST message is the current concern to triage — earlier messages are context, "
+            'e.g. what a short follow-up like "still broken" or "use the other approach" is '
+            "referring to",
+        )
+        + "Decide whether the thread's LAST message raises a real, actionable issue, and "
         "whether that issue is a false positive given the actual code. Respond as JSON."
     )
     try:
@@ -464,14 +517,13 @@ def _plan_resolution(
     """
     prompt = (
         "## Real issue raised by a review comment\n"
-        f"File: {comment.path or '(none)'}\n"
-        f"Line: {comment.line if comment.line is not None else '(file-level)'}\n\n"
-        "## Discussion thread (oldest to newest; the LAST message is the issue to resolve — "
-        "earlier messages give it context)\n"
-        f"{_format_thread_history(thread_history)}\n\n"
-        "## Cited file content (may be empty if unavailable)\n"
-        f"{cited_code[:_MAX_CITED_CODE_CHARS] if cited_code else '(unavailable)'}\n\n"
-        "Identify the resolution requirements for the thread's LAST message, the top THREE "
+        + _format_comment_prompt_context(
+            comment,
+            cited_code,
+            thread_history,
+            "the LAST message is the issue to resolve — earlier messages give it context",
+        )
+        + "Identify the resolution requirements for the thread's LAST message, the top THREE "
         "candidate solutions (each scored 1-10 on requirement fit, computational performance, "
         "memory usage, and inverted code complexity), and a concrete implementation plan for "
         "the best-scoring one. Respond as JSON."
@@ -559,12 +611,32 @@ def _dispatch_implementation(
     the review thread open.
 
     Preconditions:
+        - ``parent_job_id`` is the address-comments run's own job id (used to
+          derive the deterministic child job id ``f"{parent_job_id}:comment:
+          {comment.id}"``).
+        - ``pr_head``/``pr_base`` are the PR's head/base branch SHORT names
+          (not SHAs) — passed straight through to the child workflow's branch
+          preparation.
+        - ``pr_url`` is the PR's web URL, stored on the child job's github
+          context for traceability.
         - ``pr_remote`` is the remote to fetch/push the head branch through
           (see :func:`_pr_head_remote`) — ``"origin"`` for a same-repo PR, a
           fork clone URL for a fork PR, or ``None`` when it could not be
           resolved (the fork was deleted). ``None`` raises immediately rather
           than defaulting to "origin", which would silently target the wrong
           repository.
+        - ``token`` is a valid GitHub token for ``request.owner``/``request.repo``.
+    Postconditions:
+        - On success, returns the child job id
+          (``f"{parent_job_id}:comment:{comment.id}"``) after
+          ``execute_coding_team_workflow`` reports an exact ``"completed"``
+          status; any other terminal status (including
+          ``"completed_with_failures"``) raises ``RuntimeError`` instead of
+          returning, so the caller never replies to or resolves the thread
+          over a partially-failed implementation.
+        - A child job row and its Temporal workflow are always created as a
+          side effect, even on the raise path (the workflow ran; only its
+          result was unsuccessful).
     """
     if pr_remote is None:
         raise RuntimeError(
@@ -595,11 +667,12 @@ def _dispatch_implementation(
             }
         },
     )
+    plan_input_dict = plan_input.model_dump()
     child_job_id = f"{parent_job_id}:comment:{comment.id}"
     _main.create_job(
         job_id=child_job_id,
         repo_path=request.repo_path,
-        plan_input=plan_input.model_dump(),
+        plan_input=plan_input_dict,
     )
     child_fields: Dict[str, Any] = {
         "parent_job_id": parent_job_id,
@@ -619,7 +692,7 @@ def _dispatch_implementation(
     result = _main.execute_coding_team_workflow(
         child_job_id,
         request.repo_path,
-        plan_input.model_dump(),
+        plan_input_dict,
         github={
             "owner": request.owner,
             "repo": request.repo,
@@ -767,7 +840,10 @@ def _reply_and_resolve(
           the LLM for this comment's triage/planning (see ``_handle_comment``'s
           precondition) — passed through to the freshness re-check so an edit
           to ANY of those messages (not just ``comment`` itself) is caught,
-          not only an edit to the representative comment.
+          not only an edit to the representative comment. When OMITTED
+          (``None``), the freshness check defaults to ``[comment]`` — it is
+          NOT disabled; edits to ``comment`` itself are still detected, only
+          edits to earlier messages elsewhere in the thread go unchecked.
     Postconditions:
         - Posts a threaded reply and, when ``thread`` is known, resolves it.
           The reply targets the thread's ROOT comment
@@ -1132,8 +1208,6 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         # look heartbeat-stale to _running_review_for_pr. The context manager
         # guarantees the beat stops on every exit path; on_error keeps a
         # job-service blip from killing the beat thread (or the run).
-        from shared.concurrency import BackgroundHeartbeat  # noqa: I001, PLC0415 - keep module import light
-
         address_hb = BackgroundHeartbeat(
             lambda: _main.heartbeat_job(job_id),
             _main._REVIEW_HEARTBEAT_INTERVAL_S,

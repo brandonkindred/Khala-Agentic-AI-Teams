@@ -2614,7 +2614,7 @@ def _ensure_repo_clone(
     token: str,
     *,
     platform_owned: bool = True,
-    hold_lock: bool = True,
+    acquire_lock: bool = True,
 ) -> str | None:
     """Clone or fetch the repository.
 
@@ -2643,13 +2643,14 @@ def _ensure_repo_clone(
           doesn't apply) and may live under a parent the service cannot write,
           where creating a sibling lock would wrongly fail an otherwise-valid
           fetch.
-        - ``hold_lock`` (platform-owned only) controls whether this call acquires
-          the sibling lock itself. Pass False when the caller already holds that
-          SAME lock (:func:`clone_lock_path` on this ``repo_path``) around a wider
-          critical section — re-acquiring it here via a second file descriptor
-          would self-deadlock (``flock`` mutual exclusion is per open file
-          description, not per process/thread, so a second ``open()`` of the same
-          path blocks against the first even within one process).
+        - ``acquire_lock`` (platform-owned only) controls whether this call
+          acquires the sibling lock itself. Pass False when the caller ALREADY
+          HOLDS that SAME lock (:func:`clone_lock_path` on this ``repo_path``)
+          around a wider critical section — re-acquiring it here via a second
+          file descriptor would self-deadlock (``flock`` mutual exclusion is
+          per open file description, not per process/thread, so a second
+          ``open()`` of the same path blocks against the first even within one
+          process).
     """
     env = _git_auth_env(token)
     path = Path(repo_path)
@@ -2723,8 +2724,8 @@ def _ensure_repo_clone(
         return _clone_or_fetch()
 
     # A caller already holding this checkout's lock around a wider critical
-    # section (see `hold_lock`'s contract above) must not have it re-acquired here.
-    if not hold_lock:
+    # section (see `acquire_lock`'s contract above) must not have it re-acquired here.
+    if not acquire_lock:
         return _clone_or_fetch()
 
     # Platform-owned per-issue checkout: serialize via an exclusive flock on a
@@ -2925,7 +2926,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
                 repo,
                 token,
                 platform_owned=platform_owned,
-                hold_lock=False,
+                acquire_lock=False,
             ),
         )
         if clone_err:
@@ -3116,8 +3117,8 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
           acquiring it there is best-effort (the path may live under a parent this
           service cannot write) and degrades to no additional locking on the
           ``OSError`` that failure mode raises (:func:`flock_lock`'s complete
-          raise contract — mkdir/open/flock failures only), same as this
-          route's pre-existing operator-pinned behavior. The lock
+          raise contract — mkdir/open/flock failures only), same operator-pinned
+          fallback pattern ``run_github_issue`` uses. The lock
           still cannot reach into the coding-team service's own long-running
           remediation once this request returns — the coding-team service's own
           admission lock remains the authority for that window.
@@ -3173,9 +3174,13 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
         )
         running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
         if running_job_id:
+            # The pre-check is checkout-scoped, not PR-scoped: with repo_path
+            # passed, a hit can be a DIFFERENT PR's job sharing this same
+            # operator-pinned checkout (see get_address_comments_running's own
+            # docstring) — never claim it belongs to the current PR.
             raise HTTPException(
                 status_code=409,
-                detail=f"job {running_job_id} already running for {owner}/{repo}#{pr_number}",
+                detail=f"job {running_job_id} already running on the checkout for {owner}/{repo}",
             )
 
         clone_err = await loop.run_in_executor(
@@ -3187,7 +3192,7 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
                 repo,
                 token,
                 platform_owned=platform_owned,
-                hold_lock=False,
+                acquire_lock=False,
             ),
         )
         if clone_err:

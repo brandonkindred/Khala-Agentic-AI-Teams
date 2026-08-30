@@ -211,6 +211,29 @@ from software_engineering_team.token_crypto import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+
+def get_running_job_on_checkout(repo_path: str) -> dict[str, object] | None:
+    """Public service-layer seam for "is any job already using this checkout?".
+
+    Thin wrapper over the private :func:`_running_sibling_on_checkout` (a
+    pr_review.py implementation detail this module re-exports for internal
+    use), so a route module can depend on a stable, documented public
+    function instead of reaching across module boundaries into another
+    module's underscore-prefixed helper.
+
+    Preconditions:
+        - ``repo_path`` is the checkout path to check; non-empty.
+    Postconditions:
+        - Returns the sibling job dict when a live, non-terminal job (any
+          kind) is using this EXACT checkout (canonical-path compared), or
+          ``None`` when none is running. No job is excluded from the scan —
+          this is a pure pre-check, not called by a job checking against its
+          own already-created row. Never raises (see
+          :func:`_running_sibling_on_checkout`'s own fail-closed contract).
+    """
+    return _running_sibling_on_checkout(repo_path)
+
+
 app = create_team_app(
     service_name="coding-team",
     team_key="coding_team",
