@@ -20,16 +20,22 @@ references it. `agent_name` is a team-local slot key (may differ from `manifest.
 it is not a persona override.
 
 Persona fields (`role`, `skills`, `capabilities`, `tools`, `expertise`) are never
-persisted on the roster row. They're joined at read time via `roster_resolve.resolve_persona`
-into an `EnrichedRosterAgent`, and consumed the same way by `roster_validation.py`
-(staffing/depth checks), `runtime/agent_builder.py` (system-prompt construction), and
-`runtime/pipeline_runner.py` (execution). Roster `PUT` rejects any body that supplies a
-persona field with `400` — edit the linked `AgentManifest` instead.
+persisted on the roster row. `role`/`skills`/`tools`/`expertise` are joined at read time
+via `roster_resolve.resolve_persona` from the linked `AgentManifest` into an
+`EnrichedRosterAgent`. `capabilities` is not part of the `AgentManifest` schema at all,
+so it always projects as an empty list — it travels through the same persona plumbing
+(views, validation, invoke binding) as the other fields, but there is no manifest source
+for it to bind from. All of this is consumed the same way by `roster_validation.py`
+(staffing/depth checks — which only inspect `skills`/`tools`/`expertise`, since
+`capabilities` is never populated), `runtime/agent_builder.py` (system-prompt
+construction), and `runtime/pipeline_runner.py` (execution). Roster `PUT` rejects any
+body that supplies a persona field with `400` — edit the linked `AgentManifest` instead.
 
 `runtime/agent_builder.py`'s sandbox invoke path (`invoke_generated_agent`) binds this
 manifest at invoke time when the request **omits** a persona/state field: it resolves the
 manifest via the shim's trusted route id and fills `role` / `skills` / `capabilities` /
-`expertise` / the selected state's `system_prompt` from it. Whether a field is "omitted" is
+`expertise` / the selected state's `system_prompt` from it — `capabilities`'s "manifest
+default" is always `[]`, since the manifest carries no such field. Whether a field is "omitted" is
 a raw-body key-presence test, not a truthiness test — an explicitly-present request field,
 including an explicitly-cleared empty list/blank string, wins over the manifest default for
 that invoke only; a request-supplied `system_prompt` fully replaces the base prompt instead
@@ -61,7 +67,7 @@ and for folding a legacy fat row's persona into the target manifest during migra
 | `skills` | `tags` | marker tags (`"generated"`, team key) stripped |
 | `tools` | `cognition.tools` | empty when the manifest has no `cognition` block |
 | `expertise` | `[team]` | single-element list: the manifest's home team |
-| `capabilities` | *(none)* | never populated from a manifest — open gap |
+| `capabilities` | *(none)* | not part of the `AgentManifest` schema; always `[]` by design |
 
 ## Pipeline test runs (execution)
 
