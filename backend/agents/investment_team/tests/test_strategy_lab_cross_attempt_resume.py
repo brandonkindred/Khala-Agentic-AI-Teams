@@ -397,3 +397,93 @@ def test_repeated_resume_does_not_duplicate_seeded_drift_history(
     # ``MAX_DESIGN_REENTRIES + 1`` instead of ``1``.
     assert review_call_count["n"] == 2  # one not-ready round, one ready round
     assert len(record.spec_history) == 1
+
+
+def test_non_spec_implicated_failure_does_not_mislabel_convergence_directive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review finding: appending ``PREVIOUS SPEC UNIMPLEMENTABLE:
+    {evidence}`` to ``directives`` unconditionally -- even for a
+    ``spec_implicated=False`` failure -- would mislabel evidence that was
+    never about the spec's soundness. If a later attempt falls back to a
+    full restart (e.g. because a subsequent resumed attempt goes on to fail
+    with ``spec_implicated=True``), that mislabeled directive would steer
+    the design agent to needlessly revise a spec that was never at fault.
+
+    Drives attempt 0 to fail not-spec-implicated (triggering resume for
+    attempt 1), then attempt 1 (resumed) to fail *spec-implicated*
+    (triggering a full restart for attempt 2), then lets attempt 2 run for
+    real. Captures the ``directives`` list ``_run_design_attempt`` actually
+    receives on each call: attempt 2's should carry only attempt 1's
+    (correctly labeled) directive, never attempt 0's.
+    """
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+
+    review_call_count = {"n": 0}
+
+    def _review_with_one_revision(*_a: Any, **_kw: Any) -> SpecCritique:
+        review_call_count["n"] += 1
+        if review_call_count["n"] == 1:
+            return SpecCritique(ready=False, rationale="tighten entry threshold")
+        return SpecCritique(ready=True, rationale="ok")
+
+    def _revised_spec_dict() -> Dict[str, Any]:
+        revised = _spec_dict()
+        revised["hypothesis"] = "RSI mean reversion, revised threshold"
+        return revised
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review_with_one_revision)
+    monkeypatch.setattr(
+        orch.design_agent, "revise", lambda *_a, **_kw: (_revised_spec_dict(), "revised rationale")
+    )
+
+    real_synthesize = orch._synthesize_initial_code
+
+    def _synthesize_raise_on_first_two_attempts(**kwargs: Any) -> Any:
+        design_attempt = kwargs["design_attempt"]
+        if design_attempt == 0:
+            raise SpecImplementabilityError(
+                "attempt-0 evidence, not spec-implicated",
+                failure_phase="synthesis",
+                last_spec=kwargs["spec"],
+                last_code="",
+                spec_implicated=False,
+            )
+        if design_attempt == 1:
+            raise SpecImplementabilityError(
+                "attempt-1 evidence, spec-implicated",
+                failure_phase="synthesis",
+                last_spec=kwargs["spec"],
+                last_code="",
+                spec_implicated=True,
+            )
+        return real_synthesize(**kwargs)
+
+    monkeypatch.setattr(orch, "_synthesize_initial_code", _synthesize_raise_on_first_two_attempts)
+
+    real_run_design_attempt = orch._run_design_attempt
+    directives_seen: List[List[str]] = []
+
+    def _tracking_run_design_attempt(**kwargs: Any) -> Any:
+        directives_seen.append(list(kwargs["directives"]))
+        return real_run_design_attempt(**kwargs)
+
+    monkeypatch.setattr(orch, "_run_design_attempt", _tracking_run_design_attempt)
+
+    _transitions, record = _drive_cycle(orch)
+
+    assert len(directives_seen) == 3
+    # Attempt 0: no prior failure yet.
+    assert directives_seen[0] == []
+    # Attempt 1 (resumed past attempt 0's not-spec-implicated failure): no
+    # directive was added for it.
+    assert directives_seen[1] == []
+    # Attempt 2 (full restart after attempt 1's spec-implicated failure):
+    # exactly one directive, for attempt 1's evidence -- never attempt 0's.
+    assert directives_seen[2] == [
+        "PREVIOUS SPEC UNIMPLEMENTABLE: attempt-1 evidence, spec-implicated"
+    ]
+    assert record.backtest.status.startswith("failed")

@@ -817,7 +817,18 @@ class StrategyLabOrchestrator(
                             "failure_phase": exc.failure_phase,
                         },
                     )
-                    directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {exc.evidence}")
+                    if exc.spec_implicated:
+                        # Only steer the design agent to revise the spec when
+                        # the failure actually implicated it. A
+                        # ``spec_implicated=False`` failure's evidence is
+                        # about something else (e.g. code/infrastructure) --
+                        # labeling it "SPEC UNIMPLEMENTABLE" would mislead a
+                        # *later* full restart (if this or a subsequent
+                        # resumed attempt eventually falls back to one) into
+                        # needlessly revising a spec that was never at
+                        # fault. No production raise site sets this today,
+                        # so this branch is always taken in practice.
+                        directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {exc.evidence}")
 
         # Re-entry budget exhausted. The exception's ``last_spec`` /
         # ``last_code`` carry the just-pre-mutation state from the most
