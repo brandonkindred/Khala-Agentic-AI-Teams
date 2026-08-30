@@ -95,8 +95,9 @@ justified exception. Do not migrate it to `BaseTeamLead`.**
 - **`BaseTeamLead` is one of several already-coexisting shapes, not a
   universal norm being violated.** It's adopted by four
   `software_engineering_team`-internal orchestrators, one of them dormant,
-  and even `devops_team` combines it with LangGraph rather than using it
-  alone. The team's README already states these shapes are deliberate. The
+  and even `devops_team` combines it with a `shared.concurrency.parallel_map`
+  fan-out rather than using it alone. The team's README already states these
+  shapes are deliberate. The
   Enterprise Orchestrator isn't breaking a single hard convention; it's
   another deliberately different shape for a genuinely different
   delegation model.
