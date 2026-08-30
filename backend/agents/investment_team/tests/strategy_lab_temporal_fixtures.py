@@ -93,13 +93,16 @@ def checkpoint_json(
     from investment_team.models import StrategySpec
     from investment_team.strategy_lab import phases
 
-    spec = StrategySpec(
-        strategy_id="strat-1",
-        authored_by="DesignAgent",
-        asset_class="stocks",
-        hypothesis="test hypothesis",
-        signal_definition="test signal",
-        timeframe="1d",
+    spec = overrides.pop(
+        "spec",
+        StrategySpec(
+            strategy_id="strat-1",
+            authored_by="DesignAgent",
+            asset_class="stocks",
+            hypothesis="test hypothesis",
+            signal_definition="test signal",
+            timeframe="1d",
+        ),
     )
     code = overrides.pop("code", "def run(): pass")
     base: Dict[str, Any] = {

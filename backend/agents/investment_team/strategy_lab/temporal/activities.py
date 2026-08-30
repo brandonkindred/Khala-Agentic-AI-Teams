@@ -166,7 +166,7 @@ if TYPE_CHECKING:
     # Type-checking only -- runtime resolution stays lazy (see module
     # docstring) since this import pulls in the full strategy-lab dependency
     # graph and this file's own ACTIVITIES list must stay importable without it.
-    from investment_team.models import DesignAttemptCheckpoint
+    from investment_team.models import DesignAttemptCheckpoint, StrategySpec
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
 
 logger = logging.getLogger(__name__)
@@ -792,7 +792,7 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
 
 def _cross_attempt_resume_from_params(
     params: Dict[str, Any], *, run_id: Optional[str], design_attempt_index: int
-) -> "Tuple[Optional[Any], Optional[str], Optional[_DesignPersistContext]]":
+) -> "Tuple[Optional[StrategySpec], Optional[str], Optional[_DesignPersistContext]]":
     """Reconstruct ``run_design_attempt_activity``'s cross-attempt resume state from ``params``.
 
     Temporal-mode parity with thread mode's gated cross-attempt resume

@@ -686,6 +686,29 @@ def _run_with_reentry_then_record(pipeline_checkpoints: List[Dict[str, Any]]) ->
         )
 
 
+def test_checkpoint_json_fixture_hashes_an_overridden_spec_not_the_default():
+    """Regression guard: ``checkpoint_json``'s ``spec_hash`` must reflect
+    whichever ``spec`` actually ends up on the checkpoint -- an overridden
+    ``spec`` popped and hashed *before* the default fields dict is built,
+    never the fixture's own default spec computed ahead of ``**overrides``
+    being applied."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab import phases
+    from investment_team.strategy_lab.checkpoints import DesignCheckpoint
+
+    custom_spec = StrategySpec(
+        strategy_id="strat-custom",
+        authored_by="DesignAgent",
+        asset_class="crypto",
+        hypothesis="a different hypothesis",
+        signal_definition="a different signal",
+        timeframe="1h",
+    )
+    checkpoint = _checkpoint_json(DesignCheckpoint, spec=custom_spec)
+    assert checkpoint["spec"]["strategy_id"] == "strat-custom"
+    assert checkpoint["spec_hash"] == phases.hash_spec(custom_spec)
+
+
 def test_resume_determination_after_design_checkpoint_targets_review():
     from investment_team.strategy_lab.checkpoints import DesignCheckpoint
 
