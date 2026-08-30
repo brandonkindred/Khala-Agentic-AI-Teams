@@ -45,12 +45,12 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   at a single price.
 - **Cost-aware position sizing.** Entry quantity is resolved from
   `spec.sizing` against a running equity figure this module tracks itself
-  (seeded from `spec.initial_capital`, marked to market from this module's
-  own no-slippage, no-cost reference fills only — see §5's "Entries"
-  subsection) — not against the true, cost-adjusted equity a real backtest
-  or paper-trading run would show. A ladder rung's own quantity is whatever
-  its `qty_fraction * original_qty` implies once the entry quantity is
-  known.
+  (seeded from the `starting_equity` input, marked to market from this
+  module's own no-slippage, no-cost reference prices only — see §5's
+  "Entries" subsection) — not against the true, cost-adjusted equity a real
+  backtest or paper-trading run would show. A ladder rung's own quantity is
+  whatever its `qty_fraction * original_qty` implies once the entry quantity
+  is known.
 
 ## 2. Module boundary
 
@@ -58,6 +58,7 @@ It is **not** a fill-cost engine. Explicitly out of scope:
 def simulate(
     spec: StrategySpec,
     bars: Mapping[str, Sequence[Bar]],
+    starting_equity: float,
 ) -> List[ReferenceTrade]:
     """Pure re-simulation of spec.entry_rules / spec.exit_rules over bars.
     """
@@ -70,10 +71,29 @@ def simulate(
   can target more than one symbol and every existing decision structure
   (`PositionState`, `ExitIntent`) is already symbol-scoped. A single-symbol
   spec simply passes a one-entry mapping.
+- `starting_equity` seeds the equity figure entry-quantity sizing resolves
+  against (§5's "Entries" subsection). It is a required third parameter, not
+  read off `spec`: `StrategySpec` carries no capital field — starting
+  capital lives on the separate `BacktestConfig.initial_capital`, a model
+  paired with a spec only at the backtest-orchestration layer, not part of
+  `StrategySpec` itself. A caller reproducing a specific backtest run passes
+  that run's `BacktestConfig.initial_capital` through as `starting_equity`.
 - Return value: one `ReferenceTrade` per closed trade, in emission order. A
   scaled-take-profit ladder emits one row per fired rung (mirroring how
   production emits one `TradeRecord` per rung close), never a nested
   sub-fills list.
+
+### Cross-symbol processing order
+
+For a multi-symbol spec, `simulate` must walk `bars` as a single merged,
+chronological timeline, not process each symbol's sequence independently —
+entry sizing and equity tracking depend on the state of every symbol's
+position as of a given point in time, not just the symbol currently being
+evaluated. The merge orders bar events by `(timestamp, symbol)`, the same
+tie-break `HistoricalReplayStream.__iter__` uses for same-timestamp bars
+across symbols. Each symbol's own `entry_bar`/`exit_bar` indices (§3) remain
+indices into that symbol's own `bars[symbol]` sequence — the global timeline
+is a processing-order concern only, not part of the `ReferenceTrade` schema.
 
 ### Reuse
 
@@ -127,6 +147,7 @@ no import chain back into the excluded modules above before relying on it.
   strictly increasing ladder `pct` values).
 - For every symbol `spec` references, `bars[symbol]` is non-empty and
   strictly increasing by `timestamp`.
+- `starting_equity > 0`.
 
 **Postconditions:**
 - The returned list is ordered by non-decreasing `entry_bar` within each
@@ -142,10 +163,10 @@ no import chain back into the excluded modules above before relying on it.
 **Invariants:**
 - `simulate` has no side effects: it does not mutate `spec` or `bars`, and
   performs no I/O.
-- `simulate` is deterministic — identical `(spec, bars)` inputs always
-  produce an identical output list. This is required for it to function as
-  a reference oracle; a non-deterministic simulator cannot be diffed
-  meaningfully against a single production run.
+- `simulate` is deterministic — identical `(spec, bars, starting_equity)`
+  inputs always produce an identical output list. This is required for it
+  to function as a reference oracle; a non-deterministic simulator cannot be
+  diffed meaningfully against a single production run.
 
 ## 3. `ReferenceTrade` schema
 
@@ -254,14 +275,19 @@ position for that trigger (the same end-of-data handling as `signal_exit`).
 
 **Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
 against a running equity figure it tracks itself — seeded at
-`spec.initial_capital`, then marked to market using only this module's own
-no-slippage reference fills as trades close (never the true, cost-adjusted
-equity a real run would show, consistent with §1's scope). This keeps
-`simulate(spec, bars)`'s two-argument signature exact: `spec.initial_capital`
-is what supplies the seed equity, so no third parameter is needed. The
-per-sizing-kind formula mirrors production's (evaluated against the trigger
-bar's close, the same reference price used for the reference fill's
-next-bar-open resolution one bar later):
+`starting_equity`, then marked to market at each entry-sizing decision using
+the **latest observed price of every currently open position across all
+symbols** (unrealized value included, not just realized/closed reference
+trades) — mirroring `Portfolio.mark_to_market()`, which values open
+positions the same way, and consistent with §1's scope in that this
+mark-to-market uses only this module's own no-slippage reference prices,
+never the true, cost-adjusted equity a real run would show. This is why the
+"Cross-symbol processing order" note above matters: computing this equity
+figure correctly for a multi-symbol spec requires walking every symbol's
+bars in one merged chronological order, not resolving one symbol's trades
+in isolation. The per-sizing-kind formula mirrors production's (evaluated
+against the trigger bar's close, the same reference price used for the
+reference fill's next-bar-open resolution one bar later):
 
 - `FixedFractionSizing`: `equity * fraction / trigger_bar.close`.
 - `FixedNotionalSizing`: `notional_usd / trigger_bar.close`.
@@ -298,11 +324,24 @@ fill.
   bar, since the reused decision evaluator is stateless per call and does
   not itself carry this history. Fill-price/fill-bar rule is otherwise
   identical to the static case above.
-- **`style="limit"`**: modeled as a resting stop-limit. If a gap carries
-  price past the limit price in the same move that crosses the stop, the
-  order does **not** fill that bar — it stays "armed," and only fills on a
-  later bar where price recovers back into the limit's reachable range.
-  This module models that arming/latching at the semantic level (a boolean
+- **`style="limit"`**: modeled as a resting stop-limit (restricted, per
+  `StopLossRule`'s own validation, to `basis="entry_price"` — a limit-style
+  stop cannot trail). The limit sits on the protective side of the stop:
+  `limit_price = stop_price - offset` when closing a long (a sell),
+  `limit_price = stop_price + offset` when closing a short (a buy), where
+  `offset = stop_price * limit_offset_pct` — the same sign convention as
+  `protective_limit_price`. The stop triggers on the usual crossing test
+  (bar reaches `stop_price` on the closing side); once triggered, it fills
+  at the **exact limit price** the first bar the range reaches it (a sell
+  triggers on `bar.low <= stop_price`, then fills once `bar.high >=
+  limit_price`; a buy is the mirror image) — `ReferenceTrade.exit_price =
+  limit_price`, never `stop_price`, and never gap-adjusted worse, same as
+  `take_profit`'s exact-price rule. If a gap carries price past the limit in
+  the same move that crosses the stop, the order does **not** fill that bar —
+  it stays "armed," and only fills on a later bar where price recovers back
+  into the limit's reachable range (the limit price itself is static once
+  computed, since trailing bases are unavailable for `style="limit"`). This
+  module models that arming/latching at the semantic level (a boolean
   per-position flag once the stop level is first breached), not by
   replicating the production `PendingOrder` state machine's exact fields.
 
