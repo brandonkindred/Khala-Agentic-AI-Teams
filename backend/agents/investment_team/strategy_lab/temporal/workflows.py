@@ -332,6 +332,21 @@ class StrategyLabCycleWorkflow:
         ``max_design_reentries`` (falling back to
         ``_MAX_DESIGN_REENTRIES_FALLBACK`` when absent), and stays constant
         for every attempt in the cycle.
+
+        On a ``"reentry"`` outcome (the attempt's activity caught
+        ``SpecImplementabilityError``), the next attempt always re-fires the
+        full transition sequence from scratch -- a full restart, unchanged --
+        UNLESS the outcome's ``spec_implicated`` is ``False`` (no current
+        production raise site sets this) AND the just-failed attempt's most
+        recent checkpoint converged through ``PipelineStage.REVIEW``: then the
+        next attempt resumes from that checkpoint's spec/rationale/
+        design_context instead of re-deriving it, via the activity's
+        ``resume_spec``/``resume_rationale``/``resume_design_context`` params
+        -- code synthesis always still runs fresh, since ``spec_implicated``
+        makes no claim about any already-synthesized code's soundness. This
+        mirrors thread mode's ``orchestrator.py::run_cycle`` gated
+        cross-attempt resume (issue #7318, #7282's second step, parity with
+        #7315/PR #7469) -- see ``checkpoints.py`` for the full contract.
     """
 
     @workflow.run
@@ -391,17 +406,54 @@ class StrategyLabCycleWorkflow:
         last_failure_phase: Optional[str] = None
         last_design_context: Optional[dict] = None
 
-        # First step of #7282 (Temporal-mode parity with thread mode's
-        # #7309/#7315): compute, but do not yet act on, the resume-point
-        # determination for each failed attempt's checkpoint. One entry per
-        # completed re-entry, in order -- the next stage a resumed attempt
-        # *could* start from (per ``determine_resume_stage``), or ``None``
-        # when no usable checkpoint was captured. Not consumed by the retry
-        # loop below yet (that's the next step, #7318); surfaced only on the
-        # terminal return dicts below for test observability.
+        # Second step of #7282 (Temporal-mode parity with thread mode's
+        # #7309/#7315, landed as PR #7469): the resume-point determination
+        # for each failed attempt's checkpoint. One entry per completed
+        # re-entry, in order -- the next stage a resumed attempt *could*
+        # start from (per ``determine_resume_stage``), or ``None`` when no
+        # usable checkpoint was captured. Surfaced on the terminal return
+        # dicts below for test observability (as it was before this step).
         resume_stage_determinations: List[Optional[str]] = []
 
+        # Cross-attempt resume state for the *next* loop iteration, set by
+        # the reentry-handling block below only when the just-failed
+        # attempt's ``SpecImplementabilityError.spec_implicated`` was
+        # ``False`` AND its latest checkpoint converged through REVIEW
+        # (``resume_stage is PipelineStage.SYNTHESIS``); reset to "no
+        # resume" (full restart) every time otherwise. There is exactly one
+        # resume boundary -- Phase 1 (DESIGN+REVIEW) -- mirroring thread
+        # mode's ``pending_resume_*`` locals in ``orchestrator.py::run_cycle``:
+        # code synthesis is deliberately never skipped on resume, since
+        # ``spec_implicated=False`` proves only that the spec isn't
+        # implicated, not that any already-synthesized code is safe to
+        # reuse -- see ``checkpoints.py`` for the full contract. No
+        # production raise site sets ``spec_implicated=False`` today, so
+        # these stay ``None`` on every real re-entry.
+        pending_resume_spec: Optional[dict] = None
+        pending_resume_rationale: Optional[str] = None
+        pending_resume_design_context: Optional[dict] = None
+        # The checkpoint's own converged spec/code provenance, seeded into
+        # the resumed attempt's fresh drift collector below so a record
+        # built from a resumed attempt still shows how its (reused) spec was
+        # actually derived, rather than the design phase appearing to have
+        # never happened. ``None`` whenever resume isn't active.
+        pending_resume_drift_seed: Optional[Dict[str, List[dict]]] = None
+
         for design_attempt in range(max_reentries + 1):
+            # Copy-on-entry: a fresh empty child collector for this attempt,
+            # unless resuming -- then seeded with the checkpoint's own
+            # history first, since that converged work is real provenance
+            # for this attempt's (reused) spec, not drift from a discarded
+            # attempt. Captured in a per-iteration local (rather than read
+            # back off ``pending_resume_drift_seed`` after the call) because
+            # that variable gets overwritten for the *next* attempt before
+            # this attempt's outcome is handled below.
+            attempt_drift_seed = pending_resume_drift_seed
+            attempt_drift = _empty_drift()
+            if attempt_drift_seed is not None:
+                attempt_drift["spec_history"].extend(attempt_drift_seed["spec_history"])
+                attempt_drift["code_history"].extend(attempt_drift_seed["code_history"])
+                attempt_drift["gate_timeline"].extend(attempt_drift_seed["gate_timeline"])
             outcome = await _exec(
                 act.run_design_attempt_activity,
                 params={
@@ -415,13 +467,15 @@ class StrategyLabCycleWorkflow:
                     "directives": directives,
                     "design_attempt": design_attempt,
                     "phase_back_count": phase_back_count,
-                    # Copy-on-entry: a fresh empty child collector for this attempt.
-                    "drift": _empty_drift(),
+                    "drift": attempt_drift,
                     "gate_results": cumulative_gate_results,
                     "budget_calls": budget_calls,
                     "regime_summary": regime_summary,
                     "convergence_tracker_state": tracker_state,
                     "batch_cache_key": batch_cache_key,
+                    "resume_spec": pending_resume_spec,
+                    "resume_rationale": pending_resume_rationale,
+                    "resume_design_context": pending_resume_design_context,
                 },
                 timeout=_DESIGN_ATTEMPT_TIMEOUT,
                 heartbeat_timeout=_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT,
@@ -480,6 +534,7 @@ class StrategyLabCycleWorkflow:
             # discipline and ``activities.py``'s own local-import convention
             # for ``investment_team.models`` types.
             from investment_team.strategy_lab.checkpoints import (
+                PipelineStage,
                 determine_resume_stage,
                 find_latest_checkpoint_for_attempt,
                 parse_checkpoint,
@@ -503,15 +558,81 @@ class StrategyLabCycleWorkflow:
             tracker = convergence_tracker_from_wire(tracker_state)
             tracker.increment_trials(1)
             tracker_state = convergence_tracker_to_wire(tracker)
-            # Commit-on-completion: fold this attempt's child drift into the
-            # parent so the short-circuit record retains its diagnostics.
+            # Commit-on-completion: fold the failed attempt's drift into the
+            # parent commit log so the short-circuit record retains its
+            # diagnostics. When this attempt was itself resumed,
+            # ``outcome["drift"]`` starts with the seeded copy of the
+            # checkpoint's history -- but the parent already received that
+            # exact history when the *original* attempt (the one that
+            # produced the checkpoint) failed and merged its own drift.
+            # Re-merging the seeded prefix here would duplicate those
+            # entries in the parent commit log every time a resumed attempt
+            # goes on to fail itself -- so only the entries this attempt
+            # actually produced beyond the seed are folded in (mirrors
+            # ``orchestrator.py::run_cycle``'s identical fix).
             child_drift = outcome["drift"]
-            parent_drift["spec_history"].extend(child_drift["spec_history"])
-            parent_drift["code_history"].extend(child_drift["code_history"])
-            parent_drift["gate_timeline"].extend(child_drift["gate_timeline"])
+            if attempt_drift_seed is not None:
+                parent_drift["spec_history"].extend(
+                    child_drift["spec_history"][len(attempt_drift_seed["spec_history"]) :]
+                )
+                parent_drift["code_history"].extend(
+                    child_drift["code_history"][len(attempt_drift_seed["code_history"]) :]
+                )
+                parent_drift["gate_timeline"].extend(
+                    child_drift["gate_timeline"][len(attempt_drift_seed["gate_timeline"]) :]
+                )
+            else:
+                parent_drift["spec_history"].extend(child_drift["spec_history"])
+                parent_drift["code_history"].extend(child_drift["code_history"])
+                parent_drift["gate_timeline"].extend(child_drift["gate_timeline"])
+            # Default: full restart, unchanged from today's behavior. Only
+            # overridden below when the raising exception itself declares
+            # the checkpointed spec is not implicated in the failure AND the
+            # determination is the one stage the activity actually knows how
+            # to resume into. A checkpoint that converged through SYNTHESIS
+            # (or further) is deliberately never used to resume, even when
+            # ``spec_implicated`` is ``False``: that would reuse the
+            # checkpoint's *code*, and a spec-not-implicated exception makes
+            # no claim about the code's soundness -- see ``checkpoints.py``.
+            spec_implicated = outcome.get("spec_implicated", True)
+            pending_resume_spec = None
+            pending_resume_rationale = None
+            pending_resume_design_context = None
+            pending_resume_drift_seed = None
+            if not spec_implicated and resume_stage is PipelineStage.SYNTHESIS:
+                # ``resume_checkpoint`` is necessarily a ``ReviewCheckpoint``
+                # here: ``determine_resume_stage`` only returns
+                # ``PipelineStage.SYNTHESIS`` when ``resume_checkpoint.stage``
+                # is REVIEW. The exception has already declared this
+                # converged state didn't cause the failure, so it's safe to
+                # hand to the next attempt as-is.
+                pending_resume_spec = resume_checkpoint.spec.model_dump(mode="json")
+                pending_resume_rationale = resume_checkpoint.rationale
+                pending_resume_design_context = resume_checkpoint.design_context
+                pending_resume_drift_seed = {
+                    "spec_history": [
+                        r.model_dump(mode="json") for r in resume_checkpoint.spec_history
+                    ],
+                    "code_history": [
+                        r.model_dump(mode="json") for r in resume_checkpoint.code_history
+                    ],
+                    "gate_timeline": [
+                        r.model_dump(mode="json") for r in resume_checkpoint.gate_timeline
+                    ],
+                }
             if design_attempt >= max_reentries:
                 break
-            directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {last_evidence}")
+            if spec_implicated:
+                # Only steer the design agent to revise the spec when the
+                # failure actually implicated it. A ``spec_implicated=False``
+                # failure's evidence is about something else (e.g.
+                # code/infrastructure) -- labeling it "SPEC UNIMPLEMENTABLE"
+                # would mislead a *later* full restart (if this or a
+                # subsequent resumed attempt eventually falls back to one)
+                # into needlessly revising a spec that was never at fault.
+                # No production raise site sets this today, so this branch
+                # is always taken in practice.
+                directives.append(f"PREVIOUS SPEC UNIMPLEMENTABLE: {last_evidence}")
 
         # Re-entry budget exhausted. Shares run_cycle's exact terminal-guard
         # implementation via the dto adapter (see dto.py's module docstring).

@@ -42,6 +42,13 @@ def reentry_outcome(**overrides: Any) -> Dict[str, Any]:
         "last_code": "code",
         "failure_phase": "evaluation",
         "design_context": {"rounds": 1, "critiques": [], "stop_reason": "x", "loop_telemetry": {}},
+        # Matches ``SpecImplementabilityError.spec_implicated``'s own default
+        # (``exceptions.py``) — every current production raise site passes
+        # this explicitly as ``True``, so the default here keeps every
+        # existing test's full-restart behavior unchanged unless a test
+        # deliberately overrides it to exercise cross-attempt resume
+        # (issue #7318).
+        "spec_implicated": True,
         "convergence_tracker_state": {"trial_count": 0},
         "gate_results": [],
         "budget_calls": 0,

@@ -812,3 +812,233 @@ def test_resume_determination_computed_but_not_acted_on_across_reentries_to_shor
     # same "reentry" outcome -> 3 determinations, all "synthesis".
     assert result["resume_stage_determinations"] == ["synthesis", "synthesis", "synthesis"]
     assert result["record"]["status"] == "failed: spec_unimplementable"
+
+
+# ---------------------------------------------------------------------------
+# Cross-attempt resume consumption (issue #7318, second step of #7282 --
+# Temporal-mode parity with thread mode's gated cross-attempt resume,
+# #7315/PR #7469). The determination computed above is now *acted on*: the
+# next attempt's activity params carry the checkpoint's state, but only when
+# the raising exception declared ``spec_implicated=False`` AND the
+# determination is ``PipelineStage.SYNTHESIS`` (a ``ReviewCheckpoint``).
+# Every current production raise site still sets ``spec_implicated=True``
+# (the ``reentry_outcome`` fixture default), so the common-path tests below
+# lock in "no behavior change" and the ``spec_implicated=False`` tests stand
+# in for a future raise site that has proven its failure doesn't implicate
+# the checkpointed spec.
+# ---------------------------------------------------------------------------
+
+
+def _spec_revision(**overrides: Any) -> Dict[str, Any]:
+    base = {
+        "phase": "design",
+        "agent": "DesignAgent",
+        "timestamp": "2026-08-27T00:00:00Z",
+        "before_hash": "a" * 64,
+        "after_hash": "b" * 64,
+        "diff": "--- before\n+++ after\n",
+        "reason": "tightened entry threshold",
+        "gate_failures": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def _run_reentry_then_record_capturing_params(
+    *, reentry_overrides: Dict[str, Any]
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Drive one re-entry then a terminal record, capturing every
+    ``run_design_attempt_activity`` call's ``params`` in order.
+    """
+    captured_params: List[Dict[str, Any]] = []
+
+    def _run_design_attempt(args: tuple[Dict[str, Any]]) -> Dict[str, Any]:
+        captured_params.append(args[0])
+        if len(captured_params) == 1:
+            return _reentry_outcome(**reentry_overrides)
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _run_design_attempt,
+    }
+    with _patch_execute(handlers):
+        result = _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "run_id": "run-1",
+                "generation": 1,
+            }
+        )
+    return result, captured_params
+
+
+def test_spec_implicated_true_full_restart_carries_no_resume_state():
+    """The common path (every current production raise site): a
+    ``ReviewCheckpoint`` is present, but ``spec_implicated`` defaults to
+    ``True`` -- the next attempt's params must carry no resume state and an
+    empty drift seed, exactly matching today's full-restart behavior.
+    """
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+
+    checkpoint = _checkpoint_json(
+        ReviewCheckpoint,
+        review_rounds_completed=1,
+        spec_history=[_spec_revision()],
+        design_context={"rounds": 1, "critiques": [], "stop_reason": "ready", "loop_telemetry": {}},
+    )
+    result, captured_params = _run_reentry_then_record_capturing_params(
+        reentry_overrides={"pipeline_checkpoints": [checkpoint]}
+    )
+
+    assert result["resume_stage_determinations"] == ["synthesis"]
+    second_call = captured_params[1]
+    assert second_call["resume_spec"] is None
+    assert second_call["resume_rationale"] is None
+    assert second_call["resume_design_context"] is None
+    assert second_call["drift"] == {"spec_history": [], "code_history": [], "gate_timeline": []}
+    assert second_call["directives"] == ["PREVIOUS SPEC UNIMPLEMENTABLE: always fails"]
+
+
+def test_spec_implicated_false_resumes_from_review_checkpoint():
+    """When the raising exception declares ``spec_implicated=False`` and the
+    just-failed attempt's checkpoint converged through REVIEW, the next
+    attempt's params carry the checkpoint's spec/rationale/design_context and
+    a drift seeded with the checkpoint's own history -- and no misleading
+    "SPEC UNIMPLEMENTABLE" directive is added.
+    """
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+
+    spec_revision = _spec_revision()
+    checkpoint = _checkpoint_json(
+        ReviewCheckpoint,
+        review_rounds_completed=1,
+        spec_history=[spec_revision],
+        design_context={"rounds": 1, "critiques": [], "stop_reason": "ready", "loop_telemetry": {}},
+    )
+    result, captured_params = _run_reentry_then_record_capturing_params(
+        reentry_overrides={"pipeline_checkpoints": [checkpoint], "spec_implicated": False}
+    )
+
+    assert result["resume_stage_determinations"] == ["synthesis"]
+    second_call = captured_params[1]
+    assert second_call["resume_spec"] == checkpoint["spec"]
+    assert second_call["resume_rationale"] == checkpoint["rationale"]
+    assert second_call["resume_design_context"] == checkpoint["design_context"]
+    assert second_call["drift"]["spec_history"] == [spec_revision]
+    assert second_call["directives"] == []
+
+
+def test_spec_implicated_false_does_not_resume_past_review_checkpoint():
+    """``spec_implicated=False`` alone isn't sufficient: a checkpoint that
+    converged further than REVIEW (here, SYNTHESIS -- determination
+    REFINEMENT) has no resume boundary at all, since resuming past code
+    synthesis would need its own code-soundness signal that
+    ``spec_implicated`` doesn't provide.
+    """
+    from investment_team.strategy_lab.checkpoints import SynthesisCheckpoint
+
+    checkpoint = _checkpoint_json(SynthesisCheckpoint)
+    result, captured_params = _run_reentry_then_record_capturing_params(
+        reentry_overrides={"pipeline_checkpoints": [checkpoint], "spec_implicated": False}
+    )
+
+    assert result["resume_stage_determinations"] == ["refinement"]
+    second_call = captured_params[1]
+    assert second_call["resume_spec"] is None
+    assert second_call["drift"] == {"spec_history": [], "code_history": [], "gate_timeline": []}
+
+
+def test_spec_implicated_false_does_not_resume_when_no_checkpoint_exists():
+    result, captured_params = _run_reentry_then_record_capturing_params(
+        reentry_overrides={"pipeline_checkpoints": [], "spec_implicated": False}
+    )
+
+    assert result["resume_stage_determinations"] == [None]
+    second_call = captured_params[1]
+    assert second_call["resume_spec"] is None
+
+
+def test_repeated_resume_does_not_duplicate_seeded_drift_history_in_short_circuit_record():
+    """Codex-review-style regression guard (mirrors thread mode's
+    ``test_repeated_resume_does_not_duplicate_seeded_drift_history``):
+    merging a resumed attempt's *whole* drift -- including the checkpoint
+    history seeded into it -- into the parent on every subsequent failure
+    would duplicate that history once per resumed re-entry. Drives every
+    attempt to fail not-spec-implicated with a REVIEW checkpoint carrying
+    the *same* one spec revision each time; the short-circuit record's
+    ``drift_collector`` must still show that revision exactly once.
+    """
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+
+    spec_revision = _spec_revision()
+    captured_short_circuit_params: List[Dict[str, Any]] = []
+
+    def _attempt(args: tuple[Dict[str, Any]]) -> Dict[str, Any]:
+        checkpoint = _checkpoint_json(
+            ReviewCheckpoint,
+            design_attempt=args[0]["design_attempt"],
+            review_rounds_completed=1,
+            spec_history=[spec_revision],
+            design_context={
+                "rounds": 1,
+                "critiques": [],
+                "stop_reason": "ready",
+                "loop_telemetry": {},
+            },
+        )
+        # Simulates the real activity's own drift_collector: whether this
+        # attempt derived the revision fresh (attempt 0, no seed) or resumed
+        # past a checkpoint that already carried it (every later attempt,
+        # seeded), its own accumulated child collector ends up containing
+        # this exact one entry either way -- never duplicated by re-deriving
+        # it on top of a seed.
+        return _reentry_outcome(
+            pipeline_checkpoints=[checkpoint],
+            spec_implicated=False,
+            drift={"spec_history": [spec_revision], "code_history": [], "gate_timeline": []},
+        )
+
+    def _short_circuit(args: tuple[Dict[str, Any]]) -> Dict[str, Any]:
+        captured_short_circuit_params.append(args[0])
+        return {
+            "record": {"lab_record_id": "sc-1", "status": args[0]["short_circuit_status"]},
+            "convergence_tracker_state": args[0]["convergence_tracker_state"],
+        }
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+        "build_short_circuit_record_activity": _short_circuit,
+    }
+    with _patch_execute(handlers):
+        result = _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "run_id": "run-1",
+                "generation": 1,
+            }
+        )
+
+    assert result["record"]["status"] == "failed: spec_unimplementable"
+    drift_collector = captured_short_circuit_params[0]["drift_collector"]
+    # Every attempt resumed past REVIEW using the same checkpoint's single
+    # spec revision -- without the delta-only merge fix, this would grow by
+    # one duplicate entry per resumed re-entry (3 attempts -> 3 entries).
+    assert drift_collector["spec_history"] == [spec_revision]
+
+
+def test_convergence_directive_omitted_for_non_spec_implicated_failure():
+    """A ``spec_implicated=False`` failure's evidence isn't about the spec's
+    soundness -- labeling it "SPEC UNIMPLEMENTABLE" would mislead a later
+    full restart into needlessly revising a spec that was never at fault.
+    """
+    result, captured_params = _run_reentry_then_record_capturing_params(
+        reentry_overrides={"pipeline_checkpoints": [], "spec_implicated": False}
+    )
+    assert captured_params[1]["directives"] == []
+    assert result["record"] == {"lab_record_id": "rec-1"}

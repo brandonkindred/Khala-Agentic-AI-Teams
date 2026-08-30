@@ -1028,6 +1028,20 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             calling workflow incarnation was dispatched with, mirroring
             ``persist_run_state_activity``'s own default-generation
             backward-compat convention.
+          - ``resume_spec``/``resume_rationale``/``resume_design_context``
+            (all optional): cross-attempt resume state (issue #7318,
+            Temporal-mode parity with thread mode's ``orchestrator.py::
+            run_cycle`` cross-attempt resume, #7315/PR #7469) -- the calling
+            workflow's own ``StrategyLabCycleWorkflow.run`` supplies these,
+            wire-shaped exactly like the ADR-012 same-attempt checkpoint
+            fields below, only when a *prior* attempt's
+            ``SpecImplementabilityError.spec_implicated`` was ``False`` and
+            its checkpoint converged through ``PipelineStage.REVIEW``. Only
+            consulted when no ADR-012 same-attempt checkpoint was found for
+            this ``design_attempt_index`` (the common case, since ADR-012
+            checkpoints are keyed to the exact attempt that crashed, never a
+            not-yet-attempted one). ``resume_spec is not None`` if and only
+            if ``resume_design_context is not None``.
     Postconditions:
         Returns either
         ``{"kind": "record", "record": <StrategyLabRecord JSON dump>,
@@ -1035,9 +1049,13 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         "budget_calls": int, "drift": {...}}`` on a terminal record, or
         ``{"kind": "reentry", "evidence": str, "last_spec": <StrategySpec JSON
         dump or None>, "last_code": str, "failure_phase": str|None,
-        "design_context": {...}|None, "convergence_tracker_state": ...,
+        "design_context": {...}|None, "spec_implicated": bool,
+        "convergence_tracker_state": ...,
         "gate_results": [...], "budget_calls": int, "drift": {...}}`` when
-        ``_run_design_attempt`` raised ``SpecImplementabilityError``, or
+        ``_run_design_attempt`` raised ``SpecImplementabilityError``
+        (``spec_implicated`` mirrors the exception's own field -- see
+        ``exceptions.py`` -- and is what the calling workflow gates
+        cross-attempt resume on for the *next* attempt), or
         ``{"kind": "skipped", "reason": "no_market_data",
         "convergence_tracker_state": ..., "gate_results": [...],
         "budget_calls": int, "drift": {...}}`` when this attempt recorded a
@@ -1096,6 +1114,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         GateEvent,
         SpecRevision,
         StrategyLabRecord,
+        StrategySpec,
     )
     from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
     from investment_team.strategy_lab._orchestrator_helpers import _DriftCollector
@@ -1262,6 +1281,25 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 resume_spec = checkpoint.spec
                 resume_rationale = checkpoint.rationale
                 resume_design_context = checkpoint_design_context
+
+    # ── Cross-attempt resume (issue #7318, Temporal-mode parity with thread
+    # mode's #7315/PR #7469) ─────────────────────────────────────────────
+    # Only consulted when the ADR-012 same-attempt lookup just above found
+    # nothing -- the two never actually collide, since an ADR-012 checkpoint
+    # is keyed to THIS exact ``design_attempt_index`` crashing mid-execution,
+    # while ``params["resume_spec"]`` is supplied by the calling workflow for
+    # a ``design_attempt_index`` that has never run yet. The workflow is the
+    # sole source of truth for whether resuming is sound (gated on the prior
+    # attempt's ``SpecImplementabilityError.spec_implicated`` being ``False``
+    # -- see ``checkpoints.py`` and ``orchestrator.py::run_cycle`` for the
+    # full contract); this activity just forwards whatever it's handed,
+    # wire-shaped exactly like the ADR-012 fields above so both paths land
+    # in the same ``orch._run_design_attempt(resume_spec=..., ...)`` call
+    # below.
+    if resume_spec is None and params.get("resume_spec") is not None:
+        resume_spec = StrategySpec(**params["resume_spec"])
+        resume_rationale = params.get("resume_rationale")
+        resume_design_context = _design_context_from_wire(params.get("resume_design_context"))
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
         """``checkpoint_hook`` passed into ``_run_design_attempt`` (``PhaseCallback`` shape).
@@ -1517,6 +1555,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "last_code": exc.last_code or "",
             "failure_phase": exc.failure_phase,
             "design_context": design_context_wire,
+            "spec_implicated": exc.spec_implicated,
             "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
             "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
             "budget_calls": budget.calls_made,

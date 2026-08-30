@@ -1142,6 +1142,36 @@ def test_run_design_attempt_activity_returns_reentry_outcome(monkeypatch):
     assert out["design_context"]["rounds"] == 3
     assert out["design_context"]["loop_telemetry"] == {"k": 1}
     assert out["budget_calls"] == 7
+    # SpecImplementabilityError.spec_implicated's own default (exceptions.py)
+    # -- the reentry outcome must mirror it so the calling workflow's
+    # cross-attempt resume gate (issue #7318) sees the same value.
+    assert out["spec_implicated"] is True
+
+
+def test_run_design_attempt_activity_reentry_outcome_reports_spec_implicated_false(monkeypatch):
+    """A raise site that has proven its failure doesn't implicate the
+    checkpointed spec (``spec_implicated=False`` -- none does in production
+    today) must have that declaration surface on the reentry outcome, since
+    the calling workflow gates cross-attempt resume on it (issue #7318)."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    last_spec = StrategySpec.parse_persisted(_spec_dict(strategy_id="strat-x"))
+
+    def _fake_attempt(self, **kwargs):
+        raise SpecImplementabilityError(
+            "not spec-implicated",
+            failure_phase="synthesis",
+            last_spec=last_spec,
+            last_code="",
+            spec_implicated=False,
+        )
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["spec_implicated"] is False
 
 
 def test_run_design_attempt_activity_maps_unexpected_error(monkeypatch):
@@ -1700,6 +1730,84 @@ def test_run_design_attempt_activity_resumes_from_valid_checkpoint(monkeypatch):
     # Checkpoint's drift, not params' empty drift.
     assert len(captured["drift_collector"].spec_history) == 1
     assert captured["drift_collector"].spec_history[0].reason == "checkpointed revision"
+
+
+# ---------------------------------------------------------------------------
+# run_design_attempt_activity — cross-attempt resume (issue #7318, Temporal-
+# mode parity with thread mode's #7315/PR #7469). Distinct from the ADR-012
+# same-attempt checkpoint tests above: here ``run_id`` is absent (or the
+# same-attempt lookup simply finds nothing), so the only source of resume
+# state is the calling workflow's own ``resume_spec``/``resume_rationale``/
+# ``resume_design_context`` params.
+# ---------------------------------------------------------------------------
+
+
+def test_run_design_attempt_activity_forwards_cross_attempt_resume_params(monkeypatch):
+    """``resume_spec``/``resume_rationale``/``resume_design_context`` supplied
+    directly in ``params`` (the workflow's cross-attempt resume state) are
+    reconstructed into real ``StrategySpec``/``_DesignPersistContext``
+    objects and forwarded into ``_run_design_attempt`` -- with no ``run_id``
+    in params, this is the only source of resume state (no ADR-012
+    same-attempt checkpoint lookup happens at all)."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(
+            resume_spec=_spec_dict(strategy_id="strat-resumed"),
+            resume_rationale="carried forward from checkpoint",
+            resume_design_context={
+                "rounds": 2,
+                "critiques": [],
+                "stop_reason": "ready",
+                "loop_telemetry": {},
+            },
+        )
+    )
+
+    assert out["kind"] == "record"
+    assert captured["resume_spec"] == StrategySpec(**_spec_dict(strategy_id="strat-resumed"))
+    assert captured["resume_rationale"] == "carried forward from checkpoint"
+    assert captured["resume_design_context"].rounds == 2
+
+
+def test_run_design_attempt_activity_without_cross_attempt_resume_params_forwards_none(
+    monkeypatch,
+):
+    """Absent ``resume_spec``/``resume_rationale``/``resume_design_context``
+    params (today's baseline, and every attempt after the first re-entry
+    step landed by #7474 alone) -- full restart, unchanged."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    act.run_design_attempt_activity(_run_design_attempt_params())
+
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
 
 
 def test_run_design_attempt_activity_malformed_checkpoint_gate_results_falls_back_to_scratch(
