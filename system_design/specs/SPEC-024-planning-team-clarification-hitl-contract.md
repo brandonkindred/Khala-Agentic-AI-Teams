@@ -157,6 +157,18 @@ Planning-specific scope creep: PRA's own answers-submission route
 build a new, correctly-plumbed pause/resume path on top of a wire format that still can't carry a
 multi-select answer through to PRA.
 
+**The client must first learn a question is multi-select at all.** Fixing the answer-submission
+direction alone is not sufficient: `api/routes/product_analysis.py:194-213`, the status endpoint
+that hands `pending_questions` to a polling client (Planning included), reconstructs each shared
+`PendingQuestion` explicitly field-by-field and never sets `allow_multiple` — every question
+serializes with the model's default, `False`, regardless of what `OpenQuestion.allow_multiple` the
+question actually carries server-side. A client reading this status response has no way to know a
+question allows multiple selections, so it cannot know to submit `selected_option_ids` in the first
+place — the answer-side fix is unreachable without this. **Contract requirement:** the same
+rollout must forward `q["allow_multiple"]` in this status conversion, alongside the
+`AnswerSubmission`/validator/PRA-route changes above; all four pieces are one change, not
+independently shippable.
+
 **The shared validator needs the same fix, not just the model.** Adding the field to
 `AnswerSubmission` is necessary but not sufficient: `shared.hitl.validation.validate_answers`
 (`shared/hitl/validation.py:81-118`, the coding team's own answer-validation entry point, and the
@@ -785,13 +797,21 @@ this contract:
   different question" — reconciling by id alone risks silently applying round *N*'s stale answer
   content to round *N+1*'s differently-scoped question, which PRA's id-only validation would
   accept without complaint. Comparing the *full* `(id, question_text)` pair against what this pause
-  round persisted removes the ambiguity: a match means "PRA is still waiting on exactly this
-  question, safe to (re-)submit"; no match (the id is gone, or present with different
-  `question_text`) means "PRA has moved past this round already — do not submit stale content,"
-  proceeding straight to step (2) instead. This is the same class of already-flagged limitation as
-  the PRA-idempotency open risk (§5, below): Planning's contract can defend against confusion here,
-  but a durable PRA-side round/version identifier would close the gap more completely than any
-  reconciliation Planning does on its own — out of `planning_team`'s boundary, as before.
+  round persisted **narrows, but does not eliminate,** the ambiguity: a match means "PRA is still
+  waiting on exactly this question, safe to (re-)submit"; no match means "PRA has moved past this
+  round already — do not submit stale content," proceeding straight to step (2) instead. **This is
+  not a complete fix.** `question_text` has the identical fallback problem as `id`:
+  `_require_string_field(q_data, "question_text", "")` (`question_processing.py:822`) defaults a
+  missing `question_text` to `""`, exactly as `id` defaults to `q{index}` — so two consecutive
+  rounds can in principle share the *same* `(id, question_text)` pair (e.g., both malformed-parse
+  fallbacks, or coincidentally identical LLM output), and no client-side comparison over PRA's
+  reported fields can distinguish that case from a genuine still-pending question. Comparing the
+  full pair is strictly better than comparing `id` alone — it catches every collision where the two
+  rounds' `question_text` actually differ, which is the common case — but it is a harm-reduction
+  measure, not a proof. This folds into, rather than sits beside, the open risk already flagged
+  below: **only a durable PRA-side round/version identifier or delivery receipt closes this
+  completely**, and that is out of `planning_team`'s boundary to provide. #7445-B inherits this
+  residual risk knowingly; it is not resolved by this spec.
 
 **A failed status read is not confirmation.** `get_product_analysis_status` returns `None` on
 *any* GET failure (`adapters/product_analysis.py:51-58` — "Returns `None` on failure"), not only
@@ -840,6 +860,16 @@ no persisted pause to resume from, silently hanging the job.
    idempotency key or equivalent reconciliation lookup; that is outside `planning_team`'s boundary
    and this spec's stated scope, and is flagged here as a prerequisite for fully retryable PRA
    submission rather than something #7445-B can close alone.
+3. *New to this spec, cross-team:* the answer-delivery reconciliation on a resumed-activity retry
+   (§4.3) compares the full `(id, question_text)` pair, not `id` alone — but PRA's own question
+   parser can default *both* fields identically across two separate rounds
+   (`question_processing.py:821-822`), so no comparison Planning performs over PRA's reported
+   fields can distinguish "this exact question is still pending" from "an unrelated later round
+   coincidentally produced the same fallback pair" with full certainty. This is the same class of
+   gap as risk 2: full closure requires a PRA-side round/version identifier or delivery receipt,
+   which is outside `planning_team`'s boundary. The `(id, question_text)` comparison reduces the
+   collision surface (it catches every case where the two rounds' text actually differs) but is not
+   a complete fix, and #7445-B inherits this residual risk knowingly.
 
 ---
 
