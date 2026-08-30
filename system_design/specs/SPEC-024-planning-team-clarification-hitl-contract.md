@@ -474,6 +474,24 @@ generic CAS API to design from scratch; it is the same proven conditional-`UPDAT
 condition. A broad, arbitrary-field-equality primitive is explicitly **not** required — only this
 one resume-token-guarded shape, which is all this contract needs.
 
+**The `resume_token`-match guard alone is not write-once — it must also condition on the
+token-scoped answer slot itself.** `resume_token` does not change when an answer batch is written
+for it, so under two concurrent submissions for the *same* active token, `WHERE resume_token =
+expected_resume_token` is satisfied by **both** requests: the first write does not invalidate the
+guard for the second, and the second silently overwrites the first's answer content — the exact
+last-write-wins outcome the first-write-wins requirement below exists to prevent, and it can leave
+the resumed activity reading a different batch than the one whose signal actually woke the
+workflow. **Contract requirement:** the same server-side `UPDATE` must add a second condition on
+the token-scoped answer slot: succeed unconditionally when that slot is absent (`NULL`/unset —
+the legitimate first write for this token), succeed as a no-op-equivalent when it is already
+present with **identical** content (a client safely retrying its own prior write, per "a rejected
+write must not strand the winner's own retry" below), and fail without writing when it is present
+with **different** content (a genuine second, conflicting submission for the same token). This is
+one extra `WHERE`-clause condition on the same `UPDATE ... WHERE resume_token = %s AND (data->
+'answers'->%s IS NULL OR data->'answers'->%s = %s::jsonb)`-shaped statement, not a second
+round-trip or a separate primitive — the resume-token guard and the write-once guard are enforced
+by the same atomic server-side write.
+
 **The persist step must be first-write-wins, not last-write-wins.** Two clients can race to submit
 answers for the same `resume_token` (a stale UI retry, a double-click, a legitimate second
 attempt). The workflow's signal handler already commits to "first submission wins, everything else
@@ -1039,16 +1057,37 @@ this contract:
 - *Preconditions:* PRA reports unanswered `OpenQuestion`s and no matching persisted pause is being
   resumed (per `_check_pending_pause_reentry`, §4.3).
 - *Postconditions:* The activity persists `{waiting_for_answers: True, resume_token, pause_kind:
-  "planning_clarification", pause_context: None, pending_questions}` to the job record as its own
-  atomic `update_job` call (separate from, and after, the checkpoint write above — no longer
-  required to be combined with it, since checkpoint-presence alone already prevents resubmission),
-  then returns (does not raise) `{"outcome": "paused", "job_id", "resume_token", "pause_kind",
-  "pause_context", "pending_questions"}` — no further job-store read or blocking call past that
-  point.
+  "planning_clarification", pause_context: None, pending_questions}` to the job record via a
+  **conditional** write — succeed only while no pause is currently active for this job (guard:
+  `waiting_for_answers` is falsy/absent on the current row) — separate from, and after, the
+  checkpoint write above (no longer required to be combined with it, since checkpoint-presence
+  alone already prevents resubmission), then returns (does not raise) `{"outcome": "paused",
+  "job_id", "resume_token", "pause_kind", "pause_context", "pending_questions"}` — no further
+  job-store read or blocking call past that point. **Contract requirement — this write must not be
+  the unconditional `update_job` a first draft of this contract implied.** `SAFE_RETRY` activities
+  heartbeat through `BackgroundHeartbeat` (`shared/concurrency/heartbeat.py`), whose own contract
+  states "a raising `beat`... never kills the loop: the exception is routed to `on_error` (default:
+  swallowed)" — a lost heartbeat (worker pause, GC stall, transient RPC failure) is silently
+  absorbed rather than surfaced, so the activity thread keeps running with no signal that Temporal's
+  server may have already timed out the attempt and started a new one. Two attempts of the *same*
+  activity invocation can therefore both observe "no persisted pause yet," each mint a distinct
+  `resume_token` (`mint_resume_token`, unconditioned on anything but its own randomness), and — with
+  an unconditional write — both persist successfully, one clobbering the other. Whichever attempt's
+  *return value* Temporal actually delivers to the workflow may not be whichever attempt's token
+  ended up durably stored last, permanently stranding the pause: the answer-submission route
+  accepts only the token in the job record, while the workflow is waiting on the token from the
+  attempt result it received. **Contract requirement:** persist the pause envelope with the
+  conditional write described above (fails if another attempt already persisted one first); the
+  losing attempt must not return its own freshly-minted, never-persisted token as if it won — it
+  must reload the job record and re-emit the *winning* attempt's persisted envelope (same
+  `resume_token`, `pending_questions`, etc.) as its own return value, so both attempts converge on
+  one token regardless of which one Temporal ultimately delivers.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
-  PRA work and no duplicate persistence.
+  PRA work and no duplicate persistence. Exactly one pause envelope is ever durably active for a
+  given job at a time, even when multiple concurrent attempts of the same activity invocation reach
+  the paused-return path simultaneously.
 
 **`document_production_activity` (resume path)**
 - *Preconditions:* `request["acknowledged_resume_token"]` equals the job record's persisted
