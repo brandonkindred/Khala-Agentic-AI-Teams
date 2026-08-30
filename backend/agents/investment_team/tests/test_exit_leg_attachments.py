@@ -177,6 +177,22 @@ def test_rejects_non_finite_ref_price(ref_price: float) -> None:
         resolve_exit_leg_attachments([_leg()], OrderSide.LONG, ref_price)
 
 
+def test_rejects_overflowed_limit_price() -> None:
+    """A finite but extreme ref_price can overflow a LIMIT leg's resolved price
+    to inf (float64 overflow is silent, no exception) — the resolver must catch
+    this itself since ``inf <= 0`` is False and would otherwise slip past a bare
+    positivity check."""
+    with pytest.raises(ValueError, match="non-finite/non-positive limit_price"):
+        resolve_exit_leg_attachments([_leg(OrderType.LIMIT, pct=0.9)], OrderSide.LONG, 1e308)
+
+
+def test_rejects_overflowed_stop_price() -> None:
+    """The same overflow risk applies to the STOP-family branch (a short's
+    ref_price * (1 + pct))."""
+    with pytest.raises(ValueError, match="non-finite/non-positive stop_price"):
+        resolve_exit_leg_attachments([_leg(OrderType.STOP, pct=0.9)], OrderSide.SHORT, 1e308)
+
+
 # ---------------------------------------------------------------------------
 # ExitLegSpec: kind / secondary-offset coupling validation
 # ---------------------------------------------------------------------------
