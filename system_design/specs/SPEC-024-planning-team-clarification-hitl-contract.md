@@ -192,6 +192,20 @@ that reuses this validator — is rejected with a 400, and a multi-select answer
 combines a stored option with a free-text `"other"` entry is specifically and incorrectly rejected
 even after the plural-field-awareness fix alone.
 
+**Also reject what the wire shape alone can't rule out: plural selections for a single-select
+question, and both fields set at once.** Validating each id in `selected_option_ids` against the
+question's own options (above) is necessary but not sufficient — it says nothing about whether the
+*question itself* allows more than one selection. PRA's own `apply_answers`
+(`user_communication.py:210`) treats any non-empty `selected_option_ids` as authoritative
+regardless of the question's `allow_multiple`, and resolves an ambiguous submission carrying both
+`selected_option_id` and a non-empty `selected_option_ids` silently in favor of the plural list —
+neither behavior is validated against on the way in. **Contract requirement:** `validate_answers`
+must additionally reject (400) a submission where `selected_option_ids` is non-empty for a question
+whose persisted `allow_multiple` is falsy, and reject (400) a submission that sets both
+`selected_option_id` (non-blank) and a non-empty `selected_option_ids` for the same answer — the
+two fields are mutually exclusive per answer, selected by the question's own `allow_multiple`, not
+freely combinable by the client.
+
 **Why the same name, not `planning_submit_answers` or similar:** `backend/shared/hitl/models.py`
 was deliberately built as a cross-team superset so both teams share one vocabulary. A single
 signal name across teams means any future workflow that hosts both a coding-team-style gate and a
@@ -412,19 +426,28 @@ worker crash *before* any pause is reached (activity retried, or the workflow re
 Writing the checkpoint unconditionally and immediately closes that gap regardless of whether this
 run ever pauses.
 
-Symmetrically, **every entry into `document_production_activity`** — a fresh run, a Temporal-level
-activity retry, or a workflow-driven resume — must `load_checkpoint("planning_team",
+Symmetrically — **scoped to the patched branch with `use_product_analysis=True`, the only case
+this contract's PRA pause machinery governs (§5 spells out the other two cases explicitly: a
+patched `use_product_analysis=False` job never creates or expects a checkpoint at all, and the
+unpatched legacy branch retains its exact pre-contract `run_pra` behavior, checkpoint-free)** —
+**every entry into `document_production_pra_submit_activity`** (the activity that owns deciding
+whether to call `run_pra`, §4.4's split from `document_production_activity` below) — a fresh run or
+a Temporal-level retry of that `NO_RETRY` activity — must `load_checkpoint("planning_team",
 planning_job_id, "document_production_pra")` *before* deciding whether to call `run_pra(...)`: a
 present checkpoint means "PRA already submitted for this job," full stop, independent of whether a
-pause envelope also happens to be persisted. When present, call `wait_pra(job_id=<checkpointed
-pra_job_id>, answer_callback=...)` directly — **never** call `run_pra(...)` again for this job. This
-makes checkpoint-presence, not the pause envelope, the single source of truth for "already
-submitted," and removes any need for the checkpoint and pause-envelope writes to be one atomic
-update — the checkpoint alone is sufficient to prevent resubmission at every re-entry, no matter
-which write reached durable storage last. The pause envelope's own write (`waiting_for_answers`,
-`resume_token`, `pause_kind`, `pause_context`, `pending_questions`) remains a separate atomic
-`update_job` call, made only once PRA actually raises unanswered questions, and continues to be
-read via `_check_pending_pause_reentry` (§5) exactly as before.
+pause envelope also happens to be persisted; a present checkpoint makes the call a no-op. On this
+same patched-and-PRA-enabled path, `document_production_activity` itself never decides whether to
+submit at all — it only ever loads the checkpoint `document_production_pra_submit_activity` already
+established and calls `wait_pra(job_id=<checkpointed pra_job_id>, answer_callback=...)` — the
+"never call `run_pra` again" guarantee lives entirely in the submit activity's own checkpoint-first
+check, not in anything `document_production_activity` decides. This makes checkpoint-presence, not
+the pause envelope, the single source of truth for "already submitted," and removes any need for
+the checkpoint and pause-envelope writes to be one atomic update — the checkpoint alone is
+sufficient to prevent resubmission at every re-entry, no matter which write reached durable storage
+last. The pause envelope's own write (`waiting_for_answers`, `resume_token`, `pause_kind`,
+`pause_context`, `pending_questions`) remains a separate atomic `update_job` call, made only once
+PRA actually raises unanswered questions, and continues to be read via
+`_check_pending_pause_reentry` (§5) exactly as before.
 
 Note the two distinct ids throughout: `planning_job_id` (the Planning job this activity/workflow is
 running for — what `job_id`/`load_checkpoint`/`save_checkpoint` key on) and `pra_job_id` (the
@@ -561,8 +584,9 @@ implementation, not a behavior change to `_guarded` itself; `_guarded` needs no 
 ### 4.3.2 Rollout compatibility for the activity signature change
 
 `document_production_activity` is currently called with three positional args —
-`args=[job_id, repo_path, ...]`-style, matching every other per-phase activity in this workflow
-(`temporal/workflows.py:142-215`, e.g. `intake_activity` at :142-146) — not the single `request`
+`args=[job_id, context, use_product_analysis]` exactly (`temporal/workflows.py:189-197`), matching
+every other per-phase activity's positional-args style in this workflow (`:142-215`, e.g.
+`intake_activity` at :142-146) — not the single `request`
 dict this contract's retry/continuation loop (§4.3) needs in order to carry
 `acknowledged_resume_token`. Changing the activity's calling signature is itself a workflow-history
 compatibility hazard, independent of the pause feature: a `PlanningWorkflow` execution whose
@@ -733,9 +757,11 @@ this contract:
   engages); the activity runs its ordinary non-PRA document-production work. This contract does not
   govern this case — it is unaffected, not merely relaxed.
 - **Legacy branch** (`not workflow.patched(...)` — a `PlanningWorkflow` execution whose history
-  predates this feature, per §4.3.2): called with the original three positional args (`job_id`,
-  `repo_path`, ... — `temporal/workflows.py:189-197`'s current shape, `use_product_analysis` among
-  them), never a `request` dict, never with `acknowledged_resume_token` — the legacy branch skips
+  predates this feature, per §4.3.2): called with the original three positional args, exactly
+  `[job_id, context, use_product_analysis]` (`temporal/workflows.py:189-197`'s current shape —
+  **not** `[job_id, repo_path, ...]`; the second positional argument is the full context dict, not
+  a bare path, and a compatibility decoder that mistakes it for one would lose the specification/PRA
+  inputs), never a `request` dict, never with `acknowledged_resume_token` — the legacy branch skips
   `document_production_pra_submit_activity` and the retry/continuation loop entirely (§4.3.2).
   **Retains its exact recorded `retry_policy=NO_RETRY`** — Temporal's replay determinism binds the
   scheduled activity's parameters, retry policy included, to what history recorded; this contract
