@@ -18,9 +18,7 @@ A multi-agent system that simulates a real software engineering team with a mix 
 | **Accessibility Expert** | Quality | A11y specialist | Reviews frontend for WCAG 2.2 compliance |
 | **Linting Tool Agent** | Quality | Linting specialist | Detects project linters, runs them, produces code fixes to pass lint |
 | **DbC Comments Agent** | Quality | Design by Contract | Adds pre/postconditions and invariants to code |
-| **Integration Agent** | Integration/release | Full-stack validator | Validates backend-frontend API contract alignment after workers complete |
 | **DevOps Team** (via DevOps Engineering Team) | Integration/release | DevOps sub-orchestration | Team Lead, Task Clarifier, IaC, CI/CD, Deployment Strategy, DevSecOps Review, Test Validation, Change Review, Documentation & Runbook – contract-first pipeline with hard gates |
-| **Documentation Agent** | Integration/release | Technical writer | Updates README and project docs |
 
 ## Coding Standards
 
@@ -83,7 +81,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Implementation** | codegen_team (`stack="frontend"`) | Frontend v2 worker (Angular/React/TypeScript, CSS/SCSS, UI/UX, accessibility, state); same phase pipeline and shared, config-driven implementation with frontend tool agents. Driven by the coding-team engine's Tech Lead |
 | **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert |
-| **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
+| **Integration / release** | top-level | DevOps Team (sub-orchestrator); per-task documentation review happens earlier, inside the quality gates (self-review loop, see § Per-Task Workflow Gates) |
 
 **Coding Team:** the coding-team execution engine (Tech Lead + Task Graph, living as direct children of `software_engineering_team/`) is the **Software Engineering sub-team** responsible for task-graph execution (see [§ Coding Team](#coding-team) below). The SE orchestrator calls `run_coding_team_orchestrator` in-process after planning; the same engine's routers are also mounted on this app for direct/standalone runs at `/api/coding-team`.
 
@@ -124,9 +122,7 @@ flowchart LR
   end
 
   subgraph integration [Integration and release]
-    IntegrationAgent
     DevOps
-    Documentation
   end
 
   discovery --> Adapter --> design
@@ -186,9 +182,8 @@ All planning artifacts are written to a `plan/` folder at the project root (work
    - **QA review + Security review** (run in parallel over the same post-Code-Review snapshot; backend QA covers bugs + persisted integration/unit tests and README)
    - **Documentation** (self-review loop)
    - Merge to development, Tech Lead review
-9. **Integration phase** – After workers complete, Integration Agent validates backend-frontend API contract alignment.
-10. **Final security** (full codebase) and **documentation** pass when Tech Lead requests.
-11. **Retry path** – Failed tasks are retried through the same full workflow (build verification, code review, QA + security in parallel, documentation).
+9. **Final security** (full codebase) pass when Tech Lead requests.
+10. **Retry path** – Failed tasks are retried through the same full workflow (build verification, code review, QA + security in parallel, documentation).
 
 ## Requirements
 
@@ -358,9 +353,7 @@ Spec → Project Planning → Architecture + Tech Lead (alignment loop)
     (run_workflow)       (run_workflow)
     Build → CodeReview → Security → QA → DBC → Merge
          ↓                      ↓
-    Integration Agent (backend + frontend contract alignment)
-         ↓
-    Final Security + Documentation
+    Final Security
 ```
 
 ## Project Layout
@@ -441,9 +434,7 @@ software_engineering_team/
 ├── build_fix_specialist/  # Resolves build failures
 │
 │  # --- Integration / release ---
-├── integration_team/      # Integration Agent (backend/frontend API-contract alignment)
-├── technical_writers/     # Documentation, DbC comments, and release-notes agents
-│   ├── documentation_agent/
+├── technical_writers/     # DbC comments and release-notes agents
 │   ├── dbc_comments_agent/
 │   └── release_notes_agent/
 │
