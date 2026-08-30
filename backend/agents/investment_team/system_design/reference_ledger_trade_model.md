@@ -19,6 +19,21 @@ re-implementation of the decision logic produce?* It exists to be diffed
 against the production engine's actual trade output, so a mismatch signals
 either a spec-compilation bug or an engine-fidelity regression.
 
+**A note on current vs. target production behavior:** at the time of this
+writing, only the OCO bracket's take-profit leg and any `style="limit"` stop
+already rest at their authored price in production — standalone
+`stop_loss`/`take_profit`/`scaled_take_profit` with `style="market"` still
+fire via bar-close detection and close at the *next* bar's market open, the
+same next-bar-open approximation `signal_exit` uses. This document
+deliberately models the *target* resting-order behavior a separate,
+in-flight execution-fidelity change will ship for those standalone rules
+(exact level, or worse-of-open-and-level on a gap, filled on the trigger bar
+itself) — because once that behavior ships, comparing the reference ledger
+against the pre-change approximation would make every stop/take-profit trade
+trivially "diverge." Implementers should not be surprised that this document
+does not match the current `_build_close_order` behavior for those three
+rule kinds; that divergence is intentional and temporary.
+
 It is **not** a fill-cost engine. Explicitly out of scope:
 
 - **Slippage and transaction costs.** Reference prices are exact bar-derived
@@ -28,11 +43,14 @@ It is **not** a fill-cost engine. Explicitly out of scope:
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
   at a single price.
-- **Position sizing mechanics beyond what a rule needs.** Quantity per trade
-  is whatever the rule's own fraction implies (e.g. a ladder rung's
-  `qty_fraction * original_qty`); sizing-rule resolution (`FixedFractionSizing`
-  / `VolatilityTargetSizing` / `FixedNotionalSizing`) for the *entry* qty
-  itself is assumed as an input, not derived here.
+- **Cost-aware position sizing.** Entry quantity is resolved from
+  `spec.sizing` against a running equity figure this module tracks itself
+  (seeded from `spec.initial_capital`, marked to market from this module's
+  own no-slippage, no-cost reference fills only — see §5's "Entries"
+  subsection) — not against the true, cost-adjusted equity a real backtest
+  or paper-trading run would show. A ladder rung's own quantity is whatever
+  its `qty_fraction * original_qty` implies once the entry quantity is
+  known.
 
 ## 2. Module boundary
 
@@ -70,12 +88,15 @@ re-deriving *whether* a rule fires:
   trigger decisions and rule-priority resolution.
 
 What these evaluators do **not** cover, and what this module's simulate loop
-must newly implement, is resting-order *fill-price* mechanics: gap handling
-(worse-of-open-and-level), trailing-stop watermark ratcheting, ladder-rung
-sequencing across bars, and stop-limit arm/latch behavior. Today that logic
-lives inside the production fill engine, which this module must not depend
-on (see below) — so it is modeled here at the semantic level described in
-§5, as new pure code, not imported from the production engine.
+must newly implement, is: resting-order *fill-price* mechanics (gap handling
+— worse-of-open-and-level, trailing-stop watermark ratcheting, ladder-rung
+sequencing across bars, and stop-limit arm/latch behavior); turning a
+matched entry signal into an actual fill (bar and price); and entry-quantity
+resolution (§5's "Entries" subsection covers both of the latter two). Today
+this logic lives inside the production fill engine and dispatchers, which
+this module must not depend on (see below) — so it is modeled here at the
+semantic level described in §5, as new pure code, not imported from the
+production engine.
 
 ### Exclusions
 
@@ -141,13 +162,13 @@ inconsistent record silently.
 | `trade_num` | `int` | `trade_num` | 1-based, assigned in emission order. |
 | `symbol` | `str` | `symbol` | Verbatim. |
 | `side` | `Literal["long", "short"]` | `side` | Verbatim (production stores a plain `str`; this is the stricter reference form). |
-| `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened. Primary key for this module's own bookkeeping (ladder rungs, per-position running state). |
+| `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Primary key for this module's own bookkeeping (ladder rungs, per-position running state). |
 | `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where this trade (or rung) closed. |
 | `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp` — the actual comparison key against production, since `TradeRecord` carries no bar index. |
 | `exit_date` | `str` | `exit_date` | `bars[symbol][exit_bar].timestamp`. |
 | `entry_price` | `float` | `entry_bid_price` | Pre-slippage reference level — **not** `entry_fill_price` or the legacy `entry_price` alias (both are post-slippage in production). See rationale below. |
 | `exit_price` | `float` | `exit_bid_price` | Same pre-slippage correspondence. |
-| `qty` | `float` | `shares` | Renamed to match this module's own vocabulary (`ExitIntent.qty_fraction`, `PositionState.qty`); the matching module maps `qty` ↔ `shares`. |
+| `qty` | `float` | `shares` | Renamed to match this module's own vocabulary (`ExitIntent.qty_fraction`, `PositionState.qty`); the matching module maps `qty` ↔ `shares`. Entry quantity resolution is specified in §5's "Entries" subsection. |
 | `exit_rule_kind` | `Optional[str]` | *(none — derived from `exit_reason` today)* | One of the values in §4's vocabulary table. `None` only for a trade force-closed with no rule firing (e.g. ran off the end of `bars`). |
 | `exit_rule_index` | `Optional[int]` | *(none)* | Which `spec.exit_rules[i]` fired — mirrors `ExitIntent.rule_index`. `None` iff `exit_rule_kind` is `None`. |
 | `level_index` | `Optional[int]` | *(none)* | Set only when `exit_rule_kind == "scaled_take_profit"`, identifying which ladder rung fired — mirrors `ExitIntent.level_index`. |
@@ -221,9 +242,48 @@ directions.
 Each subsection specifies: the trigger condition (reusing the existing
 pure evaluator's trigger logic), the fill price, and the fill bar.
 
+### Entries
+
+An entry rule's trigger bar is the bar at which `evaluate_entry_rules`
+matches. Like `signal_exit`, an entry is a bar-close predicate decision, not
+a resting order: it fills at the **next** bar's open —
+`entry_bar = trigger_bar + 1`, `ReferenceTrade.entry_price =
+bars[symbol][entry_bar].open`. If the predicate matches on the final bar of
+`bars[symbol]`, there is no next bar to fill on and this module opens no
+position for that trigger (the same end-of-data handling as `signal_exit`).
+
+**Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
+against a running equity figure it tracks itself — seeded at
+`spec.initial_capital`, then marked to market using only this module's own
+no-slippage reference fills as trades close (never the true, cost-adjusted
+equity a real run would show, consistent with §1's scope). This keeps
+`simulate(spec, bars)`'s two-argument signature exact: `spec.initial_capital`
+is what supplies the seed equity, so no third parameter is needed. The
+per-sizing-kind formula mirrors production's (evaluated against the trigger
+bar's close, the same reference price used for the reference fill's
+next-bar-open resolution one bar later):
+
+- `FixedFractionSizing`: `equity * fraction / trigger_bar.close`.
+- `FixedNotionalSizing`: `notional_usd / trigger_bar.close`.
+- `VolatilityTargetSizing`: `equity * target_annual_vol / (trigger_bar.close
+  * atr)`, where `atr` comes from the same indicator view this module
+  already needs for `signal_exit` predicates (see §2's `PandasHistoryView`
+  dependency note) — reinforcing that dependency rather than introducing a
+  new one.
+
+Whole-share flooring and any `max_position_pct` clamp apply the same way
+production's sizing resolution does; an entry that sizes to zero or below
+one whole share (on a non-fractional asset class) is simply not opened.
+
 ### `stop_loss`
 
-Covers all `basis` × `style` combinations from `StopLossRule`.
+Covers all `basis` × `style` combinations from `StopLossRule`. Unlike a
+bracket leg (see `oco_bracket` below), a standalone stop/take-profit's
+`basis="entry_price"` level is anchored to the position's actual
+`ReferenceTrade.entry_price` (the next-bar-open fill from the "Entries"
+subsection above) — these rules evaluate against the live position after it
+has actually filled, not against a signal-time reference resolved before
+fill.
 
 - **`style="market"`** (any `basis`): fires the bar the price level is
   breached. Fill price is the level itself, or — on a gap where the bar's
@@ -296,6 +356,26 @@ it), the same one-cancels-other behavior production implements by canceling
 the sibling order once either leg fills. A `signal_exit` rule may legally
 coexist alongside a bracket in the same spec and is evaluated independently
 per §5's `signal_exit` rules above.
+
+**Reference price — anchored to the trigger bar's close, not the entry
+fill.** Unlike a standalone `stop_loss`/`take_profit`, both bracket legs'
+percentage offsets resolve against the entry rule's **trigger bar's close**
+(`bars[symbol][trigger_bar].close`, where `trigger_bar = entry_bar - 1` per
+the "Entries" subsection) — the same reference price this module's own
+entry-quantity sizing uses, and the same one production's bracket
+attachment resolves against before the entry order has even filled. This
+matters on a gap: if `entry_bar`'s open jumps away from `trigger_bar`'s
+close, the bracket's stop/target levels do **not** shift to re-center on the
+(possibly very different) actual fill price the way a standalone
+`basis="entry_price"` stop would.
+
+**Same-bar precedence.** A single bar's OHLC range can touch both legs'
+levels at once, which the bar's own high/low/close alone cannot resolve —
+"whichever fires first" is not observable from OHLC data. This module
+breaks that tie the same way production's bracket materialization does (the
+stop-loss child is submitted before the take-profit child, and pending
+orders are then processed in that same order): **on a same-bar double-touch,
+the stop leg wins.**
 
 ## 6. Forward references
 
