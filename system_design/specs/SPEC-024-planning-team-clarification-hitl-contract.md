@@ -292,10 +292,16 @@ in §6) and Planning's clarification gate has no property that would require a d
 ```python
 # Initial call. retry_policy is required here too -- every execute_activity call is its own
 # independent command; omitting it falls back to the SDK's unbounded default, which _guarded's
-# finite-max_attempts contract (§4.3.1) cannot tolerate on either call.
+# finite-max_attempts contract (§4.3.1) cannot tolerate on either call. heartbeat_timeout must
+# also carry over from the current call (temporal/workflows.py:189-195, paired with the
+# activity's own BackgroundHeartbeat) on both calls below: this activity polls PRA for a long
+# time, and without a heartbeat timeout Temporal cannot detect a dead poller until the full
+# multi-hour start_to_close_timeout elapses, long after this contract's retry/reentry behavior
+# should have kicked in.
 result = await workflow.execute_activity(
     document_production_activity, request,
-    start_to_close_timeout=activity_timeout, retry_policy=SAFE_RETRY,
+    start_to_close_timeout=activity_timeout, heartbeat_timeout=HEARTBEAT_TIMEOUT,
+    retry_policy=SAFE_RETRY,
 )
 while result.get("outcome") == "paused":
     resume_token = result.get("resume_token")
@@ -314,7 +320,8 @@ while result.get("outcome") == "paused":
     self._active_resume_token = None
     result = await workflow.execute_activity(
         document_production_activity, request,
-        start_to_close_timeout=activity_timeout, retry_policy=SAFE_RETRY,
+        start_to_close_timeout=activity_timeout, heartbeat_timeout=HEARTBEAT_TIMEOUT,
+    retry_policy=SAFE_RETRY,
     )
     request.pop("acknowledged_resume_token", None)
 ```
@@ -630,6 +637,38 @@ mechanism reaching the same effect) must sit *inside* the callable passed as `wo
 converting it to the `{"outcome": "paused", ...}` value there, as a normal return, so it never
 becomes an `Exception` `_guarded` itself observes. This is a placement requirement on the
 implementation, not a behavior change to `_guarded` itself; `_guarded` needs no modification.
+
+**Correction — the exception cannot even survive the polling layer beneath `_guarded`, so it must
+never be raised as an exception through this call path at all.** The requirement above (catch
+before `_guarded` sees it) implicitly assumed `_ActivityPauseSignal` propagates as a normal Python
+exception up through `wait_pra` → `DocumentProductionAgent.run` → `work()`. It does not reach that
+far: `wait_pra` is `wait_for_product_analysis_completion`, which drives its poll loop through the
+shared `poll_until_terminal` (`shared/http/job_polling.py:395-416`), and that helper's own
+`on_poll` invocation (`:409-414`) is wrapped in `try: on_poll(status) except Exception as e: ...
+return {status_key: "failed", "error": _ON_POLL_FAILURE}`. `answer_callback` is invoked from
+inside `_on_poll` (`adapters/product_analysis.py:92-97`), which is `poll_until_terminal`'s
+`on_poll`. So a pause signal raised from `answer_callback` — being an `Exception` — is caught and
+swallowed by `poll_until_terminal` itself, logged as an `on_poll` failure, and converted into an
+ordinary `{"status": "failed", ...}` terminal result **two layers before** `_guarded` or the
+activity function ever gets a chance to see it. `DocumentProductionAgent` would observe what looks
+like an ordinary PRA failure and (per its existing, unrelated error handling) return normally; the
+workflow would advance past document production having never paused at all — the opposite of this
+contract's purpose. **Contract requirement, superseding raise-and-catch for this call path
+specifically:** the pause must be signaled as a **return value**, not an exception, starting at the
+point closest to where it originates. `poll_until_terminal` must be extended (a small,
+backward-compatible change: existing callers whose `on_poll` returns `None` are unaffected) so that
+when `on_poll` returns a non-`None` value, polling stops immediately and that value is returned
+directly as `poll_until_terminal`'s own result, instead of continuing to poll toward a terminal
+status. `wait_for_product_analysis_completion`'s `_on_poll` must then, when a genuine pause (not
+auto-answering) is needed, *return* a structured pause marker (e.g., `{"status": "paused",
+"pending_questions": [...]}`) rather than calling `answer_callback` in a way that could raise — and
+`wait_pra`'s own return value is what the calling code (`DocumentProductionAgent.run`, and in turn
+the `work` callable passed to `_guarded`) must inspect for that marker and convert into this
+contract's `{"outcome": "paused", ...}` shape. `_ActivityPauseSignal`-the-exception, and the
+inside-`_guarded`'s-`work`-callable catch point above, remain correct for a pause signaled from
+somewhere *outside* this specific polling call chain (should one ever exist); through
+`wait_pra`/`poll_until_terminal` specifically, the mechanism is return-value propagation the whole
+way, not exception unwinding at any point.
 
 ### 4.3.2 Rollout compatibility for the activity signature change
 
