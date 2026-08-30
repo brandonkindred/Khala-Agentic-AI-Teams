@@ -46,6 +46,11 @@ def reentry_outcome(**overrides: Any) -> Dict[str, Any]:
         "gate_results": [],
         "budget_calls": 0,
         "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
+        # Matches the real activity's always-present field
+        # (``_pipeline_checkpoints_to_wire()`` in ``activities.py``) — a list
+        # of ``PipelineCheckpoint.model_dump(mode="json")`` dicts. Empty by
+        # default (no checkpoint captured for this attempt).
+        "pipeline_checkpoints": [],
     }
     base.update(overrides)
     return base
@@ -59,6 +64,7 @@ def record_outcome(**overrides: Any) -> Dict[str, Any]:
         "gate_results": [],
         "budget_calls": 3,
         "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
+        "pipeline_checkpoints": [],
     }
     base.update(overrides)
     return base
