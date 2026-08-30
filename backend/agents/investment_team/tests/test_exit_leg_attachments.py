@@ -168,6 +168,15 @@ def test_empty_legs_with_non_positive_ref_price_still_raises() -> None:
         resolve_exit_leg_attachments([], OrderSide.LONG, -5.0)
 
 
+@pytest.mark.parametrize("ref_price", [float("nan"), float("inf"), float("-inf")])
+def test_rejects_non_finite_ref_price(ref_price: float) -> None:
+    """A non-finite ref_price (NaN/+inf/-inf) is rejected explicitly rather than
+    silently slipping past a bare ``<= 0`` check (NaN's comparisons are always
+    False) and propagating a NaN/inf price into the returned attachment."""
+    with pytest.raises(ValueError, match="reference price must be positive"):
+        resolve_exit_leg_attachments([_leg()], OrderSide.LONG, ref_price)
+
+
 # ---------------------------------------------------------------------------
 # ExitLegSpec: kind / secondary-offset coupling validation
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ a convention. See ``strategy/streaming_harness.py`` and
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date as date_cls
@@ -1519,22 +1520,28 @@ def resolve_exit_leg_attachments(
     market entry) keeps the attachment's advertised ``stop_price`` equal to
     the level the engine actually arms.
 
-    Preconditions: ``ref_price > 0``; ``side`` is the entry's ``OrderSide``;
-    each element of ``legs`` is a validated :class:`ExitLegSpec`.
+    Preconditions: ``ref_price`` is a finite number ``> 0``; ``side`` is the
+    entry's ``OrderSide``; each element of ``legs`` is a validated
+    :class:`ExitLegSpec`.
     Postconditions: returns a list the same length and order as ``legs``;
     each element is a :class:`StopAttachment` (``STOP``/``STOP_LIMIT``/
     ``TRAILING_STOP`` legs) or :class:`LimitAttachment` (``LIMIT`` legs) whose
     absolute price is strictly positive and on the correct side of
     ``ref_price``; empty ``legs`` yields ``[]``.
     Raises:
-        ValueError: if ``ref_price <= 0``, or if a resolved price is
-            non-positive — a defensive guard that would only trip if a leg
-            field bound were loosened without updating this math.
+        ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
+            ``<= 0``, or if a resolved price is non-positive — a defensive
+            guard that would only trip if a leg field bound were loosened
+            without updating this math.
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
-    # contract stays enforced in optimized production runs.
-    if ref_price <= 0:
-        raise ValueError(f"exit leg reference price must be positive, got {ref_price!r}")
+    # contract stays enforced in optimized production runs. ``ref_price`` is a
+    # plain float (unlike ``ExitLegSpec.pct``, whose Pydantic ``gt``/``lt``
+    # bounds already reject NaN/inf), and NaN's reflexive-false comparisons
+    # would otherwise slip past a bare ``<= 0`` check and propagate NaN/inf
+    # prices into the returned attachments instead of raising here.
+    if not math.isfinite(ref_price) or ref_price <= 0:
+        raise ValueError(f"exit leg reference price must be positive and finite, got {ref_price!r}")
     is_long = side == OrderSide.LONG
     attachments: list[Union[StopAttachment, LimitAttachment]] = []
     for leg in legs:
@@ -1620,15 +1627,15 @@ def resolve_bracket_attachments(
     :func:`resolve_exit_leg_attachments` for the shared price-resolution
     contract (anchoring, sign convention, limit-offset handling, and raises).
 
-    Preconditions: ``ref_price > 0``; ``side`` is the entry's ``OrderSide``;
-    ``bracket`` is a validated :class:`OcoBracketRule` (its leg ``pct`` values lie
-    in ``(0, 1)``).
+    Preconditions: ``ref_price`` is a finite number ``> 0``; ``side`` is the
+    entry's ``OrderSide``; ``bracket`` is a validated :class:`OcoBracketRule`
+    (its leg ``pct`` values lie in ``(0, 1)``).
     Postconditions: returns a ``(StopAttachment, LimitAttachment)`` pair whose
     absolute prices are strictly positive and on the correct side of ``ref_price``;
     a ``limit``-style stop leg additionally carries a positive ``limit_offset``.
     Raises:
-        ValueError: if ``ref_price <= 0``, or if a resolved ``stop_price`` /
-            ``limit_price`` is non-positive.
+        ValueError: if ``ref_price`` is non-finite or ``<= 0``, or if a
+            resolved ``stop_price``/``limit_price`` is non-positive.
     """
     stop_attachment, limit_attachment = resolve_exit_leg_attachments(
         _bracket_to_leg_specs(bracket), side, ref_price
