@@ -361,6 +361,20 @@ workflow (which is asleep waiting on the *current* token, not the stale one). **
 requirement:** a missing or mismatched `resume_token` must be rejected with `409` before any write,
 exactly as the coding team's route already does.
 
+**The token check and the answer write must be one atomic conditional operation, not read-then-write.**
+Checking the active `resume_token` and then separately persisting the batch leaves a race: between
+the read and the write, a *different*, faster submission for the same round can complete, wake the
+workflow, and the activity can advance past this pause round entirely — clearing the envelope and,
+per this contract's own permission to move a consumed batch into `resolved_questions` (§4.3's
+round-scoped persistence requirement), leaving no populated write-once entry left for a slower
+request to conflict against. The slower request's write-once check would then find "nothing
+populated for this token" and succeed, silently persisting a stale batch the workflow has already
+moved past, and returning success to a caller whose signal the workflow ignores. **Contract
+requirement:** the active-token comparison and the write-once insertion must be a single atomic
+conditional job-store operation (e.g., a compare-and-set keyed on the job record's *current*
+`resume_token` value, not merely on "is this specific token's slot already populated") — never two
+separate read-then-write steps, however narrow the window between them looks.
+
 **The persist step must be first-write-wins, not last-write-wins.** Two clients can race to submit
 answers for the same `resume_token` (a stale UI retry, a double-click, a legitimate second
 attempt). The workflow's signal handler already commits to "first submission wins, everything else
@@ -839,8 +853,12 @@ this contract:
 **`document_production_activity` (resume path)**
 - *Preconditions:* `request["acknowledged_resume_token"]` equals the job record's persisted
   `resume_token`; the job record's answer store (persisted by the answer-submission path *before*
-  it signaled — §4.3) carries a batch tagged with that same `resume_token` covering every question
-  in `pending_questions`; a PRA-job-id checkpoint for this job is present (§4.3.1).
+  it signaled — §4.3) carries a batch tagged with that same `resume_token` covering every
+  **required** question in `pending_questions` (matching `validate_answers`'s own
+  `required_ids - answered_ids` check, §4.1 — optional questions may legitimately be omitted, and
+  PRA's `apply_answers` supplies its own defaults for those; treating full coverage as a
+  precondition would make an already-validated, already-accepted submission impossible to resume);
+  a PRA-job-id checkpoint for this job is present (§4.3.1).
 - *Postconditions, in this order (§4.3's ordering requirement below):* (1) the answer batch tagged
   with the resumed `resume_token` — never the full accumulated answer history, never the signal
   payload directly — is submitted to PRA via `submit_product_analysis_answers`/`answer_callback`;
