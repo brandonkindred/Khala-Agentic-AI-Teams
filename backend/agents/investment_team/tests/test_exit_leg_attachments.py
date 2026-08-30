@@ -256,5 +256,10 @@ def test_bracket_adapter_matches_generalized_resolution(side: OrderSide) -> None
     via_adapter = resolve_bracket_attachments(bracket, side, 100.0)
     via_generalized = resolve_exit_leg_attachments(_bracket_to_leg_specs(bracket), side, 100.0)
 
-    assert via_adapter[0] == via_generalized[0]
-    assert via_adapter[1] == via_generalized[1]
+    # A single list-equality assertion (rather than indexing each side)
+    # verifies both cardinality and element-wise equality together, so a
+    # regression that drops/adds an attachment fails with a clear diff
+    # instead of an IndexError. via_adapter is a tuple (its public
+    # signature); list(...) normalizes it for comparison against
+    # via_generalized's list — tuple != list in Python regardless of contents.
+    assert list(via_adapter) == via_generalized
