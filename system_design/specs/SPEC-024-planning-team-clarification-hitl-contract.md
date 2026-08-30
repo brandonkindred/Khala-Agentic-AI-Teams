@@ -96,9 +96,24 @@ synthesis → **document_production** → sub_agent_provisioning → finalize. N
 **Non-Goals** (deferred to later stories)
 - Implementing the mechanism (#7445-B).
 - Wiring `document_production_activity` / `resolve_pra_answers` to actually use it (#7446).
-- Thread-mode (non-Temporal) pause behavior — `shared/temporal/checkpoints.py`'s `wait_for_input`/
-  `submit_input` already cover that path per `shared/temporal/README.md`; this spec covers only
-  the Temporal-native signal.
+- Thread-mode (non-Temporal) pause behavior — `backend/shared/temporal/checkpoints.py`'s
+  `wait_for_input`/`submit_input` already cover that path per `shared/temporal/README.md`; this
+  spec covers only the Temporal-native signal. **Why this contract does not simply call
+  `submit_input` from the `submit_answers` signal handler, reconciling with `checkpoints.py`
+  directly:** `checkpoints.py`'s `waiting_for`/`inputs` job-record fields are a single-key
+  prompt/value pair (`wait_for_input(team, job_id, key, prompt=...)` → one `inputs[key]`) — there is
+  no batch-of-questions, no per-question option list, no `resume_token`/`pause_kind` taxonomy, and
+  no multi-round scoping. Planning's clarification gate needs all of those (§4.1/§4.3), matching
+  what `checkpoints.py` itself was never built to carry — its module docstring's own framing
+  ("pair these with `workflow.wait_condition`... or, in thread-mode fallback, with a simple polling
+  loop") describes the generic pattern this contract instantiates, not a ready-made
+  multi-question envelope to call into unchanged. The mandatory extraction of
+  `mint_resume_token`/`_check_pending_pause_reentry`/the workflow-side state machine into
+  `backend/shared/hitl/` (§4.3, §4.2) *is* this contract's answer to "converge on one shared
+  primitive rather than two team-specific ones": once extracted, `checkpoints.py` remains the
+  sanctioned single-key/thread-mode primitive, and the new `shared/hitl/pause_cycle.py` +
+  shared workflow-state-machine component becomes the sanctioned structured/Temporal-native one —
+  two primitives for two genuinely different shapes of pause, both shared, neither team-specific.
 - The full REST/UI surface (routes, request validation) beyond the one field this spec's contract
   requires exposing — see §4.1's `resume_token`-delivery requirement below; that field's existence
   is in scope precisely because without it a polling client has no way to learn the token
@@ -110,7 +125,10 @@ synthesis → **document_production** → sub_agent_provisioning → finalize. N
 
 ### 4.1 Signal name and payload
 
-Reuse the coding team's signal **verbatim** — same name, same shape:
+Reuse the coding team's signal **name and destination payload shape** — not a byte-for-byte
+verbatim reuse, since the payload requires one extension below; "reuse" here means the same
+`@workflow.signal(name="submit_answers")` name and the same core envelope, deliberately extended
+rather than copied unchanged:
 
 ```python
 @workflow.signal(name="submit_answers")
@@ -125,15 +143,16 @@ Payload: `{"resume_token": str, "answers": list[dict]}`, where each `answers` el
 `allow_multiple=True` questions (below).
 
 **Contract requirement — a polling client must be able to learn the `resume_token` in the first
-place.** `SubmitAnswersRequest.resume_token` (`shared/hitl/models.py:80-96`) is where the client
-*sends* the token back, but Planning's current client-facing status surface —
-`PlanningStatusResponse` (`planning_team/models.py:120-131`) and `get_status`
-(`api/main.py:318-329`) — exposes only `pending_questions`/`waiting_for_answers`, with no field
-carrying the token itself; the paused activity's `resume_token` (§4.1's payload above) is consumed
-entirely inside `PlanningWorkflow`/the job record today. Without a client-visible field, no caller
-can ever populate `SubmitAnswersRequest.resume_token` correctly. This mirrors the coding team's own
-`StatusResponse.resume_token` (`software_engineering_team/api/coding_team_models.py:106-112`) —
-required here for the same reason. **Contract requirement:** extend `PlanningStatusResponse` with
+place.** `SubmitAnswersRequest.resume_token` (`backend/shared/hitl/models.py:80-96`) is where the
+client *sends* the token back, but Planning's current client-facing status surface —
+`PlanningStatusResponse` (`backend/agents/planning_team/models.py:120-131`) and `get_status`
+(`backend/agents/planning_team/api/main.py:318-329`) — exposes only
+`pending_questions`/`waiting_for_answers`, with no field carrying the token itself; the paused
+activity's `resume_token` (§4.1's payload above) is consumed entirely inside
+`PlanningWorkflow`/the job record today. Without a client-visible field, no caller can ever
+populate `SubmitAnswersRequest.resume_token` correctly. This mirrors the coding team's own
+`StatusResponse.resume_token` (`backend/agents/software_engineering_team/api/coding_team_models.py:106-112`)
+— required here for the same reason. **Contract requirement:** extend `PlanningStatusResponse` with
 `resume_token: Optional[str] = None`, populated (from the job record's persisted `resume_token`)
 whenever `waiting_for_answers` is `True`, `None` otherwise — the client-visible half of the same
 pause envelope §4.3.1 already persists server-side.
@@ -142,7 +161,7 @@ pause envelope §4.3.1 already persists server-side.
 (`product_requirements_analysis_agent/models.py:78`, mirrored in
 `planning_team/models.py:224`) sets `allow_multiple=True` on some questions, and Planning's own
 `AnsweredQuestion` model already has both `selected_option_id` *and* `selected_option_ids: List[str]`
-(`planning_team/models.py:241-242`) for exactly this reason. `shared/hitl/models.py`'s
+(`backend/agents/planning_team/models.py:241-242`) for exactly this reason. `backend/shared/hitl/models.py`'s
 `AnswerSubmission`, reused verbatim above, currently has **only** the singular field — reusing it
 as-is for Planning would silently drop every selection but one on a multi-select question. This
 contract requires extending `AnswerSubmission` with an optional `selected_option_ids: List[str] =
@@ -284,19 +303,23 @@ and the identical signal-handler rules (`temporal/coding_team_workflow.py:282-34
 This is a **copy, not a redesign** — the state machine is proven (see the integration tests listed
 in §6) and Planning's clarification gate has no property that would require a different one.
 
-**Recommended extraction (decision for #7445-B, not mandated here, consistent with §4.3's identical
-recommendation for `mint_resume_token`/`_check_pending_pause_reentry`):** copying this state
-machine field-for-field into `PlanningWorkflow` creates a second implementation of the same
-capability that will diverge from `CodingTeamWorkflow`'s on any future bug fix or
-race-condition improvement to either. `_active_resume_token`/`_submitted_answers`/
-`_buffered_signals`, the `submit_answers` signal handler, and the arm/consume/clear rules have no
-coding-team-specific logic — they operate purely on workflow instance state and the signal
-payload. #7445-B should consider extracting this into a shared, composable HITL primitive (e.g., a
-mixin or a small shared component alongside the already-recommended `backend/shared/hitl/pause_cycle.py`)
-that both `CodingTeamWorkflow` and `PlanningWorkflow` compose, rather than each workflow carrying
-its own copy. As with the other "recommended extraction" notes in this spec, the contract this
-section defines is what both implementations must behave like; the extraction's exact shape is
-an implementation decision for #7445-B.
+**Mandatory extraction (upgraded from an earlier "recommended, not mandated" note — see the
+matching upgrade in §4.3 for `mint_resume_token`/`_check_pending_pause_reentry`):** copying this
+state machine field-for-field into `PlanningWorkflow` creates a second implementation of the same
+capability that will diverge from `CodingTeamWorkflow`'s on any future bug fix or race-condition
+improvement to either — an unacceptable maintenance cost once both exist, not a hypothetical one.
+`_active_resume_token`/`_submitted_answers`/`_buffered_signals`, the `submit_answers` signal
+handler, and the arm/consume/clear rules have no coding-team-specific logic — they operate purely
+on workflow instance state and the signal payload, so nothing about them resists extraction.
+**Contract requirement:** #7445-B MUST extract this state machine into a shared, composable HITL
+primitive (a mixin or small shared component alongside the also-now-mandatory
+`backend/shared/hitl/pause_cycle.py`, §4.3) that both `CodingTeamWorkflow` and `PlanningWorkflow`
+compose; `CodingTeamWorkflow` must be migrated onto the shared component in the same change that
+introduces `PlanningWorkflow`'s support, not left on its own bespoke copy while Planning gets the
+shared one — otherwise the extraction achieves nothing (both would still exist, just with the
+newer one delegating). The contract this section defines is what the shared component must behave
+like; its exact shape (mixin vs. standalone composed object vs. something else) is #7445-B's
+implementation decision to make, not this design story's.
 
 ### 4.3 Retry/continuation shape
 
@@ -396,6 +419,29 @@ conditional job-store operation (e.g., a compare-and-set keyed on the job record
 `resume_token` value, not merely on "is this specific token's slot already populated") — never two
 separate read-then-write steps, however narrow the window between them looks.
 
+**This primitive does not exist today and must be added — it is in scope for #7445-B, not an
+implementation detail left implicit.** `JobServiceClient`
+(`backend/agents/job_service_client.py`) exposes only unconditional `update_job`, `atomic_update`
+(blind merge/append/increment — no conditional guard), and `apply_and_get` (same, but returns the
+post-write record); the job-service DB layer (`backend/job_service/db.py`) has exactly one
+conditional-write primitive today, `update_job_if_not_cancelled` (`db.py:320-366`), which guards a
+single hard-coded `status != 'cancelled'` check inside one server-side `UPDATE ... WHERE`
+statement — there is no generic field-equality compare-and-set a caller can parameterize with an
+arbitrary field/expected-value pair. Implementing the requirement above as a client-side
+read-then-write (a `get_job` call followed by a separate `update_job`/`atomic_update` call) would
+reintroduce the exact TOCTOU race this section exists to close, since nothing holds the row between
+the two calls. **Contract requirement:** #7445-B MUST add a new job-service primitive narrowly
+scoped to this guard — e.g. `update_job_if_resume_token_matches(job_id, expected_resume_token,
+**fields)` — implemented as a single server-side conditional `UPDATE` exactly mirroring
+`update_job_if_not_cancelled`'s existing shape and its `True`/`False`/`None` return convention
+(write performed / job exists but guard failed / job does not exist), substituting a
+`data->>'resume_token' = %s` (or `IS NULL`, for the very first write when no `resume_token` has
+been persisted yet) comparison for that function's `status != 'cancelled'` one. This is not a
+generic CAS API to design from scratch; it is the same proven conditional-`UPDATE` pattern
+`update_job_if_not_cancelled` already establishes, applied to a second, narrowly-scoped guard
+condition. A broad, arbitrary-field-equality primitive is explicitly **not** required — only this
+one resume-token-guarded shape, which is all this contract needs.
+
 **The persist step must be first-write-wins, not last-write-wins.** Two clients can race to submit
 answers for the same `resume_token` (a stale UI retry, a double-click, a legitimate second
 attempt). The workflow's signal handler already commits to "first submission wins, everything else
@@ -466,14 +512,22 @@ activity reads from.
 by `resume_token` — `{"<resume_token>": [AnswerSubmission, ...]}` — rather than one flat list, so
 "only this round's answers" is a single dict lookup, with no id-based filtering step to get wrong.
 
-**Recommended extraction (decision for #7445-B, not mandated here):** `mint_resume_token` and
-`_check_pending_pause_reentry` have no coding-team-specific logic — they operate purely on a job
-record dict and a resume token. #7445-B should consider extracting them from
-`software_engineering_team/pause_cycle.py` into a new `backend/shared/hitl/pause_cycle.py`
-(alongside the existing `shared/hitl/models.py`), so Planning **imports** the primitive rather than
-duplicating it or reaching across team boundaries into `software_engineering_team`. This spec does
-not mandate the extraction's exact shape — only that Planning's implementation must not diverge in
-behavior from what's documented in §4.4 below, however the code ends up organized.
+**Mandatory extraction:** `mint_resume_token` and `_check_pending_pause_reentry` have no
+coding-team-specific logic — they operate purely on a job record dict and a resume token, so there
+is no reason for Planning to duplicate them or reach across a team boundary into
+`software_engineering_team` to import them directly (the latter would make `planning_team` depend
+on `software_engineering_team`'s internals, which is its own layering violation). **Contract
+requirement:** #7445-B MUST extract `mint_resume_token` and `_check_pending_pause_reentry` from
+`backend/agents/software_engineering_team/pause_cycle.py` into a new
+`backend/shared/hitl/pause_cycle.py` (alongside the existing `backend/shared/hitl/models.py`)
+*before or as part of* wiring Planning's contract, and MUST migrate
+`software_engineering_team/pause_cycle.py` to import from the shared location rather than leaving
+its own copy in place — as with the workflow-side state machine above, extracting a shared module
+that only the new consumer imports (while the original owner keeps its own copy) is not the
+extraction this requirement asks for. This spec does not mandate the extraction's exact function
+signatures or module layout beyond the new location — only that Planning's implementation must not
+diverge in behavior from what's documented in §4.4 below, and that both teams end up calling one
+shared implementation, not two.
 
 ### 4.3.1 Checkpointing the external PRA run before pausing
 
@@ -852,11 +906,20 @@ The primitive #7445-B builds must satisfy:
   (`DocumentProductionAgent.run` is what writes `initial_spec.md`, and it hasn't run yet).
   **Contract requirement:** the workflow must pass `context` (or the specific
   `repo_path`/`spec_content`/`initial_brief` fields) into this activity's call, not just `job_id`
-  and not `repo_path`/`spec_content` alone; the submit activity must derive `spec_to_use` with the
-  identical fallback (`spec_content or initial_brief or <same default>`) before calling `run_pra`,
-  matching `agent.py:70-72` exactly rather than reinventing the derivation. The
-  `"planning_team"`-namespaced job record is readable; scheduled by the workflow with
-  `retry_policy=NO_RETRY`.
+  and not `repo_path`/`spec_content` alone. **The `spec_to_use` derivation itself must not be
+  reimplemented a second time inside the submit activity** — doing so creates two independently
+  maintained copies of `spec_content or initial_brief or "# Specification\n\n(To be refined.)"`
+  that must stay byte-for-byte identical (§4.4), and any future change to one (a new fallback
+  source, a different default string) silently desyncs from the other, submitting PRA a different
+  spec than the resumed `document_production_activity`/`DocumentProductionAgent.run` will later
+  validate against. **Contract requirement:** extract the derivation itself into a small shared
+  helper (e.g., `planning_team.phases.document_production._derive_spec_to_use(spec_content,
+  initial_brief)`, or have the workflow compute the derived value once — in `context` — and pass
+  that single already-derived string into both the submit activity and
+  `document_production_activity`/`DocumentProductionAgent.run`, rather than each independently
+  deriving it from the same raw inputs). Either shape is acceptable; two independent
+  re-derivations of the same fallback logic is not. The `"planning_team"`-namespaced job record is
+  readable; scheduled by the workflow with `retry_policy=NO_RETRY`.
 - *Postconditions:* Checks `load_checkpoint("planning_team", job_id, "document_production_pra")`
   first. If present, returns immediately (no-op — a prior successful run already submitted). If
   absent, calls `run_pra(...)`. **`run_pra`/`run_product_analysis` returns `None` when the
