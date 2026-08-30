@@ -978,6 +978,56 @@ class TestHandleComment:
         assert fake.replies[0][0] == 2
         assert fake.resolved == ["T2"]
 
+    def test_false_positive_blocks_resolve_when_feedback_lands_after_the_reply(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer can post follow-up feedback in the window between the
+        pre-reply freshness check and the resolve call — e.g. while
+        `reply_to_review_comment` itself is in flight. The reply has already
+        been posted by then (best-effort, not undoable), but resolving on
+        top of that feedback must still be blocked, or the concern is
+        silently dropped forever."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        real_reply = fake.reply_to_review_comment
+
+        def _reply_then_inject_human_followup(**kw):
+            result = real_reply(**kw)
+            # Simulate a reviewer's follow-up landing in the window between
+            # the reply being posted and the resolve call that follows it.
+            human_followup = _comment(5, body="wait, this is still a problem")
+            fake.review_comments = [*fake.review_comments, human_followup]
+            fake.threads = [
+                replace(t, comment_ids=(*t.comment_ids, 5)) if t.id == "T2" else t
+                for t in fake.threads
+            ]
+            return result
+
+        fake.reply_to_review_comment = _reply_then_inject_human_followup  # type: ignore[assignment]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert len(fake.replies) == 1  # the reply was already posted (best-effort)
+        assert fake.resolved == []  # but never resolved over the new feedback
+
     def test_reply_targets_thread_root_not_a_later_representative_comment(
         self, address_env, monkeypatch
     ) -> None:
@@ -1231,6 +1281,39 @@ class TestRunAddressComments:
         # docstring. The real work is still surfaced via the waiting-for-review
         # label instead (see test_marks_waiting_for_review_on_retry_only_success).
         assert final and final[-1]["review_summary"]["counts"] == {}
+
+    def test_retry_resolve_blocks_on_edit_to_earlier_history_message(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A resolve-only retry's freshness check must catch a reviewer
+        editing an EARLIER message in the thread (root comment 2), not just
+        a new comment appearing — an id-only ">" comparison against the
+        Khala reply's own id can never see this, since any message that
+        predates the reply always has a lower id."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        original_root = _comment(2, body="please fix this")
+        khala_reply = _khala_reply(ac, 3)
+        edited_root = _comment(2, body="actually, use a completely different approach")
+
+        calls = {"n": 0}
+
+        def _list_review_comments(_o, _r, _n):
+            calls["n"] += 1
+            # First call: _unresolved_comments' initial snapshot (unedited).
+            # Every call after: the live re-check right before resolving
+            # sees the reviewer's edit to the root comment.
+            if calls["n"] == 1:
+                return [original_root, khala_reply]
+            return [edited_root, khala_reply]
+
+        fake.list_review_comments = _list_review_comments  # type: ignore[assignment]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == []  # blocked — never resolved over the edit
+        assert fake.labels_set == []  # not moved to waiting-for-review
 
     def test_run_wraps_body_in_liveness_heartbeat(self, address_env, monkeypatch) -> None:
         """_run_address_comments must hold a continuous heartbeat for the job while

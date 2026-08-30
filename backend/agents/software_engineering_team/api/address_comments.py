@@ -386,8 +386,16 @@ def _unresolved_comments(
             # resolve mutation failed previously. Retry resolving it only;
             # never re-triage a fix that already landed. The reply's own id
             # travels with the thread id so the caller can re-verify
-            # freshness immediately before resolving.
+            # freshness immediately before resolving. Also snapshot the
+            # thread's full history under the SAME dict retry threads share
+            # with genuinely-unresolved ones — keyed by `latest.id` (the
+            # reply's id) here — so the caller's freshness re-check can pass
+            # it as `since_history` and catch an EARLIER message being
+            # edited (not just a new one appearing), which an id-only ">"
+            # comparison against the reply's own id could never see: any
+            # message that predates the reply always has a lower id.
             retry_resolve_threads.append((thread.id, latest.id))
+            thread_history_by_comment_id[latest.id] = messages
             continue
         # `latest` is either the thread's only message so far, or newer
         # feedback a reviewer posted after an earlier Khala reply in the same
@@ -949,6 +957,32 @@ def _reply_and_resolve(
 
     resolved = True
     if replied and thread is not None:
+        # Re-check freshness a SECOND time, right before resolving: reviewer
+        # feedback can land in the window between the pre-reply check above
+        # and this point (during or just after `reply_to_review_comment`
+        # itself). The reply has already been posted by now — best-effort,
+        # not undoable — but resolving on top of feedback that arrived in
+        # that window would still close the thread over an unaddressed
+        # concern, AND (since Khala's own reply is now the latest message)
+        # the next run's latest-message check would misread the thread as
+        # already handled, silently dropping the reviewer's feedback for
+        # good. `since_comment_id=comment.id` still correctly excludes the
+        # reply just posted (it postdates comment.id but is Khala's own).
+        if _thread_has_new_reviewer_feedback(
+            client,
+            request.owner,
+            request.repo,
+            request.pr_number,
+            thread.id,
+            comment.id,
+            thread_history if thread_history is not None else [comment],
+        ):
+            logger.info(
+                "address-comments: skipping resolve on thread %s — newer reviewer "
+                "feedback appeared after the reply was posted",
+                thread.id,
+            )
+            return False
         try:
             resolved = client.resolve_review_thread(thread.id)
         except Exception as e:  # noqa: BLE001 - resolve is best-effort; honor "never raises"
@@ -1358,7 +1392,13 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             retry_resolve_ok = True
             for thread_id, khala_reply_id in retry_resolve_threads:
                 if _thread_has_new_reviewer_feedback(
-                    client, owner, repo, pr_number, thread_id, khala_reply_id
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    thread_id,
+                    khala_reply_id,
+                    thread_history_by_comment_id.get(khala_reply_id),
                 ):
                     logger.info(
                         "address-comments: skipping resolve-retry on thread %s — newer "
