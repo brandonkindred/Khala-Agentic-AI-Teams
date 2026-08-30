@@ -283,6 +283,15 @@ bars[symbol][entry_bar].open`. If the predicate matches on the final bar of
 `bars[symbol]`, there is no next bar to fill on and this module opens no
 position for that trigger (the same end-of-data handling as `signal_exit`).
 
+**Suppression while a position is open or pending.** An entry rule that
+keeps matching on later bars while the symbol already has an open position,
+or already has an entry queued from a prior bar's trigger not yet filled,
+must **not** open a second, overlapping position — mirrors
+`_EngineEntryDispatcher.maybe_emit`'s two gates (`portfolio.positions.get(sym)
+is not None` and an already-queued same-symbol entry). Without this, a
+predicate that stays true for several consecutive bars would open one
+production position but many overlapping reference ones.
+
 **Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
 against a running equity figure it tracks itself — seeded at
 `starting_equity`, then marked to market at each entry-sizing decision using
@@ -313,14 +322,25 @@ reference fill's next-bar-open resolution one bar later):
   yet), fall back to a one-share probe instead of failing, then still run it
   through the whole-share/`max_position_pct` handling below.
 
-Whole-share handling mirrors production's cap-aware floor, not a blanket
-skip: a raw quantity `>= 1` floors down to `int(qty)`. A raw quantity `< 1`
-on a non-fractional asset class is **promoted to one share** if that one
-share still satisfies `max_position_pct` (re-checked at exactly one share,
-since flooring up can itself re-breach the cap), and only **skipped** (no
-entry) if even one share would breach it. A fractional-capable asset class
-(crypto/forex) instead keeps the raw, uncapped-floor quantity as-is (dropped
-to zero only if the cap itself drove it to zero or below).
+**Position-cap clamp, applied first.** Before any whole-share handling, the
+raw quantity from every sizing kind above — not just a sub-1 result — is
+clamped so its notional does not exceed `equity * max_position_pct / 100`
+at the trigger bar's close: `qty = min(raw_qty, equity * max_position_pct /
+100 / trigger_bar.close)`, mirroring `_cap_qty_to_position`. This applies
+unconditionally to all three sizing kinds this module models (fixed-fraction,
+fixed-notional, volatility-target) — a `FixedNotionalSizing`
+or `VolatilityTargetSizing` result above the cap must be reduced, not passed
+through uncapped.
+
+Whole-share handling, applied after the clamp above, mirrors production's
+cap-aware floor rather than a blanket skip: a clamped quantity `>= 1` floors
+down to `int(qty)`. A clamped quantity `< 1` on a non-fractional asset class
+is **promoted to one share** if that one share still satisfies
+`max_position_pct` (re-checked at exactly one share, since flooring up can
+itself re-breach the cap), and only **skipped** (no entry) if even one
+share would breach it. A fractional-capable asset class (crypto/forex)
+instead keeps the raw, uncapped-floor quantity as-is (dropped to zero only
+if the cap itself drove it to zero or below).
 
 ### Exit aggregation
 
@@ -357,6 +377,32 @@ only a partially-reduced remainder from earlier rungs — produces **no**
 `ReferenceTrade` at all, matching production's `open_position_entry_reasons`
 handling rather than a synthetic force-close.
 
+### Per-bar evaluation order
+
+Two ordering rules this module must enforce, both to stay behaviorally
+identical to production, not just directionally similar:
+
+- **Queued fills resolve before this bar's own rule evaluation.** An entry
+  or `signal_exit` triggered on the prior bar fills at *this* bar's open
+  first; only after that does this bar's own resting-order/bar-close
+  evaluation run (stop/take-profit/scaled-rung triggers, bracket-leg
+  reachability, this bar's own entry/signal-exit predicate checks). A
+  position a queued fill closes at this bar's open is gone before any other
+  rule on this same bar gets a chance to fire against it — mirrors
+  production's per-bar step order (submit-and-fill the previous bar's queued
+  orders, *then* evaluate this bar's rules).
+- **No exit rule is eligible on a position's own `entry_bar`.** Every exit
+  rule kind — `stop_loss`/`take_profit`/`scaled_take_profit`/`signal_exit`
+  evaluation, and bracket-leg reachability alike — first becomes eligible at
+  `entry_bar + 1`, never on `entry_bar` itself, regardless of what that
+  bar's own range would otherwise trigger. This unifies two production
+  mechanisms this module doesn't import but must reproduce the effect of:
+  the dispatcher's `just_opened` gate (skips all bar-by-bar rule evaluation
+  on the bar a position first appears) and the bracket-child submission
+  guard (a bracket's children are stamped with the entry-fill bar's own
+  timestamp and are skipped whenever their submission bar isn't strictly
+  earlier than the bar being evaluated).
+
 ### `stop_loss`
 
 Covers all `basis` × `style` combinations from `StopLossRule`. Unlike a
@@ -378,8 +424,14 @@ fill.
   for a long's trailing-high stop, `min` of `bar.low` for a short's
   trailing-low stop) and re-derive the effective stop level from it each
   bar, since the reused decision evaluator is stateless per call and does
-  not itself carry this history. Fill-price/fill-bar rule is otherwise
-  identical to the static case above.
+  not itself carry this history. **Evaluate-then-extend ordering matters**:
+  each bar's trigger check must run against the watermark **as of the prior
+  bar** — not yet including this bar's own high/low — and only *after* that
+  check does the watermark extend with this bar's high/low, for the next
+  bar to see. Updating the watermark before the check would let a bar's own
+  favorable extreme raise the stop and then have the same bar's opposite
+  extreme trigger it, misreading an ordinary bar as a stop-out. Fill-price/
+  fill-bar rule is otherwise identical to the static case above.
 - **`style="limit"`**: modeled as a resting stop-limit (restricted, per
   `StopLossRule`'s own validation, to `basis="entry_price"` — a limit-style
   stop cannot trail). The limit sits on the protective side of the stop:
@@ -476,6 +528,13 @@ breaks that tie the same way production's bracket materialization does (the
 stop-loss child is submitted before the take-profit child, and pending
 orders are then processed in that same order): **on a same-bar double-touch,
 the stop leg wins.**
+
+**Eligibility starts at `entry_bar + 1`, not `entry_bar` itself** — see the
+"Per-bar evaluation order" subsection above. A bracket's levels can look
+already touched by the entry bar's own range, but production's children are
+stamped with the entry-fill bar's timestamp and cannot fire on that same
+bar; this module must reproduce that deferral rather than closing the
+position on `entry_bar`.
 
 ## 6. Forward references
 
