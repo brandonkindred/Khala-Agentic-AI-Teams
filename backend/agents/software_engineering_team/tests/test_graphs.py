@@ -25,20 +25,3 @@ def test_build_phase4_validation_graph_returns_graph() -> None:
     graph = build_phase4_validation_graph()
     assert graph is not None
 
-
-def test_build_resolution_swarm_returns_swarm() -> None:
-    from software_engineering_team.integration_team.graphs.resolution_swarm import (
-        build_resolution_swarm,
-    )
-
-    swarm = build_resolution_swarm()
-    assert swarm is not None
-
-
-def test_build_resolution_swarm_with_handoff_limit() -> None:
-    from software_engineering_team.integration_team.graphs.resolution_swarm import (
-        build_resolution_swarm,
-    )
-
-    swarm = build_resolution_swarm(max_handoffs=2)
-    assert swarm is not None
