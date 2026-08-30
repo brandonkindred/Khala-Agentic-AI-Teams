@@ -246,6 +246,17 @@ whose persisted `allow_multiple` is falsy, and reject (400) a submission that se
 two fields are mutually exclusive per answer, selected by the question's own `allow_multiple`, not
 freely combinable by the client.
 
+**Duplicate ids within `selected_option_ids` must also be rejected, not silently accepted.**
+Per-id membership validation (above) accepts `selected_option_ids=["postgres", "postgres"]` without
+complaint — each id individually is a valid option — but PRA's own `apply_answers`
+(`user_communication.py:210-219`) iterates the list unmodified: `postgres` appears twice in
+`selected_labels`, and the joined `selected_answer` becomes a malformed
+`"Postgres; Postgres"` that then flows into the persisted `AnsweredQuestion` and any generated
+artifact built from it. **Contract requirement:** `validate_answers` must reject (400) a
+`selected_option_ids` list containing a repeated id (`"other"` included), rather than dedupe it
+silently — a client submitting the same option twice is a malformed request, not one this contract
+should quietly correct into a different, unrequested answer.
+
 **This must be enforced at PRA's own public endpoint too, not only in the shared validator.**
 PRA's answers route (`api/routes/product_analysis.py:238-288`) does **not** call
 `shared.hitl.validation.validate_answers` — it performs its own inline validation (pending/required/
