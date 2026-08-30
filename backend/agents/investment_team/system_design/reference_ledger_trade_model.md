@@ -78,10 +78,15 @@ def simulate(
   paired with a spec only at the backtest-orchestration layer, not part of
   `StrategySpec` itself. A caller reproducing a specific backtest run passes
   that run's `BacktestConfig.initial_capital` through as `starting_equity`.
-- Return value: one `ReferenceTrade` per closed trade, in emission order. A
-  scaled-take-profit ladder emits one row per fired rung (mirroring how
-  production emits one `TradeRecord` per rung close), never a nested
-  sub-fills list.
+- Return value: one `ReferenceTrade` per **fully closed** position, in
+  emission order — never one row per partial exit. A position reduced by one
+  or more `scaled_take_profit` rungs before its final closing event
+  aggregates into a single row (§5's "Exit aggregation" subsection), the
+  same way production only builds a `TradeRecord` once `pos.is_closed`. A
+  position still open when `bars[symbol]` runs out produces **no** row at
+  all — mirroring production, which reports it via
+  `TradingServiceResult.open_position_entry_reasons` instead of a
+  `TradeRecord`, not as a synthetic force-close.
 
 ### Cross-symbol processing order
 
@@ -154,9 +159,12 @@ no import chain back into the excluded modules above before relying on it.
   symbol.
 - Every `ReferenceTrade` satisfies `0 <= entry_bar <= exit_bar <
   len(bars[symbol])`.
-- A fired ladder rung produces its own `ReferenceTrade`, sharing the
-  position's `entry_bar`/`entry_price` with its sibling rungs but carrying a
-  distinct `level_index`.
+- Each fully closed position produces exactly one `ReferenceTrade` — a
+  position reduced by prior `scaled_take_profit` rungs aggregates them into
+  a single row (§5's "Exit aggregation" subsection) rather than emitting one
+  per rung.
+- A position still open at `bars[symbol]`'s last bar produces no
+  `ReferenceTrade` for that position.
 - No forbidden import (§2 Exclusions) occurs as a result of calling
   `simulate`.
 
@@ -185,14 +193,14 @@ inconsistent record silently.
 | `side` | `Literal["long", "short"]` | `side` | Verbatim (production stores a plain `str`; this is the stricter reference form). |
 | `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Primary key for this module's own bookkeeping (ladder rungs, per-position running state). |
 | `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where this trade (or rung) closed. |
-| `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp` — the actual comparison key against production, since `TradeRecord` carries no bar index. |
-| `exit_date` | `str` | `exit_date` | `bars[symbol][exit_bar].timestamp`. |
+| `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp[:10]` — truncated to the date portion exactly as production does (`pos.entry_timestamp[:10]`), so an intraday `Bar.timestamp` still matches production's date-only comparison key. |
+| `exit_date` | `str` | `exit_date` | `bars[symbol][exit_bar].timestamp[:10]`, truncated the same way (`bar.timestamp[:10]` in `_fill_exit`). |
 | `entry_price` | `float` | `entry_bid_price` | Pre-slippage reference level — **not** `entry_fill_price` or the legacy `entry_price` alias (both are post-slippage in production). See rationale below. |
-| `exit_price` | `float` | `exit_bid_price` | Same pre-slippage correspondence. |
-| `qty` | `float` | `shares` | Renamed to match this module's own vocabulary (`ExitIntent.qty_fraction`, `PositionState.qty`); the matching module maps `qty` ↔ `shares`. Entry quantity resolution is specified in §5's "Entries" subsection. |
-| `exit_rule_kind` | `Optional[str]` | *(none — derived from `exit_reason` today)* | One of the values in §4's vocabulary table. `None` only for a trade force-closed with no rule firing (e.g. ran off the end of `bars`). |
-| `exit_rule_index` | `Optional[int]` | *(none)* | Which `spec.exit_rules[i]` fired — mirrors `ExitIntent.rule_index`. `None` iff `exit_rule_kind` is `None`. |
-| `level_index` | `Optional[int]` | *(none)* | Set only when `exit_rule_kind == "scaled_take_profit"`, identifying which ladder rung fired — mirrors `ExitIntent.level_index`. |
+| `exit_price` | `float` | `exit_bid_price` | Pre-slippage reference level. For a position closed in one shot this is that close's reference price; for a position that passed through one or more `scaled_take_profit` rungs first, this is the quantity-weighted average across every partial exit and the final close (§5's "Exit aggregation" subsection), mirroring `pos.weighted_avg_exit_price`. |
+| `qty` | `float` | `shares` | Equals the position's entry quantity (`original_qty`), **not** the remaining size after any partial rungs — mirrors production's `TradeRecord.shares = pos.original_qty`. Entry quantity resolution is specified in §5's "Entries" subsection. |
+| `exit_rule_kind` | `str` | *(none — derived from `exit_reason` today)* | One of the values in §4's vocabulary table, always populated — every closed position in this model closes via some exit rule (there is no strategy-emitted arbitrary close path here). Describes only the position's final closing event (§5's "Exit aggregation"), not any earlier partial rung. |
+| `exit_rule_index` | `int` | *(none)* | Which `spec.exit_rules[i]` fired the final close — mirrors `ExitIntent.rule_index`. |
+| `level_index` | `Optional[int]` | *(none)* | Set only when the position's final closing event was itself a `scaled_take_profit` rung, identifying which rung — mirrors `ExitIntent.level_index`. `None` whenever some other rule kind performed the final close, even if earlier rungs fired first. |
 
 **Why `entry_price`/`exit_price` map to the bid fields, not the fill fields:**
 production's `entry_fill_price`/`exit_fill_price` (and their legacy
@@ -228,7 +236,9 @@ free text (superseded by the structured `exit_rule_kind`/`exit_rule_index`/
 - `qty > 0`.
 - `entry_price > 0` and `exit_price > 0`.
 - `side in ("long", "short")`.
-- `exit_rule_kind is None` if and only if `exit_rule_index is None`.
+- `exit_rule_kind` and `exit_rule_index` are always populated (every emitted
+  `ReferenceTrade` represents a fully closed position, and full closure
+  always happens via some exit rule firing).
 - `level_index is not None` implies `exit_rule_kind == "scaled_take_profit"`.
 
 ## 4. `exit_rule_kind` vocabulary
@@ -312,6 +322,41 @@ entry) if even one share would breach it. A fractional-capable asset class
 (crypto/forex) instead keeps the raw, uncapped-floor quantity as-is (dropped
 to zero only if the cap itself drove it to zero or below).
 
+### Exit aggregation
+
+A position may be reduced by zero or more `scaled_take_profit` rungs before
+it is finally, fully closed — either by the ladder's own last rung, or by
+an unrelated full-position exit rule (`stop_loss`, `take_profit`,
+`signal_exit`, or an `oco_bracket` leg) firing first and closing all
+remaining quantity in one shot. Every other exit rule kind is always a
+full-position close; only `scaled_take_profit` rungs are partial.
+
+`simulate` emits a `ReferenceTrade` **only when a position is fully
+closed** — mirroring `FillSimulator._fill_exit`, which returns
+`trade_record=None` for every partial close and builds exactly one
+`TradeRecord` only once `pos.is_closed`, using `pos.original_qty` and
+`pos.weighted_avg_exit_price`. Concretely, for that one emitted record:
+
+- `qty` is the position's entry quantity (`original_qty`), unreduced by any
+  earlier partial rungs.
+- `exit_price` is the quantity-weighted average of every partial exit's
+  price (each rung's fill, plus the final closing fill), weighted by the
+  quantity each one closed — trivially just that single price when the
+  position closes in one shot with no prior rungs.
+- `exit_bar`/`exit_date` are the bar of the **final** closing event, not any
+  earlier rung.
+- `exit_rule_kind`/`exit_rule_index`/`level_index` describe **only** the
+  final closing event — a `scaled_take_profit` ladder whose last two rungs
+  fired sets `exit_rule_kind="scaled_take_profit"` with the last rung's
+  `level_index`; a `stop_loss` that closes out the remainder after two
+  earlier rungs already fired instead sets `exit_rule_kind="stop_loss"` with
+  no `level_index`, even though rungs contributed to `exit_price`.
+
+A position still open at `bars[symbol]`'s last bar — including one holding
+only a partially-reduced remainder from earlier rungs — produces **no**
+`ReferenceTrade` at all, matching production's `open_position_entry_reasons`
+handling rather than a synthetic force-close.
+
 ### `stop_loss`
 
 Covers all `basis` × `style` combinations from `StopLossRule`. Unlike a
@@ -380,10 +425,11 @@ advances the cursor by exactly one rung even if the bar's range would have
 cleared several rungs at once — this module must maintain that same
 one-rung-per-position-per-bar advancement rule, matching the counter's
 semantics rather than firing every technically-reachable rung in one step.
-Each fired rung emits its own `ReferenceTrade` (§3), sharing `entry_bar`/
-`entry_price` with its siblings but carrying a distinct `level_index`. Fill
-price for a firing rung follows the same exact-price rule as standalone
-`take_profit`. Fill bar is the trigger bar.
+Fill price for a firing rung follows the same exact-price rule as
+standalone `take_profit`; fill bar is the trigger bar. A fired rung does
+**not** emit its own `ReferenceTrade` — see the "Exit aggregation"
+subsection above for how rungs feed into the single record eventually
+emitted when the position is fully closed.
 
 ### `signal_exit`
 
