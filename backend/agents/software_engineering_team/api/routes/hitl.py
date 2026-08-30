@@ -6,23 +6,19 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from planning_team.temporal.answer_signal import SUBMIT_PLANNING_ANSWERS_SIGNAL
-from shared.hitl.progress import coerce_progress
-from shared.hitl.status import pending_questions_from_raw
 from shared.hitl.validation import validate_answers
 from shared.temporal.runner import signal_workflow_sync
 from software_engineering_team.api.models import (
     AutoAnswerRequest,
     AutoAnswerResponse,
-    FailedTaskDetail,
     JobStatusResponse,
     SubmitAnswersRequest,
-    TaskStateEntry,
-    TeamProgressEntry,
 )
 from software_engineering_team.api.state import (
     _get_spec_content_for_job,
     _is_orchestrator_alive,
     _real_question_options,
+    build_job_status_response,
 )
 from software_engineering_team.shared.job_store import (
     append_submitted_answers as store_append_submitted_answers,
@@ -36,43 +32,6 @@ from software_engineering_team.temporal.constants import WORKFLOW_ID_PREFIX_RUN_
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def _job_status_response(job_id: str, updated_data: dict) -> JobStatusResponse:
-    """Build the ``JobStatusResponse`` this route returns, from a fresh ``get_job`` read."""
-    return JobStatusResponse(
-        job_id=job_id,
-        status=updated_data.get("status", "running"),
-        repo_path=updated_data.get("repo_path"),
-        requirements_title=updated_data.get("requirements_title"),
-        architecture_overview=updated_data.get("architecture_overview"),
-        current_task=updated_data.get("current_task"),
-        status_text=updated_data.get("status_text"),
-        task_results=updated_data.get("task_results", []),
-        task_ids=updated_data.get("execution_order", []),
-        progress=coerce_progress(updated_data.get("progress")),
-        error=updated_data.get("error"),
-        failed_tasks=[FailedTaskDetail(**ft) for ft in updated_data.get("failed_tasks", [])],
-        phase=updated_data.get("phase"),
-        task_states={
-            k: TaskStateEntry(**v) for k, v in (updated_data.get("task_states") or {}).items()
-        }
-        if updated_data.get("task_states")
-        else None,
-        team_progress={
-            k: TeamProgressEntry(**v) for k, v in (updated_data.get("team_progress") or {}).items()
-        }
-        if updated_data.get("team_progress")
-        else None,
-        pending_questions=pending_questions_from_raw(updated_data.get("pending_questions", [])),
-        waiting_for_answers=updated_data.get("waiting_for_answers", False),
-        resume_token=updated_data.get("resume_token"),
-        planning_subprocess=updated_data.get("planning_subprocess"),
-        planning_completed_phases=updated_data.get("planning_completed_phases") or [],
-        analysis_subprocess=updated_data.get("analysis_subprocess"),
-        analysis_completed_phases=updated_data.get("analysis_completed_phases") or [],
-        planning_hierarchy=updated_data.get("planning_hierarchy"),
-    )
 
 
 @router.post(
@@ -124,13 +83,19 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
                 detail="resume_token does not match this job's current pause; it is stale or "
                 "answers a pause that already resolved.",
             )
-        store_append_submitted_answers(job_id, answers_dicts)
+        # Signal first: it is the durable, resuming action (the workflow's own signal
+        # handler owns applying the answers). If this succeeds but the audit-trail append
+        # below fails, the workflow has still resumed -- the more important half. The
+        # reverse order would risk the opposite failure: answers already persisted (and
+        # rejected as a duplicate by validate_answers on any retry) while the workflow,
+        # never signaled, stays paused forever.
         signal_workflow_sync(
             f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}",
             SUBMIT_PLANNING_ANSWERS_SIGNAL,
             {"resume_token": resume_token, "answers": answers_dicts},
         )
-        return _job_status_response(job_id, get_job(job_id))
+        store_append_submitted_answers(job_id, answers_dicts)
+        return build_job_status_response(job_id, get_job(job_id))
 
     store_submit_answers(job_id, answers_dicts)
 
@@ -150,7 +115,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
             status_text="Answers received. Resume the job to continue processing.",
         )
 
-    return _job_status_response(job_id, get_job(job_id))
+    return build_job_status_response(job_id, get_job(job_id))
 
 
 @router.post(

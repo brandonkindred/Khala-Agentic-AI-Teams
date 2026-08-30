@@ -636,12 +636,11 @@ def _plan_project_activity_body(
         from software_engineering_team.orchestrator import _structure_planning_questions
 
         structured = _structure_planning_questions(exc.pending_questions, source="planning")
-        add_pending_questions(job_id, structured)
-        # Persisted separately from add_pending_questions' own atomic write (the shared
-        # run-team job store has no combined call for both) so POST /run-team/{job_id}/answers
-        # has something to key a Temporal-native-vs-thread-mode decision on, matching the
-        # coding team's resume_token convention (pause_cycle._run_pause_cycle).
-        update_job(job_id, resume_token=exc.resume_token)
+        # resume_token is persisted in the SAME atomic write as waiting_for_answers/
+        # pending_questions (add_pending_questions' resume_token param) so a client polling
+        # POST /run-team/{job_id}/answers between two separate writes can never observe a
+        # pause with no token to key its Temporal-native-vs-thread-mode decision on.
+        add_pending_questions(job_id, structured, resume_token=exc.resume_token)
         return {
             "outcome": "paused",
             "resume_token": exc.resume_token,

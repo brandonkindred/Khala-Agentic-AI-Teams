@@ -125,6 +125,7 @@ def run_workflow(
         wait_for_ai_systems_build_completion,
         wait_for_product_analysis_completion,
     )
+    from planning_team.exceptions import PlanningAnswerPauseSignal
     from planning_team.phases import (
         run_discovery,
         run_document_production,
@@ -133,7 +134,6 @@ def run_workflow(
         run_sub_agent_provisioning,
         run_synthesis,
     )
-    from planning_team.temporal.answer_signal import PlanningAnswerPauseSignal
 
     def _update(phase: str, progress: int, status_text: str = "") -> None:
         if job_updater:

@@ -997,7 +997,7 @@ def test_plan_project_activity_pauses_on_planning_clarification_question(
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
-    js.create_job("pp-pause", repo_path=str(tmp_path))
+    js.create_job("pp-pause", repo_path=str(tmp_path), job_type="run_team")
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     monkeypatch.setattr(
         "software_engineering_team.orchestrator._get_agents",
@@ -1054,7 +1054,7 @@ def test_plan_project_activity_resumes_with_submitted_answers(
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
-    js.create_job("pp-resume", repo_path=str(tmp_path))
+    js.create_job("pp-resume", repo_path=str(tmp_path), job_type="run_team")
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     monkeypatch.setattr(
         "software_engineering_team.orchestrator._get_agents",

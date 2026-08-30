@@ -60,7 +60,7 @@ def test_get_submitted_answers_coerces_none_and_missing() -> None:
 
 
 def test_make_cachedir_hitl_binds_cachedir_wrappers() -> None:
-    """The factory both team job-stores use returns four cache_dir-keyed wrappers
+    """The factory both team job-stores use returns five cache_dir-keyed wrappers
     that delegate to the client the getter yields, with public wrapper names."""
     seen: dict = {}
 
@@ -68,14 +68,17 @@ def test_make_cachedir_hitl_binds_cachedir_wrappers() -> None:
         seen["cache_dir"] = cache_dir
         return _FakeClient(job={"waiting_for_answers": True, "submitted_answers": [7]})
 
-    add, submit, waiting, get = shared_job_store.make_cachedir_hitl(_getter, "/default/cache")
+    add, submit, waiting, get, append = shared_job_store.make_cachedir_hitl(
+        _getter, "/default/cache"
+    )
 
     # __name__ preserved for clean tracebacks/introspection.
-    assert (add.__name__, submit.__name__, waiting.__name__, get.__name__) == (
+    assert (add.__name__, submit.__name__, waiting.__name__, get.__name__, append.__name__) == (
         "add_pending_questions",
         "submit_answers",
         "is_waiting_for_answers",
         "get_submitted_answers",
+        "append_submitted_answers",
     )
     # Default cache_dir flows to the getter; delegation reaches the client.
     assert waiting("j") is True
@@ -84,3 +87,17 @@ def test_make_cachedir_hitl_binds_cachedir_wrappers() -> None:
     # An explicit cache_dir overrides the default.
     waiting("j", cache_dir="/other")
     assert seen["cache_dir"] == "/other"
+
+
+def test_add_pending_questions_persists_resume_token_atomically() -> None:
+    """A supplied resume_token is merged into the SAME atomic write as
+    waiting_for_answers -- never a separate call -- so a client polling between two
+    writes can never observe the pause flag without the token that identifies it."""
+    client = _FakeClient()
+    shared_job_store.add_pending_questions(client, "j", [{"q": "1"}], resume_token="j:tok-1")
+    assert client.updates == [
+        {
+            "merge": {"waiting_for_answers": True, "resume_token": "j:tok-1"},
+            "append": {"pending_questions": [{"q": "1"}]},
+        }
+    ]

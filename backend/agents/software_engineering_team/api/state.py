@@ -16,7 +16,7 @@ import os
 import re
 import tempfile
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -25,9 +25,12 @@ from pydantic import ValidationError
 
 from shared.concurrency import BackgroundHeartbeat
 from shared.hitl.progress import coerce_progress
+from shared.hitl.status import pending_questions_from_raw
 from shared.run_thread_registry import RunThreadRegistry
 from software_engineering_team.api.models import (
     CurrentActivityEntry,
+    FailedTaskDetail,
+    JobStatusResponse,
     TaskStateEntry,
     TeamProgressEntry,
 )
@@ -261,6 +264,83 @@ def _coerce_current_activity(value: Any) -> Optional[CurrentActivityEntry]:
     except ValidationError:
         logger.warning("Malformed current_activity on job record (ignored): %r", value)
         return None
+
+
+def build_job_status_response(job_id: str, data: Dict[str, Any]) -> JobStatusResponse:
+    """Build the ``JobStatusResponse`` for a run-team job from a fresh ``get_job`` read.
+
+    Single source for turning a raw job record into the response both
+    ``GET /run-team/{job_id}`` (``routes/jobs.py``) and
+    ``POST /run-team/{job_id}/answers`` (``routes/hitl.py``) return, so the two can
+    never drift on which fields they surface (e.g. ``server_time``, ``current_activity``).
+
+    Preconditions: ``data`` is a non-``None`` job record (callers already 404 on a
+        missing job before calling this).
+    Postconditions: returns a fully populated ``JobStatusResponse``; every field
+        degrades to a safe default (``None``/``[]``/``False``) rather than raising when
+        the underlying stored value is missing or malformed. ``server_time`` is always
+        the current UTC instant, not a stored value.
+    """
+    raw_failed = data.get("failed_tasks") or []
+    failed_tasks = [
+        FailedTaskDetail(
+            task_id=str(ft.get("task_id", "")),
+            title=str(ft.get("title", "")) if ft.get("title") is not None else "",
+            reason=str(ft.get("reason", "")) if ft.get("reason") is not None else "",
+        )
+        for ft in raw_failed
+        if isinstance(ft, dict)
+    ]
+
+    execution_order = data.get("execution_order")
+    task_ids = list(execution_order) if isinstance(execution_order, list) else []
+
+    task_states_parsed = _parse_task_states(data.get("task_states"))
+    team_progress_parsed = _parse_team_progress(data.get("team_progress"))
+
+    # Materialize via the shared helper: model_validate keeps EVERY stored field
+    # (including recommendation/allow_multiple, which a hand-enumeration would
+    # silently drop) and still defensively skips non-dict entries.
+    raw_pending_questions = data.get("pending_questions", [])
+    pending_questions_parsed = pending_questions_from_raw(raw_pending_questions)
+
+    payload: Dict[str, Any] = {
+        "job_id": str(job_id),
+        "status": str(data.get("status", JOB_STATUS_PENDING)),
+        "repo_path": data.get("repo_path"),
+        "requirements_title": data.get("requirements_title"),
+        "architecture_overview": data.get("architecture_overview"),
+        "current_task": data.get("current_task"),
+        "status_text": data.get("status_text"),
+        "task_results": data.get("task_results")
+        if isinstance(data.get("task_results"), list)
+        else [],
+        "task_ids": task_ids,
+        "progress": _coerce_progress(data.get("progress")),
+        "error": data.get("error"),
+        "failed_tasks": [ft.model_dump() for ft in failed_tasks],
+        "phase": data.get("phase"),
+        "task_states": {k: v.model_dump() for k, v in task_states_parsed.items()}
+        if task_states_parsed
+        else None,
+        "team_progress": {k: v.model_dump() for k, v in team_progress_parsed.items()}
+        if team_progress_parsed
+        else None,
+        "pending_questions": [pq.model_dump() for pq in pending_questions_parsed],
+        "waiting_for_answers": bool(data.get("waiting_for_answers", False)),
+        "resume_token": data.get("resume_token"),
+        "planning_subprocess": data.get("planning_subprocess"),
+        "planning_completed_phases": data.get("planning_completed_phases") or [],
+        "analysis_subprocess": data.get("analysis_subprocess"),
+        "analysis_completed_phases": data.get("analysis_completed_phases") or [],
+        "planning_hierarchy": data.get("planning_hierarchy"),
+        "current_activity": _coerce_current_activity(data.get("current_activity")),
+        "last_activity_at": data.get("last_activity_at"),
+        "updated_at": data.get("updated_at"),
+        "last_heartbeat_at": data.get("last_heartbeat_at"),
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    }
+    return JobStatusResponse.model_validate(payload)
 
 
 RESUMABLE_STATUSES = (
