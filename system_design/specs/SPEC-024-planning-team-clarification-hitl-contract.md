@@ -216,9 +216,17 @@ that submits directly to PRA's public endpoint (bypassing Planning's route and i
 shared validator entirely) could therefore still submit plural choices for a single-select question
 or set both fields, and `apply_answers` (§4.1, above) would accept it. **Contract requirement:**
 `api/routes/product_analysis.py`'s answers route must either call `shared.hitl.validation.validate_answers`
-in place of its current inline checks, or replicate the same multiplicity/mutual-exclusion
-validation inline — the fix cannot live in the shared validator alone while PRA's own route
-bypasses it.
+in place of its current inline checks, or replicate **the validator's full answer-validity surface**
+inline — not just the multiplicity/mutual-exclusion checks above, but every check
+`validate_answers` performs: each plural id's membership in the question's own options
+(`validation.py:92-99`, mirrored for `selected_option_ids`), the `"other"` special case requiring
+non-blank text (`validation.py:86-91`), *and* multiplicity/mutual-exclusion. PRA's own existing
+inline checks (`:258-278`) validate only question-level id membership (which question was
+answered), never option-level validity (which choice within that question) — an inline replica
+that covers only multiplicity would still let a direct PRA caller submit an unknown option id or an
+`"other"` with no text; `apply_answers` silently drops an unknown id into an `"Unknown"` decision
+rather than rejecting it, and the endpoint clears the wait regardless. The fix cannot live in the
+shared validator alone while PRA's own route bypasses it, and cannot be partial when it doesn't.
 
 **Why the same name, not `planning_submit_answers` or similar:** `backend/shared/hitl/models.py`
 was deliberately built as a cross-team superset so both teams share one vocabulary. A single
@@ -338,6 +346,20 @@ appending to a `submitted_answers` job-record field — before delivering the `s
 signal; this is a required part of the contract, not an implementation detail #7445-B is free to
 skip. Without it, `resolve_pra_answers(..., answer_callback=<from job record>)` on resume has
 nothing to read and the resume path silently regresses to auto-answering.
+
+**Reject a stale or mismatched `resume_token` before persisting, not after.** The route must also
+mirror the coding team's own request-level check
+(`api/routes/coding_team_hitl.py:56-62`: `if request.resume_token != resume_token: raise
+HTTPException(409, ...)`), comparing the submitted `resume_token` against the job record's
+*currently active* `resume_token` **before** doing the persist-then-signal write above — not merely
+relying on question-id validation to catch a stale submission. A later PRA round can reuse
+question ids from an earlier round (§4.3's already-flagged `q{index}` collision risk), so a client
+submitting against a stale, already-resolved `resume_token` can still pass id-membership validation
+against the *current* round's `pending_questions` purely by coincidence, and — without this check —
+would be written under the wrong (old) token, return success to the caller, and never wake the
+workflow (which is asleep waiting on the *current* token, not the stale one). **Contract
+requirement:** a missing or mismatched `resume_token` must be rejected with `409` before any write,
+exactly as the coding team's route already does.
 
 **The persist step must be first-write-wins, not last-write-wins.** Two clients can race to submit
 answers for the same `resume_token` (a stale UI retry, a double-click, a legitimate second
@@ -623,11 +645,19 @@ replay that now schedules a new activity command first, **even if `document_prod
 itself is called with its old argument shape** on that branch. So the single new patch marker (e.g.
 `_CLARIFICATION_PAUSE_PATCH`) must gate the *whole* new sequence: on `not workflow.patched(...)`,
 skip `document_production_pra_submit_activity` entirely and call `document_production_activity`
-exactly as today (old args, no resume loop); on the patched branch, schedule the submit activity
-first, then run the new `request`-dict call and retry/continuation loop of §4.3. This exactly
-mirrors `_PER_PHASE_PATCH`'s own legacy branch, which replays its entire old single-activity
-sequence rather than cherry-picking pieces of the new one — reused a second time in the same
-workflow, not invented anew.
+exactly as today (old args, no resume loop); on the patched branch **and only when
+`use_product_analysis` is `True`** (§4.3.1's conditional-submission requirement applies here
+unchanged — a patched execution with `use_product_analysis=False` must skip
+`document_production_pra_submit_activity` exactly as the legacy branch does, for the same reason:
+no checkpoint is expected, and scheduling the submit activity for an explicit opt-out would submit
+an external PRA job the caller never asked for), schedule the submit activity first, then run the
+new `request`-dict call and retry/continuation loop of §4.3. So there are three sequences, not two:
+legacy (old args, no submit activity, no resume loop), patched+PRA-disabled (`request`-dict call,
+no submit activity, no resume loop — PRA never engages so nothing to pause on), and
+patched+PRA-enabled (submit activity, then `request`-dict call with the full retry/continuation
+loop). This exactly mirrors `_PER_PHASE_PATCH`'s own legacy branch, which replays its entire old
+single-activity sequence rather than cherry-picking pieces of the new one — reused a second time in
+the same workflow, not invented anew.
 
 **`workflow.patched` alone is not sufficient — the activity worker needs its own compatibility
 path.** `workflow.patched` only governs what a *workflow* schedules on replay; it says nothing
