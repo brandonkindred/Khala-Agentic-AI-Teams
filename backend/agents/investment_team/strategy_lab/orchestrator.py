@@ -677,12 +677,17 @@ class StrategyLabOrchestrator(
                 # drift from a prior failed attempt cannot poison it. When
                 # resuming, seed it with the checkpoint's own history first --
                 # that converged work is real provenance for this attempt's
-                # (reused) spec, not drift from a discarded attempt.
+                # (reused) spec, not drift from a discarded attempt. Captured
+                # in a per-iteration local (rather than read back off
+                # ``pending_resume_drift_seed`` in the except block below)
+                # because that variable gets overwritten for the *next*
+                # attempt before this attempt's failure is handled.
                 attempt_drift = drift_collector.snapshot()
-                if pending_resume_drift_seed is not None:
-                    attempt_drift.spec_history.extend(pending_resume_drift_seed.spec_history)
-                    attempt_drift.code_history.extend(pending_resume_drift_seed.code_history)
-                    attempt_drift.gate_timeline.extend(pending_resume_drift_seed.gate_timeline)
+                resume_drift_seed_for_attempt = pending_resume_drift_seed
+                if resume_drift_seed_for_attempt is not None:
+                    attempt_drift.spec_history.extend(resume_drift_seed_for_attempt.spec_history)
+                    attempt_drift.code_history.extend(resume_drift_seed_for_attempt.code_history)
+                    attempt_drift.gate_timeline.extend(resume_drift_seed_for_attempt.gate_timeline)
                 try:
                     return self._run_design_attempt(
                         prior_records=prior_records,
@@ -712,8 +717,33 @@ class StrategyLabOrchestrator(
                     # Commit-on-completion: fold the failed attempt's drift into
                     # the parent commit log so the short-circuit record retains
                     # its diagnostics. The next attempt's ``snapshot`` is still a
-                    # fresh empty child, so this does not contaminate it.
-                    drift_collector.merge(attempt_drift)
+                    # fresh empty child, so this does not contaminate it. When
+                    # this attempt was itself resumed, ``attempt_drift`` starts
+                    # with a seeded copy of the checkpoint's history -- but the
+                    # parent already received that exact history when the
+                    # *original* attempt (the one that produced the checkpoint)
+                    # failed and merged its own drift. Re-merging the seeded
+                    # prefix here would duplicate those entries in the parent
+                    # commit log every time a resumed attempt goes on to fail
+                    # itself, corrupting the eventual short-circuit record's
+                    # provenance -- so only the entries this attempt actually
+                    # produced beyond the seed are folded in.
+                    if resume_drift_seed_for_attempt is not None:
+                        drift_collector.merge(
+                            _DriftCollector(
+                                spec_history=attempt_drift.spec_history[
+                                    len(resume_drift_seed_for_attempt.spec_history) :
+                                ],
+                                code_history=attempt_drift.code_history[
+                                    len(resume_drift_seed_for_attempt.code_history) :
+                                ],
+                                gate_timeline=attempt_drift.gate_timeline[
+                                    len(resume_drift_seed_for_attempt.gate_timeline) :
+                                ],
+                            )
+                        )
+                    else:
+                        drift_collector.merge(attempt_drift)
                     # Look up the most recent checkpoint captured for the
                     # attempt that just failed, and determine the resume
                     # point it implies.

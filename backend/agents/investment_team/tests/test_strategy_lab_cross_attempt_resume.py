@@ -328,3 +328,72 @@ def test_spec_implicated_false_resumes_from_review_checkpoint(
     assert list(record.code_history[: len(checkpoint.code_history)]) == list(
         checkpoint.code_history
     )
+
+
+def test_repeated_resume_does_not_duplicate_seeded_drift_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review finding: merging a resumed attempt's *whole* drift
+    collector on failure -- including the checkpoint history seeded into it
+    at the top of the loop -- would re-add that same history to the parent
+    commit log every time a resumed attempt goes on to fail itself, since
+    the parent already received it once when the checkpoint-producing
+    attempt originally failed. Left unfixed, exhausting the re-entry budget
+    after repeated resumes would persist a short-circuit record whose
+    ``spec_history`` shows the same design-phase revision duplicated once
+    per resumed failure.
+
+    Drives all ``MAX_DESIGN_REENTRIES + 1`` attempts to fail: attempt 0
+    fails not-spec-implicated at the synthesis boundary (after one real
+    design-revision round, so its checkpoint's ``spec_history`` is
+    non-empty), and every subsequent resumed attempt fails the same way,
+    re-triggering resume from its own (re-captured, identical) checkpoint
+    each time. The exhaustion short-circuit record is built from the parent
+    drift collector -- the exact path the duplication would surface on.
+    """
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+
+    review_call_count = {"n": 0}
+
+    def _review_with_one_revision(*_a: Any, **_kw: Any) -> SpecCritique:
+        review_call_count["n"] += 1
+        if review_call_count["n"] == 1:
+            return SpecCritique(ready=False, rationale="tighten entry threshold")
+        return SpecCritique(ready=True, rationale="ok")
+
+    def _revised_spec_dict() -> Dict[str, Any]:
+        revised = _spec_dict()
+        revised["hypothesis"] = "RSI mean reversion, revised threshold"
+        return revised
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review_with_one_revision)
+    monkeypatch.setattr(
+        orch.design_agent, "revise", lambda *_a, **_kw: (_revised_spec_dict(), "revised rationale")
+    )
+
+    def _always_raise_not_spec_implicated(**kwargs: Any) -> Any:
+        raise SpecImplementabilityError(
+            "forced fail at synthesis boundary, not spec-implicated",
+            failure_phase="synthesis",
+            last_spec=kwargs["spec"],
+            last_code="",
+            spec_implicated=False,
+        )
+
+    monkeypatch.setattr(orch, "_synthesize_initial_code", _always_raise_not_spec_implicated)
+
+    _transitions, record = _drive_cycle(orch)
+
+    # Every attempt failed, so the cycle exhausted its re-entry budget --
+    # the returned record is the short-circuit record built from the
+    # parent drift collector.
+    assert record.backtest.status == "failed: spec_unimplementable"
+    # Exactly one design-revision round happened, ever (attempt 0's Phase 1
+    # -- every later attempt resumed past it). If a resumed attempt's
+    # failure re-merged its seeded history into the parent, this would be
+    # ``MAX_DESIGN_REENTRIES + 1`` instead of ``1``.
+    assert review_call_count["n"] == 2  # one not-ready round, one ready round
+    assert len(record.spec_history) == 1
