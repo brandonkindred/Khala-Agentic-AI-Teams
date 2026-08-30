@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -301,8 +301,13 @@ def _unresolved_comments(
     # authenticated identity. Resolved once per call; best-effort (matching
     # pr_review._fetch_pr_metadata's _get_login): a failure degrades to "",
     # which _is_khala_authored never matches, failing closed to "not Khala's"
-    # (worst case: a redundant re-triage of an already-fixed comment) rather
-    # than trusting an unauthenticated marker.
+    # rather than trusting an unauthenticated marker. The worst case differs
+    # by whether the comment has a discoverable thread: for one that does,
+    # it's a redundant re-triage of an already-fixed comment; for an ORPHANED
+    # Khala reply (no thread — see the loop below), it's worse — no longer
+    # recognized as Khala's own, it falls through to the "no discoverable
+    # thread" fail-closed branch and aborts the whole run, not just that one
+    # comment.
     try:
         authenticated_login = client.get_authenticated_login()
     except Exception as e:  # noqa: BLE001 - best-effort; never blocks the run
@@ -345,7 +350,7 @@ def _unresolved_comments(
     unresolved: List[ReviewComment] = []
     retry_resolve_threads: List[Tuple[str, int]] = []
     thread_history_by_comment_id: Dict[int, List[ReviewComment]] = {}
-    seen_thread_ids: set[str] = set()
+    seen_thread_ids: Set[str] = set()
     for thread in threads:
         if thread.is_resolved or thread.id in seen_thread_ids:
             continue
@@ -918,7 +923,10 @@ def _reply_and_resolve(
           message. WHEN ``thread`` is ``None`` (should not normally happen —
           see the reply-target precondition above), there is no thread id to
           re-check against, so the reply is posted directly to ``comment.id``
-          with NO live-state verification at all.
+          with NO live-state verification at all — and the SAME ``comment.id``
+          fallback applies when ``thread`` IS known but carries an empty
+          ``comment_ids`` (should also not normally happen — a real thread
+          always has at least a root comment).
     """
     if thread is not None and _thread_has_new_reviewer_feedback(
         client,

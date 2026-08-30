@@ -366,14 +366,18 @@ def _comment(
     )
 
 
-def _khala_reply(ac, cid: int) -> ReviewComment:
+def _khala_reply(ac, fake, cid: int) -> ReviewComment:
     """A synthetic Khala-generated reply comment, built from the production
-    module's own marker constant (`ac._KHALA_COMMENT_MARKER`) and the
-    `_FakeClient`'s default `authenticated_login` ("khala-bot") rather than
-    hardcoding either literal here — so a change to the production marker or
-    bot identity can't silently stop these tests from exercising the
+    module's own marker constant (`ac._KHALA_COMMENT_MARKER`) and `fake`'s
+    own `authenticated_login` rather than hardcoding either literal here —
+    so a change to the production marker or `_FakeClient`'s default bot
+    identity can't silently stop these tests from exercising the
     retry-resolve path they're meant to cover."""
-    return _comment(cid, body=f"Addressed by the SE team. {ac._KHALA_COMMENT_MARKER}", author="khala-bot")
+    return _comment(
+        cid,
+        body=f"Addressed by the SE team. {ac._KHALA_COMMENT_MARKER}",
+        author=fake.authenticated_login,
+    )
 
 
 @pytest.fixture
@@ -538,7 +542,7 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _khala_reply(ac, 3),
+            _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -557,7 +561,7 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _khala_reply(ac, 3),
+            _khala_reply(ac, fake, 3),
             _comment(4, body="this fix is incomplete, the null case is still broken"),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
@@ -608,7 +612,7 @@ class TestUnresolvedComments:
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _khala_reply(ac, 3),
+            _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=True, comment_ids=(2, 3))]
 
@@ -1264,7 +1268,7 @@ class TestRunAddressComments:
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _khala_reply(ac, 3),
+            _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -1293,7 +1297,7 @@ class TestRunAddressComments:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         original_root = _comment(2, body="please fix this")
-        khala_reply = _khala_reply(ac, 3)
+        khala_reply = _khala_reply(ac, fake, 3)
         edited_root = _comment(2, body="actually, use a completely different approach")
 
         calls = {"n": 0}
@@ -1392,7 +1396,7 @@ class TestRunAddressComments:
         # `outcomes` stay empty.
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _khala_reply(ac, 3),
+            _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
@@ -1412,7 +1416,7 @@ class TestRunAddressComments:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
-            _khala_reply(ac, 3),
+            _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
 
@@ -2026,6 +2030,9 @@ class TestAddressCommentsRoute:
         }
 
     def test_starts_job_and_reports_unresolved_count(self, route_env) -> None:
+        """The happy path: the route creates a job, persists the token
+        ciphertext, launches the background hook, and reports the PR's
+        unresolved-comment count in its response."""
         resp = route_env["client"].post(
             "/pulls/7/address-comments",
             json={"owner": "o", "repo": "r", "repo_path": route_env["repo_path"], "pr_number": 7},
@@ -2108,6 +2115,9 @@ class TestAddressCommentsRoute:
         assert launched_request.pr_number == 7
 
     def test_github_error_returns_502(self, route_env, monkeypatch) -> None:
+        """A GitHub API failure while fetching the PR surfaces as 502, not
+        an opaque 500 or a silently-launched job."""
+
         def _boom(*_a, **_kw):
             raise GitHubAPIError(404, "missing")
 
@@ -2119,6 +2129,8 @@ class TestAddressCommentsRoute:
         assert resp.status_code == 502
 
     def test_rejects_closed_pr_with_400(self, route_env) -> None:
+        """Only OPEN PRs can be addressed — a closed PR is rejected with 400
+        and no job is ever launched for it."""
         fake = route_env["fake"]
         fake.pr = PullRequestDetail(
             number=7,
@@ -2142,6 +2154,10 @@ class TestAddressCommentsRoute:
         assert route_env["started"] == []  # no job launched for a closed PR
 
     def test_thread_state_unavailable_returns_502(self, route_env, monkeypatch) -> None:
+        """Unknown/incomplete thread state (the GraphQL listing failing) must
+        fail closed as 502, never silently launching a job over unverifiable
+        resolved/unresolved state."""
+
         def _boom(*_a, **_kw):
             raise ReviewThreadsUnavailableError("o", "r", 7, "graphql down")
 
@@ -2154,6 +2170,10 @@ class TestAddressCommentsRoute:
         assert route_env["started"] == []
 
     def test_thread_launch_failure_terminalizes_created_job(self, route_env, monkeypatch) -> None:
+        """When the background hook fails to launch after the job row was
+        already created, that job must be marked failed rather than left
+        stuck in a non-terminal state forever (creation and launch are not
+        transactional)."""
         from software_engineering_team.api import address_comments as ac
 
         def _raise_thread_unavailable(*_a, **_kw):
@@ -2189,6 +2209,7 @@ class TestAddressCommentsAdmissionRoute:
     route_env = TestAddressCommentsRoute.route_env
 
     def test_reports_none_when_nothing_running(self, route_env) -> None:
+        """No live job for this PR → `running_job_id: None`."""
         resp = route_env["client"].get(
             "/pulls/7/address-comments/running", params={"owner": "o", "repo": "r"}
         )
@@ -2196,6 +2217,8 @@ class TestAddressCommentsAdmissionRoute:
         assert resp.json() == {"running_job_id": None}
 
     def test_reports_running_job_id(self, route_env, monkeypatch) -> None:
+        """A live job for this PR is reported by id, matching the POST
+        route's own admission check (`_running_review_for_pr`)."""
         from software_engineering_team.api import coding_team_main as _main
 
         monkeypatch.setattr(_main, "_running_review_for_pr", lambda *_a, **_kw: "job-abc")

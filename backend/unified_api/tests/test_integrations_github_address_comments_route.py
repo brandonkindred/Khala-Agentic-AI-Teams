@@ -338,6 +338,9 @@ def test_checkout_lock_held_around_the_whole_flow(mock_cfg, mock_cred, mock_path
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_502_when_platform_owned_lock_acquisition_fails(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+    """Platform-owned checkouts rely on the clone lock for correctness; a
+    failure to acquire it is a hard failure and must surface as 502, not
+    proceed to an unguarded clone."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     resp = client.post(_URL, json={})
     assert resp.status_code == 502

@@ -98,6 +98,10 @@ def execute_coding_team_workflow(
           caller is a per-comment background-thread worker (see
           ``address_comments._dispatch_implementation``), which can afford to
           keep blocking — there is no request deadline to respect here.
+    Raises:
+        ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
+            dict, or ``github`` contains a ``"token"`` key.
+        RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result.
     """
     if not job_id:
         raise ValueError("execute_coding_team_workflow requires a non-empty job_id")
