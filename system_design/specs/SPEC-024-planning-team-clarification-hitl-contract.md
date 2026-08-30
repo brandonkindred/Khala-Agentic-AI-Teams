@@ -206,6 +206,20 @@ whose persisted `allow_multiple` is falsy, and reject (400) a submission that se
 two fields are mutually exclusive per answer, selected by the question's own `allow_multiple`, not
 freely combinable by the client.
 
+**This must be enforced at PRA's own public endpoint too, not only in the shared validator.**
+PRA's answers route (`api/routes/product_analysis.py:238-288`) does **not** call
+`shared.hitl.validation.validate_answers` — it performs its own inline validation (pending/required/
+answered-id-set checks only, `:258-278`, verified earlier in this section) and, per this contract's
+own plural pass-through requirement above, would forward `selected_option_ids` straight through to
+`apply_answers` at `:280-288` with no multiplicity or mutual-exclusion check of its own. A caller
+that submits directly to PRA's public endpoint (bypassing Planning's route and its use of the
+shared validator entirely) could therefore still submit plural choices for a single-select question
+or set both fields, and `apply_answers` (§4.1, above) would accept it. **Contract requirement:**
+`api/routes/product_analysis.py`'s answers route must either call `shared.hitl.validation.validate_answers`
+in place of its current inline checks, or replicate the same multiplicity/mutual-exclusion
+validation inline — the fix cannot live in the shared validator alone while PRA's own route
+bypasses it.
+
 **Why the same name, not `planning_submit_answers` or similar:** `backend/shared/hitl/models.py`
 was deliberately built as a cross-team superset so both teams share one vocabulary. A single
 signal name across teams means any future workflow that hosts both a coding-team-style gate and a
