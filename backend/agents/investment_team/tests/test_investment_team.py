@@ -1211,6 +1211,66 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
         )
 
 
+def test_strategy_spec_max_concurrent_positions_defaults_to_one() -> None:
+    """Omitting the field preserves today's implicit one-position-per-symbol behavior."""
+    spec = StrategySpec(
+        strategy_id="s-mcp-default",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    assert spec.max_concurrent_positions == 1
+
+
+def test_strategy_spec_max_concurrent_positions_accepts_valid_value() -> None:
+    spec = StrategySpec(
+        strategy_id="s-mcp-valid",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        max_concurrent_positions=3,
+    )
+    assert spec.max_concurrent_positions == 3
+
+
+def test_strategy_spec_max_concurrent_positions_rejects_non_positive() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    for bad_value in (0, -1):
+        with pytest.raises(ValidationError):
+            StrategySpec(
+                strategy_id="s-mcp-bad",
+                authored_by="test",
+                asset_class="stocks",
+                hypothesis="h",
+                signal_definition="s",
+                timeframe="1d",
+                max_concurrent_positions=bad_value,
+            )
+
+
+def test_strategy_spec_max_concurrent_positions_rejects_above_ceiling() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-mcp-ceiling",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+            max_concurrent_positions=21,
+        )
+
+
 def test_resolve_strategy_symbols_overrides_default_when_targets_non_empty() -> None:
     """Non-empty ``target_symbols`` is returned verbatim — the asset-class
     default does not contribute, so the fetched universe matches what

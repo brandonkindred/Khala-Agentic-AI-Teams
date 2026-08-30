@@ -321,6 +321,15 @@ class ExpectancyForecast(BaseModel):
         return v if math.isfinite(v) else 0.0
 
 
+# Ceiling for max_concurrent_positions. Mirrors the order of magnitude of
+# _DEFAULT_MAX_UNIVERSE_SYMBOLS (market_data_service.py) — a spec's
+# concurrency budget shouldn't imply more simultaneous positions than a
+# typical target-symbol universe spans. Not imported from
+# market_data_service.py: that module already imports StrategySpec from
+# here, so importing back would be circular.
+_MAX_CONCURRENT_POSITIONS = 20
+
+
 class StrategySpec(BaseModel):
     strategy_id: str
     authored_by: str
@@ -342,6 +351,20 @@ class StrategySpec(BaseModel):
     # instead of the asset-class default universe, so a hypothesis naming
     # QQQ doesn't get silently backtested on AAPL.
     target_symbols: List[str] = Field(default_factory=list)
+    # Default of 1 reproduces today's implicit one-position-per-symbol
+    # behavior exactly. The ceiling bounds the concurrency budget to a
+    # sane order of magnitude relative to target_symbols cardinality; see
+    # _MAX_CONCURRENT_POSITIONS above.
+    max_concurrent_positions: int = Field(
+        default=1,
+        ge=1,
+        le=_MAX_CONCURRENT_POSITIONS,
+        description=(
+            "Maximum number of positions this spec may hold open "
+            "concurrently across target_symbols. Defaults to 1, matching "
+            "today's implicit one-position-per-symbol behavior."
+        ),
+    )
     # Phase 3: risk_limits is validated at spec construction time.  Dicts
     # authored by the LLM (or persisted before this field was typed) are
     # accepted and routed through ``RiskLimits.from_legacy_dict``, which
