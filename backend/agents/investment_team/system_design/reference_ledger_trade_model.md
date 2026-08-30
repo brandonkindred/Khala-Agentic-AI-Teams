@@ -295,11 +295,22 @@ reference fill's next-bar-open resolution one bar later):
   * atr)`, where `atr` comes from the same indicator view this module
   already needs for `signal_exit` predicates (see §2's `PandasHistoryView`
   dependency note) — reinforcing that dependency rather than introducing a
-  new one.
+  new one. Which ATR: scan the entry rules' own predicates first, then the
+  signal-exit rules' predicates, for the first ATR indicator reference (so a
+  spec-configured ATR period is honored); fall back to a default ATR(14)
+  reference when no rule references one. Warmup fallback: if the resolved
+  ATR is unavailable or non-positive at the trigger bar (not enough history
+  yet), fall back to a one-share probe instead of failing, then still run it
+  through the whole-share/`max_position_pct` handling below.
 
-Whole-share flooring and any `max_position_pct` clamp apply the same way
-production's sizing resolution does; an entry that sizes to zero or below
-one whole share (on a non-fractional asset class) is simply not opened.
+Whole-share handling mirrors production's cap-aware floor, not a blanket
+skip: a raw quantity `>= 1` floors down to `int(qty)`. A raw quantity `< 1`
+on a non-fractional asset class is **promoted to one share** if that one
+share still satisfies `max_position_pct` (re-checked at exactly one share,
+since flooring up can itself re-breach the cap), and only **skipped** (no
+entry) if even one share would breach it. A fractional-capable asset class
+(crypto/forex) instead keeps the raw, uncapped-floor quantity as-is (dropped
+to zero only if the cap itself drove it to zero or below).
 
 ### `stop_loss`
 
@@ -336,14 +347,18 @@ fill.
   triggers on `bar.low <= stop_price`, then fills once `bar.high >=
   limit_price`; a buy is the mirror image) — `ReferenceTrade.exit_price =
   limit_price`, never `stop_price`, and never gap-adjusted worse, same as
-  `take_profit`'s exact-price rule. If a gap carries price past the limit in
-  the same move that crosses the stop, the order does **not** fill that bar —
-  it stays "armed," and only fills on a later bar where price recovers back
-  into the limit's reachable range (the limit price itself is static once
-  computed, since trailing bases are unavailable for `style="limit"`). This
-  module models that arming/latching at the semantic level (a boolean
-  per-position flag once the stop level is first breached), not by
-  replicating the production `PendingOrder` state machine's exact fields.
+  `take_profit`'s exact-price rule. Reachability is judged on the triggering
+  bar's full range, not its open: a bar that opens beyond the limit but
+  whose range still reaches back to it **fills on that same bar** (a sell
+  fills if `bar.high >= limit_price` anywhere in the bar; a buy if `bar.low
+  <= limit_price`), regardless of where the open printed. Only a bar whose
+  **entire range** stays beyond the limit leaves the order unfilled — it
+  stays "armed," and only fills on a later bar whose range reaches the limit
+  (the limit price itself is static once computed, since trailing bases are
+  unavailable for `style="limit"`). This module models that arming/latching
+  at the semantic level (a boolean per-position flag once the stop level is
+  first breached), not by replicating the production `PendingOrder` state
+  machine's exact fields.
 
 ### `take_profit`
 
