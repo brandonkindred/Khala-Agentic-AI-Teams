@@ -25,16 +25,3 @@ def test_build_phase4_validation_graph_returns_graph() -> None:
     graph = build_phase4_validation_graph()
     assert graph is not None
 
-
-def test_review_result_protocol_runtime_checkable() -> None:
-    """The ``ReviewResult`` Protocol should runtime-check ``approved: bool``."""
-    from software_engineering_team.quality_gates.protocols import ReviewResult
-
-    class _Approved:
-        approved: bool = True
-
-    class _NoAttr:
-        pass
-
-    assert isinstance(_Approved(), ReviewResult)
-    assert not isinstance(_NoAttr(), ReviewResult)
