@@ -391,6 +391,16 @@ class StrategyLabCycleWorkflow:
         last_failure_phase: Optional[str] = None
         last_design_context: Optional[dict] = None
 
+        # First step of #7282 (Temporal-mode parity with thread mode's
+        # #7309/#7315): compute, but do not yet act on, the resume-point
+        # determination for each failed attempt's checkpoint. One entry per
+        # completed re-entry, in order -- the next stage a resumed attempt
+        # *could* start from (per ``determine_resume_stage``), or ``None``
+        # when no usable checkpoint was captured. Not consumed by the retry
+        # loop below yet (that's the next step, #7318); surfaced only on the
+        # terminal return dicts below for test observability.
+        resume_stage_determinations: List[Optional[str]] = []
+
         for design_attempt in range(max_reentries + 1):
             outcome = await _exec(
                 act.run_design_attempt_activity,
@@ -425,6 +435,7 @@ class StrategyLabCycleWorkflow:
                 return {
                     "record": outcome["record"],
                     "convergence_tracker_state": tracker_state,
+                    "resume_stage_determinations": resume_stage_determinations,
                 }
 
             if outcome["kind"] == "skipped":
@@ -442,6 +453,50 @@ class StrategyLabCycleWorkflow:
             last_code = outcome["last_code"] or ""
             last_failure_phase = outcome["failure_phase"]
             last_design_context = outcome["design_context"]
+            # Replay-safe checkpoint lookup: ``outcome["pipeline_checkpoints"]``
+            # is already-serialized workflow state (part of this same
+            # activity's result), and ``parse_checkpoint``/
+            # ``find_latest_checkpoint_for_attempt``/``determine_resume_stage``
+            # are pure functions (no I/O, no wall-clock/env reads) -- safe to
+            # call directly in workflow code, exactly like
+            # ``gather_convergence_directives`` above. ``cycle_scope`` is read
+            # off the checkpoints themselves (every checkpoint in this list was
+            # captured by -- and so already carries the identity of -- the one
+            # activity invocation that just produced ``outcome``) rather than
+            # via ``workflow.info().workflow_id``: that call requires a live
+            # Temporal workflow runtime and raises outside one, which the
+            # mocked-``execute_activity`` unit-test harness for this workflow
+            # doesn't provide. When ``attempt_checkpoints`` is empty the
+            # placeholder value is never consulted -- there is nothing to
+            # filter, so ``find_latest_checkpoint_for_attempt`` returns
+            # ``None`` regardless of what's passed for ``cycle_scope``.
+            #
+            # Imported here, not at module top: ``checkpoints.py`` imports
+            # ``investment_team.models``, whose transitive graph
+            # (``execution.risk_filter``, ``strategy_lab.spec_dsl``, etc.)
+            # this module's own top-level code -- which runs inside the
+            # temporalio workflow sandbox's restricted re-import -- must not
+            # drag in, matching ``dto.py``'s documented deferred-import
+            # discipline and ``activities.py``'s own local-import convention
+            # for ``investment_team.models`` types.
+            from investment_team.strategy_lab.checkpoints import (
+                determine_resume_stage,
+                find_latest_checkpoint_for_attempt,
+                parse_checkpoint,
+            )
+
+            attempt_checkpoints = [
+                parse_checkpoint(raw) for raw in outcome.get("pipeline_checkpoints", [])
+            ]
+            resume_checkpoint = find_latest_checkpoint_for_attempt(
+                attempt_checkpoints,
+                run_id=run_id,
+                cycle_scope=attempt_checkpoints[0].cycle_scope if attempt_checkpoints else "",
+                design_attempt=design_attempt,
+                generation=generation,
+            )
+            resume_stage = determine_resume_stage(resume_checkpoint)
+            resume_stage_determinations.append(resume_stage.value if resume_stage else None)
             phase_back_count += 1
             # Each failed attempt consumed real LLM work on the same evaluation
             # window, so advance the DSR trial counter by one per phase-back.
@@ -486,6 +541,7 @@ class StrategyLabCycleWorkflow:
         return {
             "record": result["record"],
             "convergence_tracker_state": result["convergence_tracker_state"],
+            "resume_stage_determinations": resume_stage_determinations,
         }
 
 

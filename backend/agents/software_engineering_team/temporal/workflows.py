@@ -14,6 +14,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    from planning_team.temporal.answer_signal import PlanningAnswerSignalMixin
     from software_engineering_team.temporal import activities as _activities
     from software_engineering_team.temporal.constants import (
         STANDALONE_TYPE_BACKEND,
@@ -52,11 +53,16 @@ class RetryFailedWorkflow:
 
 
 @workflow.defn(name="RunTeamWorkflowV2")
-class RunTeamWorkflowV2:
+class RunTeamWorkflowV2(PlanningAnswerSignalMixin):
     """Multi-step orchestration: each pipeline phase is a separate Temporal activity.
 
     Phases: spec parsing + PRA → Planning → Coding Team execution.
     Each activity can fail and retry independently.
+
+    Inherits ``PlanningAnswerSignalMixin`` so a ``submit_planning_answers`` signal can
+    durably resolve a Planning clarification-question pause (see the Phase 2 loop in
+    ``run``) without this workflow blocking — matching thread-mode's invariant that
+    Planning is never silently auto-answered.
     """
 
     @workflow.run
@@ -89,7 +95,11 @@ class RunTeamWorkflowV2:
             retry_policy=DEFAULT_RETRY_POLICY,
         )
 
-        # Phase 2: Planning
+        # Phase 2: Planning. Loops while the activity reports a pause (a Planning
+        # clarification question with no answer yet): each pass durably awaits the
+        # matching `submit_planning_answers` signal via `wait_for_planning_answers`
+        # (from `PlanningAnswerSignalMixin`) before re-invoking the activity with the
+        # resolved answers, mirroring `CodingTeamWorkflow.run`'s HITL pause loop.
         plan_result = await workflow.execute_activity(
             _activities.plan_project_activity,
             args=[job_id, repo_path, spec_result, trace_id],
@@ -98,6 +108,17 @@ class RunTeamWorkflowV2:
             heartbeat_timeout=timedelta(minutes=5),
             retry_policy=DEFAULT_RETRY_POLICY,
         )
+        while plan_result.get("outcome") == "paused":
+            resume_token = plan_result["resume_token"]
+            answers = await self.wait_for_planning_answers(resume_token)
+            plan_result = await workflow.execute_activity(
+                _activities.plan_project_activity,
+                args=[job_id, repo_path, spec_result, trace_id, resume_token, answers],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=timedelta(hours=4),
+                heartbeat_timeout=timedelta(minutes=5),
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
 
         if planning_only:
             return

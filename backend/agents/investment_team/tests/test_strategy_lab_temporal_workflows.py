@@ -650,3 +650,165 @@ def test_signal_brief_activity_timeout_deduplicates_the_exclude_list():
     distinct = wf._signal_brief_activity_timeout(3600.0, ["stocks", "crypto"], 10, 0.0)
     assert deduped == distinct
     assert deduped == timedelta(seconds=3 * 3600.0 * 11)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint-lookup and resume-point determination (issue #7312, first step
+# of #7282 — Temporal-mode parity with thread mode's #7309/#7315). The
+# workflow computes ``resume_stage_determinations`` per re-entry but does not
+# yet act on it (that's #7318) -- surfaced only on the "record" and
+# short-circuit return dicts for test observability.
+# ---------------------------------------------------------------------------
+
+
+def _checkpoint_json(
+    checkpoint_cls, *, run_id: str = "run-1", generation: int = 1, **overrides: Any
+) -> Dict[str, Any]:
+    """Build one real ``PipelineCheckpoint`` subclass instance -- with the
+    identity fields matching this file's own ``run_id``/``generation``
+    convention -- and return its wire (``model_dump(mode="json")``) form,
+    exactly as ``activities.py``'s ``_pipeline_checkpoints_to_wire`` produces
+    it. Building from the real Pydantic classes (rather than hand-rolled
+    dicts) means this fixture can't drift from the real wire shape.
+    """
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab import phases
+
+    spec = StrategySpec(
+        strategy_id="strat-1",
+        authored_by="DesignAgent",
+        asset_class="stocks",
+        hypothesis="test hypothesis",
+        signal_definition="test signal",
+        timeframe="1d",
+    )
+    code = overrides.pop("code", "def run(): pass")
+    base: Dict[str, Any] = {
+        "run_id": run_id,
+        "cycle_scope": "cycle-scope-1",
+        "design_attempt": 0,
+        "generation": generation,
+        "spec_hash": phases.hash_spec(spec),
+        "code_hash": phases.hash_code(code)
+        if "code" in checkpoint_cls.model_fields
+        else phases.hash_code(None),
+        "captured_at": "2026-08-27T00:00:00Z",
+        "budget_calls": 5,
+        "gate_results": [],
+        "spec": spec,
+        "rationale": "because",
+    }
+    if "code" in checkpoint_cls.model_fields:
+        base["code"] = code
+    base.update(overrides)
+    return checkpoint_cls(**base).model_dump(mode="json")
+
+
+def _run_with_reentry_then_record(pipeline_checkpoints: List[Dict[str, Any]]) -> Dict[str, Any]:
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": mock.Mock(
+            side_effect=[
+                _reentry_outcome(pipeline_checkpoints=pipeline_checkpoints),
+                _record_outcome(),
+            ]
+        ),
+    }
+    with _patch_execute(handlers):
+        return _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "run_id": "run-1",
+                "generation": 1,
+            }
+        )
+
+
+def test_resume_determination_after_design_checkpoint_targets_review():
+    from investment_team.strategy_lab.checkpoints import DesignCheckpoint
+
+    result = _run_with_reentry_then_record([_checkpoint_json(DesignCheckpoint)])
+    assert result["resume_stage_determinations"] == ["review"]
+
+
+def test_resume_determination_after_review_checkpoint_targets_synthesis():
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+
+    result = _run_with_reentry_then_record(
+        [_checkpoint_json(ReviewCheckpoint, review_rounds_completed=2)]
+    )
+    assert result["resume_stage_determinations"] == ["synthesis"]
+
+
+def test_resume_determination_after_synthesis_checkpoint_targets_refinement():
+    from investment_team.strategy_lab.checkpoints import SynthesisCheckpoint
+
+    result = _run_with_reentry_then_record([_checkpoint_json(SynthesisCheckpoint)])
+    assert result["resume_stage_determinations"] == ["refinement"]
+
+
+def test_resume_determination_after_refinement_checkpoint_targets_alignment():
+    from investment_team.strategy_lab.checkpoints import RefinementCheckpoint
+
+    result = _run_with_reentry_then_record(
+        [_checkpoint_json(RefinementCheckpoint, refinement_rounds_completed=1)]
+    )
+    assert result["resume_stage_determinations"] == ["alignment"]
+
+
+def test_resume_determination_after_alignment_checkpoint_is_none():
+    """The last stage has nothing after it to resume into."""
+    from investment_team.strategy_lab.checkpoints import AlignmentCheckpoint
+
+    result = _run_with_reentry_then_record(
+        [_checkpoint_json(AlignmentCheckpoint, alignment_rounds_completed=3)]
+    )
+    assert result["resume_stage_determinations"] == [None]
+
+
+def test_resume_determination_is_none_when_no_checkpoint_exists():
+    result = _run_with_reentry_then_record([])
+    assert result["resume_stage_determinations"] == [None]
+
+
+def test_resume_determination_computed_but_not_acted_on_across_reentries_to_short_circuit():
+    """Every re-entry appends its own determination, in order, and nothing
+    about the short-circuit path's existing fields changes: the workflow
+    still fully re-runs every attempt from scratch (this step doesn't wire
+    resume_spec/resume_design_context yet -- that's #7318)."""
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+
+    def _attempt(a):
+        # Each attempt's checkpoint must carry *that* attempt's own
+        # design_attempt -- find_latest_checkpoint_for_attempt filters on it,
+        # exactly matching how the real activity captures checkpoints against
+        # whichever design_attempt it was actually invoked with.
+        checkpoint = _checkpoint_json(
+            ReviewCheckpoint, design_attempt=a[0]["design_attempt"], review_rounds_completed=1
+        )
+        return _reentry_outcome(pipeline_checkpoints=[checkpoint])
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+        "build_short_circuit_record_activity": lambda a: {
+            "record": {"lab_record_id": "sc-1", "status": a[0]["short_circuit_status"]},
+            "convergence_tracker_state": a[0]["convergence_tracker_state"],
+        },
+    }
+    with _patch_execute(handlers):
+        result = _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "run_id": "run-1",
+                "generation": 1,
+            }
+        )
+    # max_design_reentries=2 (WF_CONFIG) -> 3 attempts, each producing the
+    # same "reentry" outcome -> 3 determinations, all "synthesis".
+    assert result["resume_stage_determinations"] == ["synthesis", "synthesis", "synthesis"]
+    assert result["record"]["status"] == "failed: spec_unimplementable"
