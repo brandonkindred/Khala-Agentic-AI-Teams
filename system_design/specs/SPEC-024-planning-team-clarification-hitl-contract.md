@@ -946,13 +946,28 @@ The primitive #7445-B builds must satisfy:
   absent, calls `run_pra(...)`. **`run_pra`/`run_product_analysis` returns `None` when the
   Software Engineering service is unconfigured or the submission POST fails
   (`adapters/product_analysis.py:33-48`) — this activity must treat a `None`/falsy return as a
-  failure and raise, not persist a checkpoint with `pra_job_id: None` and return successfully.** A
-  raised exception here fails this `NO_RETRY` activity (and, per the workflow's own error handling,
-  the workflow) loudly and visibly, which is the correct outcome: `document_production_activity`'s
-  precondition requires a checkpoint carrying a *usable* `pra_job_id` before it will ever call
-  `wait_pra`, and there is no defined no-PRA fallback for a job that requested
-  `use_product_analysis=True` but got no PRA job — that is an operational failure to surface, not
-  paper over. Only on a genuine successful `pra_job_id`, immediately persist
+  failure and raise, not persist a checkpoint with `pra_job_id: None` and return successfully.**
+  **Contract requirement — this activity must be wrapped in `_guarded` like every other phase
+  activity in this workflow, not raise a bare exception.** `PlanningWorkflow.run` itself has no
+  `except` around any `execute_activity` call and never touches the job store on failure — the
+  workflow docstring is explicit that "each activity owns its own job-store progress writes and
+  marks the job FAILED (then re-raises) on its own error" (`temporal/workflows.py:104-111`), and
+  every existing phase activity does so by routing through `_guarded`
+  (`temporal/activities.py:69-119`, `mark_job_failed`/`update_job` bound in), which marks the job
+  record FAILED on the final attempt before re-raising. If this new activity instead raised a bare
+  exception (as "a raised exception here fails this `NO_RETRY` activity... loudly and visibly"
+  could be read to imply), Temporal terminates the workflow but the job record is never updated —
+  the status endpoint keeps reporting the job as running indefinitely, exactly the silent-hang
+  failure mode this activity's own `None`/falsy-return handling above is trying to avoid. This
+  activity must call `_guarded(job_id, "document_production_pra", ..., work, max_attempts=1)`
+  (`SINGLE_ATTEMPT`, matching its `NO_RETRY` `retry_policy` — the same finite-attempts pairing
+  §4.3.2 requires for `document_production_activity`) so a raised exception is both re-raised *and*
+  recorded as a job-store `FAILED` before the workflow terminates. A raised exception here fails
+  this `NO_RETRY` activity and the workflow loudly and visibly, which is the correct outcome:
+  `document_production_activity`'s precondition requires a checkpoint carrying a *usable*
+  `pra_job_id` before it will ever call `wait_pra`, and there is no defined no-PRA fallback for a
+  job that requested `use_product_analysis=True` but got no PRA job — that is an operational
+  failure to surface, not paper over. Only on a genuine successful `pra_job_id`, immediately persist
   `save_checkpoint("planning_team", job_id, "document_production_pra", {"pra_job_id": ...})` as its
   own atomic write, then return.
 - *Invariants:* `run_pra` is called at most once per Planning `job_id`, ever, *when this activity
