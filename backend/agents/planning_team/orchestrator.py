@@ -133,6 +133,7 @@ def run_workflow(
         run_sub_agent_provisioning,
         run_synthesis,
     )
+    from planning_team.temporal.answer_signal import PlanningAnswerPauseSignal
 
     def _update(phase: str, progress: int, status_text: str = "") -> None:
         if job_updater:
@@ -240,6 +241,12 @@ def run_workflow(
         result["summary"] = "Planning completed; handoff package ready."
         result["current_phase"] = Phase.SUB_AGENT_PROVISIONING.value
         _update(Phase.SUB_AGENT_PROVISIONING.value, 100, "Complete")
+    except PlanningAnswerPauseSignal:
+        # A durable-signal answer_callback (see build_temporal_planning_answer_callback)
+        # raises this as its "no answer yet" control-flow signal — it must reach the
+        # caller (an activity boundary) unconverted, not be folded into a normal
+        # success=False failure result like every other exception here.
+        raise
     except Exception as e:
         logger.exception("Planning workflow failed")
         result["failure_reason"] = str(e)
