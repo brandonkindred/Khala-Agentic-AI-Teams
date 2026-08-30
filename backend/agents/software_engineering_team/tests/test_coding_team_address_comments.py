@@ -732,6 +732,8 @@ class TestHandleComment:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
 
         outcome = ac._handle_comment(
             fake,
@@ -835,6 +837,8 @@ class TestHandleComment:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
 
         outcome = ac._handle_comment(
             fake,
@@ -863,6 +867,8 @@ class TestHandleComment:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
 
         outcome = ac._handle_comment(
             fake,
@@ -889,6 +895,8 @@ class TestHandleComment:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
 
         outcome = ac._handle_comment(
             fake,
@@ -925,6 +933,8 @@ class TestHandleComment:
         # Root is comment 2; comment 4 (a later reply in the same thread) is the
         # representative comment being handled.
         thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))
+        fake.review_comments = [_comment(2), _comment(3), _comment(4, body="this fix is incomplete")]
+        fake.threads = [thread]
 
         outcome = ac._handle_comment(
             fake,
@@ -1435,6 +1445,82 @@ class TestRunAddressComments:
         assert address_env["child_jobs"] == []  # implementation never dispatched
         assert fake.replies == []
         assert fake.resolved == []  # never re-resolved — already resolved live
+
+    def test_dispatch_time_freshness_check_blocks_deleted_thread(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer (or the PR author) can delete the representative comment
+        or its whole thread while triage/planning is still running — the live
+        re-fetch then finds no matching thread at all. This must be treated
+        exactly like an already-resolved thread (superseded, stop) rather than
+        proceeding as if nothing changed, or the implementation workflow would
+        be dispatched and push a fix for withdrawn feedback."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        # The snapshot's view of the thread; the LIVE fake state has NO thread
+        # with this id at all (fake.threads left empty) — simulating deletion.
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "superseded" in outcome.detail
+        assert address_env["child_jobs"] == []  # implementation never dispatched
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_dispatch_time_freshness_check_blocks_edit_to_earlier_history_message(
+        self, address_env, monkeypatch
+    ) -> None:
+        """Triage/planning consume the thread's FULL history, not just the
+        representative (latest) comment. A reviewer editing an EARLIER
+        message in that history — e.g. changing the requested approach in the
+        root while leaving a later "still broken" reply untouched — carries
+        no new comment id, so an id-only or representative-only body check
+        would miss it. It must still block dispatch."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 4))
+        root_snapshot = _comment(2, body="please fix the null check")
+        latest = _comment(4, body="still broken")
+        # The LIVE root comment's body has changed since triage ran — the
+        # representative comment (4) itself is unchanged.
+        fake.review_comments = [_comment(2, body="actually, use a different approach entirely"), latest]
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            latest,
+            thread,
+            [root_snapshot, latest],  # the full history triage/planning actually saw
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "superseded" in outcome.detail
+        assert address_env["child_jobs"] == []  # implementation never dispatched
+        assert fake.replies == []
+        assert fake.resolved == []
 
     def test_triage_and_plan_prompts_include_full_thread_history(
         self, address_env, monkeypatch

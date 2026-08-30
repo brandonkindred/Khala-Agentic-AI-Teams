@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -651,7 +651,7 @@ def _thread_has_new_reviewer_feedback(
     pr_number: int,
     thread_id: str,
     since_comment_id: int,
-    since_comment_body: str = "",
+    since_history: Optional[Sequence[ReviewComment]] = None,
 ) -> bool:
     """True iff ``thread_id`` now carries reviewer feedback newer than ``since_comment_id``.
 
@@ -665,28 +665,43 @@ def _thread_has_new_reviewer_feedback(
     Preconditions:
         - ``since_comment_id`` is the id of the comment this run triaged/replied
           to (the thread's representative comment at snapshot time).
-        - ``since_comment_body`` is that same comment's body at snapshot time
-          (optional — omitting it disables the in-place-edit check below).
+        - ``since_history`` is EVERY message (chronological) that was actually
+          shown to the LLM for triage/planning — normally the thread's full
+          ``thread_history`` — at its snapshotted body (optional — omitting it
+          disables the in-place-edit check below; ``[]``/``None`` behave the
+          same). Triage/planning consume the WHOLE history, not just the
+          representative comment, so an edit to an EARLIER message in it
+          (e.g. a reviewer changing the requested approach in the root while
+          leaving a later "still broken" reply untouched) is just as
+          invalidating as an edit to the representative comment itself.
     Postconditions:
         - Returns True when the thread's CURRENT comment set (re-fetched live)
           contains EITHER (a) an id greater than ``since_comment_id`` that is
           not Khala's own authenticated reply — genuine new reviewer feedback
-          the triage that ran never saw — OR (b) a live comment with id EQUAL
-          to ``since_comment_id`` whose body no longer matches
-          ``since_comment_body`` — GitHub retains a comment's id across an
-          edit, so a reviewer who edits the ALREADY-triaged comment in place
-          (rather than posting a reply) would otherwise be invisible to the
-          id-only check and get silently resolved over — OR (c) the LIVE
-          thread is already resolved: a reviewer can resolve a thread by hand
-          (via the GitHub UI) while triage/planning/implementation for it is
-          still running, which supersedes the in-flight work just as
-          decisively as new feedback would — dispatching (or pushing) a fix
-          for a concern the reviewer already closed is wasted work at best.
-          Returns False when none of these hold, or when the thread itself
-          can no longer be found (nothing left to protect). Fails OPEN
-          (returns True) on any error: resolving a thread whose freshness
-          could not be verified risks silently hiding real feedback, which is
-          worse than a redundant re-check on the next run.
+          the triage that ran never saw — OR (b) a live comment matching ANY
+          id in ``since_history`` whose body no longer matches that entry's
+          snapshotted body — GitHub retains a comment's id across an edit, so
+          a reviewer who edits an ALREADY-triaged message in place (rather
+          than posting a reply) would otherwise be invisible to the id-only
+          check and get silently resolved over, whether that message was the
+          representative comment or an earlier one in the same history — OR
+          (c) the LIVE thread is already resolved: a reviewer can resolve a
+          thread by hand (via the GitHub UI) while triage/planning/
+          implementation for it is still running, which supersedes the
+          in-flight work just as decisively as new feedback would —
+          dispatching (or pushing) a fix for a concern the reviewer already
+          closed is wasted work at best — OR (d) the thread can no longer be
+          found at all in the live listing: a reviewer (or the PR author) can
+          delete the representative comment or its whole thread while
+          triage/planning/implementation is still running, same as resolving
+          it by hand — a later reply attempt would fail anyway, but not
+          before the implementation workflow has already been dispatched and
+          pushed a fix for withdrawn feedback, so this must be caught BEFORE
+          dispatch too, not just at the reply step. Returns False only when
+          the thread is found, still open, and none of (a)/(b) hold. Fails
+          OPEN (returns True) on any error: resolving a thread whose
+          freshness could not be verified risks silently hiding real
+          feedback, which is worse than a redundant re-check on the next run.
     """
     try:
         authenticated_login = client.get_authenticated_login()
@@ -696,14 +711,17 @@ def _thread_has_new_reviewer_feedback(
         threads = client.list_review_threads(owner, repo, pr_number)
         fresh_thread = next((t for t in threads if t.id == thread_id), None)
         if fresh_thread is None:
-            return False
+            # Deleted (or otherwise no longer discoverable) — treat exactly
+            # like an already-resolved thread: superseded, nothing left to
+            # protect by proceeding.
+            return True
         if fresh_thread.is_resolved:
             return True
         all_comments = client.list_review_comments(owner, repo, pr_number)
         comments_by_id = {c.id: c for c in all_comments}
-        if since_comment_body:
-            live_snapshot = comments_by_id.get(since_comment_id)
-            if live_snapshot is not None and (live_snapshot.body or "") != since_comment_body:
+        for snapshotted in since_history or ():
+            live = comments_by_id.get(snapshotted.id)
+            if live is not None and (live.body or "") != (snapshotted.body or ""):
                 return True
         for cid in fresh_thread.comment_ids:
             if cid <= since_comment_id:
@@ -727,9 +745,16 @@ def _reply_and_resolve(
     comment: ReviewComment,
     thread: Optional[ReviewThread],
     reply_body: str,
+    thread_history: Optional[Sequence[ReviewComment]] = None,
 ) -> bool:
     """Reply to a review comment's thread and resolve it.
 
+    Preconditions:
+        - ``thread_history``, when given, is every message actually shown to
+          the LLM for this comment's triage/planning (see ``_handle_comment``'s
+          precondition) — passed through to the freshness re-check so an edit
+          to ANY of those messages (not just ``comment`` itself) is caught,
+          not only an edit to the representative comment.
     Postconditions:
         - Posts a threaded reply and, when ``thread`` is known, resolves it.
           The reply targets the thread's ROOT comment
@@ -764,7 +789,13 @@ def _reply_and_resolve(
           message.
     """
     if thread is not None and _thread_has_new_reviewer_feedback(
-        client, request.owner, request.repo, request.pr_number, thread.id, comment.id, comment.body
+        client,
+        request.owner,
+        request.repo,
+        request.pr_number,
+        thread.id,
+        comment.id,
+        thread_history if thread_history is not None else [comment],
     ):
         logger.info(
             "address-comments: skipping reply/resolve on thread %s — newer "
@@ -909,7 +940,7 @@ def _handle_comment(
                 "After reviewing the referenced code, this appears to be a false positive: "
                 f"{triage.issue_summary}"
             )
-            ok = _reply_and_resolve(client, request, comment, thread, reply)
+            ok = _reply_and_resolve(client, request, comment, thread, reply, thread_history)
             base.outcome = "false_positive" if ok else "failed"
             base.detail = triage.issue_summary if ok else "Reply/resolve step failed."
             return base
@@ -932,7 +963,7 @@ def _handle_comment(
         # the thread stays open and the next run's _unresolved_comments picks
         # up the reviewer's actual latest message.
         if thread is not None and _thread_has_new_reviewer_feedback(
-            client, request.owner, request.repo, request.pr_number, thread.id, comment.id, comment.body
+            client, request.owner, request.repo, request.pr_number, thread.id, comment.id, thread_history
         ):
             base.detail = (
                 "Newer reviewer feedback appeared on this thread before implementation "
@@ -955,7 +986,7 @@ def _handle_comment(
             f"Addressed by the software-engineering team in job `{child_job_id}`. "
             f"{plan.chosen_plan}"
         )
-        ok = _reply_and_resolve(client, request, comment, thread, reply)
+        ok = _reply_and_resolve(client, request, comment, thread, reply, thread_history)
         base.outcome = "resolved" if ok else "failed"
         base.detail = plan.chosen_plan if ok else "Reply/resolve step failed."
         return base
