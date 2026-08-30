@@ -155,8 +155,11 @@ no import chain back into the excluded modules above before relying on it.
 - `starting_equity > 0`.
 
 **Postconditions:**
-- The returned list is ordered by non-decreasing `entry_bar` within each
-  symbol.
+- The returned list is in **global emission order** — chronological by the
+  merged `(timestamp, symbol)` timeline (§2's "Cross-symbol processing
+  order"), not grouped by symbol. Consequently, the subsequence of trades
+  belonging to any single symbol is ordered by non-decreasing `entry_bar`,
+  but trades from different symbols can interleave in the overall list.
 - Every `ReferenceTrade` satisfies `0 <= entry_bar <= exit_bar <
   len(bars[symbol])`.
 - Each fully closed position produces exactly one `ReferenceTrade` — a
@@ -192,7 +195,7 @@ inconsistent record silently.
 | `symbol` | `str` | `symbol` | Verbatim. |
 | `side` | `Literal["long", "short"]` | `side` | Verbatim (production stores a plain `str`; this is the stricter reference form). |
 | `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Primary key for this module's own bookkeeping (ladder rungs, per-position running state). |
-| `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where this trade (or rung) closed. |
+| `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position's **final** closing event occurred. For a position that passed through one or more `scaled_take_profit` rungs before closing, this is the bar of the final close only — never an earlier rung's bar — since the reference model emits one aggregated row per fully closed position (§5's "Exit aggregation" subsection). |
 | `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp[:10]` — truncated to the date portion exactly as production does (`pos.entry_timestamp[:10]`), so an intraday `Bar.timestamp` still matches production's date-only comparison key. |
 | `exit_date` | `str` | `exit_date` | `bars[symbol][exit_bar].timestamp[:10]`, truncated the same way (`bar.timestamp[:10]` in `_fill_exit`). |
 | `entry_price` | `float` | `entry_bid_price` | Pre-slippage reference level — **not** `entry_fill_price` or the legacy `entry_price` alias (both are post-slippage in production). See rationale below. |
@@ -339,7 +342,7 @@ is **promoted to one share** if that one share still satisfies
 `max_position_pct` (re-checked at exactly one share, since flooring up can
 itself re-breach the cap), and only **skipped** (no entry) if even one
 share would breach it. A fractional-capable asset class (crypto/forex)
-instead keeps the raw, uncapped-floor quantity as-is (dropped to zero only
+instead keeps the clamped, unfloored quantity as-is (dropped to zero only
 if the cap itself drove it to zero or below).
 
 ### Exit aggregation
