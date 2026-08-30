@@ -1777,6 +1777,121 @@ describe('CodingTeamPageComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // PR-driven runs (address-comments remediation jobs: github_context carries
+  // pr_number instead of issue_number)
+  // -------------------------------------------------------------------------
+
+  describe('PR-driven runs', () => {
+    it('includes a PR-context job in the Runs list instead of filtering it out', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-job',
+            status: 'running',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 42, pr_url: 'https://example.com/pull/42' },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      expect(component.runs.map((r) => r.job_id)).toEqual(['pr-job']);
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.coding-run-item').length).toBe(1);
+      expect(el.textContent).toContain('acme/widgets#42 (PR)');
+    });
+
+    it('selects a PR-context run, deriving its kind and number', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-job',
+            status: 'running',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 42, pr_url: 'https://example.com/pull/42' },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      // Non-terminal runs are auto-selected on first load, same as an issue-driven run.
+      expect(component.selectedRunId).toBe('pr-job');
+      expect(component.selectedRunNumber).toBe(42);
+      expect(component.selectedRunKind).toBe('pr');
+      expect(component.selectedRunOwner).toBe('acme');
+      expect(component.selectedRunRepo).toBe('widgets');
+    });
+
+    it('keys the "in progress" chip for a PR run separately from an issue of the same number', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-job',
+            status: 'running',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 2 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      expect(component.activeIssueKeys.has('acme/widgets#pr-2')).toBe(true);
+      // A same-numbered issue is a distinct identity and must not be flagged in progress.
+      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(false);
+    });
+
+    it('makes a paused PR-remediation run reachable for answering questions, like an issue run', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-paused',
+            status: 'waiting_for_user',
+            waiting_for_answers: true,
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 7 },
+          }),
+        ]),
+      );
+      apiSpy.getJobStatus.mockReturnValue(
+        of({
+          job_id: 'pr-paused',
+          status: 'waiting_for_user',
+          waiting_for_answers: true,
+          pending_questions: [
+            { id: 'q1', question_text: 'Which approach?', options: [{ id: 'a', label: 'A' }], required: true, source: 'tech_lead' },
+          ],
+          github_context: { owner: 'acme', repo: 'widgets', pr_number: 7 },
+        }),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      fixture.detectChanges();
+      // Paused runs are preferred by auto-select, so this run's answer controls are on screen.
+      expect(component.selectedRunId).toBe('pr-paused');
+      expect(fixture.nativeElement.querySelector('app-pending-questions')).not.toBeNull();
+    });
+
+    it('does not offer "Run again" for a finished PR-remediation run', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-done',
+            status: 'completed',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 3 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      component.toggleRun(component.recentRuns[0]);
+      await flushAsync();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.run-detail__retry')).toBeNull();
+      component.retrySelectedRun();
+      expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Retry
   // -------------------------------------------------------------------------
 
