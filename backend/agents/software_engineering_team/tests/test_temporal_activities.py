@@ -1037,6 +1037,9 @@ def test_plan_project_activity_pauses_on_planning_clarification_question(
     assert job["pending_questions"][0]["question_text"] == "Which auth provider?"
     # Never marked failed by the generic exception handler — a pause is not a failure.
     assert job["status"] != js.JOB_STATUS_FAILED
+    # Persisted onto the job record so POST /run-team/{job_id}/answers has something to
+    # key its Temporal-native-vs-thread-mode decision on (see api/routes/hitl.py).
+    assert job["resume_token"] == result["resume_token"]
 
 
 def test_plan_project_activity_resumes_with_submitted_answers(

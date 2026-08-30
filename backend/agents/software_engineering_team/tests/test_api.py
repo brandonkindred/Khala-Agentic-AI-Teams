@@ -590,6 +590,20 @@ def test_get_job_status_includes_server_time(client: TestClient, temp_work_path:
     datetime.fromisoformat(server_time)
 
 
+def test_get_job_status_surfaces_resume_token(client: TestClient, temp_work_path: Path) -> None:
+    """A client discovering a Temporal-native pause via polling status (rather than the
+    original pause notification) has no other way to learn the resume_token it must echo
+    back on POST /run-team/{job_id}/answers -- GET must surface it."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    assert client.get(f"/run-team/{job_id}").json()["resume_token"] is None
+
+    update_job(job_id, resume_token=f"{job_id}:tok-1")
+    assert client.get(f"/run-team/{job_id}").json()["resume_token"] == f"{job_id}:tok-1"
+
+
 def test_get_job_status_clamps_progress(client: TestClient, temp_work_path: Path) -> None:
     """Progress is clamped to [0, 100] via shared.hitl.progress.coerce_progress, so a corrupt
     stored value can no longer render an out-of-range bar. This is an intentional behavior

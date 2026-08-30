@@ -210,6 +210,12 @@ class JobStatusResponse(BaseModel):
         default=False,
         description="True when job is blocked waiting for user to answer pending questions.",
     )
+    resume_token: Optional[str] = Field(
+        default=None,
+        description="Set only for a Temporal-native pause; the client must echo this back on "
+        "SubmitAnswersRequest.resume_token. A client discovering the pause via polling status "
+        "(rather than the original pause notification) has no other way to obtain it.",
+    )
     planning_subprocess: Optional[str] = Field(
         None,
         description=(

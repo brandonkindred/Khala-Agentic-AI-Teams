@@ -646,6 +646,11 @@ def _plan_project_activity_body(
                 if oq.get("options"):
                     sq["options"] = oq["options"]
         add_pending_questions(job_id, structured)
+        # Persisted separately from add_pending_questions' own atomic write (the shared
+        # run-team job store has no combined call for both) so POST /run-team/{job_id}/answers
+        # has something to key a Temporal-native-vs-thread-mode decision on, matching the
+        # coding team's resume_token convention (pause_cycle._run_pause_cycle).
+        update_job(job_id, resume_token=exc.resume_token)
         return {
             "outcome": "paused",
             "resume_token": exc.resume_token,

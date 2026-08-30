@@ -5,9 +5,11 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
+from planning_team.temporal.answer_signal import SUBMIT_PLANNING_ANSWERS_SIGNAL
 from shared.hitl.progress import coerce_progress
 from shared.hitl.status import pending_questions_from_raw
 from shared.hitl.validation import validate_answers
+from shared.temporal.runner import signal_workflow_sync
 from software_engineering_team.api.models import (
     AutoAnswerRequest,
     AutoAnswerResponse,
@@ -23,51 +25,21 @@ from software_engineering_team.api.state import (
     _real_question_options,
 )
 from software_engineering_team.shared.job_store import (
+    append_submitted_answers as store_append_submitted_answers,
+)
+from software_engineering_team.shared.job_store import (
     get_job,
     update_job,
 )
 from software_engineering_team.shared.job_store import submit_answers as store_submit_answers
+from software_engineering_team.temporal.constants import WORKFLOW_ID_PREFIX_RUN_TEAM
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post(
-    "/run-team/{job_id}/answers",
-    response_model=JobStatusResponse,
-    summary="Submit answers to pending questions",
-    description="Submit user answers to pending questions. The job will resume once all required questions are answered. "
-    "Each answer can select a predefined option or provide custom 'other' text.",
-)
-def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobStatusResponse:
-    """Submit answers to pending questions and resume job execution."""
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    # Reconciled validation lives in shared.hitl (the strict union of both teams' rules):
-    # it adds the corrupted-record (500) and duplicate-answer (400) rejections SE's old
-    # inline check lacked, and returns answer dicts carrying each question's text.
-    answers_dicts = validate_answers(data, request)
-    store_submit_answers(job_id, answers_dicts)
-
-    # If the orchestrator thread is alive, its _wait_for_user_answers polling loop
-    # will pick up the answers automatically (waiting_for_answers is now False).
-    # If the thread is dead (server restarted), the job stays in running state
-    # with answers stored — the user or UI should call POST /run-team/{job_id}/resume.
-    if not _is_orchestrator_alive(job_id):
-        logger.info(
-            "Orchestrator thread for job %s is not running; answers stored. "
-            "Call POST /run-team/%s/resume to restart the orchestrator.",
-            job_id,
-            job_id,
-        )
-        update_job(
-            job_id,
-            status_text="Answers received. Resume the job to continue processing.",
-        )
-
-    updated_data = get_job(job_id)
+def _job_status_response(job_id: str, updated_data: dict) -> JobStatusResponse:
+    """Build the ``JobStatusResponse`` this route returns, from a fresh ``get_job`` read."""
     return JobStatusResponse(
         job_id=job_id,
         status=updated_data.get("status", "running"),
@@ -94,12 +66,91 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         else None,
         pending_questions=pending_questions_from_raw(updated_data.get("pending_questions", [])),
         waiting_for_answers=updated_data.get("waiting_for_answers", False),
+        resume_token=updated_data.get("resume_token"),
         planning_subprocess=updated_data.get("planning_subprocess"),
         planning_completed_phases=updated_data.get("planning_completed_phases") or [],
         analysis_subprocess=updated_data.get("analysis_subprocess"),
         analysis_completed_phases=updated_data.get("analysis_completed_phases") or [],
         planning_hierarchy=updated_data.get("planning_hierarchy"),
     )
+
+
+@router.post(
+    "/run-team/{job_id}/answers",
+    response_model=JobStatusResponse,
+    summary="Submit answers to pending questions",
+    description="Submit user answers to pending questions. The job will resume once all required questions are answered. "
+    "Each answer can select a predefined option or provide custom 'other' text.",
+)
+def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobStatusResponse:
+    """Submit answers to a run-team job's pending questions and resume job execution.
+
+    Two distinct pause mechanisms, told apart by whether the job record carries a
+    ``resume_token`` (set only when ``plan_project_activity`` catches a
+    ``PlanningAnswerPauseSignal`` — see ``temporal/activities.py``; never set by a
+    thread-mode pause):
+
+    - **Temporal-native pause** (``resume_token`` present): the client must echo the same
+      ``resume_token`` it was given in the pause notification/status poll — a mismatch (or a
+      missing one) raises 409, mirroring the coding team's identical contract
+      (``coding_team_hitl.py``): without this check a client holding a stale token would get
+      a 200 while ``RunTeamWorkflowV2``'s ``submit_planning_answers`` handler silently drops
+      the mismatched signal, giving false confidence the answer landed. Once validated,
+      answers are appended to ``submitted_answers`` (for audit/status-poll visibility only —
+      resumption itself is driven entirely by the signal, not by re-reading the job record),
+      then ``RunTeamWorkflowV2`` is signaled directly so its Planning-phase pause loop
+      resumes with the resolved answers.
+    - **Thread-mode pause** (``resume_token`` absent): unchanged existing behavior — answers
+      are stored via ``store_submit_answers``, which clears ``waiting_for_answers`` so a
+      still-alive blocked wait loop can proceed.
+
+    Authentication/authorization is enforced by the unified API security gateway in front of
+    all team mounts; like every other run-team route, this endpoint assumes that perimeter.
+    """
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    # Reconciled validation lives in shared.hitl (the strict union of both teams' rules):
+    # it adds the corrupted-record (500) and duplicate-answer (400) rejections SE's old
+    # inline check lacked, and returns answer dicts carrying each question's text.
+    answers_dicts = validate_answers(data, request)
+
+    resume_token = data.get("resume_token")
+    if resume_token:
+        if request.resume_token != resume_token:
+            raise HTTPException(
+                status_code=409,
+                detail="resume_token does not match this job's current pause; it is stale or "
+                "answers a pause that already resolved.",
+            )
+        store_append_submitted_answers(job_id, answers_dicts)
+        signal_workflow_sync(
+            f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}",
+            SUBMIT_PLANNING_ANSWERS_SIGNAL,
+            {"resume_token": resume_token, "answers": answers_dicts},
+        )
+        return _job_status_response(job_id, get_job(job_id))
+
+    store_submit_answers(job_id, answers_dicts)
+
+    # If the orchestrator thread is alive, its _wait_for_user_answers polling loop
+    # will pick up the answers automatically (waiting_for_answers is now False).
+    # If the thread is dead (server restarted), the job stays in running state
+    # with answers stored — the user or UI should call POST /run-team/{job_id}/resume.
+    if not _is_orchestrator_alive(job_id):
+        logger.info(
+            "Orchestrator thread for job %s is not running; answers stored. "
+            "Call POST /run-team/%s/resume to restart the orchestrator.",
+            job_id,
+            job_id,
+        )
+        update_job(
+            job_id,
+            status_text="Answers received. Resume the job to continue processing.",
+        )
+
+    return _job_status_response(job_id, get_job(job_id))
 
 
 @router.post(

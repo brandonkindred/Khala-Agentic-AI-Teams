@@ -264,6 +264,7 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         else None,
         "pending_questions": [pq.model_dump() for pq in pending_questions_parsed],
         "waiting_for_answers": bool(data.get("waiting_for_answers", False)),
+        "resume_token": data.get("resume_token"),
         "planning_subprocess": data.get("planning_subprocess"),
         "planning_completed_phases": data.get("planning_completed_phases") or [],
         "analysis_subprocess": data.get("analysis_subprocess"),
