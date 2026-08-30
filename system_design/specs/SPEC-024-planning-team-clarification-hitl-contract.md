@@ -1057,6 +1057,28 @@ this contract:
   job-record update; (3) `wait_pra` resumes polling against the checkpointed external PRA job id —
   `run_pra` is not called again; the activity proceeds to its normal terminal return shape (or
   pauses again, for the next round, per the paused-return path above).
+  **Contract requirement — the consumed batch must survive this activity's own terminal write, not
+  just step (2)'s job-record update.** Moving the consumed batch into the job record's
+  `resolved_questions` field at step (2) is not sufficient by itself: once `wait_pra` finally
+  reports `"completed"` (no more rounds), this same `document_production_activity` reaches its
+  existing terminal persistence (`temporal/activities.py:335-364`), which rebuilds `merged =
+  _merge_context(context, context_update)` from the **original synthesized `context`** (threaded in
+  from the synthesis phase, §4.3.1's precondition) and then unconditionally writes
+  `resolved_questions=list(merged.get("resolved_questions") or [])`
+  (`temporal/activities.py:346,364`) — overwriting whatever step (2) already persisted for this job
+  with whatever `context`/`context_update` happens to carry, which today is nothing:
+  `context["resolved_questions"]` is never populated anywhere in `planning_team` (`orchestrator.py`
+  only reads it, per its own "intentionally a no-op today" comment at
+  `temporal/activities.py:336-342`). Left as-is, every clarification decision a human made through
+  this contract's pause/resume path would be silently discarded from the handoff and the job
+  record's own `resolved_questions` the moment the job completes. **This activity must hydrate the
+  accumulated `AnsweredQuestion`-shaped consumed batches (across every resumed round for this job)
+  into `context`/`context_update`'s `resolved_questions` before the terminal write** — e.g. by
+  reading them back from the job record (the durable store step (2) already wrote them to) and
+  merging into `context_update` ahead of the `_merge_context` call — so the terminal
+  `update_job(..., resolved_questions=...)` preserves rather than clobbers them, and the handoff
+  package built from the same `merged` dict carries the actual human decisions instead of an empty
+  list.
 - *Invariants:* A resume is applied at most once per `resume_token` — re-invocation with the same
   already-consumed token must not re-apply answers or re-run already-completed work (idempotent
   resume). No resume path may submit a second external PRA job for the same Planning job. A
@@ -1074,10 +1096,22 @@ this contract:
   different question" — reconciling by id alone risks silently applying round *N*'s stale answer
   content to round *N+1*'s differently-scoped question, which PRA's id-only validation would
   accept without complaint. Comparing the *full* `(id, question_text)` pair against what this pause
-  round persisted **narrows, but does not eliminate,** the ambiguity: a match means "PRA is still
-  waiting on exactly this question, safe to (re-)submit"; no match means "PRA has moved past this
-  round already — do not submit stale content," proceeding straight to step (2) instead. **This is
-  not a complete fix.** `question_text` has the identical fallback problem as `id`:
+  round persisted **narrows, but does not eliminate,** the ambiguity — and the comparison **must be
+  over the complete persisted `pending_questions` set as one unit, never per-question.** A
+  per-question check is unsafe for a multi-question round: if the persisted round paused on
+  `[q0, q1]` and a retry's status GET finds PRA now reports `[q0 (same text), q1 (different
+  text)]` — PRA has silently advanced `q1` to a new question while `q0`'s id/text pair happens to
+  still match — a per-question rule would find "`q0` matches" and conclude PRA is still on the old
+  round, resubmitting the *entire* persisted batch; PRA's id-only answer validation
+  (`api/routes/product_analysis.py:262-275`) then accepts the stale `q1` answer against the new
+  question with no error. **Contract requirement:** treat this as one set-equality check — every
+  `(id, question_text)` pair PRA currently reports must equal, as a set, every pair this pause round
+  persisted — before concluding "PRA is still waiting on exactly this round, safe to (re-)submit."
+  Any partial difference (even a single question's id or text changed, added, or missing) must be
+  treated as advancement — proceed straight to step (2), submitting nothing — never as "the
+  unchanged questions are still safe to resubmit." This still leaves the residual risk below when
+  the *entire* set is identical across rounds. **This is not a complete fix.** `question_text` has
+  the identical fallback problem as `id`:
   `_require_string_field(q_data, "question_text", "")` (`question_processing.py:822`) defaults a
   missing `question_text` to `""`, exactly as `id` defaults to `q{index}` — so two consecutive
   rounds can in principle share the *same* `(id, question_text)` pair (e.g., both malformed-parse
