@@ -311,10 +311,37 @@ class _FakeClient:
         self, *, owner: str, repo: str, number: int, comment_id: int, body: str
     ) -> dict[str, Any]:
         self.replies.append((comment_id, body))
-        return {"id": comment_id, "html_url": "https://example/reply"}
+        # Mirror real GitHub state: a posted reply becomes a new comment on the
+        # SAME thread, so a later live re-check (list_review_comments/
+        # list_review_threads) sees it — matching how the real API behaves and
+        # how the production freshness/re-list checks assume state evolves.
+        new_id = max([c.id for c in self.review_comments] + [comment_id], default=0) + 1
+        marked_body = body if KHALA_COMMENT_MARKER in body else f"{body}\n\n{KHALA_COMMENT_MARKER}"
+        reply = ReviewComment(
+            id=new_id,
+            path="",
+            line=None,
+            body=marked_body,
+            html_url="https://example/reply",
+            author=self.authenticated_login,
+        )
+        self.review_comments = [*self.review_comments, reply]
+        self.threads = [
+            replace(t, comment_ids=(*t.comment_ids, new_id))
+            if comment_id in t.comment_ids
+            else t
+            for t in self.threads
+        ]
+        return {"id": new_id, "html_url": "https://example/reply"}
 
     def resolve_review_thread(self, thread_id: str) -> bool:
         self.resolved.append(thread_id)
+        if self.resolve_result:
+            # Mirror real GitHub state: a successful resolve flips the live
+            # thread's is_resolved flag, so a later live re-check sees it.
+            self.threads = [
+                replace(t, is_resolved=True) if t.id == thread_id else t for t in self.threads
+            ]
         return self.resolve_result
 
     def update_issue(
@@ -1238,6 +1265,46 @@ class TestRunAddressComments:
         # never labelled ready while a reviewer's follow-up is still unaddressed.
         assert fake.labels_set == []
 
+    def test_relists_unresolved_threads_before_declaring_success(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer can open a BRAND-NEW thread while an earlier comment's
+        implementation workflow is still running — invisible to both
+        `outcomes` and `retry_resolve_threads`, which only cover what THIS
+        run's initial snapshot saw. The run must re-list live unresolved
+        state before declaring itself fully successful, or it would label
+        the PR ready (and could reclaim its checkout) over a thread that was
+        never triaged."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+
+        real_unresolved_comments = ac._unresolved_comments
+        calls = {"n": 0}
+        new_thread_comment = _comment(9, body="separate new concern")
+
+        def _stub(client, owner, repo, pr_number):
+            calls["n"] += 1
+            result = real_unresolved_comments(client, owner, repo, pr_number)
+            if calls["n"] == 1:
+                return result
+            # The final re-list (this run's second call) sees a brand-new
+            # thread a reviewer opened while comment 2's workflow was running.
+            unresolved, by_comment, retry, history = result
+            by_comment = {**by_comment, 9: ReviewThread(id="T9", is_resolved=False, comment_ids=(9,))}
+            history = {**history, 9: [new_thread_comment]}
+            return [*unresolved, new_thread_comment], by_comment, retry, history
+
+        monkeypatch.setattr(ac, "_unresolved_comments", _stub)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert calls["n"] == 2  # the initial snapshot, then the final re-list
+        assert fake.resolved == ["T2"]  # comment 2's own thread still resolved
+        # But the run as a whole did NOT declare success over the new thread.
+        assert fake.labels_set == []
+
     def test_dispatch_time_freshness_check_blocks_stale_implementation(
         self, address_env, monkeypatch
     ) -> None:
@@ -1276,6 +1343,43 @@ class TestRunAddressComments:
         assert address_env["executions"] == []
         assert fake.replies == []
         assert fake.resolved == []
+
+    def test_dispatch_time_freshness_check_blocks_manually_resolved_thread(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A reviewer can resolve a thread by hand (the GitHub UI) while
+        triage/planning for it is still running — this supersedes the
+        in-flight work just as decisively as new feedback would. Dispatching
+        (or pushing) a fix for a concern the reviewer already closed is
+        wasted work and must be blocked."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        # The LIVE thread is already resolved (a human resolved it after this
+        # run's snapshot was taken); the snapshot itself still shows it open.
+        thread = ReviewThread(id="T2", is_resolved=True, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),  # the snapshot's view
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "superseded" in outcome.detail
+        assert address_env["child_jobs"] == []  # implementation never dispatched
+        assert fake.replies == []
+        assert fake.resolved == []  # never re-resolved — already resolved live
 
     def test_triage_and_plan_prompts_include_full_thread_history(
         self, address_env, monkeypatch

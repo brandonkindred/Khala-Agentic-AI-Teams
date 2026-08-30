@@ -676,12 +676,17 @@ def _thread_has_new_reviewer_feedback(
           ``since_comment_body`` — GitHub retains a comment's id across an
           edit, so a reviewer who edits the ALREADY-triaged comment in place
           (rather than posting a reply) would otherwise be invisible to the
-          id-only check and get silently resolved over. Returns False when
-          neither is found, or when the thread itself can no longer be found
-          (nothing left to protect). Fails OPEN (returns True) on any error:
-          resolving a thread whose freshness could not be verified risks
-          silently hiding real feedback, which is worse than a redundant
-          re-check on the next run.
+          id-only check and get silently resolved over — OR (c) the LIVE
+          thread is already resolved: a reviewer can resolve a thread by hand
+          (via the GitHub UI) while triage/planning/implementation for it is
+          still running, which supersedes the in-flight work just as
+          decisively as new feedback would — dispatching (or pushing) a fix
+          for a concern the reviewer already closed is wasted work at best.
+          Returns False when none of these hold, or when the thread itself
+          can no longer be found (nothing left to protect). Fails OPEN
+          (returns True) on any error: resolving a thread whose freshness
+          could not be verified risks silently hiding real feedback, which is
+          worse than a redundant re-check on the next run.
     """
     try:
         authenticated_login = client.get_authenticated_login()
@@ -692,6 +697,8 @@ def _thread_has_new_reviewer_feedback(
         fresh_thread = next((t for t in threads if t.id == thread_id), None)
         if fresh_thread is None:
             return False
+        if fresh_thread.is_resolved:
+            return True
         all_comments = client.list_review_comments(owner, repo, pr_number)
         comments_by_id = {c.id: c for c in all_comments}
         if since_comment_body:
@@ -1129,8 +1136,31 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 outcomes.append(outcome)
 
             # Every comment handled without failure AND every retry-resolve
-            # succeeded: nothing is still owed to the reviewer.
+            # succeeded: nothing is still owed to the reviewer, AS FAR AS THIS
+            # RUN'S INITIAL SNAPSHOT SAW.
             all_succeeded = retry_resolve_ok and all(o.outcome != "failed" for o in outcomes)
+            if all_succeeded:
+                # A reviewer can open a brand-new thread — or resolve/reply to an
+                # existing one — while an earlier comment's implementation
+                # workflow was still running, after this run's initial
+                # `_unresolved_comments` snapshot was taken. Such a thread
+                # appears in neither `outcomes` nor `retry_resolve_threads`, so
+                # the check above alone would declare the run fully successful
+                # over feedback that was never triaged. Re-list live state as
+                # the actual authority for "nothing left owed" before labelling
+                # the PR ready or reclaiming its checkout.
+                try:
+                    fresh_unresolved, _tbc, fresh_retry, _hist = _unresolved_comments(
+                        client, owner, repo, pr_number
+                    )
+                    all_succeeded = not fresh_unresolved and not fresh_retry
+                except Exception as e:  # noqa: BLE001 - fail closed: unverifiable state must not read as success
+                    logger.warning(
+                        "address-comments: could not re-list unresolved threads before "
+                        "declaring the run successful: %s",
+                        scrub_token_from_text(str(e)),
+                    )
+                    all_succeeded = False
             # Move the PR to "waiting for review" only on a fully successful run —
             # a failed comment or a still-open retried thread means work is owed,
             # so the PR is not yet ready for another look. A run consisting SOLELY
