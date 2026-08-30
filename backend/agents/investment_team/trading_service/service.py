@@ -29,6 +29,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 
 import numpy as np
@@ -84,6 +85,7 @@ from .engine.order_book import FILL_QTY_REL_TOL, OrderBook, PendingOrder
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
     Bar,
+    ExitLegSpec,
     LimitAttachment,
     OrderRequest,
     OrderSide,
@@ -1490,22 +1492,119 @@ class _EngineExitDispatcher:
 ENGINE_ENTRY_REASON_PREFIX = "engine_entry:"
 
 
+def resolve_exit_leg_attachments(
+    legs: Sequence[ExitLegSpec], side: OrderSide, ref_price: float
+) -> list[Union[StopAttachment, LimitAttachment]]:
+    """Resolve an ordered list of protective/target exit-leg specs into entry-order attachments.
+
+    Pure function (no engine/dispatcher state) so the price math is
+    unit-testable in isolation. Generalizes the bracket-only price math
+    previously inlined here (now factored into the :func:`resolve_bracket_attachments`
+    adapter below). Anchors every leg at ``ref_price`` independently (the
+    signal-bar close, the same reference ``_compute_qty`` sizes against). For
+    a long, protective legs (``STOP``/``STOP_LIMIT``/``TRAILING_STOP``) sit
+    below and target legs (``LIMIT``) sit above the reference; for a short
+    the signs flip. A ``STOP_LIMIT``/``TRAILING_STOP`` leg's secondary offset
+    (``limit_offset``/``trail_offset``) is an absolute distance off the
+    resolved stop level — NOT an absolute price — because the stop level can
+    trail/ratchet, so the engine bracket materializer re-derives the
+    protective limit from the live stop via ``protective_limit_price``
+    (``fill_simulator._materialize_bracket_children``) with the same
+    ``(stop_price, offset, closing_long)`` inputs used here, keeping
+    emit-time and materialization-time limits consistent.
+
+    Preconditions: ``ref_price > 0``; ``side`` is the entry's ``OrderSide``;
+    each element of ``legs`` is a validated :class:`ExitLegSpec`.
+    Postconditions: returns a list the same length and order as ``legs``;
+    each element is a :class:`StopAttachment` (``STOP``/``STOP_LIMIT``/
+    ``TRAILING_STOP`` legs) or :class:`LimitAttachment` (``LIMIT`` legs) whose
+    absolute price is strictly positive and on the correct side of
+    ``ref_price``; empty ``legs`` yields ``[]``.
+    Raises:
+        ValueError: if ``ref_price <= 0``, or if a resolved price is
+            non-positive — a defensive guard that would only trip if a leg
+            field bound were loosened without updating this math.
+    """
+    # Explicit raises (not ``assert``, which ``python -O`` strips) so the
+    # contract stays enforced in optimized production runs.
+    if ref_price <= 0:
+        raise ValueError(f"exit leg reference price must be positive, got {ref_price!r}")
+    is_long = side == OrderSide.LONG
+    attachments: list[Union[StopAttachment, LimitAttachment]] = []
+    for leg in legs:
+        if leg.kind == OrderType.LIMIT:
+            limit_price = ref_price * (1.0 + leg.pct) if is_long else ref_price * (1.0 - leg.pct)
+            # Defense-in-depth postcondition — see the STOP-family branch below.
+            if limit_price <= 0:
+                raise ValueError(
+                    f"exit leg resolved non-positive limit_price={limit_price!r} "
+                    f"from ref={ref_price!r}, pct={leg.pct!r}"
+                )
+            attachments.append(LimitAttachment(limit_price=limit_price))
+            continue
+        stop_price = ref_price * (1.0 - leg.pct) if is_long else ref_price * (1.0 + leg.pct)
+        # Defense-in-depth postcondition: the resolved price must be strictly
+        # positive. The leg field bound (``pct < 1.0``) already guarantees this
+        # for a positive ``ref_price``, so a violation here means the bound was
+        # loosened without updating this math — fail loudly at emit rather than
+        # materialize a never-filling / negative-price child.
+        if stop_price <= 0:
+            raise ValueError(
+                f"exit leg resolved non-positive stop_price={stop_price!r} "
+                f"from ref={ref_price!r}, pct={leg.pct!r}"
+            )
+        # ``limit_offset_pct``/``trail_offset_pct`` are fractions of the stop
+        # level; the attachment carries an absolute distance. The leg
+        # validator bounds each ``< 1.0``, so the offset stays inside
+        # ``(0, stop_price)`` and the engine's ``protective_limit_price``/
+        # trailing math at materialization stays positive and on the
+        # protective side.
+        limit_offset = stop_price * leg.limit_offset_pct if leg.kind == OrderType.STOP_LIMIT else None
+        trail_offset = stop_price * leg.trail_offset_pct if leg.kind == OrderType.TRAILING_STOP else None
+        attachments.append(
+            StopAttachment(
+                stop_price=stop_price,
+                limit_offset=limit_offset,
+                limit_offset_kind="abs",
+                trail_offset=trail_offset,
+                trail_offset_kind="abs",
+            )
+        )
+    return attachments
+
+
+def _bracket_to_leg_specs(bracket: OcoBracketRule) -> list[ExitLegSpec]:
+    """Translate an OCO bracket's two fixed legs into generic exit-leg specs.
+
+    Preconditions: ``bracket`` is a validated :class:`OcoBracketRule`.
+    Postconditions: returns ``[stop_leg, target_leg]`` — the stop leg first
+    (``STOP_LIMIT`` when ``bracket.stop_loss.style == "limit"``, else
+    ``STOP``), the take-profit leg second (``LIMIT``) — matching the order
+    :func:`resolve_bracket_attachments` has always returned them in.
+    """
+    stop_kind = OrderType.STOP_LIMIT if bracket.stop_loss.style == "limit" else OrderType.STOP
+    return [
+        ExitLegSpec(
+            kind=stop_kind,
+            pct=bracket.stop_loss.pct,
+            limit_offset_pct=bracket.stop_loss.limit_offset_pct if stop_kind == OrderType.STOP_LIMIT else None,
+        ),
+        ExitLegSpec(kind=OrderType.LIMIT, pct=bracket.take_profit.pct),
+    ]
+
+
 def resolve_bracket_attachments(
     bracket: OcoBracketRule, side: OrderSide, ref_price: float
 ) -> tuple[StopAttachment, LimitAttachment]:
     """Resolve an OCO bracket's percentage legs into entry-order attachments.
 
-    Pure function (no engine/dispatcher state) so the price math is unit-testable
-    in isolation. Anchors the legs at ``ref_price`` (the signal-bar close, the
-    same reference ``_compute_qty`` sizes against). For a long the stop sits below
-    and the target above the reference; for a short the signs flip. A
-    ``limit``-style stop leg sets ``StopAttachment.limit_offset`` (an absolute
-    distance off the stop level, ``limit_offset_kind="abs"``) — NOT an absolute
-    limit price — because the stop level can trail/ratchet, so the engine bracket
-    materializer re-derives the protective limit from the live stop via
-    ``protective_limit_price`` (``fill_simulator._materialize_bracket_children``)
-    with the same ``(stop_price, offset, closing_long)`` inputs used here, keeping
-    emit-time and materialization-time limits consistent.
+    Thin adapter over the generalized :func:`resolve_exit_leg_attachments`:
+    translates the bracket's fixed (stop, target) legs into
+    :class:`ExitLegSpec`\\ s via :func:`_bracket_to_leg_specs` and unpacks the
+    two-element result back into a tuple, preserving this function's
+    original signature and price math byte-for-byte. See
+    :func:`resolve_exit_leg_attachments` for the shared price-resolution
+    contract (anchoring, sign convention, limit-offset handling, and raises).
 
     Preconditions: ``ref_price > 0``; ``side`` is the entry's ``OrderSide``;
     ``bracket`` is a validated :class:`OcoBracketRule` (its leg ``pct`` values lie
@@ -1515,44 +1614,10 @@ def resolve_bracket_attachments(
     a ``limit``-style stop leg additionally carries a positive ``limit_offset``.
     Raises:
         ValueError: if ``ref_price <= 0``, or if a resolved ``stop_price`` /
-            ``limit_price`` is non-positive — a defensive guard that would only
-            trip if a leg field bound were loosened without updating this math.
+            ``limit_price`` is non-positive.
     """
-    # Explicit raises (not ``assert``, which ``python -O`` strips) so the
-    # contract stays enforced in optimized production runs.
-    if ref_price <= 0:
-        raise ValueError(f"bracket reference price must be positive, got {ref_price!r}")
-    is_long = side == OrderSide.LONG
-    stop_pct = bracket.stop_loss.pct
-    tp_pct = bracket.take_profit.pct
-    if is_long:
-        stop_price = ref_price * (1.0 - stop_pct)
-        limit_price = ref_price * (1.0 + tp_pct)
-    else:
-        stop_price = ref_price * (1.0 + stop_pct)
-        limit_price = ref_price * (1.0 - tp_pct)
-    # Defense-in-depth postcondition: both resolved prices must be strictly
-    # positive. The leg field bounds (stop/target ``pct < 1.0``) already guarantee
-    # this for a positive ``ref_price``, so a violation here means a field bound
-    # was loosened without updating this math — fail loudly at emit rather than
-    # materialize a never-filling / negative-price child.
-    if stop_price <= 0 or limit_price <= 0:
-        raise ValueError(
-            f"bracket resolved non-positive price (stop={stop_price!r}, limit={limit_price!r}) "
-            f"from ref={ref_price!r}, stop_pct={stop_pct!r}, tp_pct={tp_pct!r}"
-        )
-    limit_offset: Optional[float] = None
-    if bracket.stop_loss.style == "limit":
-        # ``limit_offset_pct`` is a fraction of the stop level; the attachment
-        # carries an absolute distance. The leg validator bounds
-        # ``limit_offset_pct < 1.0``, so ``0 < limit_offset < stop_price`` and the
-        # engine's ``protective_limit_price(stop_price, limit_offset, closing_long)``
-        # at materialization stays positive and on the protective side.
-        limit_offset = stop_price * bracket.stop_loss.limit_offset_pct
-    return (
-        StopAttachment(stop_price=stop_price, limit_offset=limit_offset, limit_offset_kind="abs"),
-        LimitAttachment(limit_price=limit_price),
-    )
+    stop_attachment, limit_attachment = resolve_exit_leg_attachments(_bracket_to_leg_specs(bracket), side, ref_price)
+    return stop_attachment, limit_attachment  # type: ignore[return-value]
 
 
 @dataclass
@@ -1716,14 +1781,18 @@ class _EngineEntryDispatcher:
     ) -> tuple[Optional[StopAttachment], Optional[LimitAttachment]]:
         """Resolve this run's OCO bracket (if any) into entry-order attachments.
 
-        Thin wrapper that supplies the per-run bracket to the pure, public
-        :func:`resolve_bracket_attachments`; returns ``(None, None)`` when the
-        spec has no bracket. See that function for the price-resolution contract
-        (anchoring, sign convention, limit-offset handling, and raises).
+        Builds the bracket's legs via :func:`_bracket_to_leg_specs` and
+        resolves them through the generalized :func:`resolve_exit_leg_attachments`;
+        returns ``(None, None)`` when the spec has no bracket. See that
+        function for the price-resolution contract (anchoring, sign
+        convention, limit-offset handling, and raises).
         """
         if self._bracket is None:
             return None, None
-        return resolve_bracket_attachments(self._bracket, side, ref_price)
+        stop_attachment, limit_attachment = resolve_exit_leg_attachments(
+            _bracket_to_leg_specs(self._bracket), side, ref_price
+        )
+        return stop_attachment, limit_attachment  # type: ignore[return-value]
 
     def _compute_qty(
         self,
