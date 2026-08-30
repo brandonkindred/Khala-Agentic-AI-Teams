@@ -82,16 +82,21 @@ def test_single_stop_limit_leg_sets_limit_offset() -> None:
 
 
 def test_single_trailing_stop_leg_sets_trail_offset() -> None:
-    """A lone TRAILING_STOP leg resolves a trail_offset (absolute distance off the
-    resolved stop level: trail_offset_pct * stop_price), with no limit offset."""
+    """A lone TRAILING_STOP leg resolves a trail_offset derived from ref_price
+    (ref_price * pct = 3.0), not from stop_price, so it matches the level
+    fill_simulator actually seeds (entry_fill_price - trail_offset) when
+    entry_fill_price == ref_price; no limit offset."""
     [att] = resolve_exit_leg_attachments(
-        [_leg(OrderType.TRAILING_STOP, pct=0.03, trail_offset_pct=0.02)], OrderSide.LONG, 100.0
+        [_leg(OrderType.TRAILING_STOP, pct=0.03)], OrderSide.LONG, 100.0
     )
     assert isinstance(att, StopAttachment)
     assert att.stop_price == pytest.approx(97.0)
-    assert att.trail_offset == pytest.approx(1.94)
+    assert att.trail_offset == pytest.approx(3.0)
     assert att.trail_offset_kind == "abs"
     assert att.limit_offset is None
+    # The advertised stop_price matches entry_fill_price - trail_offset
+    # (the level fill_simulator actually arms) when entry_fill_price == ref_price.
+    assert att.stop_price == pytest.approx(100.0 - att.trail_offset)
 
 
 def test_single_limit_target_leg_long() -> None:
@@ -120,7 +125,7 @@ def test_multiple_legs_resolve_in_order() -> None:
     legs = [
         _leg(OrderType.STOP, pct=0.03),
         _leg(OrderType.STOP_LIMIT, pct=0.04, limit_offset_pct=0.01),
-        _leg(OrderType.TRAILING_STOP, pct=0.05, trail_offset_pct=0.02),
+        _leg(OrderType.TRAILING_STOP, pct=0.05),
         _leg(OrderType.LIMIT, pct=0.06),
     ]
     attachments = resolve_exit_leg_attachments(legs, OrderSide.LONG, 100.0)
@@ -138,7 +143,7 @@ def test_multiple_legs_resolve_in_order() -> None:
 
     assert isinstance(trailing, StopAttachment)
     assert trailing.stop_price == pytest.approx(95.0)
-    assert trailing.trail_offset == pytest.approx(1.9)
+    assert trailing.trail_offset == pytest.approx(5.0)
 
     assert isinstance(target, LimitAttachment)
     assert target.limit_price == pytest.approx(106.0)
@@ -178,18 +183,6 @@ def test_non_stop_limit_leg_rejects_limit_offset_pct() -> None:
     """A non-STOP_LIMIT leg carrying limit_offset_pct is rejected."""
     with pytest.raises(ValueError, match="limit_offset_pct is required"):
         ExitLegSpec(kind=OrderType.STOP, pct=0.03, limit_offset_pct=0.01)
-
-
-def test_trailing_stop_leg_requires_trail_offset_pct() -> None:
-    """A TRAILING_STOP leg without trail_offset_pct is rejected."""
-    with pytest.raises(ValueError, match="trail_offset_pct is required"):
-        ExitLegSpec(kind=OrderType.TRAILING_STOP, pct=0.03)
-
-
-def test_non_trailing_stop_leg_rejects_trail_offset_pct() -> None:
-    """A non-TRAILING_STOP leg carrying trail_offset_pct is rejected."""
-    with pytest.raises(ValueError, match="trail_offset_pct is required"):
-        ExitLegSpec(kind=OrderType.LIMIT, pct=0.06, trail_offset_pct=0.02)
 
 
 def test_unsupported_kind_is_rejected() -> None:

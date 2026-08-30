@@ -1504,14 +1504,20 @@ def resolve_exit_leg_attachments(
     signal-bar close, the same reference ``_compute_qty`` sizes against). For
     a long, protective legs (``STOP``/``STOP_LIMIT``/``TRAILING_STOP``) sit
     below and target legs (``LIMIT``) sit above the reference; for a short
-    the signs flip. A ``STOP_LIMIT``/``TRAILING_STOP`` leg's secondary offset
-    (``limit_offset``/``trail_offset``) is an absolute distance off the
-    resolved stop level — NOT an absolute price — because the stop level can
-    trail/ratchet, so the engine bracket materializer re-derives the
-    protective limit from the live stop via ``protective_limit_price``
-    (``fill_simulator._materialize_bracket_children``) with the same
-    ``(stop_price, offset, closing_long)`` inputs used here, keeping
-    emit-time and materialization-time limits consistent.
+    the signs flip. A ``STOP_LIMIT`` leg's secondary offset (``limit_offset``)
+    is an absolute distance off the resolved stop level — NOT an absolute
+    price — because the stop level can trail/ratchet, so the engine bracket
+    materializer re-derives the protective limit from the live stop via
+    ``protective_limit_price`` (``fill_simulator._materialize_bracket_children``)
+    with the same ``(stop_price, offset, closing_long)`` inputs used here,
+    keeping emit-time and materialization-time limits consistent. A
+    ``TRAILING_STOP`` leg's ``trail_offset`` is derived from ``ref_price``
+    (not from ``stop_price``, unlike ``limit_offset``): the fill simulator
+    seeds a trailing child's live initial stop as ``entry_fill_price ∓
+    trail_offset`` and discards the resolved ``stop_price`` outright, so
+    deriving ``trail_offset`` off ``ref_price`` (≈ ``entry_fill_price`` for a
+    market entry) keeps the attachment's advertised ``stop_price`` equal to
+    the level the engine actually arms.
 
     Preconditions: ``ref_price > 0``; ``side`` is the entry's ``OrderSide``;
     each element of ``legs`` is a validated :class:`ExitLegSpec`.
@@ -1553,18 +1559,20 @@ def resolve_exit_leg_attachments(
                 f"exit leg resolved non-positive stop_price={stop_price!r} "
                 f"from ref={ref_price!r}, pct={leg.pct!r}"
             )
-        # ``limit_offset_pct``/``trail_offset_pct`` are fractions of the stop
-        # level; the attachment carries an absolute distance. The leg
-        # validator bounds each ``< 1.0``, so the offset stays inside
-        # ``(0, stop_price)`` and the engine's ``protective_limit_price``/
-        # trailing math at materialization stays positive and on the
-        # protective side.
+        # ``limit_offset_pct`` is a fraction of the stop level; the attachment
+        # carries an absolute distance. The leg validator bounds it ``< 1.0``,
+        # so the offset stays inside ``(0, stop_price)`` and the engine's
+        # ``protective_limit_price`` at materialization stays positive and on
+        # the protective side.
         limit_offset = (
             stop_price * leg.limit_offset_pct if leg.kind == OrderType.STOP_LIMIT else None
         )
-        trail_offset = (
-            stop_price * leg.trail_offset_pct if leg.kind == OrderType.TRAILING_STOP else None
-        )
+        # ``trail_offset`` is derived from ``ref_price`` (not ``stop_price``):
+        # ``ref_price - stop_price == ref_price * pct`` by construction above,
+        # so seeding the child from ``entry_fill_price ∓ trail_offset`` (see
+        # ``_materialize_bracket_children``) reproduces this same ``stop_price``
+        # when ``entry_fill_price == ref_price`` — see the docstring.
+        trail_offset = ref_price * leg.pct if leg.kind == OrderType.TRAILING_STOP else None
         attachments.append(
             StopAttachment(
                 stop_price=stop_price,

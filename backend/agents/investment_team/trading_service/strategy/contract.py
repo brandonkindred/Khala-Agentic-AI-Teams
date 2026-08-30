@@ -137,18 +137,25 @@ class ExitLegSpec(BaseModel):
     ``kind`` selects the resolved attachment shape: ``STOP``/``STOP_LIMIT``/
     ``TRAILING_STOP`` resolve to a :class:`StopAttachment`; ``LIMIT`` (a
     target leg) resolves to a :class:`LimitAttachment`. ``pct`` is the leg's
-    primary distance off the entry reference price, as a positive fraction in
+    distance off the entry reference price, as a positive fraction in
     ``(0, 1)`` (direction implied by side — the same convention as
-    ``BracketStopLeg``/``BracketTakeProfitLeg``). ``limit_offset_pct`` is the
-    ``STOP_LIMIT`` leg's secondary offset (a fraction of the resolved stop
-    level); ``trail_offset_pct`` is the ``TRAILING_STOP`` leg's secondary
-    offset (also a fraction of the resolved stop level). Each secondary field
-    is required iff its owning ``kind`` is selected — the same coupling as
-    ``BracketStopLeg._validate_limit_style``.
+    ``BracketStopLeg``/``BracketTakeProfitLeg``). For ``TRAILING_STOP``,
+    ``pct`` is *also* the trailing distance (``StopAttachment.trail_offset``
+    is derived from it as ``ref_price * pct``, not from a second,
+    independently-settable fraction): the fill simulator's trailing-stop
+    materialization (``fill_simulator._materialize_bracket_children``) seeds
+    the live child's initial stop as ``entry_fill_price ∓ trail_offset``,
+    discarding any separately-resolved ``stop_price`` — so a second knob for
+    the "initial" distance would silently diverge from the level the engine
+    actually arms. ``limit_offset_pct`` is the ``STOP_LIMIT`` leg's secondary
+    offset (a fraction of the resolved stop level, unaffected by the
+    trailing case since ``limit_offset``/``trail_offset`` are mutually
+    exclusive on :class:`StopAttachment`); required iff ``kind ==
+    STOP_LIMIT``, the same coupling as ``BracketStopLeg._validate_limit_style``.
 
     Preconditions: ``pct`` in ``(0, 1)``; ``kind`` in ``{STOP, STOP_LIMIT,
     TRAILING_STOP, LIMIT}``; ``limit_offset_pct`` set iff ``kind ==
-    STOP_LIMIT``; ``trail_offset_pct`` set iff ``kind == TRAILING_STOP``.
+    STOP_LIMIT``.
     Postconditions: a validated, immutable leg spec ready for
     ``resolve_exit_leg_attachments``.
     """
@@ -156,18 +163,17 @@ class ExitLegSpec(BaseModel):
     kind: OrderType
     pct: float = Field(gt=0, lt=1.0)
     limit_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
-    trail_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
     note: str = ""
 
     @model_validator(mode="after")
     def _validate_kind_fields(self) -> "ExitLegSpec":
-        """Tie ``limit_offset_pct``/``trail_offset_pct`` to ``kind``.
+        """Tie ``limit_offset_pct`` to ``kind``.
 
         Preconditions: ``kind`` is a valid ``OrderType`` (Pydantic-enforced).
         Postconditions: returns ``self`` when consistent; raises
-        ``ValueError`` when ``kind`` is not a supported leg kind, or when a
-        secondary offset field is set without (or missing despite) its
-        owning ``kind``.
+        ``ValueError`` when ``kind`` is not a supported leg kind, or when
+        ``limit_offset_pct`` is set without (or missing despite) ``kind ==
+        STOP_LIMIT``.
         """
         if self.kind not in (
             OrderType.STOP,
@@ -180,8 +186,6 @@ class ExitLegSpec(BaseModel):
             )
         if (self.kind == OrderType.STOP_LIMIT) != (self.limit_offset_pct is not None):
             raise ValueError("ExitLegSpec.limit_offset_pct is required iff kind == STOP_LIMIT")
-        if (self.kind == OrderType.TRAILING_STOP) != (self.trail_offset_pct is not None):
-            raise ValueError("ExitLegSpec.trail_offset_pct is required iff kind == TRAILING_STOP")
         return self
 
 
