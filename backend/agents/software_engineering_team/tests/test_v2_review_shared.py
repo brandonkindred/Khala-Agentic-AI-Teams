@@ -1521,11 +1521,17 @@ def test_run_review_tool_agents_fold_order_matches_submission_not_completion(
 
 
 def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -> None:
-    """Two agents whose ``build_runner`` is set (they run a real external
-    command against ``repo_path`` in ``review()`` -- e.g. the build
-    specialist, the linter) must never have overlapping ``review()`` calls,
-    even under concurrent dispatch -- only they are mutually exclusive; a
-    non-``build_runner`` (LLM-only) agent still runs fully concurrently."""
+    """Agents whose ``build_runner`` is set (they run a real external command
+    against ``repo_path`` in ``review()`` -- e.g. the build specialist, the
+    linter) must never have overlapping ``review()`` calls, even under
+    concurrent dispatch, AND must run in their original ``tool_agents``
+    relative order (build before lint, matching the wired frontend roster) --
+    not whichever happens to start first. A plain mutex would give the first
+    guarantee but not the second (acquisition order isn't FIFO), so this
+    checks both. A non-``build_runner`` (LLM-only) agent still runs fully
+    concurrently alongside them -- made deliberately slower here so that, if
+    it were serialized in with the command agents by mistake, it would show
+    up as either an overlap or an out-of-order start."""
     import threading
     import time
 
@@ -1533,6 +1539,7 @@ def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -
 
     active = {"count": 0, "max": 0}
     active_lock = threading.Lock()
+    started_order: list = []
 
     class _CommandAgent:
         build_runner = staticmethod(lambda path: [])
@@ -1544,6 +1551,7 @@ def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -
             with active_lock:
                 active["count"] += 1
                 active["max"] = max(active["max"], active["count"])
+                started_order.append(self.source)
             time.sleep(0.1)
             with active_lock:
                 active["count"] -= 1
@@ -1554,7 +1562,7 @@ def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -
 
     class _LlmOnlyAgent:
         def review(self, phase_inp):
-            time.sleep(0.05)
+            time.sleep(0.3)  # deliberately slower than the whole command-agent chain
             return SimpleNamespace(issues=[], recommendations=[])
 
     config = _build_config()
@@ -1575,6 +1583,9 @@ def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -
 
     assert result is not None
     assert active["max"] == 1, "two build_runner agents ran review() concurrently"
+    assert started_order == ["build", "lint"], (
+        "build_runner agents did not run in their original tool_agents relative order"
+    )
 
 
 def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:

@@ -60,7 +60,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Tuple, TypeVar, Union
@@ -1062,12 +1061,18 @@ def _run_tool_agents_review(
           stored output fails to fold) never drops another agent's result,
           since each agent's cache read/call/fold/cache-write sequence is
           independently wrapped in its own ``try`` inside the dispatched unit
-          of work. An agent whose ``build_runner`` is set (it runs a real
+          of work. Every agent whose ``build_runner`` is set (it runs a real
           external command against ``repo_path`` in ``review()`` -- e.g. the
-          build specialist, the linter) is additionally serialized against
-          every other such agent via a lock local to this call, so at most one
-          repo-mutating command runs at a time; agents without ``build_runner``
-          are unaffected and run fully concurrently.
+          build specialist, the linter) is folded into one composite dispatch
+          unit that runs them sequentially, in their original relative
+          ``tool_agents`` order, positioned where the first such agent
+          appeared -- so, unlike the fully-concurrent LLM-only agents, they
+          never run at the same time as each other *and* always run in the
+          same relative order as the pre-concurrency sequential loop (e.g.
+          build always finishes before lint starts, matching the wired
+          frontend roster's ``BUILD_SPECIALIST`` before ``LINTER`` order).
+          Agents without ``build_runner`` are unaffected and run fully
+          concurrently, including alongside that composite unit.
     """
     if not tool_agents:
         return
@@ -1095,16 +1100,6 @@ def _run_tool_agents_review(
 
     phase_inp = config.tool_phase_input_factory(**phase_inp_kwargs)
 
-    # Agents whose `build_runner` is set execute a real external command against
-    # `repo_path` in review() (see BaseReviewToolAgent._build_review) -- e.g. the
-    # frontend build specialist's build and the linter's `npx eslint .`. Before
-    # concurrent dispatch these ran one at a time (the old sequential loop), so they
-    # never touched the working tree at the same moment; serialize them against each
-    # other here (only them -- LLM-only agents are unaffected) to preserve that.
-    # Local to this call, not module-level: different calls/tasks work on different
-    # repos and must not block each other.
-    repo_command_lock = threading.Lock()
-
     def _review_one(kind: Any, agent: Any) -> Optional[List[ReviewIssue]]:
         cache_key = None
         if tool_agent_cache is not None and microtask is not None:
@@ -1118,11 +1113,7 @@ def _run_tool_agents_review(
                 if cached is not None:
                     _fold_tool_agent_output(config, local_issues, kind, cached[0])
                     return local_issues
-            if getattr(agent, "build_runner", None) is not None:
-                with repo_command_lock:
-                    out = agent.review(phase_inp)
-            else:
-                out = agent.review(phase_inp)
+            out = agent.review(phase_inp)
             _fold_tool_agent_output(config, local_issues, kind, out)
             if cache_key is not None:
                 tool_agent_cache.put(cache_key, [out])
@@ -1137,20 +1128,56 @@ def _run_tool_agents_review(
             return None
         return local_issues
 
+    def _review_command_agents_in_order(pairs: List[Tuple[Any, Any]]) -> List[ReviewIssue]:
+        """Run `build_runner`-set agents one at a time, in `pairs`' order."""
+        combined: List[ReviewIssue] = []
+        for kind, agent in pairs:
+            result = _review_one(kind, agent)
+            if result is not None:
+                combined.extend(result)
+        return combined
+
+    # Agents whose `build_runner` is set execute a real external command against
+    # `repo_path` in review() (see BaseReviewToolAgent._build_review) -- e.g. the
+    # frontend build specialist's build and the linter's `npx eslint .`. Before
+    # concurrent dispatch these ran one at a time, in `tool_agents` order (the old
+    # sequential loop), so they never touched the working tree at the same moment and
+    # always ran in a fixed relative order (build before lint, so lint never observes a
+    # partial/mid-build tree). A plain mutex only gives mutual exclusion, not that
+    # ordering -- whichever thread happens to acquire it first would run first -- so
+    # instead every `build_runner` agent is folded into a single composite thunk that
+    # runs them sequentially, in their original relative order, positioned where the
+    # first one appeared in `tool_agents`. That single thunk is then just one more unit
+    # dispatched alongside the (fully concurrent) LLM-only agents' individual thunks.
+    kind_agent_pairs = [
+        (kind, agent) for kind, agent in tool_agents.items() if hasattr(agent, "review")
+    ]
+    command_pairs = [
+        (kind, agent)
+        for kind, agent in kind_agent_pairs
+        if getattr(agent, "build_runner", None) is not None
+    ]
+    command_kinds = {kind for kind, _ in command_pairs}
+    thunks: List[Callable[[], Optional[List[ReviewIssue]]]] = []
+    command_thunk_emitted = False
+    for kind, agent in kind_agent_pairs:
+        if kind in command_kinds:
+            if not command_thunk_emitted:
+                thunks.append(lambda pairs=command_pairs: _review_command_agents_in_order(pairs))
+                command_thunk_emitted = True
+            continue
+        thunks.append(lambda kind=kind, agent=agent: _review_one(kind, agent))
+
     # Each thunk is fully self-contained (its own try/except, cache read/write, and
-    # local-list fold -- see _review_one above), so they can be fanned out via the same
-    # dispatch policy _run_review_steps uses for the code-review/QA/security steps (see
-    # _dispatch_review_thunks). Folding into the shared `issues` list happens below,
-    # back on this thread, in `tool_agents` iteration order -- not each thunk's actual
-    # completion order -- so which agent's output "wins" a same-key dedup downstream
+    # local-list fold -- see _review_one/_review_command_agents_in_order above), so they
+    # can be fanned out via the same dispatch policy _run_review_steps uses for the
+    # code-review/QA/security steps (see _dispatch_review_thunks). Folding into the
+    # shared `issues` list happens below, back on this thread, in `thunks` order (which
+    # mirrors `tool_agents` iteration order) -- not each thunk's actual completion order
+    # -- so which agent's output "wins" a same-key dedup downstream
     # (shared/phases/review_cycle.py:_dedup_issues keeps only the first occurrence of a
     # given (file_path, description)) stays deterministic, exactly as it was under the
     # old sequential loop.
-    thunks = [
-        (lambda kind=kind, agent=agent: _review_one(kind, agent))
-        for kind, agent in tool_agents.items()
-        if hasattr(agent, "review")
-    ]
     if not thunks:
         return
     for result in _dispatch_review_thunks(thunks, llm=llm):
