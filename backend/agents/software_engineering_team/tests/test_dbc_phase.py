@@ -1,9 +1,11 @@
 """Direct-call tests for ``dbc_phase.py``'s two functions.
 
 Calls ``run_dbc_comments_review``/``_run_dbc_self_review`` directly rather
-than through ``run_gated_execution_impl`` -- this module is not yet wired
-into the gated loop (that's sibling work), so its tests exercise it in
-isolation, per the module's own docstring.
+than through ``run_gated_execution_impl``, exercising them in isolation from
+the rest of the gated loop. The phase is wired and live in production (see
+the module's own docstring and ``test_v2_gated_execution_shared.py``'s
+end-to-end regression test), but that end-to-end wiring is covered there,
+not here.
 """
 
 from __future__ import annotations

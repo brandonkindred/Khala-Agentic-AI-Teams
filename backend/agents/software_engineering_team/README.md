@@ -145,7 +145,7 @@ These are the gates run by the default v2 execution path (`codegen_team`, for bo
 Build verification (lint + build) is a single CI-owned gate that runs once, before
 Code Review; the Code Review phase itself does not re-run lint or build checks.
 
-There is no separate DbC gate inside this per-microtask loop; `DbcCommentsAgent` has no production caller anywhere in the pipeline today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
+There is no separate DbC gate inside this per-microtask loop; instead, `DbcCommentsAgent` runs as a self-review step immediately before Documentation (`_run_dbc_self_review` in `shared/phases/dbc_phase.py`), wired via both stacks' `GATE_CONFIG.run_dbc_self_review` and gated by `enable_dbc_comments` (default `True`), so it runs on every V2 backend/frontend microtask today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
 
 Data and control-flow dependencies among the build/code-review/security/QA
 gates specifically, and which of them are safe to parallelize vs. require a

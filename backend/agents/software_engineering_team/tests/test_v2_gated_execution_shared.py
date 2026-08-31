@@ -37,7 +37,9 @@ import pytest
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
 from software_engineering_team.codegen_team import models as be_models
+from software_engineering_team.shared.phases import dbc_phase
 from software_engineering_team.shared.phases import execution as execution_mod
+from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
 from software_engineering_team.shared.phases.execution import (
     _WAVE_EXECUTION_CONCURRENCY,
     GatedExecutionConfig,
@@ -50,6 +52,9 @@ from software_engineering_team.shared.phases.execution import (
     run_gated_execution_impl,
 )
 from software_engineering_team.shared.v2_models import ReviewIssue
+from software_engineering_team.technical_writers.dbc_comments_agent.models import (
+    DbcCommentsOutput,
+)
 
 MS = be_models.MicrotaskStatus
 
@@ -1819,6 +1824,46 @@ def test_dbc_self_review_output_visible_to_documentation(tmp_path):
     assert mt.status == MS.COMPLETED
     assert captured["code_files"]["src/a.py"] == augmented  # DbC output flows into docs
     assert (tmp_path / "src" / "a.py").read_text() == augmented  # and is written to disk
+
+
+def test_dbc_self_review_invokes_dbc_comments_agent_at_default_config(tmp_path, monkeypatch):
+    """End-to-end regression: with the real (unmocked) ``run_dbc_comments_review``
+    wired as ``run_dbc_self_review`` and ``enable_dbc_comments`` left at its
+    production default (True, i.e. ``_config()`` with no override),
+    ``run_gated_execution_impl`` actually reaches ``DbcCommentsAgent.run()`` --
+    proving the full production wiring
+    (``run_gated_execution_impl`` -> ``_run_dbc_self_review`` ->
+    ``gate_config.run_dbc_self_review`` (``run_dbc_comments_review``) ->
+    ``DbcCommentsAgent()``) is live, not just exercised via a stub
+    ``run_dbc_self_review`` callable."""
+
+    class _FakeAgent:
+        """Stand-in for DbcCommentsAgent, capturing whether/how it was invoked."""
+
+        last_input: Optional[Any] = None
+        run_call_count: int = 0
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def run(self, input_data: Any, on_status: Optional[Any] = None) -> DbcCommentsOutput:
+            type(self).last_input = input_data
+            type(self).run_call_count += 1
+            return DbcCommentsOutput(files={})
+
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(dbc_review=run_dbc_comments_review),
+        [mt],
+        tmp_path,
+        review_config=_config(),  # enable_dbc_comments defaults to True
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert _FakeAgent.run_call_count == 1
+    assert _FakeAgent.last_input is not None
 
 
 # ---------------------------------------------------------------------------

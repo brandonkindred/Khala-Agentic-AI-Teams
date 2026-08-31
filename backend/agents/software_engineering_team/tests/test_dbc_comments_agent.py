@@ -201,10 +201,12 @@ def test_dbc_run_merge_exception_fails_loud(monkeypatch) -> None:
     assert any(s == DbcCommentsStatus.FAILED for s, _ in statuses)
 
 
-def test_dbc_run_persistent_llm_failure_surfaces_as_non_compliant_needs_retry() -> None:
-    """A persistent LLM failure must retry at least once via complete_validated,
-    then surface as already_compliant=False with NEEDS_RETRY/FAILED status
-    callbacks -- never silently marking the code compliant."""
+def test_dbc_run_llm_failure_surfaces_as_non_compliant_single_attempt() -> None:
+    """A persistent LLM failure surfaces as already_compliant=False with a single
+    FAILED status callback -- the agent makes no outer re-attempt of its own,
+    relying solely on complete_validated's own internal correction retry (which
+    a bare, non-parse/non-validation exception like this bypasses entirely, per
+    complete_validated's own contract)."""
     client = _StubClient(raise_exc=RuntimeError("boom"))
     a = _agent(client)
     statuses = []
@@ -214,20 +216,34 @@ def test_dbc_run_persistent_llm_failure_surfaces_as_non_compliant_needs_retry() 
     )
     assert out.already_compliant is False
     assert "failed" in out.summary.lower()
-    assert statuses.count(DbcCommentsStatus.NEEDS_RETRY) >= 1
-    assert DbcCommentsStatus.FAILED in statuses
-    assert statuses.index(DbcCommentsStatus.NEEDS_RETRY) < statuses.index(DbcCommentsStatus.FAILED)
-    assert len(client.calls) == dbc_mod._MAX_LLM_ATTEMPTS  # proves the retry actually fired
+    assert DbcCommentsStatus.NEEDS_RETRY not in statuses
+    assert statuses.count(DbcCommentsStatus.FAILED) == 1
+    assert len(client.calls) == 1  # no outer retry -- exactly one raw LLM call
 
 
-def test_dbc_run_recovers_after_one_transient_failure() -> None:
-    """A transient failure on attempt 1 that succeeds on attempt 2 must return
-    the successful result, not fail -- the retry has teeth."""
+def test_dbc_run_recovers_after_one_schema_validation_failure(monkeypatch) -> None:
+    """complete_validated's own internal correction retry -- not any retry logic
+    in the agent -- is what recovers from a schema-invalid reply: the agent
+    calls complete_validated exactly once per chunk, regardless of how many raw
+    client.complete_json calls that one complete_validated call makes
+    internally to correct itself."""
+    bad_payload = {"insertions": "not a list", "already_compliant": False}  # fails schema
     good_payload = {"insertions": [], "already_compliant": True, "summary": "ok"}
-    client = _SequencedClient([RuntimeError("transient"), good_payload])
+    client = _SequencedClient([bad_payload, good_payload])
+
+    complete_validated_calls: List[Any] = []
+    original_complete_validated = dbc_mod.complete_validated
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        complete_validated_calls.append(1)
+        return original_complete_validated(*args, **kwargs)
+
+    monkeypatch.setattr(dbc_mod, "complete_validated", _spy)
+
     out = _agent(client).run(DbcCommentsInput(code="def f(): pass"))
     assert out.already_compliant is True
-    assert len(client.calls) == 2
+    assert len(client.calls) == 2  # complete_validated's own internal correction retry
+    assert len(complete_validated_calls) == 1  # the agent invoked complete_validated once
 
 
 def test_dbc_run_non_dict_top_level_json_fails_loud_non_compliant() -> None:

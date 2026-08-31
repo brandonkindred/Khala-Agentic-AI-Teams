@@ -22,20 +22,6 @@ from .prompts import DBC_COMMENTS_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# Per-chunk LLM-call budget: 1 initial attempt + 1 automatic retry.
-# complete_validated's own correction_attempts only retries a JSON-parse/
-# schema-validation failure -- everything else that can escape it untouched
-# (LLMNotConfiguredError, rate limits, semantic exhaustion, truncation, a
-# bare network error) gets zero retries from complete_validated itself, so
-# this outer loop is what actually guarantees at least one automatic retry
-# across the full class of failures the old fail-open handler covered. A
-# large ``code`` input is bounded into one or more chunks (see
-# _build_prompt_for_chunk/run below); each chunk gets its own independent
-# _MAX_LLM_ATTEMPTS budget, and any one chunk exhausting its budget fails
-# the WHOLE run (see run()'s docstring) rather than silently dropping that
-# chunk's review.
-_MAX_LLM_ATTEMPTS = 2
-
 
 class DbcCommentsAgent:
     """
@@ -49,6 +35,9 @@ class DbcCommentsAgent:
 
     Postconditions:
         - Agent is ready to review code via the run() method
+        - Each chunk reviewed by run() calls complete_validated exactly once;
+          the agent relies solely on complete_validated's own internal
+          correction retry and performs no outer re-attempt of its own
 
     Invariants:
         - The agent never modifies code logic, only comments
@@ -148,17 +137,18 @@ class DbcCommentsAgent:
               ever sent regardless of input size; a small input yields exactly
               one chunk covering the whole input, and this method's observable
               behavior is then identical to a single, unchunked call
-            - Each chunk's LLM call is retried up to _MAX_LLM_ATTEMPTS times,
-              validated against DbcCommentsLLMResponse on each attempt via
-              complete_validated; a malformed reply (including one malformed
-              insertion entry, since insertions is a required, non-permissive
-              schema field) fails the whole attempt and drives a retry, not a
-              silent partial acceptance
-            - If any chunk exhausts its attempts: already_compliant=False and
-              summary describes the failure, and the whole run returns
-              immediately -- a persistent LLM failure on any chunk can never
-              silently and permanently mark the code compliant, even when
-              other chunks already succeeded
+            - Each chunk's LLM call is made exactly once via
+              complete_validated, validated against DbcCommentsLLMResponse;
+              complete_validated's own internal correction retry is the only
+              retry applied -- the agent performs no outer re-attempt of its
+              own. A malformed reply (including one malformed insertion
+              entry, since insertions is a required, non-permissive schema
+              field) fails the attempt the same way any other exception does
+            - If any chunk's call fails: already_compliant=False and summary
+              describes the failure, and the whole run returns immediately --
+              a persistent LLM failure on any chunk can never silently and
+              permanently mark the code compliant, even when other chunks
+              already succeeded
             - Otherwise, insertions is the concatenation of every chunk's
               validated DbcCommentInsertion objects, kept unmerged (for
               observability) regardless of already_compliant
@@ -197,10 +187,9 @@ class DbcCommentsAgent:
             build_dbc_chunks) is itself guarded: a failure there (e.g.
             self.llm.get_max_context_tokens() hitting the network) surfaces
             via on_status(FAILED, ...) and already_compliant=False the same
-            way an exhausted LLM call does. Each failed-but-retryable LLM
-            attempt (on any chunk) is surfaced via on_status(NEEDS_RETRY,
-            ...); a chunk's final exhaustion via on_status(FAILED, ...) and
-            already_compliant=False, never a silent fail-open. A merge-step
+            way a failed LLM call does. A chunk's LLM-call failure is
+            surfaced via on_status(FAILED, ...) and already_compliant=False,
+            never a silent fail-open. A merge-step
             exception (apply_dbc_insertions) is handled the same way -- via
             on_status(FAILED, ...) and already_compliant=False, never fail-open
             -- see that block's own comment for why.
@@ -271,53 +260,28 @@ class DbcCommentsAgent:
         for chunk_index, chunk in enumerate(chunks, start=1):
             prompt = self._build_prompt_for_chunk(input_data, chunk, chunk_index, chunk_count)
 
-            validated: Optional[DbcCommentsLLMResponse] = None
-            last_error: Optional[Exception] = None
-            for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):
-                try:
-                    validated = complete_validated(
-                        self.llm,
-                        prompt,
-                        schema=DbcCommentsLLMResponse,
-                        objective="review code for Design by Contract compliance",
-                        system_prompt=DBC_COMMENTS_PROMPT,
-                        temperature=0.0,
-                    )
-                    break
-                except Exception as e:
-                    last_error = e
-                    if attempt < _MAX_LLM_ATTEMPTS:
-                        logger.warning(
-                            "DbcComments: chunk %d/%d LLM call attempt %d/%d failed (%s), retrying",
-                            chunk_index,
-                            chunk_count,
-                            attempt,
-                            _MAX_LLM_ATTEMPTS,
-                            e,
-                        )
-                        _update(
-                            DbcCommentsStatus.NEEDS_RETRY,
-                            f"chunk {chunk_index}/{chunk_count}: {e}",
-                        )
-                    else:
-                        logger.warning(
-                            "DbcComments: chunk %d/%d LLM call failed after %d attempt(s) (%s), "
-                            "surfacing failure -- never marking compliant",
-                            chunk_index,
-                            chunk_count,
-                            _MAX_LLM_ATTEMPTS,
-                            e,
-                        )
-
-            if validated is None:
-                _update(
-                    DbcCommentsStatus.FAILED, f"chunk {chunk_index}/{chunk_count}: {last_error}"
+            try:
+                validated = complete_validated(
+                    self.llm,
+                    prompt,
+                    schema=DbcCommentsLLMResponse,
+                    objective="review code for Design by Contract compliance",
+                    system_prompt=DBC_COMMENTS_PROMPT,
+                    temperature=0.0,
                 )
+            except Exception as e:
+                logger.warning(
+                    "DbcComments: chunk %d/%d LLM call failed (%s), surfacing failure -- "
+                    "never marking compliant",
+                    chunk_index,
+                    chunk_count,
+                    e,
+                )
+                _update(DbcCommentsStatus.FAILED, f"chunk {chunk_index}/{chunk_count}: {e}")
                 return DbcCommentsOutput(
                     already_compliant=False,
-                    summary=f"DbC review failed on chunk {chunk_index}/{chunk_count} after "
-                    f"{_MAX_LLM_ATTEMPTS} attempt(s) and could not determine compliance: "
-                    f"{last_error}",
+                    summary=f"DbC review failed on chunk {chunk_index}/{chunk_count} and could "
+                    f"not determine compliance: {e}",
                 )
 
             all_insertions.extend(validated.insertions)

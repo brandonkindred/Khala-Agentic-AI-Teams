@@ -200,11 +200,13 @@ def test_dbc_run_malformed_response_on_a_later_chunk_fails_the_whole_run() -> No
     silently compliant, and a later chunk (3+) must never be reached.
 
     complete_validated applies its own internal schema-correction retry on a
-    malformed-but-parseable payload (missing a required field), so a single
-    outer attempt can itself consume more than one complete_json call --
-    this supplies generously more malformed entries than the worst case
-    needs rather than pinning an exact internal call count, which is
-    complete_validated's own implementation detail."""
+    malformed-but-parseable payload (missing a required field), so the
+    single complete_validated call the agent makes for chunk 2 can itself
+    consume more than one complete_json call -- this supplies generously
+    more malformed entries than the worst case needs rather than pinning an
+    exact internal call count, which is complete_validated's own
+    implementation detail. The agent itself performs no outer retry of its
+    own on top of that."""
     code, chunks = _expected_chunks()
     assert len(chunks) > 1
 
@@ -219,14 +221,13 @@ def test_dbc_run_malformed_response_on_a_later_chunk_fails_the_whole_run() -> No
     )
 
     # The acceptance criterion: a persistent failure fails the whole run
-    # loud, surfaced via NEEDS_RETRY-then-FAILED status callbacks. Not
-    # asserted against the summary text or an exact call count -- both are
-    # complete_validated's own implementation detail, not part of the
-    # contract this test is verifying.
+    # loud, surfaced via a FAILED status callback. Not asserted against the
+    # summary text or an exact call count -- both are complete_validated's
+    # own implementation detail, not part of the contract this test is
+    # verifying.
     assert out.already_compliant is False
-    assert statuses.count(DbcCommentsStatus.NEEDS_RETRY) >= 1
+    assert DbcCommentsStatus.NEEDS_RETRY not in statuses
     assert DbcCommentsStatus.FAILED in statuses
-    assert statuses.index(DbcCommentsStatus.NEEDS_RETRY) < statuses.index(DbcCommentsStatus.FAILED)
     # A later chunk (3+) is never reached: only `responses` were queued (8
     # malformed entries -- generously more than any retry budget needs), and
     # no chunk-3-shaped response exists beyond them, so exhausting the run
