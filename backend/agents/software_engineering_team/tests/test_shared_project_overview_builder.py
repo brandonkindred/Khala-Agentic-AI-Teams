@@ -6,6 +6,8 @@ empty inputs, prd_content only, full client_context, and partial client_context.
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from software_engineering_team.shared.project_overview_builder import build_project_overview
@@ -130,6 +132,22 @@ class TestBuildProjectOverviewPartialClientContext:
         result = build_project_overview(client_context=ctx)
         assert result["features_and_functionality_doc"] == "## Opportunity\nReal opportunity"
         assert result["goals"] == "Real opportunity"
+
+
+class TestBuildProjectOverviewImmutability:
+    """build_project_overview must not mutate its input client_context."""
+
+    def test_client_context_not_mutated(self) -> None:
+        ctx = {
+            "problem_summary": "Users cannot track expenses",
+            "opportunity_statement": "Build an expense tracker app",
+            "target_users": ["developer", "designer"],
+        }
+        snapshot = copy.deepcopy(ctx)
+
+        build_project_overview(prd_content="# Product Requirements", client_context=ctx)
+
+        assert ctx == snapshot
 
 
 class TestBuildProjectOverviewReturnShape:
