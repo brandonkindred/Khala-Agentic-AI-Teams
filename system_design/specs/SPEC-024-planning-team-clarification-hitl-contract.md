@@ -1039,9 +1039,25 @@ The primitive #7445-B builds must satisfy:
   re-derivations of the same fallback logic is not. The `"planning_team"`-namespaced job record is
   readable; scheduled by the workflow with `retry_policy=NO_RETRY`.
 - *Postconditions:* Checks `load_checkpoint("planning_team", job_id, "document_production_pra")`
-  first. If present, returns immediately (no-op — a prior successful run already submitted). If
-  absent, calls `run_pra(...)`. **`run_pra`/`run_product_analysis` returns `None` when the
-  Software Engineering service is unconfigured or the submission POST fails
+  first. If present, returns immediately (no-op — a prior successful run already submitted). **Also
+  checks the job record's own `status` is still active (`pending`/`running`) before calling
+  `run_pra` — not merely "readable" as the precondition above states.** A cancellation or
+  interruption can land on the job record while this `NO_RETRY` activity is still queued, waiting
+  to be dispatched; `_guarded`'s initial progress update does not itself reject a terminal row (per
+  its own comment, only intake ever writes `status`, later phases "leave it untouched so they never
+  clobber a concurrent cancelled" — `temporal/activities.py:93-96` — which protects against
+  *overwriting* a terminal status but says nothing about *skipping work* for a job that already has
+  one), and this precondition as originally stated ("the job record is readable") does not exclude
+  an already-terminal row either. Without an explicit active-status check, this activity would still
+  submit a real external PRA job for a Planning run that can no longer consume its result — a
+  needless, non-idempotent side effect against a job nothing will ever resume. **Contract
+  requirement:** if the job's own `status` is not `pending`/`running` when this activity runs, treat
+  it as a no-op (return without calling `run_pra`, without writing a checkpoint) rather than
+  proceeding — the same active-status check this contract's other conditional writes already apply,
+  here as a plain read-then-skip rather than part of a CAS, since there is no competing write to
+  race against at this specific check (the job is already terminal, not concurrently becoming so).
+  If absent (checkpoint) and active (status), calls `run_pra(...)`. **`run_pra`/`run_product_analysis`
+  returns `None` when the Software Engineering service is unconfigured or the submission POST fails
   (`adapters/product_analysis.py:33-48`) — this activity must treat a `None`/falsy return as a
   failure and raise, not persist a checkpoint with `pra_job_id: None` and return successfully.**
   **Contract requirement — this activity must be wrapped in `_guarded` like every other phase
@@ -1059,7 +1075,26 @@ The primitive #7445-B builds must satisfy:
   activity must call `_guarded(job_id, "document_production_pra", ..., work, max_attempts=1)`
   (`SINGLE_ATTEMPT`, matching its `NO_RETRY` `retry_policy` — the same finite-attempts pairing
   §4.3.2 requires for `document_production_activity`) so a raised exception is both re-raised *and*
-  recorded as a job-store `FAILED` before the workflow terminates. A raised exception here fails
+  recorded as a job-store `FAILED` before the workflow terminates.
+
+  **`planning_team`'s `_guarded` wrapper hardcodes the same unconditional `mark_job_failed` the
+  workflow-level backstop above was corrected away from — this activity needs the conditional
+  version too, or the activity's own final-attempt handler clobbers a terminal state before the
+  backstop ever runs.** `_guarded` (`temporal/activities.py:69-119`) always binds Planning's
+  unconditional `mark_job_failed` (`shared/job_store.py:82-84`) as the failure writer for *every*
+  caller; if this activity uses that same wrapper as-is, a cancellation or interruption that lands
+  before this activity's own exception is raised gets overwritten with `failed` by `_guarded`
+  itself, on its final attempt, *before* the workflow's `except` block and its conditional backstop
+  activity (above) ever run — making that backstop's own correction moot for this specific failure
+  path, since the damage is already done earlier in the same call stack. **Contract requirement:**
+  this activity must not use `planning_team`'s `_guarded` convenience wrapper as-is; it must call
+  the underlying `shared.temporal.activity_helpers.guarded` directly (or an equivalent
+  activity-local wrapper) with a *conditional* failure writer — the same active-status-guarded
+  primitive the workflow-level backstop activity uses — bound in place of the unconditional
+  `mark_job_failed`, so this activity's own final-attempt failure handling preserves a terminal
+  state exactly as the workflow-level backstop now does, rather than protecting only the
+  hard-crash path and leaving the ordinary-exception path still clobbering terminal states. A raised
+  exception here fails
   this `NO_RETRY` activity and the workflow loudly and visibly, which is the correct outcome:
   `document_production_activity`'s precondition requires a checkpoint carrying a *usable*
   `pra_job_id` before it will ever call `wait_pra`, and there is no defined no-PRA fallback for a
@@ -1321,11 +1356,25 @@ this contract:
   `pause_generation` as part of its own terminal job-record write — the same field, the same
   optimistic-concurrency mechanism already established above, not a new one — so that "claim
   completion" and "create a pause" become mutually exclusive on the *same* guarded field regardless
-  of their exact ordering relative to the separate `status` column flip: a stale attempt's
-  `create_pause_if_generation_matches(observed_generation, ...)` fails the moment *either* guard
-  condition no longer holds, and advancing `pause_generation` on the success path guarantees at
-  least one of them changes before any stale write could land, even in the single-tick window where
-  `status` has not yet been updated.
+  of their exact ordering relative to the separate `status` column flip.
+
+  **Advancing `pause_generation` unconditionally on the success path is not enough — that write
+  must itself go through the same conditional guard, or it can silently clobber a pause that already
+  won.** If the success path's write is an ordinary unconditional `update_job` that merely *sets*
+  `pause_generation` to a new value, it does not check whether a stale attempt's pause-creation
+  write already won the race and advanced `pause_generation` (and `waiting_for_answers`) first — an
+  unconditional write from the success path can still proceed, overwrite `pause_generation` again,
+  and let the workflow continue to finalize believing the job completed, while the *other* attempt's
+  now-orphaned pause envelope (`waiting_for_answers: True` and its `resume_token`) is left behind
+  untouched, unreachable, and never cleared. **Contract requirement:** the success path's
+  terminal write must use the *same* `create_pause_if_generation_matches`-style conditional
+  `UPDATE` — guarded on `status IN ('pending', 'running') AND waiting_for_answers` falsy `AND
+  pause_generation == observed_generation` — to *claim* completion, not merely to record it. When
+  this conditional claim fails (a pause already won), the activity must not proceed as if it
+  completed: it must reload the job record's now-current pause envelope and return the *paused*
+  result instead, exactly as a losing paused-return attempt does above — the two code paths
+  converge on the same "reload and defer to the winner" behavior, just triggered from opposite
+  directions of the same race.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
@@ -1380,11 +1429,29 @@ this contract:
   `temporal/activities.py:336-342`). Left as-is, every clarification decision a human made through
   this contract's pause/resume path would be silently discarded from the handoff and the job
   record's own `resolved_questions` the moment the job completes. **This activity must hydrate the
-  accumulated `AnsweredQuestion`-shaped consumed batches (across every resumed round for this job)
-  into `context`/`context_update`'s `resolved_questions` before the terminal write** — e.g. by
-  reading them back from the job record (the durable store step (2) already wrote them to) and
-  merging into `context_update` ahead of the `_merge_context` call — so the terminal
-  `update_job(..., resolved_questions=...)` preserves rather than clobbers them.
+  accumulated consumed answer batches (across every resumed round for this job) into
+  `context`/`context_update`'s `resolved_questions` before the terminal write** — e.g. by reading
+  them back from the job record (the durable store step (2) already wrote them to) and merging into
+  `context_update` ahead of the `_merge_context` call — so the terminal `update_job(...,
+  resolved_questions=...)` preserves rather than clobbers them.
+
+  **The durable consumed batches are `AnswerSubmission`-shaped, not already `AnsweredQuestion`-shaped
+  — hydrating them as-is produces malformed `resolved_questions` entries.** What step (2) persists
+  is the wire-format `AnswerSubmission` (`question_id`, `selected_option_id`/`selected_option_ids`,
+  `other_text` — `shared/hitl/models.py:70-78`), which has no `question_text` field at all and no
+  human-readable answer text; `planning_team`'s own `AnsweredQuestion` (`models.py:237-244`), which
+  `resolved_questions`/downstream decision rendering actually expect, requires `question_text` and a
+  populated `selected_answer`. Hydrating the raw `AnswerSubmission` batch directly would silently
+  drop `question_text` (downstream coverage checks use it to avoid re-asking an already-answered
+  question) and leave `selected_answer` empty for every multi-select answer (only
+  `selected_option_ids` is populated on those, never a computed label). **Contract requirement:**
+  this activity must convert each consumed `AnswerSubmission` into a proper `AnsweredQuestion`
+  before hydration — looking up the matching persisted `pending_questions` entry by `question_id`
+  for its `question_text`/options, and computing `selected_answer` from the selected option
+  label(s) (joining multiple labels, and substituting `other_text` for an `"other"` selection),
+  mirroring PRA's own `apply_answers` conversion already documented in this contract
+  (`product_requirements_analysis_agent/user_communication.py:210-219`, §4.1) rather than
+  reinventing a third version of the same label-resolution logic.
 
   **Hydrating `context`/`context_update` is not sufficient on its own to fix the handoff package —
   the `handoff.setdefault` call is a no-op against an already-populated key.** `DocumentProductionAgent.run`
