@@ -545,6 +545,13 @@ def _run_review_cycles(
         entry left over from a prior microtask. A team's gate callables that
         read it off ``deps`` (currently only the frontend team) therefore
         always see a cache scoped to the microtask currently in progress.
+
+        ``seen_issues`` (the ``_dedup_issues`` accumulator) is reset at the
+        start of every outer cycle, not once per microtask: an issue still
+        failing after a fix attempt reappears in the following cycle's
+        fix-context, so the coding agent gets a real second chance at it;
+        only exact duplicates reported twice within the *same* cycle's
+        batch(es) are suppressed.
     """
     phase_failed = False
     total_cycles = 0
@@ -577,10 +584,10 @@ def _run_review_cycles(
     # docs/GATE_DEPENDENCY_GRAPH.md's "residual 2x" caching design.
     deps.tool_agent_cache = AgentReviewCache()
 
-    # Grounding-failure circuit breaker + issue dedup state, scoped to this
-    # microtask's own review lifecycle (see grounding circuit-breaker design doc).
+    # Grounding-failure circuit breaker state, scoped to this microtask's own
+    # review lifecycle (see grounding circuit-breaker design doc). Issue dedup
+    # state (``seen_issues``) is scoped per outer cycle instead -- see below.
     grounding_failure_streak = 0
-    seen_issues: set[tuple[str, str]] = set()
     cycle_limit = int(getattr(config, "grounding_failure_cycle_limit", 3))
     ratio_threshold = float(getattr(config, "grounding_failure_ratio_threshold", 0.75))
 
@@ -590,6 +597,12 @@ def _run_review_cycles(
 
     while not phase_failed and total_cycles < max_total_cycles:
         total_cycles += 1
+        # Issues already sent to a batch-fix call this outer cycle -- reset
+        # every cycle (not once per microtask) so an issue that recurs after
+        # a failed fix attempt is included again in the next cycle's
+        # fix-context; only exact duplicates within this same cycle's
+        # batch(es) are suppressed.
+        seen_issues: set[tuple[str, str]] = set()
         # True iff any CR gate call this outer cycle (initial or retry) was
         # both failing and grounding-heavy; drives the streak below.
         # ``last_bad_cr_outcome`` keeps the last such call for telemetry when
