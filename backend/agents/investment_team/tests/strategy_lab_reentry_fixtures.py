@@ -98,6 +98,9 @@ def _not_ready_then_ready_critiques(review_not_ready_rounds: int) -> List[Any]:
         ``review_not_ready_rounds`` with ``ready=False``, the last with
         ``ready=True``.
     """
+    if review_not_ready_rounds < 0:
+        raise ValueError("review_not_ready_rounds must be >= 0")
+
     from investment_team.strategy_lab.agents.design_review import SpecCritique
 
     return [
@@ -112,6 +115,23 @@ def _revised_spec_dict(spec_dict: Any) -> Any:
     revised = dict(spec_dict)
     revised["hypothesis"] = "revised hypothesis"
     return revised
+
+
+def _revising_stub(review_not_ready_rounds: int) -> Any:
+    """Build the ``design_revising`` stub both re-entry fixture shapes wire
+    onto ``design_agent.revise``: one marker revision per not-ready round.
+
+    Preconditions:
+        ``review_not_ready_rounds >= 0``.
+    Postconditions:
+        Returns a callable yielding ``review_not_ready_rounds`` successive
+        revised spec dicts, then raising ``StopIteration`` if called again.
+    """
+    from .conftest import default_rsi_spec_dict, design_revising
+
+    return design_revising(
+        [_revised_spec_dict(default_rsi_spec_dict()) for _ in range(review_not_ready_rounds)]
+    )
 
 
 def _charging_design_stubs(
@@ -137,7 +157,7 @@ def _charging_design_stubs(
     """
     from investment_team.strategy_lab.agents._llm_budget import charge_active_budget
 
-    from .conftest import default_rsi_spec_dict, design_returning, design_revising, review_returning
+    from .conftest import default_rsi_spec_dict, design_returning, review_returning
 
     attempt: Dict[str, Any] = {}
 
@@ -146,15 +166,18 @@ def _charging_design_stubs(
         attempt["review"] = review_returning(
             *_not_ready_then_ready_critiques(review_not_ready_rounds)
         )
-        attempt["revise"] = design_revising(
-            [_revised_spec_dict(default_rsi_spec_dict()) for _ in range(review_not_ready_rounds)]
-        )
+        attempt["revise"] = _revising_stub(review_not_ready_rounds)
         return design_returning(default_rsi_spec_dict())(**kwargs)
 
     def _review(*args: Any, **kwargs: Any) -> Any:
         charge_active_budget()
         return attempt["review"](*args, **kwargs)
 
+    # design_agent.revise is called with a positional spec argument in
+    # production code, but conftest.design_revising's stub only accepts
+    # **kwargs and ignores its input regardless -- *args is accepted here
+    # (matching the real call signature) and intentionally dropped before
+    # delegating, not forwarded.
     def _revise(*args: Any, **kwargs: Any) -> Any:
         charge_active_budget()
         return attempt["revise"](**kwargs)
@@ -188,13 +211,15 @@ def _review_loop_stubs(
         are replaced with stubs producing the known not-ready-then-ready
         sequence.
     """
-    from .conftest import default_rsi_spec_dict, design_revising, review_returning
+    from .conftest import review_returning
 
-    revise_stub = design_revising(
-        [_revised_spec_dict(default_rsi_spec_dict()) for _ in range(review_not_ready_rounds)]
-    )
+    revise_stub = _revising_stub(review_not_ready_rounds)
 
-    def _revise(*_args: Any, **kwargs: Any) -> Any:
+    # See the identical comment in _charging_design_stubs above: *args is
+    # accepted to match design_agent.revise's real positional call
+    # signature, then intentionally dropped -- conftest.design_revising's
+    # stub only accepts **kwargs and ignores its input regardless.
+    def _revise(*args: Any, **kwargs: Any) -> Any:
         return revise_stub(**kwargs)
 
     monkeypatch.setattr(
