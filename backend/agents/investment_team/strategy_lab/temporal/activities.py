@@ -1031,15 +1031,16 @@ def _strip_unused_resume_seed_from_record(
         lengths of the seed the workflow supplied in ``params["drift"]`` for
         this attempt.
     Postconditions:
-        When ``unused``, returns ``record_dump`` with each of
-        ``spec_history``/``code_history``/``gate_timeline`` replaced by
-        itself sliced past its ``seed_*_len``-entry prefix.
-        ``record.spec_history``/``code_history`` are exactly
-        ``drift_collector``'s own lists (unreordered); ``gate_timeline`` has
-        this attempt's own gate results appended after
-        ``drift_collector.gate_timeline`` -- either way, the seed is always
-        the first ``seed_*_len`` entries. Mutates and returns the same dict
-        either way.
+        When ``unused`` is ``True`` and at least one seed length is nonzero,
+        mutates ``record_dump`` in place by slicing each of
+        ``spec_history``/``code_history``/``gate_timeline`` past its
+        ``seed_*_len``-entry prefix, then returns it. ``record.spec_history``/
+        ``code_history`` are exactly ``drift_collector``'s own lists
+        (unreordered); ``gate_timeline`` has this attempt's own gate results
+        appended after ``drift_collector.gate_timeline`` -- either way, the
+        seed is always the first ``seed_*_len`` entries. When ``unused`` is
+        ``False`` or all seed lengths are zero, returns ``record_dump``
+        unchanged.
     """
     if not unused or not (seed_spec_len or seed_code_len or seed_gate_len):
         return record_dump
