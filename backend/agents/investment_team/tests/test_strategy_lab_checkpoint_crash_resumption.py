@@ -468,9 +468,10 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
     resumed portion.
     """
     from investment_team.models import StrategySpec
-    from investment_team.strategy_lab import orchestrator_api, run_state
+    from investment_team.strategy_lab import orchestrator_api, phases, run_state
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
     from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
     from investment_team.strategy_lab.exceptions import SpecImplementabilityError
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
     from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE, StrategyLabCycleWorkflow
@@ -503,6 +504,41 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
                     "design_context": checkpointed_context,
                 },
             )
+            # checkpoint_hook (above) only persists the ADR-012 SAME-attempt
+            # crash-recovery store -- irrelevant here, since design_attempt 1
+            # has never run before. The workflow's cross-attempt re-entry
+            # branch instead reads outcome["pipeline_checkpoints"], built
+            # from checkpoint_capture -- so a real ReviewCheckpoint must be
+            # recorded here too, or resolve_cross_attempt_resume never
+            # activates and attempt 1 re-enters this same branch instead of
+            # the "resume_spec is not None" one below.
+            capture = kwargs["checkpoint_capture"]
+            if capture is not None:
+                capture.record(
+                    ReviewCheckpoint(
+                        run_id=capture.run_id,
+                        cycle_scope=capture.cycle_scope,
+                        design_attempt=kwargs["design_attempt"],
+                        generation=capture.generation,
+                        spec_hash=phases.hash_spec(checkpointed_spec),
+                        code_hash=phases.hash_code(None),
+                        captured_at="2026-08-31T00:00:00Z",
+                        budget_calls=phase1_calls,
+                        gate_results=[],
+                        spec_history=[],
+                        code_history=[],
+                        gate_timeline=[],
+                        spec=checkpointed_spec,
+                        rationale="r",
+                        design_context={
+                            "rounds": 1,
+                            "critiques": [],
+                            "stop_reason": "converged",
+                            "loop_telemetry": {},
+                        },
+                        review_rounds_completed=1,
+                    )
+                )
             raise SpecImplementabilityError(
                 "forced fail at synthesis boundary, not spec-implicated",
                 failure_phase="synthesis",
