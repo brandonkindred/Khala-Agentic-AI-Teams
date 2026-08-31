@@ -946,7 +946,10 @@ def test_rule5_volatility_target_over_committed_across_symbols_is_critical() -> 
 
 def test_rule5_volatility_target_single_symbol_is_unaffected() -> None:
     """The same max_position_pct is implementable on a single-symbol
-    universe — worst-case concurrency is structurally 1."""
+    universe — worst-case concurrency is structurally 1. The informational
+    plausibility warning must still be preserved for a passing (no critical)
+    volatility_target spec, since the check still can't confirm the actual
+    deployed vol is sensible."""
     spec = _spec(
         sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         target_symbols=["AAPL"],
@@ -956,6 +959,10 @@ def test_rule5_volatility_target_single_symbol_is_unaffected() -> None:
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     matches = [c for c in _critical(results) if "volatility_target" in c]
     assert not matches, matches
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("volatility_target" in w and "cannot be evaluated exactly" in w for w in warnings), (
+        warnings
+    )
 
 
 def test_rule5_volatility_target_concurrency_capped_by_max_open_positions() -> None:
@@ -1050,6 +1057,20 @@ def test_rule5_volatility_target_worst_case_fits_with_slippage_headroom() -> Non
         (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 2, False),
         (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 3, True),
         (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 5, True),
+    ],
+    ids=[
+        "fixed_fraction-mop1",
+        "fixed_fraction-mop2",
+        "fixed_fraction-mop3",
+        "fixed_fraction-mop5",
+        "fixed_notional-mop1",
+        "fixed_notional-mop2",
+        "fixed_notional-mop3",
+        "fixed_notional-mop5",
+        "volatility_target-mop1",
+        "volatility_target-mop2",
+        "volatility_target-mop3",
+        "volatility_target-mop5",
     ],
 )
 def test_rule5_all_sizing_kinds_against_max_open_positions(
