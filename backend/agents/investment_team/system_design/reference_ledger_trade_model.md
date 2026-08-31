@@ -858,6 +858,28 @@ standalone `take_profit`; fill bar is the trigger bar. A fired rung does
 subsection above for how rungs feed into the single record eventually
 emitted when the position is fully closed.
 
+**Current-bar reachability is a separate, additional gate on top of
+`_next_scaled_rung`'s eligibility check.** `_next_scaled_rung`'s reachability
+test is history-based by design — the running watermark since entry, folded
+with the current bar — so a rung a single spike bar clears past stays
+*eligible* on every later bar even after price retraces, precisely so a rung
+a gap cleared isn't lost. That answers only "has this rung's level ever been
+reached," not "does *this* bar's own range reach it" — and the exact-price
+fill rule above requires the latter, the same way `stop_loss`/`take_profit`
+above only fire on a bar whose own range actually covers their level. So
+before recording a fill for the cursor rung `_next_scaled_rung` reports as
+eligible, this module must independently check the **current bar's own**
+`high` (long) / `low` (short) against that rung's exact target price. If the
+watermark says eligible purely from an earlier bar's history but the current
+bar's own range does not reach the target, the rung does **not** fire this
+bar — it remains the cursor rung, re-checked (both the watermark eligibility
+and this current-bar reachability gate) on each subsequent bar until one
+actually trades there. Without this gate, a bar trading entirely away from a
+rung's level could still be recorded as an exact fill at that level purely
+because an earlier bar's spike had already satisfied the reused evaluator's
+watermark test — a fabricated fill on a bar that never traded there, which
+this reference ledger must not produce.
+
 ### `signal_exit`
 
 Unchanged from current (and post-resting-exit-epic) engine semantics: a
