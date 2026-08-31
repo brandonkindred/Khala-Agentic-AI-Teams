@@ -115,18 +115,24 @@ def simulate(
   `StrategySpec` itself. A caller reproducing a specific backtest run passes
   that run's `BacktestConfig.initial_capital` through as `starting_equity`.
 - `entry_slippage_bps` — likewise not read off `spec`: it mirrors the
-  separate `BacktestConfig.slippage_bps`. It is needed **only** to compute an
-  internal entry-price *basis* for anchoring `basis="entry_price"`
-  stop-loss/take-profit/scaled-take-profit levels and the trailing-stop
-  watermark seed (§5's `stop_loss` subsection) — production's real engine
-  anchors those against `Position.entry_price`, which is the **post-slippage**
-  fill, not the pre-slippage bid `ReferenceTrade.entry_price` reports (§3).
-  It does **not** reintroduce slippage into this module's own output fields
-  or into fill-price computation anywhere else — `ReferenceTrade.entry_price`/
-  `exit_price` stay the pre-slippage bid values (§3), unaffected by this
-  parameter; only the internal rule-level anchor changes. A caller
-  reproducing a specific backtest run passes that run's
-  `BacktestConfig.slippage_bps` through.
+  separate `BacktestConfig.slippage_bps`. It has exactly two internal uses,
+  neither of which reintroduces slippage into this module's own output
+  fields — `ReferenceTrade.entry_price`/`exit_price` stay the pre-slippage
+  bid values (§3) no matter what this parameter is: (1) computing an
+  internal entry-price *basis* (`entry_price_basis`) for anchoring
+  `basis="entry_price"` stop-loss/take-profit/scaled-take-profit levels and
+  the trailing-stop watermark seed (§5's `stop_loss` subsection) —
+  production's real engine anchors those against `Position.entry_price`,
+  which is the **post-slippage** fill, not the pre-slippage bid
+  `ReferenceTrade.entry_price` reports (§3); and (2) the internal **capital**
+  (cash) ledger's post-slippage entry/exit accounting (§5's "Entries"
+  subsection, "Fill-time capital sufficiency"), which uses the same
+  `entry_price_basis` and its exit-side counterpart to debit/credit cash —
+  capital can in turn gate whether a *later* entry is admitted, so this
+  parameter does affect which trades this module emits even though it never
+  touches an emitted trade's own field values. A caller reproducing a
+  specific backtest run passes that run's `BacktestConfig.slippage_bps`
+  through.
 - Return value: one `ReferenceTrade` per **fully closed** position, in
   emission order — never one row per partial exit. A position reduced by one
   or more `scaled_take_profit` rungs before its final closing event
@@ -537,17 +543,40 @@ module already reads `max_position_pct` from) also carries
 `_fill_entry` at the **fill bar** (`entry_bar`), not at sizing time
 (`trigger_bar`) alongside the position-cap clamp above. This module must
 apply the same gates at the same point — `entry_bar`, together with the
-capital check below — using its own tracked state: reject the entry (open
-no position for that trigger) if it would push the count of open positions
-past `max_open_positions`, gross notional exposure past
-`max_gross_leverage * equity`, or this single symbol's notional past
-`max_symbol_concentration_pct` of `equity`. The notional basis is **not**
-uniform across the two sides of this check, mirroring production's
-`Position.position_value = entry_price × qty` (post-slippage) vs. the
-candidate's own pre-slippage fill notional: sum each **existing** open
-reference position's `qty * entry_price_basis` (the internal post-slippage
-anchor, §5's `stop_loss` subsection) for the numerator's existing-exposure
-term, but for the candidate's own contribution use `qty *
+capital check below — using its own tracked state, **and in this order**:
+
+1. **Unconditional nonpositive-equity rejection, checked before any ratio.**
+   `RiskFilter.can_enter` rejects any entry outright when `equity <= 0`,
+   ahead of and regardless of the ratio checks below — a percent-of-equity
+   cap admits no positive position against a ruined account, and the
+   leverage/concentration ratios are undefined (or, worse, falsely
+   satisfiable) with a nonpositive denominator. This module must apply the
+   same unconditional check first: if the tracked equity figure (§5's
+   "Quantity" paragraph above) is `<= 0` at `entry_bar`, reject the entry
+   without evaluating `max_open_positions`/`max_gross_leverage`/
+   `max_symbol_concentration_pct` at all.
+2. Reject the entry (open no position for that trigger) if it would push the
+   count of open positions past `max_open_positions`, gross notional
+   exposure past `max_gross_leverage * equity`, or this single symbol's
+   notional past `max_symbol_concentration_pct` of `equity`.
+
+For gate 2's ratio checks, the notional basis is **not** uniform across the
+two sides, mirroring production's `Position.position_value = entry_price ×
+qty` (post-slippage) vs. the candidate's own pre-slippage fill notional —
+**and, on the existing-exposure side, `qty` there is production's
+currently-open (already-reduced) quantity, not the position's original
+entry size**: `Position.qty` decreases in place on every partial exit
+(`Position.reduce`), so `position_value` reflects only what remains open.
+This module's `ReferenceTrade.qty` (§3) is deliberately the **original**
+entry quantity (matching production's `TradeRecord.shares`), so it is the
+**wrong** value for this sum — this module must separately track each open
+reference position's own live `remaining_qty` (starting at the entry
+quantity, decremented by each fired `scaled_take_profit` rung the same way
+`Position.reduce` decrements `qty`) and use that, not `ReferenceTrade.qty`,
+here. Concretely: sum each **existing** open reference position's
+`remaining_qty * entry_price_basis` (the internal post-slippage anchor,
+§5's `stop_loss` subsection) for the numerator's existing-exposure term, but
+for the candidate's own contribution use `qty *
 bars[symbol][entry_bar].open` — the **raw, unrounded** fill-bar open, not
 the rounded `ReferenceTrade.entry_price` output field — mirroring
 production, which computes this same check from `terms.reference_price`
@@ -581,7 +610,25 @@ the **post-slippage** fill notional (`qty * entry_price_basis`, mirroring
 `Portfolio.open`'s `capital -= position.position_value` where
 `position_value` is `Position.entry_price * qty` and `Position.entry_price`
 is itself post-slippage) — never by `qty * entry_price` either. Exits
-increase capital by their own post-slippage proceeds the same way. If
+increase capital by their own post-slippage proceeds, computed the same
+way but with the exit-side sign and reference price: an internal
+`exit_price_basis = round(raw_exit_reference_price * (1 - entry_slippage_bps
+/ 10_000), dp)` for a long, `round(raw_exit_reference_price * (1 +
+entry_slippage_bps / 10_000), dp)` for a short — sign **flipped** from the
+entry-side formula (mirroring `_slippage_multipliers`: a long exit receives
+*less* via slippage, a short exit pays *more*, the reverse of each side's
+entry case). Despite its name, `entry_slippage_bps` is the **one** input
+this module has for slippage magnitude and governs both directions,
+mirroring production's own single `config.slippage_bps`, which
+`_slippage_multipliers` derives all four (entry-long, exit-long,
+entry-short, exit-short) multipliers from. `raw_exit_reference_price` is the
+same pre-rounding reference price §5's per-exit-rule-kind subsections
+already compute before deriving the rounded, pre-slippage
+`ReferenceTrade.exit_price` output value for that closing event (the
+worse-of-open-and-level price for `stop_loss`, the exact target for
+`take_profit`/`scaled_take_profit`, the next-bar open for `signal_exit`) —
+capital increases by `filled_qty * exit_price_basis` on each exit slice,
+never by `filled_qty * exit_price`. If
 `capital < qty * bars[symbol][entry_bar].open` at the entry's actual fill
 bar, the entry does not open (no position, no `ReferenceTrade`), even though
 the sizing-bar checks above
