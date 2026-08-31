@@ -487,6 +487,20 @@ silent stale-persistence failure mode this atomic guard exists to close. (The pa
 activity's own "no pause active yet" write, above, is a *different* guard on `waiting_for_answers`,
 not this primitive, and is unaffected by this correction.)
 
+**The `resume_token` match alone is not enough either — the job's own SQL `status` must be part of
+the same guard.** A job can be cancelled, interrupted, or otherwise reach a terminal status while
+its pause envelope and `resume_token` are still sitting in the record unchanged (nothing in this
+contract clears the envelope on cancellation — that is a separate, `pause_kind`-agnostic path).
+With a token-only predicate, a client holding that still-matching token can persist an answer batch
+and receive success, then signal a workflow execution that Temporal has already terminated —
+succeeding at the store layer for a round that no longer exists at the workflow layer. **Contract
+requirement:** the same conditional `UPDATE` must additionally guard on the job's top-level SQL
+`status` column being active — `status IN ('pending', 'running')`, the same allowlist and the same
+"real SQL column, not `data->>'status'`" correction as the pause-creation primitive above (§4.3) —
+so terminalization and answer-submission cannot race past each other: the status check must be
+part of the one atomic server-side `UPDATE`, not a separate check before or after it, or the two
+could still interleave.
+
 **The `resume_token`-match guard alone is not write-once — it must also condition on the
 token-scoped answer slot itself.** `resume_token` does not change when an answer batch is written
 for it, so under two concurrent submissions for the *same* active token, `WHERE resume_token =
@@ -499,11 +513,16 @@ the token-scoped answer slot: succeed unconditionally when that slot is absent (
 the legitimate first write for this token), succeed as a no-op-equivalent when it is already
 present with **identical** content (a client safely retrying its own prior write, per "a rejected
 write must not strand the winner's own retry" below), and fail without writing when it is present
-with **different** content (a genuine second, conflicting submission for the same token). This is
-one extra `WHERE`-clause condition on the same `UPDATE ... WHERE resume_token = %s AND (data->
-'answers'->%s IS NULL OR data->'answers'->%s = %s::jsonb)`-shaped statement, not a second
-round-trip or a separate primitive — the resume-token guard and the write-once guard are enforced
-by the same atomic server-side write.
+with **different** content (a genuine second, conflicting submission for the same token). **The
+guarded slot must be the actual field this contract persists answers into and the resume path
+reads from — `submitted_answers` (§4.2/§4.3, keyed per `resume_token` per the recommended shape
+below), never a generically-named `answers` field**; guarding an unrelated key would leave the
+real slot unprotected and let concurrent submissions overwrite the batch the activity later
+consumes. This is one extra `WHERE`-clause condition on the same `UPDATE ... WHERE resume_token =
+%s AND (data->'submitted_answers'->%s IS NULL OR data->'submitted_answers'->%s =
+%s::jsonb)`-shaped statement (keyed by `resume_token` within `submitted_answers`, per the keyed
+storage shape below), not a second round-trip or a separate primitive — the resume-token guard and
+the write-once guard are enforced by the same atomic server-side write.
 
 **The persist step must be first-write-wins, not last-write-wins.** Two clients can race to submit
 answers for the same `resume_token` (a stale UI retry, a double-click, a legitimate second
@@ -1074,10 +1093,29 @@ The primitive #7445-B builds must satisfy:
   terminalizing the job the way this backstop is meant to. **Contract requirement:** register a
   small, separate failure-marking activity (e.g. `mark_planning_job_failed_activity(job_id, error)`,
   itself following this same rollout's worker-versioning requirement above since it too is a new
-  activity type) that performs the `mark_job_failed` call, and have the workflow's `except` block
+  activity type) that performs the terminalizing write, and have the workflow's `except` block
   invoke it via `await workflow.execute_activity(...)` — with its own short, bounded retry policy,
   since this call's own failure must not block the workflow from re-raising and terminating — before
   re-raising the original exception.
+
+  **This activity must terminalize *conditionally*, not by calling the existing unconditional
+  `mark_job_failed` — and the workflow's own call to it must not let this backstop step's failure
+  replace the original error.** Calling `planning_team.shared.job_store.mark_job_failed` as-is would
+  write `status: "failed"` unconditionally; if the job was independently cancelled (a user-initiated
+  cancel racing the same no-retry submission that is timing out or crashing), this backstop would
+  overwrite that `cancelled` status with `failed` — the same class of race
+  `update_job_if_not_cancelled` (`db.py:320-366`) already exists to prevent for every other
+  terminalizing write in this codebase. **Contract requirement:** `mark_planning_job_failed_activity`
+  must perform its write through that same conditional pattern (a `planning_team`-side equivalent of
+  `update_job_if_not_cancelled`, guarding on the real `jobs.status` column exactly as corrected
+  above — not the existing unconditional `mark_job_failed`), so a job already cancelled stays
+  cancelled rather than being reclassified as failed. **Contract requirement:** the workflow's
+  `except` block must wrap this `execute_activity` call in its own nested `try/except` (or
+  `try/finally`) so that if the backstop activity itself exhausts its bounded retries — plausible
+  during the very same job-service outage that caused the original failure — that secondary
+  exception is caught (logged, not propagated) and the workflow still re-raises the *original*
+  submit-activity exception, never lets the backstop's own failure silently replace the real root
+  cause the workflow is failing over.
 
 **`document_production_activity` (entry — every invocation, paused or not)**
 This contract's pause machinery (checkpoint-before-`run_pra`, the new `SAFE_RETRY` policy, the
@@ -1216,10 +1254,23 @@ this contract:
   **Contract requirement:** #7445-B MUST add a second narrowly-scoped conditional-write primitive —
   e.g. `create_pause_if_generation_matches(job_id, observed_generation, **pause_fields)` —
   mirroring `update_job_if_not_cancelled`'s single server-side `UPDATE ... WHERE` shape and
-  `True`/`False`/`None` return convention, with the guard `data->>'status' NOT IN
-  ('completed', 'failed') AND (data->>'waiting_for_answers' IS NULL OR
+  `True`/`False`/`None` return convention. **The `status` predicate must read the SQL `jobs.status`
+  column directly (`status IN ('pending', 'running')`), exactly as `update_job_if_not_cancelled`
+  itself guards on `status != 'cancelled'` — never `data->>'status'`.** `status` is a top-level SQL
+  column, not a JSONB field: `_prepare_update_fields`/`_execute_status_update`
+  (`backend/job_service/db.py:222-255,258-300`) pop `status` out of `fields` before it ever reaches
+  the `data` JSONB payload and persist it to its own `jobs.status` column instead — `data->>'status'`
+  on this schema is always `NULL`, and `NULL NOT IN (...)`/`NULL IN (...)` evaluate to `NULL`
+  (neither true nor false) in SQL, so a `WHERE` guarded that way would never match any row and this
+  primitive would never create a pause at all. An active-state allowlist (`status IN
+  ('pending', 'running')`, matching this same file's own status vocabulary) is also the safer form
+  here — it excludes `cancelled`/`interrupted` as well as `completed`/`failed`, so a cancelled or
+  interrupted job cannot be resurrected by a late pause-creation write either, not just a completed
+  or failed one. The rest of the guard stays JSONB-scoped, since `waiting_for_answers`,
+  `pause_generation`, `resume_token`, and `pending_questions` are ordinary team-specific fields
+  inside `data`: `status IN ('pending', 'running') AND (data->>'waiting_for_answers' IS NULL OR
   data->>'waiting_for_answers' = 'false') AND COALESCE((data->>'pause_generation')::int, 0) =
-  %(observed_generation)s`, and the write setting `pause_generation = observed_generation + 1`
+  %(observed_generation)s`, with the write setting `pause_generation = observed_generation + 1`
   alongside `waiting_for_answers`/`resume_token`/`pause_kind`/`pause_context`/`pending_questions`.
   This is a third instance of the same proven conditional-`UPDATE` pattern established by
   `update_job_if_not_cancelled` and extended by `update_job_if_resume_token_matches` (§4.4) — not a
