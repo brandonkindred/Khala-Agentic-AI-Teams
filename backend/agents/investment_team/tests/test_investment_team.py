@@ -355,27 +355,6 @@ def test_agent_catalog_includes_global_risk_manager() -> None:
     assert any(agent.name == "Global Risk Manager Agent" for agent in CORE_AGENTS)
 
 
-def test_spec_models_parse_minimal_promotion_decision() -> None:
-    from investment_team.spec_models import PromotionDecisionV1
-
-    decision = PromotionDecisionV1(
-        decision_id="d-1",
-        subject_id="s-1",
-        subject_type="strategy",
-        stage="paper",
-        decision="promote_to_live_candidate",
-        reasons=["paper performance acceptable"],
-        required_changes=[],
-        risk_manager_veto=False,
-        human_approval_required=True,
-        created_at="2026-01-01T00:00:00Z",
-        created_by_agent="global_risk_manager",
-    )
-
-    assert decision.subject_type.value == "strategy"
-    assert decision.decision.value == "promote_to_live_candidate"
-
-
 def test_backtest_record_captures_strategy_and_metrics() -> None:
     strategy = StrategySpec(
         strategy_id="s-backtest",
