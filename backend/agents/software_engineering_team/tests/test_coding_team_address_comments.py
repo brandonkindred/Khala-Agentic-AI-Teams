@@ -887,7 +887,7 @@ class TestHandleComment:
         )
 
         assert outcome.outcome == "resolved"
-        assert address_env["child_jobs"][0]["job_id"] == "parent:comment:2"
+        assert address_env["child_jobs"][0]["job_id"] == "address-comment:2"
         github = address_env["executions"][0]["kwargs"]["github"]
         assert github["publish_mode"] == "existing_pr"
         assert github["integration_branch"] == "feature"
@@ -940,6 +940,96 @@ class TestHandleComment:
         assert "no longer open" in outcome.detail
         assert address_env["child_jobs"]  # the implementation job DID run
         assert fake.replies == []  # but no reply or resolve followed
+        assert fake.resolved == []
+
+    def test_previously_published_fix_retries_reply_resolve_without_redispatching(
+        self, address_env, monkeypatch
+    ) -> None:
+        """An earlier run's implementation can have already been published
+        (child job completed) while that run's own reply/resolve step then
+        failed — GitHub still reports the thread unresolved with the SAME
+        original comment as its latest message, so this run must retry ONLY
+        the reply/resolve step for the already-completed child job, never
+        re-triage or dispatch a brand new implementation workflow on top of
+        one that may already be on the PR branch."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        address_env["job_state"].update(
+            {
+                "status": "completed",
+                "chosen_plan": "Add the missing null check.",
+                "github_context": {"review_comment_id": 2},
+            }
+        )
+        # If triage or planning were reached, this would raise and fail the test.
+        monkeypatch.setattr(
+            ac,
+            "_triage_comment",
+            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not re-triage")),
+        )
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "resolved"
+        assert "Add the missing null check." in outcome.detail
+        assert address_env["child_jobs"] == []  # no new implementation dispatched
+        assert fake.replies and fake.replies[0][0] == 2
+        assert "address-comment:2" in fake.replies[0][1]
+        assert fake.resolved == ["T2"]
+
+    def test_previously_published_fix_with_closed_pr_skips_reply(
+        self, address_env
+    ) -> None:
+        """A fix already published by an earlier run must not be replied to
+        or resolved against a PR that has since closed or merged."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        fake.get_pull_request = lambda _o, _r, _n: replace(fake.pr, state="closed")  # type: ignore[assignment]
+
+        address_env["job_state"].update(
+            {
+                "status": "completed",
+                "chosen_plan": "Add the missing null check.",
+                "github_context": {"review_comment_id": 2},
+            }
+        )
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "no longer open" in outcome.detail
+        assert fake.replies == []
         assert fake.resolved == []
 
     def test_new_reviewer_feedback_during_workflow_prevents_resolution(
