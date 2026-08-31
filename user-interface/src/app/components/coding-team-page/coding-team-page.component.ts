@@ -27,7 +27,7 @@ import {
   type AnswersSubmittedStatus,
 } from '../pending-questions/pending-questions.component';
 import type { GitHubIssueItem, GitHubRepoItem, OutOfScopeProposalItem, RunGitHubIssueResponse } from '../../models/integrations.model';
-import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
+import type { CodingTeamGitHubContext, CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
@@ -58,6 +58,9 @@ const LAST_REPO_STORAGE_KEY = 'coding-team-last-repo-v1';
 interface RunRowVm {
   run: CodingTeamJobListItem;
   issueNumber?: number;
+  prNumber?: number;
+  /** "#42" for an issue-driven run, "#42 (PR)" for a PR-remediation run; '' when neither is known. */
+  displayLabel: string;
   /** "owner/repo" of the run's repository, so rows from different repos are tellable apart. */
   repoLabel: string;
   status: string;
@@ -69,11 +72,33 @@ interface RunRowVm {
 }
 
 /**
- * Stable identity of one issue across repositories ("owner/repo#number", lowercased) so
- * "In progress" chips from one repo can never light up the same issue number in another.
+ * The Runs panel's identity model: a coding-team job is driven either by a GitHub issue (the
+ * "run an issue" flow) or by a pull request (the address-comments remediation flow, whose parent
+ * and per-comment child jobs carry `pr_number` instead of `issue_number`). Widening the panel to a
+ * discriminated union over the two, rather than assuming `issue_number` everywhere, is what lets a
+ * PR-driven job be listed, selected, and reached for answering paused HITL questions.
  */
-function issueRunKey(owner: string | undefined, repo: string | undefined, issueNumber: number): string {
-  return `${(owner ?? '').toLowerCase()}/${(repo ?? '').toLowerCase()}#${issueNumber}`;
+type RunIdentity = { type: 'issue'; number: number } | { type: 'pr'; number: number };
+
+/**
+ * The run identity carried by a job's GitHub context, or null when it carries neither.
+ * If both `issue_number` and `pr_number` are present, the issue identity wins so the Runs
+ * panel never treats one job as two distinct identities.
+ */
+function runIdentity(ctx: CodingTeamGitHubContext | undefined): RunIdentity | null {
+  if (ctx?.issue_number != null) return { type: 'issue', number: ctx.issue_number };
+  if (ctx?.pr_number != null) return { type: 'pr', number: ctx.pr_number };
+  return null;
+}
+
+/**
+ * Stable identity of one issue/PR across repositories ("owner/repo#number" for an issue,
+ * "owner/repo#pr-number" for a PR, lowercased) so "In progress" chips from one repo can never
+ * light up the same number in another repo — or an issue and a PR that happen to share a number.
+ */
+function runKey(owner: string | undefined, repo: string | undefined, identity: RunIdentity): string {
+  const suffix = identity.type === 'pr' ? `pr-${identity.number}` : `${identity.number}`;
+  return `${(owner ?? '').toLowerCase()}/${(repo ?? '').toLowerCase()}#${suffix}`;
 }
 
 /**
@@ -101,7 +126,7 @@ interface IssueRowVm {
  * is defined by the PAT's own authorization, not by per-repo Khala configuration. Expanding
  * a repo loads its open issues; starting a run targets that repo via per-request owner/repo
  * parameters. The Runs panel shows runs from every repository, and both the "In progress"
- * chips and the run rows are keyed by `owner/repo#number` (see {@link issueRunKey}) so
+ * chips and the run rows are keyed by `owner/repo#number` (see {@link runKey}) so
  * identical issue numbers across repositories can never collide.
  */
 @Component({
@@ -246,8 +271,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   runsError: string | null = null;
   /** The run whose live detail is shown; null when nothing is selected. */
   selectedRunId: string | null = null;
-  /** Issue number of the selected run — kept so the chip survives a list snapshot that lags a just-started run. */
+  /** Issue/PR number of the selected run — kept so the chip survives a list snapshot that lags a just-started run. */
   selectedRunNumber: number | null = null;
+  /**
+   * Whether `selectedRunNumber` identifies an issue or a PR. `null` means "not yet known" and is
+   * treated as `'issue'` everywhere the number is used, matching the panel's original issue-only
+   * behavior for runs selected before this field existed.
+   */
+  selectedRunKind: 'issue' | 'pr' | null = null;
   /** Repository of the selected run, paired with `selectedRunNumber` for cross-repo-safe chips and retries. */
   selectedRunOwner = '';
   selectedRunRepo = '';
@@ -382,8 +413,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** True for a short window after the job id is copied, to flip the copy icon to a check. */
   jobIdCopied = false;
 
-  /** Issue keys ("owner/repo#number") with a non-terminal coding-team run, for "In progress" chips. */
-  activeIssueKeys = new Set<string>();
+  /** Issue/PR keys ("owner/repo#number" or "owner/repo#pr-number") with a non-terminal coding-team run, for "In progress" chips. */
+  activeRunKeys = new Set<string>();
 
   private pollSub: Subscription | null = null;
   private runsSub: Subscription | null = null;
@@ -404,6 +435,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // Drop the selected-run bookkeeping so nothing pairs with a dead view.
     this.selectedRunId = null;
     this.selectedRunNumber = null;
+    this.selectedRunKind = null;
     this.selectedRunOwner = '';
     this.selectedRunRepo = '';
     if (this.copyResetTimer) {
@@ -753,9 +785,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    */
   private toRunVm(run: CodingTeamJobListItem): RunRowVm {
     const ctx = run.github_context;
+    const identity = runIdentity(ctx);
     return {
       run,
       issueNumber: ctx?.issue_number,
+      prNumber: ctx?.pr_number,
+      displayLabel: identity ? (identity.type === 'pr' ? `#${identity.number} (PR)` : `#${identity.number}`) : '',
       repoLabel: ctx ? `${ctx.owner}/${ctx.repo}` : '',
       status: run.status,
       badgeClass: this.badgeClass(run.status),
@@ -768,7 +803,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Rebuild the visible issue-row view-models (current page × current "In progress" chip set).
    *
-   * Preconditions: `issues`/`pageIndex`/`pageSize`/`activeIssueKeys` reflect the state to render.
+   * Preconditions: `issues`/`pageIndex`/`pageSize`/`activeRunKeys` reflect the state to render.
    * Postconditions: `pagedIssueVms` matches the current `pagedIssues` slice one-to-one.
    */
   private recomputeIssueVms(): void {
@@ -790,7 +825,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    *
    * Preconditions: none enforced — a no-op when `selectedIssue`/`selectedRepo` is null or a run is
    * already starting (`runningIssue`), so a double-click can't submit the same issue twice.
-   * Postconditions: on success the issue is marked in progress (`activeIssueKeys`), the returned
+   * Postconditions: on success the issue is marked in progress (`activeRunKeys`), the returned
    * run is selected (so its live detail shows immediately), the Runs list is refreshed, and the
    * selection is cleared; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
    */
@@ -806,10 +841,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
         this.selectedIssue = null;
-        this.activeIssueKeys.add(issueRunKey(repo.owner, repo.name, resp.issue_number));
+        this.activeRunKeys.add(runKey(repo.owner, repo.name, { type: 'issue', number: resp.issue_number }));
         // Set the selected run's issue first so selectRun (which can't find the run in `runs`
         // until the next list tick) doesn't clear it.
         this.selectedRunNumber = resp.issue_number;
+        this.selectedRunKind = 'issue';
         this.selectedRunOwner = repo.owner;
         this.selectedRunRepo = repo.name;
         this.selectRun(resp.job_id);
@@ -832,12 +868,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Re-run the selected (typically terminal) run's issue, e.g. after a failure.
    *
    * Preconditions: none enforced — a no-op when the selected run has no resolvable issue
-   * number/repository or a run is already starting (`runningIssue`).
+   * number/repository, is a PR-remediation run (`selectedRunKind === 'pr'` — there is no "issue" to
+   * re-run), or a run is already starting (`runningIssue`).
    * Postconditions: on success a fresh run for the same issue (in the same repository) is started
    * and selected, and the issue is marked in progress; on error `issueError` is surfaced.
    * `runningIssue` is toggled across the call.
    */
   retrySelectedRun(): void {
+    if (this.selectedRunKind === 'pr') return;
     const ctx = this.jobStatus?.github_context;
     const issueNumber = this.selectedRunNumber ?? ctx?.issue_number;
     const owner = this.selectedRunOwner || ctx?.owner || '';
@@ -851,8 +889,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       .subscribe({
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
-        this.activeIssueKeys.add(issueRunKey(owner, repo, resp.issue_number));
+        this.activeRunKeys.add(runKey(owner, repo, { type: 'issue', number: resp.issue_number }));
         this.selectedRunNumber = resp.issue_number;
+        this.selectedRunKind = 'issue';
         this.selectedRunOwner = owner;
         this.selectedRunRepo = repo;
         this.selectRun(resp.job_id);
@@ -904,17 +943,17 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Fold a fresh `/jobs` snapshot into the Runs panel.
    *
    * Preconditions: the poll only starts once configured (enabled + token).
-   * Postconditions: `runs` holds every issue-bearing run for a repository the PAT can currently
-   * access (running + terminal) and `runningRuns`/`recentRuns` hold its non-terminal/terminal
-   * partitions; `activeIssueKeys` holds the non-terminal subset's "owner/repo#number" keys, plus the
-   * selected run's key only while that run is absent from this snapshot and not yet observed terminal
-   * (so a snapshot that lags a just-started run can't wipe its chip, while a run the snapshot already
-   * reports terminal is trusted and dropped). On the first load only, a run is auto-selected when
-   * none is selected.
+   * Postconditions: `runs` holds every issue- or PR-bearing run for a repository the PAT can
+   * currently access (running + terminal) and `runningRuns`/`recentRuns` hold its non-terminal/terminal
+   * partitions; `activeRunKeys` holds the non-terminal subset's "owner/repo#number" (issue) or
+   * "owner/repo#pr-number" (PR) keys, plus the selected run's key only while that run is absent from
+   * this snapshot and not yet observed terminal (so a snapshot that lags a just-started run can't wipe
+   * its chip, while a run the snapshot already reports terminal is trusted and dropped). On the first
+   * load only, a run is auto-selected when none is selected.
    */
   private applyRuns(jobs: CodingTeamJobListItem[]): void {
-    let mine = jobs.filter((j) => j.github_context?.issue_number != null);
-    // The coding-team `/jobs` endpoint is NOT PAT-scoped — it returns every stored issue-bearing
+    let mine = jobs.filter((j) => runIdentity(j.github_context) != null);
+    // The coding-team `/jobs` endpoint is NOT PAT-scoped — it returns every stored issue-/PR-bearing
     // run, including runs from a previous token/config or shared job storage. Once the accessible-repo
     // list has loaded (it auto-loads on init alongside the first poll), drop runs whose repository is
     // not in it, so the panel never surfaces — or offers retries for — repos the current token can no
@@ -933,8 +972,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
     const active = new Set(
       this.runningRuns
-        .filter((j) => j.github_context?.issue_number != null)
-        .map((j) => issueRunKey(j.github_context?.owner, j.github_context?.repo, j.github_context!.issue_number!)),
+        .map((j) => {
+          const identity = runIdentity(j.github_context);
+          return identity ? runKey(j.github_context?.owner, j.github_context?.repo, identity) : null;
+        })
+        .filter((key): key is string => key != null),
     );
     // Preserve the chip for a just-started run the snapshot does not list yet — but only while the
     // run is genuinely absent from the snapshot (`selectedInSnapshot`) AND the polled status has not
@@ -950,9 +992,16 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       !selectedInSnapshot &&
       !isCodingTeamTerminalStatus(this.jobStatus?.status)
     ) {
-      active.add(issueRunKey(this.selectedRunOwner, this.selectedRunRepo, this.selectedRunNumber));
+      // `selectedRunKind` is null for a run selected before this field existed (or before the
+      // snapshot ever confirmed it) — that always meant an issue-driven run, so default to it.
+      active.add(
+        runKey(this.selectedRunOwner, this.selectedRunRepo, {
+          type: this.selectedRunKind ?? 'issue',
+          number: this.selectedRunNumber,
+        }),
+      );
     }
-    this.activeIssueKeys = active;
+    this.activeRunKeys = active;
     this.buildRunVms();
     this.recomputeIssueVms();
 
@@ -989,20 +1038,24 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Show a run's live detail and start polling its status.
    *
    * Preconditions: `jobId` is a coding-team job id; when it is a row in `runs` it carries a
-   * `github_context.issue_number` (the list is pre-filtered to issue-bearing runs).
+   * `github_context.issue_number` or `github_context.pr_number` (the list is pre-filtered to
+   * issue-/PR-bearing runs).
    * Postconditions: a no-op when `jobId` is already selected; otherwise `selectedRunId` is `jobId`,
-   * `selectedRunNumber` is taken from the matching run when it is in `runs` (its issue number, or null
-   * if the run somehow lacks one — the list is pre-filtered to issue-bearing runs, so this is a
-   * defensive fallback), and left untouched when the run is not yet in `runs` (e.g. just started, so
-   * the caller's pre-set number survives); `activityNarrative`/`activityAnnouncement` are cleared,
-   * `jobStatus`/`issueError`/`jobStatusError` are cleared, and status polling for `jobId` is (re)started.
+   * `selectedRunNumber`/`selectedRunKind` are taken from the matching run when it is in `runs` (its
+   * issue or PR number and which kind it is, or both null if the run somehow carries neither — the
+   * list is pre-filtered to issue-/PR-bearing runs, so this is a defensive fallback), and left
+   * untouched when the run is not yet in `runs` (e.g. just started, so the caller's pre-set number
+   * survives); `activityNarrative`/`activityAnnouncement` are cleared, `jobStatus`/`issueError`/
+   * `jobStatusError` are cleared, and status polling for `jobId` is (re)started.
    */
   selectRun(jobId: string): void {
     if (this.selectedRunId === jobId) return;
     this.selectedRunId = jobId;
     const run = this.runs.find((r) => r.job_id === jobId);
     if (run) {
-      this.selectedRunNumber = run.github_context?.issue_number ?? null;
+      const identity = runIdentity(run.github_context);
+      this.selectedRunNumber = identity?.number ?? null;
+      this.selectedRunKind = identity?.type ?? null;
       this.selectedRunOwner = run.github_context?.owner ?? '';
       this.selectedRunRepo = run.github_context?.repo ?? '';
     }
@@ -1029,9 +1082,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     if (this.selectedRunId === run.job_id) {
       this.stopPolling();
       this.selectedRunId = null;
-      // Clear the issue identity too: applyRuns keeps a chip alive for the selected run's issue, so
-      // a lingering selectedRunNumber would re-flag a deselected (and possibly finished) issue.
+      // Clear the issue/PR identity too: applyRuns keeps a chip alive for the selected run, so a
+      // lingering selectedRunNumber would re-flag a deselected (and possibly finished) issue/PR.
       this.selectedRunNumber = null;
+      this.selectedRunKind = null;
       this.selectedRunOwner = '';
       this.selectedRunRepo = '';
       this.jobStatus = null;
@@ -1046,13 +1100,33 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return this.runs.find((r) => r.job_id === this.selectedRunId) ?? null;
   }
 
-  /** GitHub issue URL for the selected run's header link, if known. */
+  /** GitHub issue/PR URL for the selected run's header link, if known. */
   get selectedIssueUrl(): string {
     return (
       this.selectedRun?.github_context?.issue_url ??
       this.jobStatus?.github_context?.issue_url ??
+      this.selectedRun?.github_context?.pr_url ??
+      this.jobStatus?.github_context?.pr_url ??
       ''
     );
+  }
+
+  /** "issue" or "pull request", for the run-detail header ("Working on {label}"). Defaults to "issue". */
+  get selectedRunKindLabel(): 'issue' | 'pull request' {
+    return this.selectedRunKind === 'pr' ? 'pull request' : 'issue';
+  }
+
+  /** "owner/repo" for the run-detail header, or '' when either half is unknown. */
+  get selectedRunOwnerRepo(): string {
+    return this.selectedRunOwner && this.selectedRunRepo
+      ? `${this.selectedRunOwner}/${this.selectedRunRepo}`
+      : '';
+  }
+
+  /** Issue/PR number for the run-detail header, preferring the freshest known source. */
+  get selectedRunDisplayNumber(): number | null {
+    const ctx = this.jobStatus?.github_context ?? this.selectedRun?.github_context;
+    return runIdentity(ctx)?.number ?? this.selectedRunNumber;
   }
 
   /**
@@ -1188,7 +1262,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   isIssueInProgress(issue: GitHubIssueItem): boolean {
     const repo = this.selectedRepo;
     if (!repo) return false;
-    return this.activeIssueKeys.has(issueRunKey(repo.owner, repo.name, issue.number));
+    return this.activeRunKeys.has(runKey(repo.owner, repo.name, { type: 'issue', number: issue.number }));
   }
 
   /**
@@ -1226,8 +1300,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         // Discard a stale poll for a run the user has since switched away from.
         if (this.selectedRunId !== jobId) return;
         this.jobStatus = status;
-        if (this.selectedRunNumber == null && status.github_context?.issue_number != null) {
-          this.selectedRunNumber = status.github_context.issue_number;
+        const identity = runIdentity(status.github_context);
+        if (identity) {
+          if (this.selectedRunNumber == null) {
+            this.selectedRunNumber = identity.number;
+          }
+          if (this.selectedRunKind == null) {
+            this.selectedRunKind = identity.type;
+          }
         }
         if (!this.selectedRunOwner && status.github_context?.owner) {
           this.selectedRunOwner = status.github_context.owner;

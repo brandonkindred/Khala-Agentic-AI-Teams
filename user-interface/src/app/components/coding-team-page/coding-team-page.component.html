@@ -427,7 +427,7 @@
         (click)="toggleRun(vm.run)"
       >
         <div class="coding-run-item__top">
-          <span class="coding-run-item__issue">{{ vm.repoLabel }}#{{ vm.issueNumber }}</span>
+          <span class="coding-run-item__issue">{{ vm.repoLabel }}{{ vm.displayLabel }}</span>
           @if (vm.waiting) {
             <span class="kh-badge kh-badge--warning">needs answers</span>
           } @else {
@@ -451,11 +451,11 @@
           <div class="run-detail__header">
             <mat-icon aria-hidden="true">engineering</mat-icon>
             <h3>
-              Working on issue
+              Working on {{ selectedRunKindLabel }}
               @if (selectedIssueUrl) {
-                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">{{ selectedRunOwner && selectedRunRepo ? selectedRunOwner + '/' + selectedRunRepo : '' }}#{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}</a>
+                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">{{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}</a>
               } @else {
-                {{ selectedRunOwner && selectedRunRepo ? selectedRunOwner + '/' + selectedRunRepo : '' }}#{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}
+                {{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}
               }
             </h3>
             @if (jobStatus.waiting_for_answers) {
@@ -594,7 +594,7 @@
                 </a>
               </div>
             }
-            @if (jobStatusTerminal) {
+            @if (jobStatusTerminal && selectedRunKind !== 'pr') {
               <div class="run-detail__retry">
                 <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
                   @if (runningIssue) {
