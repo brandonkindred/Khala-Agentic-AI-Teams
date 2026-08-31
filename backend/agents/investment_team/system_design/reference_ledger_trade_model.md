@@ -458,8 +458,16 @@ symbols** (unrealized value included, not just realized/closed reference
 trades) — mirroring `Portfolio.mark_to_market()`, which values open
 positions the same way, and consistent with §1's scope in that this
 mark-to-market uses only this module's own no-slippage reference prices,
-never the true, cost-adjusted equity a real run would show. "Latest
-observed price" is precise, not approximate: for each open position, it is
+never the true, cost-adjusted equity a real run would show. Identifying
+*which* price is latest does not by itself define a position's equity
+contribution — the side-specific formula does, and it is **not** symmetric:
+`equity += qty * price_now` for a long, but `equity += qty * (2 *
+entry_price - price_now)` for a short (mirroring `Portfolio.mark_to_market`'s
+own `pos.qty * (2 * pos.entry_price - price_now)` branch, `entry_price`
+there being each position's own post-slippage `entry_price_basis`) —
+synthesizing an unrealized-loss mirror as the short's own price rises, not
+the raw `qty * price_now` the long side uses. "Latest observed price" is
+precise, not approximate: for each open position, it is
 the **close of the most recently processed bar for that symbol** as of the
 current point in the merged walk — mirrors `Portfolio.update_last_price`,
 which stamps `last_price[symbol] = bar.close` every time a bar for that
