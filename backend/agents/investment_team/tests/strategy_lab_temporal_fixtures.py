@@ -11,7 +11,7 @@ can't drift the two test files out of sync with each other.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     import concurrent.futures
@@ -21,24 +21,33 @@ if TYPE_CHECKING:
 
 
 def build_strategy_lab_worker(
-    env: "WorkflowEnvironment", activity_executor: "concurrent.futures.ThreadPoolExecutor"
+    env: "WorkflowEnvironment",
+    activity_executor: "concurrent.futures.ThreadPoolExecutor",
+    *,
+    activities: Optional[List[Any]] = None,
+    max_cached_workflows: int = 0,
 ) -> "Worker":
-    """Build the real ``StrategyLabCycleWorkflow`` / ``run_design_attempt_activity``
-    ``Worker`` shared by every real-``WorkflowEnvironment`` Strategy Lab
-    integration test (``test_strategy_lab_temporal_cancellation.py`` and
+    """Build the real ``StrategyLabCycleWorkflow`` ``Worker`` shared by every
+    real-``WorkflowEnvironment`` Strategy Lab test
+    (``test_strategy_lab_temporal_cancellation.py``,
     ``test_strategy_lab_checkpoint_crash_resumption.py``'s two integration
-    tests). Single source of truth for the worker construction so the three
-    call sites can't drift out of sync with each other.
+    tests, and ``test_strategy_lab_temporal_workflow_replay.py``). Single
+    source of truth for the worker construction so the four call sites can't
+    drift out of sync with each other.
 
     Preconditions:
         ``env`` is a live ``WorkflowEnvironment`` (its ``.client`` is used to
         construct the worker); ``activity_executor`` is a live
         ``ThreadPoolExecutor`` the caller owns and will tear down.
     Postconditions:
-        Returns a ``Worker`` registered for ``TASK_QUEUE`` with the genuine,
-        unmodified ``run_design_attempt_activity`` and
-        ``StrategyLabCycleWorkflow`` -- not started; the caller is
-        responsible for ``async with`` (or otherwise starting/stopping) it.
+        Returns a ``Worker`` registered for ``TASK_QUEUE`` -- not started;
+        the caller is responsible for ``async with`` (or otherwise
+        starting/stopping) it. ``activities`` defaults to the genuine,
+        unmodified ``run_design_attempt_activity`` (the shape every call
+        site but the replay test wants); pass an explicit list (e.g. the
+        replay test's fake activity functions) to override it.
+        ``max_cached_workflows`` defaults to ``0``, matching every existing
+        call site.
     """
     from temporalio.worker import Worker
 
@@ -53,9 +62,9 @@ def build_strategy_lab_worker(
         env.client,
         task_queue=TASK_QUEUE,
         workflows=[StrategyLabCycleWorkflow],
-        activities=[act.run_design_attempt_activity],
+        activities=activities if activities is not None else [act.run_design_attempt_activity],
         activity_executor=activity_executor,
-        max_cached_workflows=0,
+        max_cached_workflows=max_cached_workflows,
         # Without the numpy/pandas passthrough, validating
         # StrategyLabCycleWorkflow re-imports investment_team's numpy/pandas
         # transitive chain inside the sandbox's isolated namespace, crashing
