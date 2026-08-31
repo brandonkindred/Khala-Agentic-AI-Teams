@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     git_identity_env,
+    remote_url_matches,
 )
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.clone_workspace import (
@@ -211,7 +212,10 @@ def _is_deletable_ephemeral_checkout(target: Path) -> bool:
         - ``target`` is an already-resolved path (symlink-collapsed).
     Postconditions:
         - Returns True iff all three content conditions hold. Pure apart from
-          filesystem reads; never raises.
+          filesystem reads. May raise ``OSError`` if a filesystem read fails
+          for a reason ``Path.exists()`` does not itself swallow (e.g. a
+          permission error) — callers are responsible for catching it, same
+          as any other filesystem call.
     """
     return (
         is_within_ephemeral_workspace(target)
@@ -236,28 +240,20 @@ def _checkout_remote_matches(repo_path: str, owner: str, repo: str) -> bool:
           (checked by the caller first — this issues a real git subprocess
           call and is not itself a "is this a checkout at all" check).
     Postconditions:
-        - Returns True iff ``git remote get-url origin`` succeeds and its
-          last two ``/``-separated path segments equal ``owner``/``repo``
-          case-insensitively (GitHub owner/repo names are case-insensitive),
-          after stripping a trailing ``.git`` — a substring match would give
-          false positives (``acme/widget`` inside ``acme/widget-extra``).
-          Returns False on any git failure (no ``origin`` remote, git not
-          installed, timeout) — an unverifiable remote is treated the same
-          as a mismatched one, never assumed to match.
+        - Returns True iff ``git remote get-url origin`` succeeds and the URL
+          it returns matches ``owner``/``repo`` on this deployment's expected
+          git host, per :func:`shared.git.git_utils.remote_url_matches` (the
+          same predicate ``unified_api``'s clone-or-fetch reuse path uses, so
+          the two never drift on URL-parsing edge cases). Returns False on
+          any git failure (no ``origin`` remote, git not installed, timeout —
+          ``_git`` never raises, it degrades to a non-zero return code) — an
+          unverifiable remote is treated the same as a mismatched one, never
+          assumed to match.
     """
     rc, out = _git(repo_path, "remote", "get-url", "origin", timeout=10.0)
     if rc != 0:
         return False
-    cleaned = out.strip().rstrip("/")
-    if cleaned.endswith(".git"):
-        cleaned = cleaned[: -len(".git")]
-    # Normalize the scp-style "git@host:owner/repo" form to use "/" throughout
-    # so both URL styles split into path segments the same way.
-    cleaned = cleaned.replace(":", "/")
-    segments = [s for s in cleaned.split("/") if s]
-    if len(segments) < 2:
-        return False
-    return segments[-2].casefold() == owner.casefold() and segments[-1].casefold() == repo.casefold()
+    return remote_url_matches(out, owner, repo)
 
 
 def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:

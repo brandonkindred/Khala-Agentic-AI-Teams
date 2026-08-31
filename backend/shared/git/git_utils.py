@@ -23,6 +23,57 @@ MAIN_BRANCH = "main"
 DEFAULT_COMMIT_USER_NAME = "Khala"
 DEFAULT_COMMIT_USER_EMAIL = "brandon.kindred@gmail.com"
 
+DEFAULT_GIT_REMOTE_HOST = "github.com"
+
+
+def remote_url_matches(
+    remote_url: str, owner: str, repo: str, *, expected_host: str = DEFAULT_GIT_REMOTE_HOST
+) -> bool:
+    """True iff ``remote_url`` is an ``expected_host`` remote for ``owner/repo``.
+
+    Single source of truth for validating a checkout's ``origin`` remote
+    against expected repository coordinates before code gets committed and
+    pushed there — used both by the coding team's per-issue/per-PR checkout
+    guard and the unified API's clone-or-fetch reuse path. Keeping one
+    implementation avoids the two drifting apart on URL-parsing edge cases
+    (GHES, SSH URLs, case-folding) the way two independent copies would.
+
+    Preconditions:
+        - ``owner`` and ``repo`` are non-empty repository coordinates.
+    Postconditions:
+        - Returns True iff ALL of: (a) the URL's host segment equals
+          ``expected_host`` case-insensitively — a substring/suffix match on
+          just the ``owner/repo`` path segments alone would accept
+          ``https://evil.example.com/owner/repo.git`` as a match for
+          ``owner/repo``, since only the LAST two path segments were ever
+          compared; checking the host closes that gap; (b) the URL's last two
+          ``/``-separated path segments equal ``owner``/``repo``
+          case-insensitively (GitHub owner/repo names are case-insensitive)
+          after stripping a trailing ``.git`` — a substring match would give
+          false positives (``acme/widget`` inside ``acme/widget-extra``).
+          Returns False for a malformed, empty, or too-short URL, or a host
+          mismatch — never assumed to match on unverifiable input.
+        - Handles both HTTPS (``https://host/owner/repo.git``) and scp-style
+          SSH (``git@host:owner/repo.git``) remote URL forms, normalizing the
+          scp colon to a ``/`` so both split into path segments the same way.
+    """
+    cleaned = remote_url.strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[: -len(".git")]
+    # Strip a URL scheme (https://, ssh://, git://) if present so the host is
+    # always the first segment after normalizing the scp-style colon to "/".
+    cleaned = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", cleaned)
+    # Normalize the scp-style "git@host:owner/repo" form to use "/" throughout
+    # so both URL styles split into path segments the same way.
+    cleaned = cleaned.replace(":", "/")
+    segments = [s for s in cleaned.split("/") if s]
+    if len(segments) < 3:
+        return False
+    host = segments[0].split("@")[-1]  # strip a "user@" prefix (e.g. "git@")
+    if host.casefold() != expected_host.casefold():
+        return False
+    return segments[-2].casefold() == owner.casefold() and segments[-1].casefold() == repo.casefold()
+
 
 def _configured_commit_identity() -> Tuple[str, str]:
     """Resolve the configured platform commit identity.

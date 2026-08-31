@@ -25,6 +25,7 @@ from shared.git.git_utils import (
     ensure_development_branch,
     initialize_new_repo,
     prune_worktrees,
+    remote_url_matches,
     remove_worktree,
     reset_hard_to,
 )
@@ -561,3 +562,58 @@ def test_reset_hard_to_propagates_untracked_cleanup_failure(repo: Path, monkeypa
 
     assert not ok
     assert "boom" in msg
+
+
+# ---------------------------------------------------------------------------
+# remote_url_matches: single-source-of-truth origin-remote validation shared
+# by software_engineering_team.api.git_ops and unified_api.routes.integrations
+# ---------------------------------------------------------------------------
+
+
+def test_remote_url_matches_exact_https() -> None:
+    assert remote_url_matches("https://github.com/acme/widget.git", "acme", "widget") is True
+    assert remote_url_matches("https://github.com/acme/widget", "acme", "widget") is True
+
+
+def test_remote_url_matches_is_case_insensitive() -> None:
+    assert remote_url_matches("https://github.com/ACME/Widget.git", "acme", "widget") is True
+
+
+def test_remote_url_matches_accepts_scp_form() -> None:
+    assert remote_url_matches("git@github.com:acme/widget.git", "acme", "widget") is True
+
+
+def test_remote_url_matches_rejects_repo_prefix_substring() -> None:
+    """'acme/widget' is a substring of 'acme/widget-extra' but must NOT match."""
+    assert remote_url_matches("https://github.com/acme/widget-extra.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_owner_suffix_substring() -> None:
+    """'acme/widget' is a suffix of 'notacme/widget' but must NOT match."""
+    assert remote_url_matches("https://github.com/notacme/widget.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_short_url() -> None:
+    assert remote_url_matches("widget", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_wrong_host() -> None:
+    """A remote whose owner/repo segments match but whose HOST does not is
+    still a mismatch — otherwise https://evil.example.com/acme/widget.git
+    would be accepted as a match for github.com's acme/widget."""
+    assert remote_url_matches("https://evil.example.com/acme/widget.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_wrong_host_scp_form() -> None:
+    assert remote_url_matches("git@evil.example.com:acme/widget.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_accepts_custom_expected_host() -> None:
+    """A caller pointed at a GitHub Enterprise Server host can override the
+    github.com default."""
+    assert (
+        remote_url_matches(
+            "https://ghes.internal/acme/widget.git", "acme", "widget", expected_host="ghes.internal"
+        )
+        is True
+    )

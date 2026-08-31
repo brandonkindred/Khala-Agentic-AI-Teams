@@ -408,7 +408,7 @@
 
         @if (loadingPulls && !pullsLoaded) {
           <div class="pulls-panel__loading">
-            <mat-spinner diameter="24"></mat-spinner>
+            <mat-spinner diameter="24" aria-label="Loading pull requests"></mat-spinner>
             <span>Loading pull requests…</span>
           </div>
         } @else if (pullsLoaded && pulls.length === 0) {

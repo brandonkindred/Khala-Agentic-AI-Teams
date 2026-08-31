@@ -35,6 +35,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from shared.concurrency import flock_lock
+from shared.git.git_utils import remote_url_matches
 from shared.postgres import bounded_probe
 from software_engineering_team.clone_workspace import (
     PER_ISSUE_DIR_TEMPLATE,
@@ -2584,30 +2585,6 @@ def _redact_url_userinfo(url: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
 
 
-def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
-    """True iff ``remote_url``'s final ``owner/repo`` segments match exactly.
-
-    A substring check (``f"{owner}/{repo}" in url``) gives false positives — e.g.
-    ``acme/widget`` matches ``acme/widget-extra``, and ``acme/widget`` is also a
-    suffix of ``notacme/widget``. This compares the last two path segments
-    exactly (case-insensitively, since GitHub treats owner/repo that way) after
-    stripping a trailing ``.git``/slash, and normalizes the ``git@host:owner/repo``
-    scp form to ``/``-separated so both URL styles work.
-
-    Postconditions:
-        - Returns True iff the remote's last two segments equal ``owner``/``repo``
-          case-insensitively; False otherwise (including malformed/short URLs).
-    """
-    cleaned = remote_url.strip().rstrip("/")
-    if cleaned.endswith(".git"):
-        cleaned = cleaned[:-4]
-    parts = [seg for seg in cleaned.replace(":", "/").split("/") if seg]
-    if len(parts) < 2:
-        return False
-    got_owner, got_repo = parts[-2], parts[-1]
-    return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
-
-
 def _ensure_repo_clone(
     repo_path: str,
     owner: str,
@@ -2679,7 +2656,7 @@ def _ensure_repo_clone(
                     timeout=10,
                 )
                 url_out = url_check.stdout.strip()
-                if url_check.returncode != 0 or not _remote_matches(url_out, owner, repo):
+                if url_check.returncode != 0 or not remote_url_matches(url_out, owner, repo):
                     # Redact any embedded credentials before surfacing the remote in the error.
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "
