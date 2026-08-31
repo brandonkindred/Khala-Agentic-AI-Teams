@@ -999,6 +999,56 @@ _PROGRESS_EVENT_FIELDS: Tuple[str, ...] = (
 )
 
 
+def _strip_unused_resume_seed_from_record(
+    record_dump: Dict[str, Any],
+    *,
+    unused: bool,
+    seed_spec_len: int,
+    seed_code_len: int,
+    seed_gate_len: int,
+) -> Dict[str, Any]:
+    """Drop a discarded cross-attempt resume seed's prefix from a JSON-dumped record.
+
+    A no-op (returns ``record_dump`` unchanged) unless ``unused`` -- ``True``
+    only when the workflow supplied a cross-attempt resume seed
+    (``params["drift"]``, seeded from a checkpoint) that this attempt never
+    actually adopted -- reconstruction failed, or an ADR-012 same-attempt
+    checkpoint won instead. That seed was still fed into ``drift_collector``
+    before the outcome was known (needed so a *reentry* outcome's returned
+    ``"drift"`` wire dict keeps the seed prefix intact --
+    ``StrategyLabCycleWorkflow.run`` always strips exactly that many entries
+    itself when folding a reentry's drift into its own parent commit log,
+    regardless of whether this attempt actually resumed). A *record* outcome
+    has no such downstream consumer expecting the seed, so its persisted
+    ``spec_history``/``code_history``/``gate_timeline`` must not carry a
+    checkpoint's provenance that this attempt never earned.
+
+    Preconditions:
+        ``record_dump`` is a ``StrategyLabRecord.model_dump(mode="json")``
+        when ``unused`` is ``True`` (so ``spec_history``/``code_history``/
+        ``gate_timeline`` are present lists) -- irrelevant when ``unused`` is
+        ``False``, since it's then returned untouched. ``seed_*_len`` are the
+        lengths of the seed the workflow supplied in ``params["drift"]`` for
+        this attempt.
+    Postconditions:
+        When ``unused``, returns ``record_dump`` with each of
+        ``spec_history``/``code_history``/``gate_timeline`` replaced by
+        itself sliced past its ``seed_*_len``-entry prefix.
+        ``record.spec_history``/``code_history`` are exactly
+        ``drift_collector``'s own lists (unreordered); ``gate_timeline`` has
+        this attempt's own gate results appended after
+        ``drift_collector.gate_timeline`` -- either way, the seed is always
+        the first ``seed_*_len`` entries. Mutates and returns the same dict
+        either way.
+    """
+    if not unused or not (seed_spec_len or seed_code_len or seed_gate_len):
+        return record_dump
+    record_dump["spec_history"] = record_dump["spec_history"][seed_spec_len:]
+    record_dump["code_history"] = record_dump["code_history"][seed_code_len:]
+    record_dump["gate_timeline"] = record_dump["gate_timeline"][seed_gate_len:]
+    return record_dump
+
+
 @activity.defn(name="strategy_lab_run_design_attempt", no_thread_cancel_exception=True)
 def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """Run one full ``StrategyLabOrchestrator._run_design_attempt`` verbatim.
@@ -1221,6 +1271,24 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         code_history=[CodeRevision(**d) for d in drift_data.get("code_history", [])],
         gate_timeline=[GateEvent(**d) for d in drift_data.get("gate_timeline", [])],
     )
+    # Length of whatever the workflow itself seeded into ``params["drift"]``
+    # for this attempt -- 0 unless the workflow is resuming (cross-attempt
+    # seed and ``params["resume_spec"]`` are always populated together, see
+    # ``workflows.py``'s ``pending_resume_drift_seed``/``pending_resume_spec``).
+    # Captured now, before ``drift_collector`` gains any of this attempt's
+    # own entries, so it stays correct as "the seed length" regardless of
+    # whether cross-attempt resume below actually succeeds -- used only to
+    # strip a failed resume's discarded seed out of a "record" outcome's
+    # persisted history (never out of a "reentry" outcome's returned
+    # ``drift`` wire dict: ``StrategyLabCycleWorkflow.run`` always strips
+    # exactly this many entries itself when merging a reentry's drift into
+    # its own parent commit log, so that wire dict must keep the seed
+    # prefix intact no matter what happened here).
+    _seed_spec_len, _seed_code_len, _seed_gate_len = (
+        len(drift_data.get("spec_history", [])),
+        len(drift_data.get("code_history", [])),
+        len(drift_data.get("gate_timeline", [])),
+    )
     # ``_run_design_attempt`` appends to this list in place (its
     # ``all_gate_results``); returning the mutated list threads accumulation
     # across re-entries, matching ``run_cycle``'s single ``cumulative_gate_results``.
@@ -1341,18 +1409,17 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         resume_spec, resume_rationale, resume_design_context = _cross_attempt_resume_from_params(
             params, run_id=run_id, design_attempt_index=design_attempt_index
         )
-        if resume_spec is None:
-            # The workflow speculatively seeded ``drift_collector`` (built
-            # above, from ``params["drift"]``) with the checkpoint's own
-            # spec/code/gate history before knowing whether this
-            # reconstruction would succeed -- it only checks the checkpoint's
-            # shape, not deeper validity (e.g. a malformed critique entry
-            # inside ``design_context["critiques"]``). Reconstruction just
-            # failed, so this attempt is falling back to a from-scratch
-            # Phase 1 re-run: it cannot claim provenance from a checkpoint it
-            # never actually resumed from. Discard the seed so the eventual
-            # record's drift reflects only this attempt's own (scratch) work.
-            drift_collector = _DriftCollector()
+    # ``True`` only when the workflow supplied a cross-attempt resume seed
+    # (``params["resume_spec"]``/``params["drift"]``) that this attempt never
+    # actually adopted -- reconstruction just above failed, or an ADR-012
+    # same-attempt checkpoint (a strictly more recent, unrelated seed) won
+    # instead (in which case ``params.get("resume_spec")`` was never even
+    # consulted, so this is trivially ``False``). Consulted only at a
+    # "record" outcome, to strip the discarded seed's provenance out of the
+    # persisted record's own history (see ``_seed_spec_len``'s comment above
+    # for why a "reentry" outcome's ``drift`` wire dict must NOT be touched
+    # by this).
+    cross_attempt_seed_unused = params.get("resume_spec") is not None and resume_spec is None
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
         """``checkpoint_hook`` passed into ``_run_design_attempt`` (``PhaseCallback`` shape).
@@ -1649,9 +1716,16 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         return _skipped_outcome()
 
     _delete_checkpoint()
+    record_dump = _strip_unused_resume_seed_from_record(
+        record.model_dump(mode="json"),
+        unused=cross_attempt_seed_unused,
+        seed_spec_len=_seed_spec_len,
+        seed_code_len=_seed_code_len,
+        seed_gate_len=_seed_gate_len,
+    )
     return {
         "kind": "record",
-        "record": record.model_dump(mode="json"),
+        "record": record_dump,
         "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
         "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
         "budget_calls": budget.calls_made,

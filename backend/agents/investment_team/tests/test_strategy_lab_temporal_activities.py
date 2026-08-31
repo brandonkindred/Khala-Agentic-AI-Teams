@@ -1886,23 +1886,55 @@ def test_run_design_attempt_activity_cross_attempt_resume_fails_open_on_malforme
     assert captured["resume_design_context"] is None
 
 
-def test_run_design_attempt_activity_clears_seeded_drift_when_cross_attempt_resume_fails_open(
+def test_run_design_attempt_activity_strips_unused_cross_attempt_seed_from_record(
     monkeypatch,
 ):
-    """The workflow speculatively seeds ``params["drift"]`` with the
+    """The workflow speculatively seeds ``params["drift"]`` with a
     checkpoint's own spec/code/gate history before knowing whether this
     activity's cross-attempt reconstruction will succeed -- a shape check
     alone can't catch a deeper problem, like an invalid critique entry, that
     only surfaces during ``SpecCritique`` reconstruction here. When
     ``_cross_attempt_resume_from_params`` fails open for that reason, this
-    attempt falls back to a from-scratch Phase 1 re-run and must not carry
-    the discarded checkpoint's history forward as if it were this attempt's
-    own provenance."""
+    attempt runs Phase 1 from scratch, and the persisted record must not
+    carry the discarded checkpoint's history as if it were this attempt's
+    own provenance -- ``record["spec_history"]`` (etc.) is stripped of the
+    seed prefix before being returned.
+
+    The returned ``"drift"`` wire dict is a *different* consumer
+    (``StrategyLabCycleWorkflow.run``'s reentry-continuation bookkeeping,
+    which always strips exactly the seed length it itself sent when folding
+    a reentry's drift into its own parent commit log) and must NOT be
+    stripped here -- it needs the seed prefix intact regardless of whether
+    this attempt actually resumed from it."""
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    seeded_spec_entry = {
+        "phase": "design",
+        "agent": "DesignAgent",
+        "timestamp": "2023-01-01T00:00:00Z",
+        "before_hash": "a" * 64,
+        "after_hash": "b" * 64,
+        "diff": "- old\n+ new",
+        "reason": "checkpointed revision",
+    }
+    new_spec_entry = {
+        "phase": "design",
+        "agent": "DesignAgent",
+        "timestamp": "2023-01-02T00:00:00Z",
+        "before_hash": "c" * 64,
+        "after_hash": "d" * 64,
+        "diff": "- a\n+ b",
+        "reason": "this attempt's own revision",
+    }
 
     class _FakeRecord:
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
-            return {"lab_record_id": "rec-1"}
+            return {
+                "lab_record_id": "rec-1",
+                "spec_history": [seeded_spec_entry, new_spec_entry],
+                "code_history": [],
+                "gate_timeline": [],
+            }
 
     captured: Dict[str, Any] = {}
 
@@ -1912,21 +1944,10 @@ def test_run_design_attempt_activity_clears_seeded_drift_when_cross_attempt_resu
 
     monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
 
-    seeded_spec_history = [
-        {
-            "phase": "design",
-            "agent": "DesignAgent",
-            "timestamp": "2023-01-01T00:00:00Z",
-            "before_hash": "a" * 64,
-            "after_hash": "b" * 64,
-            "diff": "- old\n+ new",
-            "reason": "checkpointed revision",
-        }
-    ]
     out = act.run_design_attempt_activity(
         _run_design_attempt_params(
             drift={
-                "spec_history": seeded_spec_history,
+                "spec_history": [seeded_spec_entry],
                 "code_history": [],
                 "gate_timeline": [],
             },
@@ -1948,9 +1969,15 @@ def test_run_design_attempt_activity_clears_seeded_drift_when_cross_attempt_resu
     assert captured["resume_spec"] is None
     assert captured["resume_rationale"] is None
     assert captured["resume_design_context"] is None
-    # The seeded checkpoint history must not leak into a scratch attempt's
-    # drift collector -- it was never actually resumed from.
-    assert captured["drift_collector"].spec_history == []
+    # Only this attempt's own new revision survives in the persisted record.
+    assert out["record"]["spec_history"] == [new_spec_entry]
+    # The reentry-bookkeeping wire dict keeps the seed prefix intact -- it
+    # reflects ``drift_collector`` itself, which the fake ``_run_design_attempt``
+    # never mutates, so it still holds exactly the seed this test supplied
+    # (round-tripped through ``SpecRevision``, which adds its own
+    # ``gate_failures: []`` default not present in the hand-built dict above).
+    assert len(out["drift"]["spec_history"]) == 1
+    assert out["drift"]["spec_history"][0]["reason"] == seeded_spec_entry["reason"]
 
 
 def test_run_design_attempt_activity_malformed_checkpoint_gate_results_falls_back_to_scratch(
