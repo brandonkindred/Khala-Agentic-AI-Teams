@@ -1305,6 +1305,35 @@ this contract:
   reuses the checkpointed `pra_job_id`; retrying this activity can never trigger a second PRA
   submission, because the only code path that submits lives in the other, `NO_RETRY` activity.
 
+  **Contract requirement — this activity must also check the job record's own `status` is still
+  active before doing any work, mirroring the submit activity's fix above, not merely inherit a
+  "readable row" precondition.** A cancellation or interruption can land in the window between the
+  submit activity's own active-status check and this activity actually starting — the submit
+  activity's `skipped_terminal` outcome only covers the state at *its* check, not at this activity's
+  later, separate dispatch. Without an equivalent check here, this activity would still enter
+  `_guarded`, mutate the job's progress metadata via `_guarded`'s unconditional initial write, and
+  poll `wait_pra` for up to its external timeout before any later generation-CAS logic ever notices
+  the terminal state. **Contract requirement:** perform the same pre-`guarded` active-status check
+  (`status IN ('pending', 'running')`) this activity's submit-activity sibling uses, before entering
+  `_guarded`/`guarded` at all, and return the same `{"outcome": "skipped_terminal"}` shape when it
+  fails — the workflow branches on it identically (return immediately, schedule nothing further).
+
+  **This activity's own final-attempt failure writer needs the same conditional-writer fix as the
+  submit activity, not just this new pre-entry check.** The pre-entry check above only covers the
+  state at activity start; this activity's work (checkpoint load, `wait_pra` polling, reconciliation)
+  can still run for an extended period after that check passes, during which the job can become
+  cancelled or interrupted. Because this activity is scheduled with `retry_policy=SAFE_RETRY`
+  (§4.3.2), it calls Planning's `_guarded` today, which hardcodes the same unconditional
+  `mark_job_failed` the workflow-level backstop and the submit activity were both corrected away
+  from — a cancellation or interruption landing mid-work still gets overwritten with `failed` on this
+  activity's final `SAFE_RETRY` attempt. **Contract requirement:** this activity must not use
+  Planning's `_guarded` convenience wrapper as-is either; like the submit activity, it must call the
+  underlying `shared.temporal.activity_helpers.guarded` directly with both a conditional
+  active-status-guarded failure writer and a conditional active-status-guarded progress writer bound
+  in, exactly as required for `document_production_pra_submit_activity` above — not only the new
+  activity this contract introduces, but this pre-existing one too, since this contract is what first
+  makes it retryable/pausable and therefore first exposes it to this class of race.
+
 - **Patched branch, `use_product_analysis=False`:** no checkpoint exists or is expected (PRA never
   engages); the activity runs its ordinary non-PRA document-production work. This contract does not
   govern this case — it is unaffected, not merely relaxed.
@@ -1530,6 +1559,44 @@ this contract:
   `UPDATE` — guarded on `status IN ('pending', 'running') AND waiting_for_answers` falsy `AND
   pause_generation == observed_generation` — to *claim* completion, not merely to record it.
 
+  **Claiming completion at the point `wait_pra` reports `"completed"` is too early — that point
+  precedes handoff assembly and persistence entirely.** `wait_pra` returning `"completed"` happens
+  deep inside `run_document_production` (`temporal/activities.py:326-334`); the activity then still
+  builds `merged = _merge_context(...)`, assembles/patches `handoff`, and persists it via
+  `update_job(job_id, handoff_package=handoff, ...)` (`temporal/activities.py:335-365`) — all of
+  which happens *after* `wait_pra` already returned. If the completion claim above is made as soon as
+  `wait_pra` reports completion and the activity then crashes before that later `update_job` call, a
+  retried/losing attempt that reloads and finds the completion marker already set re-emits success
+  per the rule below — but the handoff was never persisted, and the workflow proceeds to finalize a
+  job with no `handoff_package`. **Contract requirement:** the completion claim's conditional write
+  must be the *last* durable step of this activity's work — performed only after the handoff (and the
+  top-level `open_questions`/`resolved_questions` fields) have already been successfully persisted,
+  not at the moment `wait_pra` itself returns `"completed"`. Equivalently: fold the completion claim
+  into the same `update_job` call that persists the handoff, rather than treating them as two
+  separable writes — so a losing attempt that finds the completion marker can trust the handoff it
+  guards is already durably there too.
+
+  **The completion claim leaves the job's SQL `status` column untouched — still `pending`/`running`
+  — and `finalize_planning_activity` still terminalizes it unconditionally afterward.**
+  `finalize_planning_activity` calls `mark_job_completed(job_id, summary=summary)` with no status
+  guard (`temporal/activities.py:472-473`; the underlying `mark_job_completed`,
+  `shared/job_store.py:75-79`, unconditionally writes `status=JOB_STATUS_COMPLETED`). If a
+  cancellation, or the job-service shutdown/recovery sweep (`mark_all_active_jobs_interrupted`),
+  marks the job `cancelled`/`interrupted` after this activity's completion claim wins but before the
+  workflow reaches `finalize_planning_activity`, that later, unconditional write overwrites the
+  terminal `cancelled`/`interrupted` status with `completed` — the same class of terminal-state-
+  clobbering race this contract has already closed for the pause-creation write, the workflow-level
+  backstop, and the submit/document-production activities' own failure writers, left open here
+  because `finalize_planning_activity` itself predates this contract and was never in scope for those
+  earlier fixes. **Contract requirement:** #7445-B must make `finalize_planning_activity`'s
+  terminalizing write conditional too — guarded on the same active-status allowlist (`status IN
+  ('pending', 'running')`) as every other terminalizing write in this contract — so a job that reached
+  `cancelled`/`interrupted` between this activity's completion claim and finalize is left exactly as
+  it was, rather than resurrected as `completed`. This is a pre-existing activity whose exposure this
+  contract widens (by introducing the first workflow path where a pause/resume round can race against
+  external cancellation before finalize runs), not a new activity — but the fix belongs in this
+  contract's scope because this contract is what first makes the race reachable.
+
   **A failed claim does not by itself prove "a pause won" — it could just as easily mean a different
   overlapping attempt's own *completion* claim won first.** Two attempts can both reach `wait_pra`
   reporting `"completed"` (the same heartbeat-loss overlap as every other race in this section); one
@@ -1574,6 +1641,21 @@ this contract:
   job-record update; (3) `wait_pra` resumes polling against the checkpointed external PRA job id —
   `run_pra` is not called again; the activity proceeds to its normal terminal return shape (or
   pauses again, for the next round, per the paused-return path above).
+
+  **Contract requirement — step (1)'s submission must not be gated by a truthiness check on the
+  answer batch.** A round consisting entirely of optional questions produces a valid, empty answer
+  batch once every required question is satisfied elsewhere (or the round has none) — this section's
+  own resume-path precondition above explicitly permits this (`required_ids - answered_ids`, optional
+  questions may be omitted). `wait_for_product_analysis_completion`'s existing `_on_poll` callback
+  only calls `submit_product_analysis_answers` `if answers` (`adapters/product_analysis.py:92-97`);
+  an implementation that reuses that callback path for step (1) would silently skip the POST for an
+  all-optional round, leaving PRA waiting indefinitely for a submission that will never arrive even
+  though the client's request was already validated and accepted. **Contract requirement:** step
+  (1)'s submission call must POST the batch — including an empty one — for every resumed round,
+  bypassing or not reusing that truthiness-gated callback path; PRA's own `apply_answers` already
+  handles an empty submitted batch correctly (falling back to defaults for every question, §4.1), so
+  an empty POST is a valid, expected call here, not a no-op to skip.
+
   **Contract requirement — step (2)'s clear must itself be conditioned on the resumed token, not
   unconditional.** Overlapping attempts resuming the *same* `resume_token` A (the same heartbeat-loss
   scenario as the paused-return path above) can otherwise race past each other: one attempt clears
@@ -1759,6 +1841,32 @@ the latter is treated as confirmation (proceed to step (2)); a `None`/failed sta
 any other structurally invalid response, must cause the activity to raise (so `SAFE_RETRY`
 re-attempts the whole reconciliation later) rather than proceed as if confirmed.
 
+**Correction — even a *successful* status read reporting the question gone is not proof PRA applied
+it either; PRA's own submit route clears the pause synchronously, before its background loop ever
+runs `apply_answers`.** The distinction drawn above (failed status call vs. successful call reporting
+structural absence) assumes a successful, empty response means PRA's own application step has already
+run. It has not, necessarily: `submit_product_analysis_answers`'s route handler calls
+`store_submit_answers` (`shared/job_store.py`'s `submit_answers` wrapper,
+`job_service_client.py:811-823`), which atomically clears `pending_questions`/`waiting_for_answers`
+and appends to `submitted_answers` **synchronously, inside the POST request itself** — before PRA's
+own background `communicate_with_user` wait loop (`user_communication.py:88-106`, polling every
+`OPEN_QUESTIONS_POLL_INTERVAL`) has necessarily woken, read `get_submitted_answers`, and run
+`apply_answers` to actually resolve the questions. A status GET issued immediately after a successful
+POST — exactly the shape a reconciliation retry performs — can therefore observe `pending_questions`
+already empty and `waiting_for_answers` already false purely because the *route* cleared them, with
+`apply_answers` not yet having run at all; if PRA's worker then crashes before its background loop
+reaches `apply_answers`, the questions are durably marked answered-and-gone at PRA's job-record level
+even though no answer was ever actually applied to them. **Contract requirement:** this reconciliation
+cannot rely on PRA's `pending_questions` becoming empty as an applied-answer receipt at all — that
+signal fires at POST-acceptance time, not apply time, and PRA exposes no distinct applied/round
+receipt today. #7445-B must either add such a receipt to PRA (out of `planning_team`'s boundary to do
+unilaterally) or accept this as a further open risk (§5, risk 6, below): a reconciliation retry that
+finds PRA's questions gone cannot distinguish "already applied" from "accepted but not yet applied,
+and possibly never will be" without a PRA-side signal this contract cannot manufacture. This narrows,
+rather than replaces, the failed-vs-succeeded distinction above — a failed status read is still never
+confirmation — but a succeeded one showing absence confirms only *acceptance*, not *application*, and
+this spec cannot close that gap from Planning's side alone.
+
 **Ordering requirement this adds to §4.3:** clearing the local pause envelope / marking a batch
 consumed must never happen *before* PRA has durably applied that batch. Because `submit_answers`
 (§4.3) already establishes that the job record's answer batch — not the workflow's in-memory
@@ -1901,6 +2009,16 @@ no persisted pause to resume from, silently hanging the job.
    status independently of the signal path) — any of which is a substantive addition beyond this
    contract's signal-reuse scope. #7445-B inherits this risk knowingly; this contract does not
    claim to close it, only to name it explicitly rather than let it stay an unstated assumption.
+6. *New to this spec, cross-team:* the answer-delivery reconciliation's "successful status read
+   reporting the question gone" branch (§4.3, "even a successful status read...") is not proof PRA
+   actually applied the answer — `store_submit_answers` clears `pending_questions`/
+   `waiting_for_answers` synchronously inside the submit route's POST handler, before PRA's own
+   background `communicate_with_user` loop necessarily reaches `apply_answers`. A reconciliation
+   retry can therefore observe "question gone" purely from POST-acceptance, with application still
+   pending or never completed if PRA's worker subsequently crashes. This is the same class of gap as
+   risks 2-4: full closure requires PRA to expose a distinct applied/round receipt separate from
+   pause-envelope clearing, which is outside `planning_team`'s boundary. #7445-B inherits this
+   residual risk knowingly.
 
 ---
 
