@@ -322,20 +322,22 @@ class _FakeSlowExecClient:
 
 
 class _FakeReattachHandle:
-    """A workflow handle whose ``result()`` "completes" after N reattach calls,
-    simulating a workflow that outlives several client-side wait windows before
-    reaching its own terminal state."""
+    """A workflow handle whose ``result()`` takes real wall-clock time to
+    resolve, simulating a workflow that outlives several client-side wait
+    windows before reaching its own terminal state. Tracks how many times
+    ``result()`` itself is invoked (as opposed to how many windows the
+    caller polls through) — the reattach loop must schedule this coroutine
+    ONCE for the whole wait and re-poll that same future across windows,
+    never abandon a still-running one and schedule a fresh one per window."""
 
-    def __init__(self, captured: dict, *, result_after_calls: int, result: object) -> None:
+    def __init__(self, captured: dict, *, delay_s: float, result: object) -> None:
         self._captured = captured
-        self._result_after_calls = result_after_calls
+        self._delay_s = delay_s
         self._result = result
 
     async def result(self):
-        calls = self._captured.setdefault("reattach_calls", 0) + 1
-        self._captured["reattach_calls"] = calls
-        if calls < self._result_after_calls:
-            await asyncio.sleep(10)  # still "running" — outlives this window
+        self._captured["handle_result_calls"] = self._captured.get("handle_result_calls", 0) + 1
+        await asyncio.sleep(self._delay_s)
         return self._result
 
 
@@ -351,6 +353,7 @@ class _FakeReattachClient(_FakeSlowExecClient):
 
     def get_workflow_handle(self, workflow_id):
         self._captured["reattach_workflow_id"] = workflow_id
+        self._captured["get_workflow_handle_calls"] = self._captured.get("get_workflow_handle_calls", 0) + 1
         return self._handle
 
 
@@ -372,7 +375,7 @@ def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loo
     its eventual result instead of raising."""
     captured: dict = {}
     sentinel = {"ok": True}
-    handle = _FakeReattachHandle(captured, result_after_calls=1, result=sentinel)
+    handle = _FakeReattachHandle(captured, delay_s=0.02, result=sentinel)
     client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
     client_mod.set_temporal_loop(running_loop)
 
@@ -380,7 +383,7 @@ def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loo
         object(),
         workflow_id="wid",
         task_queue="q",
-        execute_timeout_s=0.05,
+        execute_timeout_s=0.01,
         reattach_on_timeout=True,
     )
 
@@ -390,10 +393,14 @@ def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loo
 
 def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
     """A workflow that outlives several reattach windows is still waited on —
-    reattach_on_timeout never gives up early."""
+    reattach_on_timeout never gives up early — and does so by re-polling ONE
+    scheduled ``handle.result()`` coroutine across every window, not by
+    abandoning a still-running waiter and scheduling a fresh one each time
+    (which would leak concurrent waiters for a long-running workflow)."""
     captured: dict = {}
     sentinel = {"ok": True}
-    handle = _FakeReattachHandle(captured, result_after_calls=3, result=sentinel)
+    # Outlives several short client-side polling windows before resolving.
+    handle = _FakeReattachHandle(captured, delay_s=0.1, result=sentinel)
     client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
     client_mod.set_temporal_loop(running_loop)
 
@@ -401,12 +408,15 @@ def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
         object(),
         workflow_id="wid",
         task_queue="q",
-        execute_timeout_s=0.03,
+        execute_timeout_s=0.02,
         reattach_on_timeout=True,
     )
 
     assert out is sentinel
-    assert captured["reattach_calls"] == 3
+    # Exactly one handle lookup and one result() coroutine for the whole
+    # wait, no matter how many client-side polling windows it spanned.
+    assert captured["get_workflow_handle_calls"] == 1
+    assert captured["handle_result_calls"] == 1
 
 
 def test_bridges_are_exported():

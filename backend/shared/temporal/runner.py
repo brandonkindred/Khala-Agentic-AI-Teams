@@ -251,11 +251,21 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
           workflow keeps running, logging once per window — this function only
           returns (or raises the workflow's own failure) once Temporal reports
           a terminal state; it never itself times out.
+        - Schedules exactly ONE ``handle.result()`` coroutine on ``loop`` for
+          the whole wait, re-polling that SAME future's ``.result(timeout=...)``
+          on every window. Scheduling a fresh coroutine per window (via a new
+          ``run_coroutine_threadsafe`` call each iteration) would instead leave
+          the PREVIOUS window's still-running waiter abandoned but not
+          cancelled on ``loop`` — a long HITL pause spanning many windows would
+          then accumulate an unbounded number of concurrent result-waiters
+          (each independently long-polling Temporal for the same workflow),
+          not just the one this function is actually re-polling.
     """
+    handle = client.get_workflow_handle(workflow_id)
+    future = asyncio.run_coroutine_threadsafe(handle.result(), loop)
     while True:
-        handle = client.get_workflow_handle(workflow_id)
         try:
-            return asyncio.run_coroutine_threadsafe(handle.result(), loop).result(timeout=poll_timeout_s)
+            return future.result(timeout=poll_timeout_s)
         except futures.TimeoutError:
             logger.warning(
                 "execute_workflow_sync: still waiting on workflow id=%s after another "

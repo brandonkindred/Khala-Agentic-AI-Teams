@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -332,7 +333,7 @@ def post_address_comments(
         except GitHubAPIError as e:
             raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
 
-    if unresolved and not request.repo_path.strip():
+    if unresolved:
         # repo_path defaults to "" (documented as accepted "for parity with
         # /review-pr", which genuinely never touches a checkout) but a real
         # issue among these unresolved comments DOES need one to implement and
@@ -342,14 +343,22 @@ def post_address_comments(
         # but cannot implement any real fix it triages. Which comments turn
         # out to be real vs. false-positive is only known once triage runs
         # inside the job, so this rejects up front whenever ANY unresolved
-        # comment could need it, rather than guessing.
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "repo_path is required when the PR has unresolved review comments: "
-                "a real-issue fix needs a local checkout to implement and push to."
-            ),
-        )
+        # comment could need it, rather than guessing. A non-empty path that
+        # names a non-existent directory or an ordinary (non-git) folder is
+        # exactly as unusable to every real-issue child as an empty one —
+        # `(path / ".git").exists()` matches this codebase's existing git-
+        # checkout test (see `_is_deletable_ephemeral_checkout`), and also
+        # accepts a worktree-style `.git` FILE, not just a `.git` directory.
+        stripped = request.repo_path.strip()
+        if not stripped or not (Path(stripped) / ".git").exists():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "repo_path is required when the PR has unresolved review comments, "
+                    "and must be an existing git checkout: a real-issue fix needs one to "
+                    "implement and push to."
+                ),
+            )
 
     # Hold the admission lock across the WHOLE start sequence (create + record + launch)
     # so a persisted job always has a running worker: if record_review_start or the

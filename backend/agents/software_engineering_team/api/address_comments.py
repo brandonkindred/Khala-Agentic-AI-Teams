@@ -183,6 +183,13 @@ class IssueResolutionPlan(BaseModel):
         default_factory=list,
         description="The top candidate solutions (aim for 3), each scored on the four dimensions.",
     )
+    chosen_candidate_index: Optional[int] = Field(
+        default=None,
+        description=(
+            "0-based index into candidate_solutions (in the order returned above, before any "
+            "re-ranking) identifying which candidate chosen_plan actually implements."
+        ),
+    )
     chosen_plan: str = Field(
         description="The concrete implementation plan for the best-scoring solution."
     )
@@ -595,6 +602,15 @@ def _plan_resolution(
           sorted best-first by :attr:`SolutionCandidate.score`, or ``None`` when the
           LLM planning step fails (the caller then records the comment as failed
           rather than implementing a plan it does not have).
+        - ``chosen_plan`` is free text the model writes independently of
+          ``candidate_solutions`` — nothing in the schema forces it to actually
+          describe the candidate ``chosen_candidate_index`` names, let alone the
+          top-scoring one. When they disagree (or ``chosen_candidate_index`` is
+          missing/out of range while candidates exist), this logs a warning but
+          still returns the plan: ``chosen_plan`` — not the candidate list — is
+          what :func:`_dispatch_implementation` actually acts on, so a scoring/
+          description mismatch is a self-consistency signal worth surfacing, not
+          grounds to fail an otherwise usable plan.
     """
     prompt = (
         "## Real issue raised by a review comment\n"
@@ -606,8 +622,10 @@ def _plan_resolution(
         )
         + "Identify the resolution requirements for the thread's LAST message, the top THREE "
         "candidate solutions (each scored 1-10 on requirement fit, computational performance, "
-        "memory usage, and inverted code complexity), and a concrete implementation plan for "
-        "the best-scoring one. Respond as JSON."
+        "memory usage, and inverted code complexity), which one you are choosing "
+        "(chosen_candidate_index, 0-based into the candidate list you return), and a concrete "
+        "implementation plan for that SAME chosen candidate — the best-scoring one. Respond as "
+        "JSON."
     )
     try:
         plan = _main.generate_structured(
@@ -624,6 +642,21 @@ def _plan_resolution(
             scrub_token_from_text(str(e)),
         )
         return None
+    if plan.candidate_solutions:
+        top_index = max(
+            range(len(plan.candidate_solutions)),
+            key=lambda i: plan.candidate_solutions[i].score,
+        )
+        if plan.chosen_candidate_index != top_index:
+            logger.warning(
+                "address-comments: comment %s's plan names chosen_candidate_index=%s but "
+                "candidate %s scored highest — chosen_plan may not describe the top-scoring "
+                "candidate; proceeding with chosen_plan as-is since it, not the candidate "
+                "list, is what gets implemented",
+                comment.id,
+                plan.chosen_candidate_index,
+                top_index,
+            )
     # Rank candidates best-first so the chosen plan corresponds to the top score.
     plan.candidate_solutions.sort(key=lambda c: c.score, reverse=True)
     return plan
@@ -1763,9 +1796,19 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             _main._cleanup_issue_checkout(request.repo_path)
 
         summary = _build_summary(outcomes)
+        # `all_succeeded` can be False for reasons that never produce a failed
+        # CommentOutcome at all (a resolve-only retry failed, the final re-list
+        # found new feedback, thread state became unverifiable, or the PR
+        # closed mid-run) — the label/cleanup above are already correctly
+        # skipped for those, but the terminal status must say so too, or a
+        # caller polling job status sees "completed" with no indication that
+        # work is still owed and another run is needed.
+        terminal_status = (
+            JobStatus.COMPLETED.value if all_succeeded else JobStatus.COMPLETED_WITH_FAILURES.value
+        )
         _main.update_job(
             job_id,
-            status=JobStatus.COMPLETED.value,
+            status=terminal_status,
             phase="completed",
             status_text=summary["status_text"],
             github_pr_url=pr.html_url,
@@ -1773,7 +1816,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         )
         _main.update_review(
             job_id,
-            status=JobStatus.COMPLETED.value,
+            status=terminal_status,
             status_text=summary["status_text"],
             review_summary=summary,
             completed=True,

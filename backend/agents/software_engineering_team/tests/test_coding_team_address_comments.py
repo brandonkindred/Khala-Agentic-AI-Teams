@@ -455,6 +455,7 @@ def _stub_triage(monkeypatch, ac, *, raises_issue: bool, is_false_positive: bool
                     code_complexity=5,
                 ),
             ],
+            chosen_candidate_index=0,  # "A" — the higher-scoring candidate
             chosen_plan="do the thing",
         )
 
@@ -1220,6 +1221,50 @@ class TestHandleComment:
         # be dropped or an extra one injected along the way.
         assert [c.summary for c in plan.candidate_solutions] == ["A", "B"]
 
+    def test_plan_still_returned_when_chosen_index_disagrees_with_top_score(
+        self, address_env, monkeypatch
+    ) -> None:
+        """chosen_plan is free text the model writes independently of
+        candidate_solutions — nothing enforces it actually describes
+        chosen_candidate_index, let alone the top-scoring candidate. A
+        mismatch is a self-consistency signal worth logging, not grounds to
+        drop an otherwise usable plan: chosen_plan, not the candidate list,
+        is what _dispatch_implementation actually acts on."""
+        ac = address_env["ac"]
+        from software_engineering_team.api import coding_team_main as _main
+
+        def _gen(prompt, *, schema, **kw):
+            if schema is ac.CommentTriage:
+                return ac.CommentTriage(raises_issue=True, is_false_positive=False, issue_summary="s")
+            return ac.IssueResolutionPlan(
+                requirements=["r1"],
+                candidate_solutions=[
+                    ac.SolutionCandidate(
+                        summary="A",
+                        requirement_fit=9,
+                        computational_performance=8,
+                        memory_usage=7,
+                        code_complexity=6,
+                    ),
+                    ac.SolutionCandidate(
+                        summary="B",
+                        requirement_fit=5,
+                        computational_performance=5,
+                        memory_usage=5,
+                        code_complexity=5,
+                    ),
+                ],
+                chosen_candidate_index=1,  # names "B" even though "A" scores highest
+                chosen_plan="do B's thing",
+            )
+
+        monkeypatch.setattr(_main, "generate_structured", _gen)
+
+        plan = ac._plan_resolution(_comment(2), "code", [_comment(2)])
+
+        assert plan is not None
+        assert plan.chosen_plan == "do B's thing"  # returned as-is, not rejected
+
 
 # ---------------------------------------------------------------------------
 # _run_address_comments (full background hook)
@@ -1302,7 +1347,9 @@ class TestRunAddressComments:
 
         ac._run_address_comments("job1", req, "tok")
 
-        final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
+        # Terminal status must say "completed_with_failures", not "completed"
+        # — a caller polling job status needs to see that another run is needed.
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed_with_failures"]
         assert final
         # Only comment 2 was ever handled; comment 5 was never attempted.
         assert final[-1]["review_summary"]["counts"].get("not_an_issue") == 1
@@ -1345,7 +1392,8 @@ class TestRunAddressComments:
 
         ac._run_address_comments("job1", req, "tok")
 
-        final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
+        # Terminal status must say "completed_with_failures", not "completed".
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed_with_failures"]
         assert final
         # The comment itself was handled normally...
         assert final[-1]["review_summary"]["counts"].get("not_an_issue") == 1
@@ -2267,8 +2315,11 @@ class TestRunAddressComments:
         ac._run_address_comments("job1", req, "tok")
 
         assert fake.labels_set == []  # not moved to waiting-for-review
-        final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
+        # Terminal status must say "completed_with_failures", not "completed"
+        # — a caller polling job status needs to see that work is still owed.
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed_with_failures"]
         assert final and final[-1]["review_summary"]["counts"]["failed"] == 1
+        assert not any(u.get("status") == "completed" for u in address_env["job_updates"])
 
     def test_fails_closed_when_thread_state_unavailable(self, address_env, monkeypatch) -> None:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
@@ -2338,6 +2389,12 @@ class TestAddressCommentsRoute:
 
         from fastapi.testclient import TestClient
 
+        # The route now validates repo_path is an actual git checkout (a
+        # ".git" entry present) before admitting a job — mark tmp_path as one
+        # so every route test below that doesn't specifically exercise that
+        # validation keeps simulating a real, usable checkout.
+        (tmp_path / ".git").mkdir()
+
         return {
             "client": TestClient(_main.app),
             "fake": fake,
@@ -2392,6 +2449,40 @@ class TestAddressCommentsRoute:
 
         assert resp.status_code == 200
         assert route_env["started"]
+
+    def test_400_when_repo_path_is_not_a_git_checkout(self, route_env, tmp_path) -> None:
+        """A non-empty repo_path that names a real directory but isn't a git
+        checkout (no `.git` entry) is exactly as unusable to a real-issue
+        child as an empty one — must be rejected the same way, not admitted
+        only to fail later during branch preparation."""
+        not_a_checkout = tmp_path / "plain-folder"
+        not_a_checkout.mkdir()
+
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": str(not_a_checkout), "pr_number": 7},
+        )
+
+        assert resp.status_code == 400
+        assert "git checkout" in resp.json()["detail"]
+        assert route_env["started"] == []
+
+    def test_400_when_repo_path_does_not_exist(self, route_env, tmp_path) -> None:
+        """A non-empty repo_path naming a directory that doesn't exist at all
+        must be rejected the same way as a non-git one."""
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={
+                "owner": "o",
+                "repo": "r",
+                "repo_path": str(tmp_path / "does-not-exist"),
+                "pr_number": 7,
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "git checkout" in resp.json()["detail"]
+        assert route_env["started"] == []
 
     def test_409_when_sibling_job_running_on_same_checkout_different_pr(
         self, route_env
