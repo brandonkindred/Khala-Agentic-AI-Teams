@@ -416,6 +416,21 @@ def test_trailing_stop_leg_valid_at_subnormal_ref_price() -> None:
     assert att.trail_offset_kind == "bps"
 
 
+def test_rejects_trailing_stop_whose_bps_round_trip_vanishes_at_ref_price() -> None:
+    """A vanishingly small (but Pydantic-valid, in (0, 1)) pct can survive
+    stop_price's own validity check yet still produce a trail_offset whose
+    round-trip application (price * (trail_offset / BPS_DIVISOR)) rounds
+    back to exactly 0 relative to a typical price's ULP: at ref_price=0.1
+    and pct=5.6e-17, stop_price=0.09999999999999999 (distinct from 0.1, so
+    the bare stop_price check alone would pass this), but the bps offset
+    the materializer would apply at that same price rounds 0.1 back to
+    exactly 0.1 — the trailing child would start at (not off) the entry."""
+    with pytest.raises(ValueError, match="materialization round-trip vanishes"):
+        resolve_exit_leg_attachments(
+            [_leg(OrderType.TRAILING_STOP, pct=5.6e-17)], OrderSide.LONG, 0.1
+        )
+
+
 # ---------------------------------------------------------------------------
 # ExitLegSpec: kind / secondary-offset coupling validation
 # ---------------------------------------------------------------------------

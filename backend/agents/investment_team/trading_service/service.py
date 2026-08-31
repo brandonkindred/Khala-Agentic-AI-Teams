@@ -1532,20 +1532,24 @@ def resolve_exit_leg_attachments(
     strictly positive, and distinct from ``stop_price`` — checking
     ``limit_offset`` alone doesn't rule this out, since it's an independent
     secondary quantity; a ``TRAILING_STOP`` leg's ``trail_offset`` is a
-    ``"bps"`` value in ``(0, 10_000)``, trivially always valid since
-    ``ExitLegSpec.pct`` is Pydantic-bounded to ``(0, 1)``. Empty ``legs``
-    yields ``[]``.
+    ``"bps"`` value in ``(0, 10_000)`` whose round-trip application at
+    ``ref_price`` (``ref_price * (trail_offset / BPS_DIVISOR)``, the same
+    formula the materializer applies at the real entry fill price) is
+    finite, strictly positive, and yields an effective stop distinct from
+    ``ref_price`` — checked as a proxy for the real fill price, which isn't
+    known at resolve time. Empty ``legs`` yields ``[]``.
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
-            ``<= 0``, or if a resolved price (or a ``STOP_LIMIT`` leg's
-            ``limit_offset`` or derived protective limit price) is
-            non-finite, non-positive, or too small to survive its
-            downstream arithmetic — a defensive guard that would only trip
-            if a leg field bound were loosened without updating this math,
-            an extreme ``ref_price`` overflowed the resolved price to
-            ``inf``, or a vanishingly small ``pct``/``limit_offset_pct``
-            rounded away to nothing in float64 on the side-specific
-            direction materialization applies.
+            ``<= 0``, or if a resolved price, a ``STOP_LIMIT`` leg's
+            ``limit_offset`` or derived protective limit price, or a
+            ``TRAILING_STOP`` leg's round-trip-previewed effective stop is
+            non-finite, non-positive, or too small to survive its downstream
+            arithmetic — a defensive guard that would only trip if a leg
+            field bound were loosened without updating this math, an
+            extreme ``ref_price`` overflowed the resolved price to ``inf``,
+            or a vanishingly small ``pct``/``limit_offset_pct`` rounded away
+            to nothing in float64 on the side-specific direction
+            materialization applies.
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
     # contract stays enforced in optimized production runs. ``ref_price`` is a
@@ -1635,11 +1639,40 @@ def resolve_exit_leg_attachments(
         # absolute distance anchored at ``ref_price`` would misrepresent the
         # requested percentage distance if the entry actually fills away from
         # ``ref_price`` (e.g. a gap) — see :class:`ExitLegSpec` for the full
-        # rationale. Since ``leg.pct`` is Pydantic-bounded to ``(0, 1)``,
-        # ``pct * BPS_DIVISOR`` is always finite in ``(0, BPS_DIVISOR)`` — no
-        # defensive check needed here.
+        # rationale.
         is_trailing = leg.kind == OrderType.TRAILING_STOP
         trail_offset = leg.pct * BPS_DIVISOR if is_trailing else None
+        if trail_offset is not None:
+            # ``trail_offset`` itself is always finite in ``(0, BPS_DIVISOR)``
+            # since ``leg.pct`` is Pydantic-bounded to ``(0, 1)`` — but that
+            # doesn't guarantee the materializer's own round-trip application
+            # (``price * (trail_offset / BPS_DIVISOR)``, then combined with
+            # that same price) survives float64: a vanishingly small ``pct``
+            # can produce an offset that, scaled back down by a typical
+            # price, rounds to exactly ``0.0`` relative to that price's ULP —
+            # e.g. ``pct=5.6e-17`` at a ``0.1`` price round-trips to an
+            # offset of ``5.6e-18``, and ``0.1 - 5.6e-18 == 0.1`` bit-for-bit,
+            # so the trailing child would start at (not off) the entry fill
+            # despite the requested positive distance. The actual entry fill
+            # price isn't known here (that's the reason this is "bps" and
+            # not "abs" in the first place), so this previews the same
+            # round-trip at ``ref_price`` as the best available proxy —
+            # catching the failure mode even though a large enough gap
+            # between ``ref_price`` and the real fill could still reintroduce
+            # it, since materialization has no better input to validate
+            # against ahead of the actual fill.
+            preview_offset = ref_price * (trail_offset / BPS_DIVISOR)
+            preview_stop = ref_price - preview_offset if is_long else ref_price + preview_offset
+            if (
+                not math.isfinite(preview_offset)
+                or preview_offset <= 0
+                or preview_stop == ref_price
+            ):
+                raise ValueError(
+                    f"exit leg #{i} ({leg.kind!r}) resolved trail_offset={trail_offset!r} whose "
+                    f"materialization round-trip vanishes at ref_price={ref_price!r} "
+                    f"(preview_offset={preview_offset!r}, pct={leg.pct!r})"
+                )
         attachments.append(
             StopAttachment(
                 stop_price=stop_price,
