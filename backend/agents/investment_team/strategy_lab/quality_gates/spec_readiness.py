@@ -999,36 +999,73 @@ class SpecReadinessGate(GateResultsMixin):
         assert capital > 0, "initial_capital must be strictly positive"
         enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
+        # ``StrategySpec.max_concurrent_positions`` is a declared upper bound
+        # on intent, but no runtime code reads it (``run_backtest`` never
+        # passes the spec object into ``TradingService``) — so it cannot be
+        # used to bound worst-case exposure without risking a false pass on a
+        # spec that omits it (default 1) yet runs on a multi-symbol universe.
+        # The runtime's actual worst-case concurrency is structural: the
+        # engine dispatcher never pyramids a symbol that already has an open
+        # position (``FillSimulator``/entry dispatcher), so at most one
+        # position per symbol can ever be open, and ``RiskFilter.can_enter``
+        # additionally caps total open positions at
+        # ``risk_limits.max_open_positions`` (default 10). Worst case is
+        # therefore ``min(len(symbols), max_open_positions)``.
+        worst_case_concurrent = min(len(symbols), ctx.spec.risk_limits.max_open_positions)
+
+        # Likewise, the runtime has no margin facility: ``Portfolio.open``/
+        # ``extend`` deduct the full order notional from cash, and the fill
+        # simulator rejects any order whose notional exceeds available cash
+        # with ``insufficient_capital`` regardless of
+        # ``risk_limits.max_gross_leverage`` — leverage only gates whether
+        # ``RiskFilter.can_enter`` allows the order, it never funds beyond
+        # cash. So a configured leverage above 1.0 cannot expand what's
+        # fundable, but a leverage below 1.0 does tighten what the risk
+        # filter would actually allow through.
+        cash_bound_multiplier = min(1.0, float(ctx.spec.risk_limits.max_gross_leverage))
+
+        # The fill simulator deducts cash at the *slipped* fill price
+        # (``entry_price = ref_price * (1 + slippage_bps/10_000)`` for a long
+        # entry — see ``_slippage_multipliers``/``_fill_entry`` and
+        # ``Position.position_value``), not the reference-price notional this
+        # check otherwise sizes against. A worst-case sum computed from
+        # reference-price notionals alone can land exactly at
+        # ``fundable_capital`` and still have its last concurrent entry
+        # rejected with ``insufficient_capital`` once slippage is applied, so
+        # inflate the worst-case notional by the configured slippage before
+        # comparing.
+        slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
 
         # Notional is symbol-independent for both supported kinds, so resolve
-        # it once. fixed_notional with notional_usd > initial_capital can
-        # never produce a fillable order — the fill engine rejects with
-        # ``insufficient_capital`` the moment ``portfolio.capital < notional``
-        # (see ``fill_simulator.py``). fixed_fraction is bounded by
-        # ``fraction <= 1.0`` in the DSL so it cannot trip this branch.
+        # it once.
         if kind == "fixed_fraction":
-            notional = capital * float(ctx.spec.sizing.fraction)
+            fraction = float(ctx.spec.sizing.fraction)
+            notional = capital * fraction
         elif kind == "fixed_notional":
             notional = float(ctx.spec.sizing.notional_usd)
-            if notional > capital:
-                return (
-                    self._critical(
-                        f"Sizing realisability: fixed_notional ${notional:.0f} "
-                        f"exceeds initial_capital ${capital:.0f}; the first "
-                        "order would be rejected with insufficient_capital."
-                    ),
-                )
         else:
             # Unknown sizing kind — covered by spec_dsl validation, but be
             # defensive: nothing further to evaluate.
             return ()
 
-        # Per-symbol price defense. The qty>=1 lot-size check below only
-        # matters for whole-lot classes (stocks/futures/commodities); forex
-        # and crypto accept fractional quantities, so for them threshold==0
-        # and the qty check never fires. But the price *sample* still carries
-        # two signals that apply to every asset class, so the loop runs for
-        # all of them rather than short-circuiting fractional classes:
+        # Per-symbol price defense, plus (for whole-lot classes) each
+        # symbol's runtime-realizable notional at the ``notional`` target.
+        # The fill engine floors whole-lot orders to a whole number of
+        # shares (``_floor_or_skip_whole_share``), so the cash a symbol
+        # actually consumes can be materially less than the raw target once
+        # ``notional`` no longer divides evenly by that symbol's price —
+        # sizing the worst-case-overcommit check below against the raw,
+        # unfloored target would false-critical a spec the runtime can
+        # actually fund. Fractional classes (crypto/forex) submit the
+        # fractional qty as-is, so realizable == notional for them, with no
+        # flooring adjustment.
+        #
+        # The qty>=1 lot-size check below only matters for whole-lot classes
+        # (stocks/futures/commodities); forex and crypto accept fractional
+        # quantities, so for them threshold==0 and the qty check never
+        # fires. But the price *sample* still carries two signals that apply
+        # to every asset class, so the loop runs for all of them rather than
+        # short-circuiting fractional classes:
         #   * a finite price <= 0 means a broken provider (a 0.0 parsed from a
         #     rate-limit body, a negative sentinel), not a market gap — fail
         #     closed regardless of asset class;
@@ -1036,9 +1073,12 @@ class SpecReadinessGate(GateResultsMixin):
         #     (qty<1) → critical, but for fractional classes it is treated as a
         #     possibly-transient gap: tolerated when any symbol still has a
         #     finite sample, and downgraded to a warning (never a hard fail)
-        #     when it affects every symbol.
+        #     when it affects every symbol. A symbol with no price sample
+        #     can't be floored, so its realizable notional is conservatively
+        #     left un-floored (the raw target) rather than assumed fundable.
         saw_finite_price = False
         nan_symbols: list[str] = []
+        realizable_notionals: list[float] = []
         for sym in symbols:
             try:
                 price = float(self._market_sample_provider(sym, ctx.spec.asset_class))
@@ -1064,6 +1104,9 @@ class SpecReadinessGate(GateResultsMixin):
                             f"with capital ${capital:.0f}."
                         ),
                     )
+                realizable_notionals.append(
+                    math.floor(qty) * price if enforce_whole_lot else notional
+                )
             elif enforce_whole_lot:
                 # Whole-lot classes genuinely need a price to size a fillable
                 # order; a missing sample is unfillable → fail closed.
@@ -1076,6 +1119,89 @@ class SpecReadinessGate(GateResultsMixin):
                 # Fractional class with a non-finite sample — defer the verdict
                 # until we know whether any symbol resolved to a finite price.
                 nan_symbols.append(sym)
+                realizable_notionals.append(notional)
+
+        # Worst case across concurrency: the ``worst_case_concurrent``
+        # symbols whose runtime-realizable notional (after whole-lot
+        # flooring, where applicable) is largest, filling simultaneously.
+        # Slippage only matters here — a single order's allow/reject
+        # decision in ``_fill_entry`` compares the unslipped reference
+        # notional against capital, so it's unaffected — because multiple
+        # concurrent entries each deduct their *slipped* (inflated) cost
+        # from the same shared capital pool, so the aggregate actually
+        # drawn down can exceed a sum computed from reference prices alone.
+        realizable_notionals.sort(reverse=True)
+        worst_case_notional = sum(realizable_notionals[:worst_case_concurrent])
+        effective_worst_case_notional = (
+            worst_case_notional * slippage_multiplier
+            if worst_case_concurrent > 1
+            else worst_case_notional
+        )
+        fundable_capital = capital * cash_bound_multiplier
+        if effective_worst_case_notional > fundable_capital:
+            if kind == "fixed_fraction":
+                worst_case_fraction = effective_worst_case_notional / capital
+                slippage_note = (
+                    f", inflated {(slippage_multiplier - 1) * 10_000:.1f}bps for "
+                    "configured slippage"
+                    if worst_case_concurrent > 1
+                    else ""
+                )
+                return (
+                    self._critical(
+                        f"Sizing realisability: fixed_fraction {fraction:.4f} × "
+                        f"worst-case concurrency {worst_case_concurrent} (min of "
+                        f"{len(symbols)} target symbol(s) and risk_limits."
+                        f"max_open_positions "
+                        f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
+                        f"whole-lot share flooring where applicable{slippage_note}) = "
+                        f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
+                        f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
+                        f"${capital:.0f}) if all concurrent positions filled "
+                        "simultaneously."
+                    ),
+                )
+            # fixed_notional
+            if worst_case_concurrent > 1:
+                return (
+                    self._critical(
+                        f"Sizing realisability: fixed_notional ${notional:.0f} × "
+                        f"worst-case concurrency {worst_case_concurrent} (min of "
+                        f"{len(symbols)} target symbol(s) and risk_limits."
+                        f"max_open_positions "
+                        f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
+                        f"whole-lot share flooring and "
+                        f"{(slippage_multiplier - 1) * 10_000:.1f}bps configured "
+                        f"slippage) = ${effective_worst_case_notional:.0f}, which "
+                        f"exceeds the cash-bound fundable capital "
+                        f"${fundable_capital:.0f} if all concurrent positions filled "
+                        "simultaneously."
+                    ),
+                )
+            if notional > capital:
+                return (
+                    self._critical(
+                        f"Sizing realisability: fixed_notional ${notional:.0f} "
+                        f"exceeds initial_capital ${capital:.0f}; the first order "
+                        "would be rejected with insufficient_capital."
+                    ),
+                )
+            # notional <= capital but > fundable_capital: only reachable
+            # when max_gross_leverage < 1.0 tightens the cash-bound
+            # ceiling below initial_capital. The fill engine's cash
+            # check would pass here — the actual rejection comes from
+            # RiskFilter.can_enter's leverage-ratio gate, which runs
+            # before the cash check, so name that gate rather than
+            # ``insufficient_capital``.
+            return (
+                self._critical(
+                    f"Sizing realisability: fixed_notional ${notional:.0f} exceeds "
+                    f"the cash-bound fundable capital ${fundable_capital:.0f} "
+                    f"(risk_limits.max_gross_leverage {cash_bound_multiplier:.2f}x of "
+                    f"initial_capital ${capital:.0f}); the first order would be "
+                    "rejected by the gross-leverage risk gate."
+                ),
+            )
 
         # Only fractional asset classes reach here with unresolved NaN samples.
         # A NaN that affected *every* symbol (no finite sample anywhere) is a
