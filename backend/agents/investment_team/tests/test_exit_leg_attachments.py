@@ -35,6 +35,8 @@ from investment_team.trading_service.strategy.contract import (
 
 
 def _leg(kind: OrderType = OrderType.STOP, pct: float = 0.03, **kwargs) -> ExitLegSpec:
+    """Build an ExitLegSpec; defaults to a 3% STOP leg. Kind-coupled fields
+    (e.g. limit_offset_pct for STOP_LIMIT) are passed through via kwargs."""
     return ExitLegSpec(kind=kind, pct=pct, **kwargs)
 
 
@@ -376,7 +378,13 @@ def test_accepts_limit_offset_that_only_rounds_away_in_the_unused_direction() ->
     )
     assert isinstance(att, StopAttachment)
     assert att.stop_price == pytest.approx(1.0)
-    assert att.limit_offset == pytest.approx(2**-53)
+    # Exact equality, not pytest.approx: stop_price is exactly 1.0 and
+    # 1.0 * 2**-53 is exactly representable, so this is the precise value
+    # under test. pytest.approx's default tolerances (rel=1e-6, abs=1e-12)
+    # both dwarf 2**-53 (~1.11e-16), so an approx comparison here couldn't
+    # fail even for a zeroed limit_offset — exactly the regression this
+    # file's test_rejects_negligible_limit_offset guards against.
+    assert att.limit_offset == 2**-53
 
 
 def test_rejects_stop_limit_derived_price_that_underflows_to_zero() -> None:

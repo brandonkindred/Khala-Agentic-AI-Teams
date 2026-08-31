@@ -1495,15 +1495,110 @@ class _EngineExitDispatcher:
 ENGINE_ENTRY_REASON_PREFIX = "engine_entry:"
 
 
+def _validated_stop_limit_offset(
+    leg: ExitLegSpec, i: int, stop_price: float, is_long: bool
+) -> float:
+    """Compute and validate a STOP_LIMIT leg's limit_offset (an absolute
+    distance off ``stop_price``; ``limit_offset_pct`` is a fraction of the
+    stop level, bounded ``< 1.0`` by the leg validator so in exact
+    arithmetic the offset stays inside ``(0, stop_price)`` and the derived
+    protective limit stays positive and on the protective side — but that
+    guarantee doesn't survive float64 rounding, so the derived price is
+    validated directly rather than trusted from this bound alone.
+
+    Combining ``limit_offset`` with ``stop_price`` (via the single shared
+    sign-convention helper also used by ``rule_compiler`` and the fill
+    simulator's bracket materialization, so this can never drift from what
+    materialization actually submits) can round the result to exactly
+    ``stop_price``, underflow to non-positive, or overflow to ``inf`` —
+    none of which ``limit_offset`` alone rules out, since it can itself be
+    finite/positive/non-negligible while the *combination* still
+    misbehaves. So the derived price is validated directly, on top of
+    validating ``limit_offset`` itself.
+
+    Preconditions: ``leg.kind == OrderType.STOP_LIMIT`` (so
+    ``leg.limit_offset_pct`` is set); ``stop_price`` is the finite,
+    positive, correctly-signed value already resolved for this leg.
+    Postconditions: returns a finite, strictly positive ``limit_offset``
+    whose derived protective limit price is finite, strictly positive, and
+    distinct from ``stop_price``.
+    Raises:
+        ValueError: if ``limit_offset`` or the derived protective limit
+            price is non-finite, non-positive, or equal to ``stop_price``.
+    """
+    limit_offset = stop_price * leg.limit_offset_pct
+    derived_limit_price = protective_limit_price(stop_price, limit_offset, closing_long=is_long)
+    if (
+        not math.isfinite(limit_offset)
+        or limit_offset <= 0
+        or not math.isfinite(derived_limit_price)
+        or derived_limit_price <= 0
+        or derived_limit_price == stop_price
+    ):
+        raise ValueError(
+            f"exit leg #{i} ({leg.kind!r}) resolved non-finite/non-positive/negligible "
+            f"limit_offset={limit_offset!r} (derived limit price {derived_limit_price!r}) "
+            f"from stop_price={stop_price!r}, limit_offset_pct={leg.limit_offset_pct!r}"
+        )
+    return limit_offset
+
+
+def _validated_trail_offset(leg: ExitLegSpec, i: int, ref_price: float, is_long: bool) -> float:
+    """Compute and validate a TRAILING_STOP leg's trail_offset (a ``"bps"``
+    value; see :class:`ExitLegSpec` for why this is basis points rather
+    than an absolute distance).
+
+    ``trail_offset`` itself is always finite in ``(0, BPS_DIVISOR)`` since
+    ``leg.pct`` is Pydantic-bounded to ``(0, 1)`` — but that doesn't
+    guarantee the materializer's own round-trip application (``price *
+    (trail_offset / BPS_DIVISOR)``, then combined with that same price)
+    survives float64: a vanishingly small ``pct`` can produce an offset
+    that, scaled back down by a typical price, rounds to exactly ``0.0``
+    relative to that price's ULP — e.g. ``pct=5.6e-17`` at a ``0.1`` price
+    round-trips to an offset of ``5.6e-18``, and ``0.1 - 5.6e-18 == 0.1``
+    bit-for-bit, so the trailing child would start at (not off) the entry
+    fill despite the requested positive distance. The actual entry fill
+    price isn't known here (that's the reason this is "bps" and not "abs"
+    in the first place), so this previews the same round-trip at
+    ``ref_price`` as the best available proxy — catching the failure mode
+    even though a large enough gap between ``ref_price`` and the real fill
+    could still reintroduce it, since materialization has no better input
+    to validate against ahead of the actual fill.
+
+    Preconditions: ``leg.kind == OrderType.TRAILING_STOP``; ``ref_price``
+    is the finite, positive reference price already validated by the
+    caller.
+    Postconditions: returns a finite, strictly positive ``trail_offset``
+    whose round-trip application at ``ref_price`` yields a finite,
+    strictly positive, distinct-from-``ref_price`` preview stop.
+    Raises:
+        ValueError: if the round-trip-previewed offset or effective stop
+            is non-finite, non-positive, or equal to ``ref_price``.
+    """
+    trail_offset = leg.pct * BPS_DIVISOR
+    preview_offset = ref_price * (trail_offset / BPS_DIVISOR)
+    preview_stop = ref_price - preview_offset if is_long else ref_price + preview_offset
+    if not math.isfinite(preview_offset) or preview_offset <= 0 or preview_stop == ref_price:
+        raise ValueError(
+            f"exit leg #{i} ({leg.kind!r}) resolved trail_offset={trail_offset!r} whose "
+            f"materialization round-trip vanishes at ref_price={ref_price!r} "
+            f"(preview_offset={preview_offset!r}, pct={leg.pct!r})"
+        )
+    return trail_offset
+
+
 def resolve_exit_leg_attachments(
     legs: Sequence[ExitLegSpec], side: OrderSide, ref_price: float
 ) -> list[Union[StopAttachment, LimitAttachment]]:
     """Resolve an ordered list of protective/target exit-leg specs into entry-order attachments.
 
     Pure function (no engine/dispatcher state) so the price math is
-    unit-testable in isolation. Generalizes the bracket-only price math
-    previously inlined here (now factored into the :func:`resolve_bracket_attachments`
-    adapter below). Anchors every leg at ``ref_price`` independently (the
+    unit-testable in isolation. Generalizes the bracket-only price math that
+    was previously inlined in the bracket-only resolution path;
+    :func:`resolve_bracket_attachments` below is now a thin adapter that
+    translates an ``OcoBracketRule``'s two fixed legs into
+    :class:`ExitLegSpec` instances and delegates here. Anchors every leg at
+    ``ref_price`` independently (the
     signal-bar close, the same reference ``_compute_qty`` sizes against). For
     a long, protective legs (``STOP``/``STOP_LIMIT``/``TRAILING_STOP``) sit
     below and target legs (``LIMIT``) sit above the reference; for a short
@@ -1599,80 +1694,17 @@ def resolve_exit_leg_attachments(
                 f"exit leg #{i} ({leg.kind!r}) resolved non-finite/non-positive/not-off-reference "
                 f"stop_price={stop_price!r} from ref={ref_price!r}, pct={leg.pct!r}"
             )
-        # ``limit_offset_pct`` is a fraction of the stop level; the attachment
-        # carries an absolute distance. The leg validator bounds it ``< 1.0``,
-        # so in exact arithmetic the offset stays inside ``(0, stop_price)``
-        # and the derived protective limit stays positive and on the
-        # protective side — but that guarantee doesn't survive float64
-        # rounding (see below), so the derived price is still validated
-        # directly rather than trusted from this bound alone.
-        limit_offset = (
-            stop_price * leg.limit_offset_pct if leg.kind == OrderType.STOP_LIMIT else None
-        )
-        if limit_offset is not None:
-            # Combining ``limit_offset`` with ``stop_price`` (via the single
-            # shared sign-convention helper also used by ``rule_compiler`` and
-            # the fill simulator's bracket materialization, so this can never
-            # drift from what materialization actually submits) can round the
-            # result to exactly ``stop_price``, underflow to non-positive, or
-            # overflow to ``inf`` — none of which ``limit_offset`` alone rules
-            # out, since it can itself be finite/positive/non-negligible
-            # while the *combination* still misbehaves. So validate the
-            # derived price directly, on top of validating ``limit_offset``.
-            derived_limit_price = protective_limit_price(
-                stop_price, limit_offset, closing_long=is_long
-            )
-            if (
-                not math.isfinite(limit_offset)
-                or limit_offset <= 0
-                or not math.isfinite(derived_limit_price)
-                or derived_limit_price <= 0
-                or derived_limit_price == stop_price
-            ):
-                raise ValueError(
-                    f"exit leg #{i} ({leg.kind!r}) resolved non-finite/non-positive/negligible "
-                    f"limit_offset={limit_offset!r} (derived limit price {derived_limit_price!r}) "
-                    f"from stop_price={stop_price!r}, limit_offset_pct={leg.limit_offset_pct!r}"
-                )
-        # ``trail_offset`` is expressed in ``"bps"`` (basis points of
-        # whatever price it is later combined with), NOT ``"abs"``: an
-        # absolute distance anchored at ``ref_price`` would misrepresent the
-        # requested percentage distance if the entry actually fills away from
-        # ``ref_price`` (e.g. a gap) — see :class:`ExitLegSpec` for the full
-        # rationale.
+        # ``limit_offset``/``trail_offset`` are each validated against their
+        # own downstream combination (not just their own inputs) — see
+        # ``_validated_stop_limit_offset``/``_validated_trail_offset`` for
+        # the float64 rationale.
         is_trailing = leg.kind == OrderType.TRAILING_STOP
-        trail_offset = leg.pct * BPS_DIVISOR if is_trailing else None
-        if trail_offset is not None:
-            # ``trail_offset`` itself is always finite in ``(0, BPS_DIVISOR)``
-            # since ``leg.pct`` is Pydantic-bounded to ``(0, 1)`` — but that
-            # doesn't guarantee the materializer's own round-trip application
-            # (``price * (trail_offset / BPS_DIVISOR)``, then combined with
-            # that same price) survives float64: a vanishingly small ``pct``
-            # can produce an offset that, scaled back down by a typical
-            # price, rounds to exactly ``0.0`` relative to that price's ULP —
-            # e.g. ``pct=5.6e-17`` at a ``0.1`` price round-trips to an
-            # offset of ``5.6e-18``, and ``0.1 - 5.6e-18 == 0.1`` bit-for-bit,
-            # so the trailing child would start at (not off) the entry fill
-            # despite the requested positive distance. The actual entry fill
-            # price isn't known here (that's the reason this is "bps" and
-            # not "abs" in the first place), so this previews the same
-            # round-trip at ``ref_price`` as the best available proxy —
-            # catching the failure mode even though a large enough gap
-            # between ``ref_price`` and the real fill could still reintroduce
-            # it, since materialization has no better input to validate
-            # against ahead of the actual fill.
-            preview_offset = ref_price * (trail_offset / BPS_DIVISOR)
-            preview_stop = ref_price - preview_offset if is_long else ref_price + preview_offset
-            if (
-                not math.isfinite(preview_offset)
-                or preview_offset <= 0
-                or preview_stop == ref_price
-            ):
-                raise ValueError(
-                    f"exit leg #{i} ({leg.kind!r}) resolved trail_offset={trail_offset!r} whose "
-                    f"materialization round-trip vanishes at ref_price={ref_price!r} "
-                    f"(preview_offset={preview_offset!r}, pct={leg.pct!r})"
-                )
+        limit_offset = (
+            _validated_stop_limit_offset(leg, i, stop_price, is_long)
+            if leg.kind == OrderType.STOP_LIMIT
+            else None
+        )
+        trail_offset = _validated_trail_offset(leg, i, ref_price, is_long) if is_trailing else None
         attachments.append(
             StopAttachment(
                 stop_price=stop_price,
