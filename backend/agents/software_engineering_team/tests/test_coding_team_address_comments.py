@@ -1865,6 +1865,38 @@ class TestRunAddressComments:
         assert fake.replies == []
         assert fake.resolved == []
 
+    def test_thread_freshness_check_fetches_comments_before_thread_membership(
+        self, address_env
+    ) -> None:
+        """A reviewer can post a reply between the two live re-fetches this
+        check makes. If thread membership were fetched FIRST and comment
+        bodies SECOND, a reply landing in that gap would show up in the
+        (later) comment listing but be absent from the (earlier) membership
+        snapshot's `comment_ids` — the loop would never examine it and
+        silently return False. Fetching comments first means any such gap
+        reply is instead missing from the (earlier) comment listing while
+        present in the (later) membership snapshot, which the existing
+        unfetched-id check already fails closed on (True)."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        original_list_review_comments = fake.list_review_comments
+
+        def racy_list_review_comments(o: str, r: str, n: int) -> list[ReviewComment]:
+            result = original_list_review_comments(o, r, n)
+            # A reviewer's reply lands right after comments were read but
+            # before thread membership is re-fetched.
+            fake.threads = [replace(thread, comment_ids=(2, 99))]
+            return result
+
+        fake.list_review_comments = racy_list_review_comments
+
+        assert (
+            ac._thread_has_new_reviewer_feedback(fake, "o", "r", 7, "T2", since_comment_id=2) is True
+        )
+
     def test_dispatch_time_freshness_check_blocks_edit_to_earlier_history_message(
         self, address_env, monkeypatch
     ) -> None:

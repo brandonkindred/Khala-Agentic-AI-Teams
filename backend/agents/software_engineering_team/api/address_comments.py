@@ -844,6 +844,19 @@ def _thread_has_new_reviewer_feedback(
     except Exception:  # noqa: BLE001 - best-effort; missing identity fails open below
         authenticated_login = ""
     try:
+        # Fetch comments BEFORE thread membership, not after: if feedback lands
+        # between the two calls, it must land in the LATER fetch so it's
+        # visible to at least one of them. With comments fetched first, a
+        # comment posted in the gap is missing from `all_comments` but present
+        # in `fresh_thread.comment_ids` (fetched after) — the loop below then
+        # finds it via `comments_by_id.get(cid) is None` and fails closed
+        # (returns True). The reverse order would do the opposite: a comment
+        # landing in the gap would be present in `all_comments` but absent
+        # from the earlier `comment_ids` snapshot, so the loop would never
+        # examine it at all and silently fail open (return False) over
+        # feedback that had, in fact, already been posted.
+        all_comments = client.list_review_comments(owner, repo, pr_number)
+        comments_by_id = {c.id: c for c in all_comments}
         threads = client.list_review_threads(owner, repo, pr_number)
         fresh_thread = next((t for t in threads if t.id == thread_id), None)
         if fresh_thread is None:
@@ -853,8 +866,6 @@ def _thread_has_new_reviewer_feedback(
             return True
         if fresh_thread.is_resolved:
             return True
-        all_comments = client.list_review_comments(owner, repo, pr_number)
-        comments_by_id = {c.id: c for c in all_comments}
         for snapshotted in since_history or ():
             live = comments_by_id.get(snapshotted.id)
             if live is None:
