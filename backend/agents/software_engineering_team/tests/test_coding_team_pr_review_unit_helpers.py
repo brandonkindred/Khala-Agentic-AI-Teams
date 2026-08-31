@@ -761,7 +761,7 @@ class TestRunReviewerUnit:
         self, monkeypatch
     ) -> None:
         """The change-surface attempt replaces the whole-file attempt (see
-        test_surface_plus_hunk_files_two_prenumbred_calls), a distinct dispatch
+        test_surface_plus_hunk_files_two_pre_numbered_calls), a distinct dispatch
         branch from the whole-file/hunk pairing covered above -- replaced_content
         must still reach both the surface call and the hunk call."""
         self._patch_collaborators(monkeypatch)
