@@ -80,7 +80,11 @@ interface RunRowVm {
  */
 type RunIdentity = { type: 'issue'; number: number } | { type: 'pr'; number: number };
 
-/** The run identity carried by a job's GitHub context, or null when it carries neither. */
+/**
+ * The run identity carried by a job's GitHub context, or null when it carries neither.
+ * If both `issue_number` and `pr_number` are present, the issue identity wins so the Runs
+ * panel never treats one job as two distinct identities.
+ */
 function runIdentity(ctx: CodingTeamGitHubContext | undefined): RunIdentity | null {
   if (ctx?.issue_number != null) return { type: 'issue', number: ctx.issue_number };
   if (ctx?.pr_number != null) return { type: 'pr', number: ctx.pr_number };
@@ -1296,10 +1300,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         // Discard a stale poll for a run the user has since switched away from.
         if (this.selectedRunId !== jobId) return;
         this.jobStatus = status;
-        if (this.selectedRunNumber == null) {
-          const identity = runIdentity(status.github_context);
-          if (identity) {
+        const identity = runIdentity(status.github_context);
+        if (identity) {
+          if (this.selectedRunNumber == null) {
             this.selectedRunNumber = identity.number;
+          }
+          if (this.selectedRunKind == null) {
             this.selectedRunKind = identity.type;
           }
         }

@@ -1889,6 +1889,22 @@ describe('CodingTeamPageComponent', () => {
       component.retrySelectedRun();
       expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
     });
+
+    it('backfills selectedRunKind from the polled status even when selectedRunNumber is already set', async () => {
+      await setup();
+      // A run pre-selected with only its number known (no kind yet) — startPolling must not
+      // skip the kind backfill just because the number is already present.
+      component.selectedRunId = 'pr-job';
+      component.selectedRunNumber = 9;
+      component.selectedRunKind = null;
+      apiSpy.getJobStatus.mockReturnValue(
+        of({ job_id: 'pr-job', status: 'running', github_context: { owner: 'acme', repo: 'widgets', pr_number: 9 } }),
+      );
+      component['startPolling']('pr-job');
+      await flushAsync();
+      expect(component.selectedRunKind).toBe('pr');
+      expect(component.selectedRunNumber).toBe(9);
+    });
   });
 
   // -------------------------------------------------------------------------
