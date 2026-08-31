@@ -587,6 +587,25 @@ def test_rule5_concurrency_capped_by_max_open_positions() -> None:
     assert not matches, matches
 
 
+def test_rule5_ignores_declarative_max_concurrent_positions() -> None:
+    """Rule 5 sizes against min(len(symbols), risk_limits.max_open_positions),
+    not the declarative max_concurrent_positions field — no runtime code
+    reads it (run_backtest never passes the StrategySpec into
+    TradingService), so declaring 1 must not suppress the over-commit
+    critical on a genuinely multi-symbol, multi-position-capable spec."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.5),
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        asset_class="stocks",
+        max_concurrent_positions=1,
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [
+        c for c in _critical(results) if "fixed_fraction" in c and "worst-case concurrency" in c
+    ]
+    assert matches, _critical(results)
+
+
 def test_rule5_fixed_fraction_worst_case_accounts_for_whole_lot_flooring() -> None:
     """The fill engine floors whole-lot orders to whole shares
     (``_floor_or_skip_whole_share``), so the worst-case-overcommit check
