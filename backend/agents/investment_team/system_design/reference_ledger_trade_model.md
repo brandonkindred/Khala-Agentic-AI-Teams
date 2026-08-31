@@ -47,8 +47,11 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   field this corresponds to. `entry_slippage_bps` has exactly two internal
   uses — anchoring `basis="entry_price"` levels (and the trailing-stop
   watermark seed) via `entry_price_basis`, and the post-slippage **capital**
-  (cash) ledger, which is deliberately separate from the no-slippage
-  **equity** figure sizing is computed against — detailed in full, as the
+  (cash) ledger that the **equity** figure sizing is computed against is
+  itself built from (equity is capital plus unrealized mark-to-market value
+  — see this section's own "Cost-aware position sizing" bullet and §5's
+  "Entries" subsection — so it inherits capital's post-slippage basis
+  rather than being a separate no-slippage figure) — detailed in full, as the
   single authoritative enumeration, in §2's `entry_slippage_bps` parameter
   description. It never appears in, or adjusts, any `ReferenceTrade` field
   value, though it can still gate whether a *later* entry is admitted via
@@ -85,10 +88,20 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   rule-attribution bug.
 - **Cost-aware position sizing.** Entry quantity is resolved from
   `spec.sizing` against a running equity figure this module tracks itself
-  (seeded from the `starting_equity` input, marked to market from this
-  module's own no-slippage, no-cost reference prices only — see §5's
-  "Entries" subsection) — not against the true, cost-adjusted equity a real
-  backtest or paper-trading run would show. A ladder rung's own quantity is
+  (seeded from the `starting_equity` input; see §5's "Entries" subsection).
+  This figure is **not** an idealized no-slippage abstraction — production
+  has no such concept either: `_compute_qty`'s own `equity =
+  portfolio.mark_to_market()` is `Portfolio.capital` (already post-slippage,
+  §5's "Fill-time capital sufficiency") plus unrealized mark-to-market value
+  (post-slippage on the short side, via `entry_price_basis`, since
+  `Position.entry_price` there is itself post-slippage; no entry-price term
+  at all on the long side, so no slippage concept applies there in either
+  production or this module). This module's equity is genuinely
+  cost-inclusive to that same extent — the divergence from a true backtest
+  is narrower than "no-slippage": limited to the mechanics §1's other
+  bullets already exclude (order-book/participation effects, and the
+  execution-model adverse-selection haircut on `LIMIT`/`STOP_LIMIT` fills),
+  not slippage in general. A ladder rung's own quantity is
   whatever its `qty_fraction * original_qty` implies once the entry quantity
   is known.
 
@@ -107,7 +120,10 @@ def simulate(
         - spec is a validated StrategySpec, with spec.requires_custom_code
           False.
         - bars contains a non-empty, strictly timestamp-increasing Bar
-          sequence for every symbol spec references.
+          sequence for every symbol spec references, and every Bar in
+          bars[key] has bar.symbol == key (the mapping key is the sole
+          source of symbol identity this module gates and attributes
+          output against; see §2's Contract for the full statement).
         - starting_equity > 0.
         - entry_slippage_bps >= 0.
 
@@ -280,7 +296,12 @@ resolve unilaterally.
   (already covered by a separate replay-oracle epic for Path-B/custom-code
   faithfulness).
 - For every symbol `spec` references, `bars[symbol]` is non-empty and
-  strictly increasing by `timestamp`.
+  strictly increasing by `timestamp`, and every `Bar` in `bars[key]`
+  satisfies `bar.symbol == key` — the mapping key, not each `Bar`'s own
+  `symbol` field, is the sole identity this module gates entry rules
+  against (§5's "Target-symbol gating") and attributes `ReferenceTrade`
+  output to; a mismatched `bar.symbol` would make that attribution
+  ambiguous and is out of scope for this module to detect or reconcile.
 - `starting_equity > 0`.
 - `entry_slippage_bps >= 0`.
 
@@ -296,8 +317,11 @@ resolve unilaterally.
   rule in §5's "Entries" subsection means one symbol never holds two
   overlapping positions, so that symbol's trades close in the same relative
   order they opened.
-- Every `ReferenceTrade` satisfies `0 <= entry_bar <= exit_bar <
-  len(bars[symbol])`.
+- Every `ReferenceTrade` satisfies `0 <= entry_bar < exit_bar <
+  len(bars[symbol])` — strict, not `<=`: no modeled exit kind can complete
+  on `entry_bar` itself (every resting-order kind is first eligible at
+  `entry_bar + 1`; `signal_exit` may trigger on `entry_bar` but always
+  fills one bar later), so `entry_bar == exit_bar` cannot occur.
 - Each fully closed position produces exactly one `ReferenceTrade` — a
   position reduced by prior `scaled_take_profit` rungs aggregates them into
   a single row (§5's "Exit aggregation" subsection) rather than emitting one
@@ -397,7 +421,8 @@ field above, `exit_reason` superseded by the structured
 
 ### Invariants (as a value object)
 
-- `entry_bar <= exit_bar`.
+- `entry_bar < exit_bar` (strict — see §2's Postconditions for why no
+  modeled exit can complete on `entry_bar` itself).
 - `qty > 0`.
 - `entry_price > 0` and `exit_price > 0`.
 - `side in ("long", "short")`.
@@ -505,19 +530,30 @@ happens to include auxiliary symbols beyond `spec.target_symbols` (e.g. a
 benchmark or a signal-only symbol) must not have entries opened against
 those extra symbols by this rule.
 
-**Nonpositive close.** `Bar` does not itself validate OHLC values as
-positive, so a trigger bar with `close <= 0` is not excluded by this
-document's own preconditions. Mirror `_compute_qty`'s own guard: if
-`trigger_bar.close <= 0`, the entry sizes to zero and no position opens —
-never divide by it or produce a negative/undefined quantity.
+**Nonpositive (or non-finite) close.** `Bar` does not itself validate OHLC
+values as positive or finite, so a trigger bar with `close <= 0` — or
+`NaN`/`±inf`, which no `<= 0` comparison catches (`NaN <= 0` is `False` in
+Python, same as `NaN > 0`) — is not excluded by this document's own
+preconditions. Mirror `_compute_qty`'s own guard for the ordinary
+nonpositive case (`trigger_bar.close <= 0` sizes the entry to zero and no
+position opens), and additionally require `math.isfinite(trigger_bar.close)`
+before using it in any sizing division: a `NaN`/`inf` close must produce
+the same no-position outcome, never a `NaN`/`inf` quantity silently
+propagated downstream. This one non-finite case does widen beyond
+`_compute_qty`'s literal `close <= 0` line — it is a robustness guard
+against garbage input this document's own preconditions don't exclude, not
+a claim that production has an equivalent explicit finiteness check.
 
-**Nonpositive fill-bar open.** This guard is distinct from, and does not
-subsume, the one above: `_compute_qty`'s `close <= 0` check only covers the
-*trigger* bar's close used for sizing, not the separate *fill* bar
-(`entry_bar = trigger_bar + 1`) whose `open` becomes
+**Nonpositive (or non-finite) fill-bar open.** This guard is distinct from,
+and does not subsume, the one above: `_compute_qty`'s `close <= 0` check
+only covers the *trigger* bar's close used for sizing, not the separate
+*fill* bar (`entry_bar = trigger_bar + 1`) whose `open` becomes
 `ReferenceTrade.entry_price`. Production has no corresponding guard on that fill-bar open
 either. Since `ReferenceTrade.entry_price > 0` is a value-object invariant
-(§3), this module must check `bars[symbol][entry_bar].open <= 0` itself and,
+(§3) that a `NaN` or `inf` open would also violate (`NaN > 0` is `False`,
+same non-catching problem as above), this module must check
+`not (bars[symbol][entry_bar].open > 0 and
+math.isfinite(bars[symbol][entry_bar].open))` itself and,
 if true, skip opening a position for that trigger — the same no-position
 outcome as a nonpositive trigger-bar close, just guarding the other price
 this module reads before a `ReferenceTrade` can be constructed. Because
@@ -532,16 +568,24 @@ against a running equity figure it tracks itself — seeded at
 the **latest observed price of every currently open position across all
 symbols** (unrealized value included, not just realized/closed reference
 trades) — mirroring `Portfolio.mark_to_market()`, which values open
-positions the same way, and consistent with §1's scope in that this
-mark-to-market uses only this module's own no-slippage reference prices,
-never the true, cost-adjusted equity a real run would show. Identifying
-*which* price is latest does not by itself define a position's equity
-contribution — the side-specific formula does, and it is **not** symmetric:
-`equity += qty * price_now` for a long, but `equity += qty * (2 *
-entry_price - price_now)` for a short (mirroring `Portfolio.mark_to_market`'s
-own `pos.qty * (2 * pos.entry_price - price_now)` branch, `entry_price`
-there being each position's own post-slippage `entry_price_basis`) —
-synthesizing an unrealized-loss mirror as the short's own price rises, not
+positions the same way. This is **not** a no-slippage or no-cost
+abstraction — see §1's "Cost-aware position sizing" bullet: this equity
+figure is capital (itself post-slippage) plus this unrealized mark-to-market
+term, matching production's own `equity = portfolio.mark_to_market() =
+capital + mtm` exactly to the extent §1's other, narrower exclusions permit.
+Identifying *which* price is latest does not by itself define a position's
+equity contribution — the side-specific formula does, and it is **not**
+symmetric: `equity += remaining_qty * price_now` for a long, but `equity +=
+remaining_qty * (2 * entry_price_basis - price_now)` for a short (mirroring
+`Portfolio.mark_to_market`'s own `pos.qty * (2 * pos.entry_price -
+price_now)` branch — `pos.qty` there is the position's **currently open**
+quantity, decremented by `Position.reduce` on every partial exit, not
+`original_qty`; this module's mirror is the same internal `remaining_qty`
+introduced in "Additional admission gates" below, **not**
+`ReferenceTrade.qty`, which is deliberately the original entry quantity and
+would overstate a partially-reduced position's contribution to equity the
+same way it would overstate leverage exposure) — synthesizing an
+unrealized-loss mirror as the short's own price rises, not
 the raw `qty * price_now` the long side uses. "Latest observed price" is
 precise, not approximate: for each open position, it is
 the **close of the most recently processed bar for that symbol** as of the
@@ -796,6 +840,29 @@ that one emitted record:
   earlier rungs already fired instead sets `exit_rule_kind="stop_loss"` with
   no `level_index`, even though rungs contributed to `exit_price`.
 
+**Capital credit on terminal closure includes the tolerance-clamped
+residual, not just the closing slice's own quantity.** Production credits
+cash in two steps, not one: `partial_close` credits `exit_qty *
+exit_price` (unrounded) for every slice as it fills, but the position's
+*terminal* close additionally calls `Portfolio.close`, which credits
+`round(pos.qty * final_exit_price, 2)` for whatever quantity is still
+tracked as open at that moment — `pos.qty`, not the closing slice's own
+requested/nominal size. For an exact single-shot close this residual is
+`0.0` and the distinction is invisible, but for a ladder whose rungs'
+tolerance-permitted quantity residual (§2's `LADDER_SUM_TOL` note) leaves
+a nonzero `remaining_qty` after every rung has fired — with no further
+exit rule ever triggering to explicitly close it — production's terminal
+`close()` step still credits that residual's dollar value once the
+FILL_QTY_REL_TOL relative test above declares the position closed. This
+module must do the same: on the closing event that satisfies the
+FILL_QTY_REL_TOL test, credit capital for the internally-tracked
+`remaining_qty` at that point (rounded to the same `dp` bucket, `round(...,
+2)`), not merely the sum of each rung's own nominal `min(level.qty_fraction
+* original_qty, remaining_qty)` contribution — the two coincide exactly
+when the ladder's fractions sum to precisely `1.0`, but diverge by the tiny
+residual otherwise, and for a large enough `original_qty` that residual's
+dollar value survives 2-decimal rounding.
+
 A position still open at `bars[symbol]`'s last bar — including one holding
 only a partially-reduced remainder from earlier rungs — produces **no**
 `ReferenceTrade` at all, matching production's `open_position_entry_reasons`
@@ -843,19 +910,31 @@ identical to production, not just directionally similar:
   only holds when nothing has been resting on the book for this position
   already.
   - **Exception: a resting `style="limit"` stop-loss does not get this FIFO
-    chance at all — it is retired outright the moment any other rule's
-    close is chosen for the same position.** Production excludes a resting
-    limit-style stop from its own exit evaluation once it is resting, so any
-    intent chosen while it rests is necessarily a *different* rule; the
-    moment that different rule's close is decided, production immediately
-    cancels the resting stop-limit (mirrors `_retire_orders_against_closed_
-    position`), before that other rule's close even reaches its own fill
-    bar. So a `style="limit"` stop can never "win FIFO" against a later
-    `signal_exit` close the way a bracket leg or a still-resting `market`-
-    style stop/take-profit/scaled rung can — by the time any competing
-    close would fill, this module must have already removed the
-    `style="limit"` stop from consideration, the same bar the competing
-    rule's intent was chosen.
+    chance at all against a rule choosing a *whole-position* close — it is
+    retired outright the moment such a close is chosen for the same
+    position.** Production excludes a resting limit-style stop from its own
+    exit evaluation once it is resting, so any intent chosen while it rests
+    is necessarily a *different* rule; the moment that different rule's
+    close is decided, production immediately cancels the resting
+    stop-limit (mirrors `_retire_orders_against_closed_position`), before
+    that other rule's close even reaches its own fill bar. So a
+    `style="limit"` stop can never "win FIFO" against a later `signal_exit`
+    close the way a bracket leg or a still-resting `market`-style
+    stop/take-profit/scaled rung can — by the time any competing close
+    would fill, this module must have already removed the `style="limit"`
+    stop from consideration, the same bar the competing rule's intent was
+    chosen. **This retirement is conditioned on the competing close being a
+    whole-position close, not any competing intent whatsoever:**
+    `_retire_orders_against_closed_position` is only reached from
+    `_emit_full_close` (a full `stop_loss`/`take_profit`/`signal_exit`) or
+    from `_emit_partial_scale_out` when the firing `scaled_take_profit` rung
+    empties the position (`req.qty >= pos.qty` within `FILL_QTY_REL_TOL`) —
+    a **genuinely partial** rung (one that leaves quantity open) does
+    **not** retire the resting limit-style stop; it keeps resting,
+    protecting the position's runner exactly as before. This module must
+    apply the same qualification: retire a resting `style="limit"` stop
+    only when the competing close is a full close or an emptying rung,
+    never for a partial rung.
 - **Exit evaluation for a symbol resolves before entry evaluation for that
   same symbol on the same bar, and entry suppression reads the
   post-exit state.** Production's own per-bar pipeline processes a bar's
@@ -898,23 +977,28 @@ production's ledger actually fires.
 
 ### Nonpositive exit references
 
-`Bar` does not validate OHLC values as positive (§2's Preconditions only
-require a strictly timestamp-increasing sequence), so a bad bar can make any
-exit kind's computed fill price nonpositive — not just entries (§5's
-"Entries" subsection already guards those two cases): a `signal_exit`'s
-fill-bar open can be `<= 0` the same way an entry's can; a `stop_loss`'s
-gap-through fill (`bar.open` on a gap) can be `<= 0` for a long; a resting
-limit's `entry_price_basis * (1 ± pct)` target could in principle be driven
-non-positive by extreme inputs even off a valid anchor. `exit_price > 0` is a
+`Bar` does not validate OHLC values as positive or finite (§2's
+Preconditions only require a strictly timestamp-increasing sequence), so a
+bad bar can make any exit kind's computed fill price nonpositive or
+non-finite — not just entries (§5's "Entries" subsection already guards
+those two cases): a `signal_exit`'s fill-bar open can be `<= 0` (or `NaN`)
+the same way an entry's can; a `stop_loss`'s gap-through fill (`bar.open`
+on a gap) can be `<= 0` for a long; a resting limit's `entry_price_basis *
+(1 ± pct)` target could in principle be driven non-positive by extreme
+inputs even off a valid anchor; any of these can also be `NaN`/`±inf` if
+the underlying bar field is, and `NaN <= 0` is `False` in Python — a plain
+`<= 0` check does not catch it. `exit_price > 0` is a
 `ReferenceTrade` value-object invariant (§3) that production has no
 corresponding runtime guard for (it simply never encounters this in
 practice) — this module cannot construct an invalid `ReferenceTrade` and
 must not let one bad bar crash `simulate()` outright.
 
 The uniform rule, applied by every per-exit-rule-kind subsection below: if
-the fill price a rule would otherwise record for a closing event is `<= 0`,
-that rule does **not** fire on that bar — exactly as if its trigger
-condition had not been met. Evaluation continues normally on subsequent
+the fill price a rule would otherwise record for a closing event is not a
+finite positive value (`<= 0`, `NaN`, or `±inf` — i.e.
+`not (price > 0 and math.isfinite(price))`), that rule does **not** fire on
+that bar — exactly as if its trigger condition had not been met. Evaluation
+continues normally on subsequent
 bars (other exit rules for the same position may still fire on the same or
 a later bar; the same rule may fire later once it would compute a positive
 price). This mirrors the "Nonpositive fill-bar open" entry guard above: a
@@ -1198,6 +1282,21 @@ production's `TradeRecord` carries a bar index the matching module could
 fall back on. `trade_num` (§3's field, mirroring production's own
 same-named, same-semantics field) is the discriminator for that case: both
 ledgers assign it as a single run-wide monotonic sequence in emission order,
-so the matching module should pair same-day same-symbol-and-side trades by
-their relative occurrence order within that shared key, not assume the key
-alone is 1:1.
+so the matching module needs same-day same-symbol-and-side trades resolved
+by their relative occurrence order within that shared key, not assumed to
+be 1:1 on the key alone. That resolution is **not** as simple as pairing
+by raw occurrence index, though: if production is missing a trade this
+module has (e.g. a spec-compilation bug drops an entry, or the divergence
+this whole reference ledger exists to catch), naive index-based pairing
+misaligns every trade after the gap — reference trade 1 would pair with
+production trade 2, and so on — and `trade_num` itself shifts after any
+earlier unmatched trade, so it cannot repair the misalignment on its own.
+Resolving same-day same-symbol-and-side collisions in the presence of a
+possible missing or extra trade (an insertion/deletion, not just a
+reordering) is a sequence-alignment problem the matching module must solve
+explicitly — e.g. aligning by closest `entry_price`/`exit_price`/`qty`
+match within the colliding group, or an edit-distance-style algorithm —
+rather than a blind index pairing; the concrete algorithm is that later
+step's design to make, not this document's, but this document should not
+be read as endorsing raw occurrence-order pairing as sufficient on its
+own.
