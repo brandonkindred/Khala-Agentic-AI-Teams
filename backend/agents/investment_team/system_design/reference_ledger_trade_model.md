@@ -422,26 +422,42 @@ handling rather than a synthetic force-close.
 Two ordering rules this module must enforce, both to stay behaviorally
 identical to production, not just directionally similar:
 
-- **Queued fills resolve before this bar's own rule evaluation.** An entry
-  or `signal_exit` triggered on the prior bar fills at *this* bar's open
-  first; only after that does this bar's own resting-order/bar-close
-  evaluation run (stop/take-profit/scaled-rung triggers, bracket-leg
-  reachability, this bar's own entry/signal-exit predicate checks). A
-  position a queued fill closes at this bar's open is gone before any other
-  rule on this same bar gets a chance to fire against it — mirrors
-  production's per-bar step order (submit-and-fill the previous bar's queued
-  orders, *then* evaluate this bar's rules).
-- **No exit rule is eligible on a position's own `entry_bar`.** Every exit
-  rule kind — `stop_loss`/`take_profit`/`scaled_take_profit`/`signal_exit`
-  evaluation, and bracket-leg reachability alike — first becomes eligible at
-  `entry_bar + 1`, never on `entry_bar` itself, regardless of what that
-  bar's own range would otherwise trigger. This unifies two production
-  mechanisms this module doesn't import but must reproduce the effect of:
-  the dispatcher's `just_opened` gate (skips all bar-by-bar rule evaluation
-  on the bar a position first appears) and the bracket-child submission
-  guard (a bracket's children are stamped with the entry-fill bar's own
-  timestamp and are skipped whenever their submission bar isn't strictly
-  earlier than the bar being evaluated).
+- **Resting orders are not eligible on their own materialization bar;
+  `signal_exit`'s trigger check is.** These are two different mechanisms
+  with two different entry-bar behaviors, and this module must not collapse
+  them into one rule:
+  - A resting order — a bracket leg, and, per this document's target-state
+    modeling, a standalone `stop_loss`/`take_profit`/`scaled_take_profit`
+    rung once materialized — is stamped with its materialization bar's own
+    timestamp and is skipped whenever its materialization bar isn't
+    strictly earlier than the bar being evaluated (mirrors the bracket-child
+    submission guard). Concretely: **not eligible on `entry_bar` itself,
+    first eligible at `entry_bar + 1`** (and, for a `scaled_take_profit`
+    rung materialized when an earlier rung fires, not eligible until the
+    bar *after* that rung's own materialization bar).
+  - `signal_exit` is unaffected by any of this — it stays the unchanged,
+    dispatcher-evaluated predicate check production runs today, and that
+    dispatcher's `just_opened` gate is `False` from the start for a market
+    entry (`entry_order_type == "market"`, which is the only way this
+    module ever fills an entry — see "Entries" above). So **`signal_exit`'s
+    trigger check is eligible starting on `entry_bar` itself**; only its
+    *fill* is deferred, by its own separate next-bar-open rule
+    (`exit_bar = trigger_bar + 1`, already stated in `signal_exit`'s own
+    subsection) — not because of any entry-bar restriction.
+- **A reachable resting order beats a same-bar queued `signal_exit` close —
+  FIFO by materialization time, not "queued fills always go first."**
+  Production processes a symbol's pending orders in one FIFO walk ordered
+  by submission time; once an earlier order in that walk closes the
+  position, every later order in the same walk is dropped by the
+  stale-position guard rather than also filling. A resting order was
+  materialized at entry (or at its own rung's advance) — strictly earlier
+  than any `signal_exit` trigger, which can only fire on some later bar —
+  so on a bar where both are reachable, the resting order is walked first
+  and wins: it fills, and the `signal_exit` close is discarded against the
+  now-closed position rather than also filling. This is the reverse of
+  "queued orders fill before this bar's own checks" as a blanket rule; it
+  only holds when nothing has been resting on the book for this position
+  already.
 
 ### `stop_loss`
 
@@ -537,7 +553,11 @@ one exit kind where the fill bar differs from the trigger bar —
 trigger bar and fill bar coincide. If the predicate fires on the final bar
 of `bars`, there is no next bar to fill on; this module treats that as "no
 trade emitted for this trigger" rather than fabricating a fill past the end
-of the data.
+of the data. Unlike every resting-order kind above, `signal_exit`'s trigger
+check is eligible starting on `entry_bar` itself, not `entry_bar + 1` — see
+"Per-bar evaluation order" above for why entry-bar eligibility differs
+between resting orders and this kind, and for the FIFO rule that lets a
+same-bar resting order beat a queued `signal_exit` close.
 
 ### `oco_bracket`
 
@@ -591,3 +611,15 @@ confirm the two ledgers agree on *why* each trade closed, not just its price.
 That module owns the `engine_exit:` string construction/parsing (§4) and any
 tolerance banding for price comparison; neither concern belongs in this
 schema or in the `simulate()` function this doc specifies.
+
+**A `(symbol, entry_date, exit_date, side)` key is not always unique.** On an
+intraday timeframe, one symbol can complete more than one same-side round
+trip within a single calendar day — `entry_date`/`exit_date`'s `[:10]`
+truncation (§3) collapses those to the same key, and neither this schema nor
+production's `TradeRecord` carries a bar index the matching module could
+fall back on. `trade_num` (§3's field, mirroring production's own
+same-named, same-semantics field) is the discriminator for that case: both
+ledgers assign it as a single run-wide monotonic sequence in emission order,
+so the matching module should pair same-day same-symbol-and-side trades by
+their relative occurrence order within that shared key, not assume the key
+alone is 1:1.
