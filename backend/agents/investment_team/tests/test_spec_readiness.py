@@ -629,6 +629,35 @@ def test_rule5_fixed_fraction_respects_configured_leverage_below_one() -> None:
     assert matches, _critical(results)
 
 
+def test_rule5_fixed_notional_single_order_leverage_limited_names_leverage_gate() -> None:
+    """A single fixed_notional order that fits within initial_capital but
+    exceeds a leverage-tightened cash-bound ceiling would actually be
+    rejected by RiskFilter.can_enter's leverage-ratio gate, not the fill
+    engine's cash check — the critical must say so rather than misreporting
+    ``insufficient_capital`` for an order that doesn't exceed capital.
+    $60k order, $100k capital, 0.5 leverage → $50k ceiling: $60k <= $100k
+    (not insufficient_capital) but $60k > $50k (leverage-limited)."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=60_000.0),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+        risk_limits={
+            "max_position_pct": 60,
+            "max_drawdown_pct": 10,
+            "max_gross_leverage": 0.5,
+        },
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [
+        c for c in _critical(results) if "fixed_notional" in c and "gross-leverage risk gate" in c
+    ]
+    assert matches, _critical(results)
+    misattributed = [
+        c for c in _critical(results) if "fixed_notional" in c and "insufficient_capital" in c
+    ]
+    assert not misattributed, misattributed
+
+
 def test_rule5_nan_price_fails_closed() -> None:
     """A provider returning NaN must trip Rule 5 — fail closed."""
     spec = _spec(

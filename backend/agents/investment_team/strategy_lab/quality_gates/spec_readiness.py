@@ -1072,11 +1072,28 @@ class SpecReadinessGate(GateResultsMixin):
                             "positions filled simultaneously."
                         ),
                     )
+                if notional > capital:
+                    return (
+                        self._critical(
+                            f"Sizing realisability: fixed_notional ${notional:.0f} "
+                            f"exceeds initial_capital ${capital:.0f}; the first order "
+                            "would be rejected with insufficient_capital."
+                        ),
+                    )
+                # notional <= capital but > fundable_capital: only reachable
+                # when max_gross_leverage < 1.0 tightens the cash-bound
+                # ceiling below initial_capital. The fill engine's cash
+                # check would pass here — the actual rejection comes from
+                # RiskFilter.can_enter's leverage-ratio gate, which runs
+                # before the cash check, so name that gate rather than
+                # ``insufficient_capital``.
                 return (
                     self._critical(
-                        f"Sizing realisability: fixed_notional ${notional:.0f} "
-                        f"exceeds initial_capital ${capital:.0f}; the first order "
-                        "would be rejected with insufficient_capital."
+                        f"Sizing realisability: fixed_notional ${notional:.0f} exceeds "
+                        f"the cash-bound fundable capital ${fundable_capital:.0f} "
+                        f"(risk_limits.max_gross_leverage {cash_bound_multiplier:.2f}x of "
+                        f"initial_capital ${capital:.0f}); the first order would be "
+                        "rejected by the gross-leverage risk gate."
                     ),
                 )
         else:
