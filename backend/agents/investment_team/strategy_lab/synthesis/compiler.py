@@ -600,7 +600,7 @@ _HELPER_BODIES: dict[str, str] = {
             if len(history) < period + 1:
                 return None
             cur = self._src(history[-1], source)
-            prev = self._src(history[-1 - period], source)
+            prev = self._src(history[-(1 + period)], source)
             if prev == 0:
                 return 0.0
             return (cur - prev) / prev * 100.0

@@ -1488,7 +1488,7 @@ class IndicatorRegistry:
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
         cur = _source_value(bars[-1], source)
-        prev = _source_value(bars[-1 - period], source)
+        prev = _source_value(bars[-(1 + period)], source)
         value = 0.0 if prev == 0 else (cur - prev) / prev * 100.0
         self._state[key] = {"fp": fp, "value": value}
         return value
