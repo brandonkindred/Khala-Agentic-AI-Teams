@@ -44,7 +44,14 @@ logger = logging.getLogger(__name__)
 
 
 def _dedup_issues(issues: List[Any], seen: Set[Tuple[str, str]]) -> List[Any]:
-    """Remove duplicate issues across review cycles based on (file_path, description).
+    """Remove issues whose ``(file_path, description)`` key is already in ``seen``.
+
+    The dedup scope is entirely the caller's choice, set by how long-lived the
+    ``seen`` accumulator it passes in is: ``_run_review_cycles`` resets its
+    ``seen_issues`` at the start of every outer cycle, so only exact
+    duplicates reported twice within the *same* cycle's batch(es) are
+    suppressed here — an issue recurring in a later cycle is deliberately not
+    suppressed.
 
     Preconditions:
         ``seen`` accumulates ``(file_path, description)`` keys across calls.
