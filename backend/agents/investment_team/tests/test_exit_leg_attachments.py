@@ -25,6 +25,7 @@ from investment_team.trading_service.service import (
     resolve_exit_leg_attachments,
 )
 from investment_team.trading_service.strategy.contract import (
+    BPS_DIVISOR,
     ExitLegSpec,
     LimitAttachment,
     OrderSide,
@@ -82,6 +83,20 @@ def test_single_stop_limit_leg_sets_limit_offset() -> None:
     assert att.trail_offset is None
 
 
+def test_single_stop_limit_leg_sets_limit_offset_short() -> None:
+    """The short-side mirror of the LONG STOP_LIMIT case above: stop and
+    limit_offset resolve identically (both are magnitudes derived from
+    stop_price), only stop_price's side relative to ref_price flips."""
+    [att] = resolve_exit_leg_attachments(
+        [_leg(OrderType.STOP_LIMIT, pct=0.03, limit_offset_pct=0.01)], OrderSide.SHORT, 100.0
+    )
+    assert isinstance(att, StopAttachment)
+    assert att.stop_price == pytest.approx(103.0)
+    assert att.limit_offset == pytest.approx(1.03)
+    assert att.limit_offset_kind == "abs"
+    assert att.trail_offset is None
+
+
 def test_single_trailing_stop_leg_sets_trail_offset() -> None:
     """A lone TRAILING_STOP leg resolves trail_offset as a "bps" (basis-point)
     value — pct * 10_000 — not an absolute distance, so it self-scales to
@@ -116,13 +131,17 @@ def test_trailing_stop_leg_offset_scales_to_actual_entry_fill_price() -> None:
     """The whole point of "bps" mode: applying the resolved trail_offset to
     a fill price that gapped away from ref_price still yields the requested
     percentage distance, unlike a stale ref_price-anchored absolute offset
-    (which could even go non-positive on a large gap). Mirrors
-    fill_simulator's bps handling: entry_fill_price * (trail_offset / 10_000)."""
+    (which could even go non-positive on a large gap). Mirrors the bps
+    application formula documented on BPS_DIVISOR: entry_fill_price *
+    (trail_offset / BPS_DIVISOR). This is a design-intent check on the
+    resolver's own output, not a substitute for an integration-level test
+    against the actual materializer, which belongs with that component's
+    own test suite."""
     [att] = resolve_exit_leg_attachments(
         [_leg(OrderType.TRAILING_STOP, pct=0.5)], OrderSide.LONG, 100.0
     )
     gapped_entry_fill_price = 40.0
-    offset = gapped_entry_fill_price * (att.trail_offset / 10_000.0)
+    offset = gapped_entry_fill_price * (att.trail_offset / BPS_DIVISOR)
     effective_stop = gapped_entry_fill_price - offset
     assert offset == pytest.approx(20.0)
     assert effective_stop == pytest.approx(20.0)
