@@ -59,12 +59,11 @@ the resumed portion of the pipeline, not the full pipeline again.
 from __future__ import annotations
 
 import concurrent.futures
-from typing import Any, Dict, List
+from typing import Any, Dict
 from unittest import mock
 
 import pytest
 
-from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.temporal import activities as act
 from shared.temporal.testing import workflow_environment as _workflow_environment
 
@@ -472,10 +471,14 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
     from investment_team.strategy_lab.agents._llm_budget import active_budget
     from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
-    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
     from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE, StrategyLabCycleWorkflow
 
+    from .strategy_lab_reentry_fixtures import (
+        REENTRY_REVIEW_NOT_READY_ROUNDS,
+        design_attempt_llm_call_cost,
+        synthesis_boundary_spec_implementability_error,
+    )
     from .strategy_lab_temporal_fixtures import build_strategy_lab_worker
 
     _, fake_persist, fake_load, fake_generation = _fake_job_store()
@@ -484,10 +487,18 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
     monkeypatch.setattr(run_state, "get_run_generation_strict", fake_generation)
 
     checkpointed_spec = StrategySpec.parse_persisted(_spec_dict())
+    # Production's design_context.rounds/review_rounds_completed count every
+    # review round including the final ready one (critique_history.append()
+    # runs unconditionally each round, orchestrator_design.py), so the known
+    # not-ready-round count needs +1 to match what a real converged attempt
+    # would record.
     checkpointed_context = _DesignPersistContext(
-        rounds=1, critiques=[], stop_reason="converged", loop_telemetry={}
+        rounds=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
+        critiques=[],
+        stop_reason="converged",
+        loop_telemetry={},
     )
-    phase1_calls = 3
+    phase1_calls = design_attempt_llm_call_cost(REENTRY_REVIEW_NOT_READY_ROUNDS)
     phase2_calls = 2
     state: Dict[str, Any] = {"budget_seen": []}
 
@@ -531,20 +542,16 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
                         spec=checkpointed_spec,
                         rationale="r",
                         design_context={
-                            "rounds": 1,
+                            "rounds": REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
                             "critiques": [],
                             "stop_reason": "converged",
                             "loop_telemetry": {},
                         },
-                        review_rounds_completed=1,
+                        review_rounds_completed=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
                     )
                 )
-            raise SpecImplementabilityError(
-                "forced fail at synthesis boundary, not spec-implicated",
-                failure_phase="synthesis",
-                last_spec=checkpointed_spec,
-                last_code="",
-                spec_implicated=False,
+            raise synthesis_boundary_spec_implementability_error(
+                spec=checkpointed_spec, spec_implicated=False
             )
         assert kwargs["resume_spec"] == checkpointed_spec
         for _ in range(phase2_calls):
@@ -628,80 +635,6 @@ def _config() -> Any:
     )
 
 
-def _charging_design_stubs(monkeypatch, orch, *, review_not_ready_rounds: int) -> int:
-    """Wire ``design_agent.run``/``revise`` and ``design_review_agent.run`` so
-    each simulated call charges one unit of the active LLM budget, and the
-    reviewer returns ``ready=False`` for ``review_not_ready_rounds`` rounds
-    (a known number of design-refinement rounds) before converging on each
-    design attempt -- so a fully re-run attempt pays the identical, known
-    cost every time (the review-round counter resets on every ``run()``,
-    i.e. at the start of each design attempt, mirroring one real design
-    attempt's shape rather than accumulating across attempts).
-
-    Postconditions:
-        Returns the exact number of budget units one design attempt charges:
-        one ``run()`` + one ``review()`` per round (``review_not_ready_rounds``
-        not-ready rounds plus the final ready round) + one ``revise()`` per
-        not-ready round.
-    """
-    from investment_team.strategy_lab.agents._llm_budget import charge_active_budget
-    from investment_team.strategy_lab.agents.design_review import SpecCritique
-
-    from .test_strategy_lab_phase_transitions import _spec_dict
-
-    def _revised_spec_dict() -> Dict[str, Any]:
-        revised = _spec_dict()
-        revised["hypothesis"] = "revised hypothesis"
-        return revised
-
-    review_calls = {"n": 0}
-
-    def _run(**_kw: Any) -> Any:
-        review_calls["n"] = 0
-        charge_active_budget()
-        return _spec_dict(), "scripted rationale"
-
-    def _review(*_a: Any, **_kw: Any) -> SpecCritique:
-        charge_active_budget()
-        review_calls["n"] += 1
-        if review_calls["n"] <= review_not_ready_rounds:
-            return SpecCritique(ready=False, rationale="tighten entry threshold")
-        return SpecCritique(ready=True, rationale="ok")
-
-    def _revise(*_a: Any, **_kw: Any) -> Any:
-        charge_active_budget()
-        return _revised_spec_dict(), "revised rationale"
-
-    monkeypatch.setattr(orch.design_agent, "run", _run)
-    monkeypatch.setattr(orch.design_review_agent, "run", _review)
-    monkeypatch.setattr(orch.design_agent, "revise", _revise)
-
-    return 1 + (review_not_ready_rounds + 1) + review_not_ready_rounds
-
-
-def _capture_cycle_budget(monkeypatch) -> List[Any]:
-    """Monkeypatch ``orchestrator_module.LLMCallBudget`` to a wrapper that
-    still constructs the real class but stashes every instance ``run_cycle``
-    creates, so the test can read ``.calls_made`` after the call returns.
-    ``run_cycle`` never exposes the budget on its return value in thread
-    mode (that field is a Temporal-activity-output concept, from
-    ``run_design_attempt_activity``'s ``out["budget_calls"]`` above) -- one
-    instance is created per cycle (``orchestrator.py``, bound for the whole
-    attempt loop via ``use_budget``), so ``captured[0]`` is the whole
-    cycle's real cost.
-    """
-    captured: List[Any] = []
-    real_cls = orchestrator_module.LLMCallBudget
-
-    def _capturing(*args: Any, **kwargs: Any) -> Any:
-        budget = real_cls(*args, **kwargs)
-        captured.append(budget)
-        return budget
-
-    monkeypatch.setattr(orchestrator_module, "LLMCallBudget", _capturing)
-    return captured
-
-
 @pytest.mark.strategy_lab_integration
 def test_cross_attempt_resume_llm_call_count_bounded_to_resumed_portion(
     monkeypatch: pytest.MonkeyPatch,
@@ -717,9 +650,14 @@ def test_cross_attempt_resume_llm_call_count_bounded_to_resumed_portion(
     the pipeline rather than the full pipeline.
     """
     from investment_team.strategy_lab.checkpoints import PipelineStage
-    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 
+    from .strategy_lab_reentry_fixtures import (
+        REENTRY_REVIEW_NOT_READY_ROUNDS,
+        _capture_cycle_budget,
+        _charging_design_stubs,
+        synthesis_boundary_spec_implementability_error,
+    )
     from .test_strategy_lab_phase_transitions import _stub_pipeline_for_happy_path
 
     # Pin both env-derived limits rather than rely on their (generous, but
@@ -733,19 +671,17 @@ def test_cross_attempt_resume_llm_call_count_bounded_to_resumed_portion(
 
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
-    phase1_calls = _charging_design_stubs(monkeypatch, orch, review_not_ready_rounds=1)
+    phase1_calls = _charging_design_stubs(
+        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
+    )
     captured_budgets = _capture_cycle_budget(monkeypatch)
 
     real_synthesize = orch._synthesize_initial_code
 
     def _fail_first_attempt_not_spec_implicated(**kwargs: Any) -> Any:
         if kwargs["design_attempt"] == 0:
-            raise SpecImplementabilityError(
-                "forced fail at synthesis boundary, not spec-implicated",
-                failure_phase="synthesis",
-                last_spec=kwargs["spec"],
-                last_code="",
-                spec_implicated=False,
+            raise synthesis_boundary_spec_implementability_error(
+                spec=kwargs["spec"], spec_implicated=False
             )
         return real_synthesize(**kwargs)
 
@@ -776,9 +712,14 @@ def test_full_restart_reentry_pays_full_pipeline_llm_call_cost(
     today) alternative.
     """
     from investment_team.strategy_lab.checkpoints import PipelineStage
-    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 
+    from .strategy_lab_reentry_fixtures import (
+        REENTRY_REVIEW_NOT_READY_ROUNDS,
+        _capture_cycle_budget,
+        _charging_design_stubs,
+        synthesis_boundary_spec_implementability_error,
+    )
     from .test_strategy_lab_phase_transitions import _stub_pipeline_for_happy_path
 
     # Pin both env-derived limits -- see the identical note on the bounded-
@@ -789,19 +730,17 @@ def test_full_restart_reentry_pays_full_pipeline_llm_call_cost(
 
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
-    phase1_calls = _charging_design_stubs(monkeypatch, orch, review_not_ready_rounds=1)
+    phase1_calls = _charging_design_stubs(
+        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
+    )
     captured_budgets = _capture_cycle_budget(monkeypatch)
 
     real_synthesize = orch._synthesize_initial_code
 
     def _fail_first_attempt_spec_implicated(**kwargs: Any) -> Any:
         if kwargs["design_attempt"] == 0:
-            raise SpecImplementabilityError(
-                "forced fail at synthesis boundary, spec-implicated",
-                failure_phase="synthesis",
-                last_spec=kwargs["spec"],
-                last_code="",
-                spec_implicated=True,
+            raise synthesis_boundary_spec_implementability_error(
+                spec=kwargs["spec"], spec_implicated=True
             )
         return real_synthesize(**kwargs)
 
