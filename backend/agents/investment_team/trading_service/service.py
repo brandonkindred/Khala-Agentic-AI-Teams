@@ -1570,13 +1570,13 @@ def resolve_exit_leg_attachments(
     # trusted from its inputs. A violation means the child would trigger at
     # (or through) the entry rather than after the requested move — fail
     # loudly at emit rather than materialize an unfillable/mistimed child.
-    for leg in legs:
+    for i, leg in enumerate(legs):
         if leg.kind == OrderType.LIMIT:
             limit_price = ref_price * (1.0 + leg.pct) if is_long else ref_price * (1.0 - leg.pct)
             wrong_side = limit_price <= ref_price if is_long else limit_price >= ref_price
             if not math.isfinite(limit_price) or limit_price <= 0 or wrong_side:
                 raise ValueError(
-                    f"exit leg resolved non-finite/non-positive/not-off-reference "
+                    f"exit leg #{i} ({leg.kind!r}) resolved non-finite/non-positive/not-off-reference "
                     f"limit_price={limit_price!r} from ref={ref_price!r}, pct={leg.pct!r}"
                 )
             attachments.append(LimitAttachment(limit_price=limit_price))
@@ -1587,12 +1587,12 @@ def resolve_exit_leg_attachments(
         # shouldn't rely solely on that upstream guarantee — an unrecognized
         # kind here must fail loudly, not be silently treated as a stop leg.
         if leg.kind not in (OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP):
-            raise ValueError(f"exit leg has unsupported kind {leg.kind!r}")
+            raise ValueError(f"exit leg #{i} has unsupported kind {leg.kind!r}")
         stop_price = ref_price * (1.0 - leg.pct) if is_long else ref_price * (1.0 + leg.pct)
         wrong_side = stop_price >= ref_price if is_long else stop_price <= ref_price
         if not math.isfinite(stop_price) or stop_price <= 0 or wrong_side:
             raise ValueError(
-                f"exit leg resolved non-finite/non-positive/not-off-reference "
+                f"exit leg #{i} ({leg.kind!r}) resolved non-finite/non-positive/not-off-reference "
                 f"stop_price={stop_price!r} from ref={ref_price!r}, pct={leg.pct!r}"
             )
         # ``limit_offset_pct`` is a fraction of the stop level; the attachment
@@ -1626,8 +1626,8 @@ def resolve_exit_leg_attachments(
                 or derived_limit_price == stop_price
             ):
                 raise ValueError(
-                    f"exit leg resolved non-finite/non-positive/negligible limit_offset="
-                    f"{limit_offset!r} (derived limit price {derived_limit_price!r}) "
+                    f"exit leg #{i} ({leg.kind!r}) resolved non-finite/non-positive/negligible "
+                    f"limit_offset={limit_offset!r} (derived limit price {derived_limit_price!r}) "
                     f"from stop_price={stop_price!r}, limit_offset_pct={leg.limit_offset_pct!r}"
                 )
         # ``trail_offset`` is expressed in ``"bps"`` (basis points of
@@ -1922,6 +1922,16 @@ class _EngineEntryDispatcher:
         """
         if self._bracket is None:
             return None, None
+        # Deliberately calls the generalized resolver directly (the same
+        # composition ``resolve_bracket_attachments`` wraps) rather than
+        # delegating to that adapter: a later change will let this dispatcher
+        # build its leg list from non-bracket exit rules too, at which point
+        # ``_bracket_to_leg_specs(self._bracket)`` becomes one leg-list source
+        # among several rather than the bracket adapter's fixed shape. Keeping
+        # this call site on the generalized API now means that change won't
+        # have to un-delegate it later. Any change to the bracket-to-leg-spec
+        # translation still applies to both call sites, since both go through
+        # ``_bracket_to_leg_specs``.
         attachments = resolve_exit_leg_attachments(
             _bracket_to_leg_specs(self._bracket), side, ref_price
         )

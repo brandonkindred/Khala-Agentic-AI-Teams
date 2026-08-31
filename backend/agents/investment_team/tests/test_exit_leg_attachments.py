@@ -230,6 +230,46 @@ def test_multiple_legs_resolve_in_order_short() -> None:
     assert target.limit_price == pytest.approx(94.0)
 
 
+def test_multiple_legs_preserve_input_order_not_grouped_by_kind() -> None:
+    """The two tests above only ever place every StopAttachment-producing leg
+    before the single LimitAttachment-producing leg, so they can't tell
+    order-preserving resolution apart from a hypothetical implementation
+    that grouped output by attachment type. This interleaves two LIMIT legs
+    around a STOP leg (and gives the LIMIT legs distinct percentages) to pin
+    the "same order as the input legs" postcondition directly: any grouping
+    or reordering implementation fails this test."""
+    legs = [
+        _leg(OrderType.LIMIT, pct=0.06),
+        _leg(OrderType.STOP, pct=0.03),
+        _leg(OrderType.LIMIT, pct=0.02),
+    ]
+    attachments = resolve_exit_leg_attachments(legs, OrderSide.LONG, 100.0)
+    first, second, third = attachments
+    assert isinstance(first, LimitAttachment)
+    assert first.limit_price == pytest.approx(106.0)
+    assert isinstance(second, StopAttachment)
+    assert second.stop_price == pytest.approx(97.0)
+    assert isinstance(third, LimitAttachment)
+    assert third.limit_price == pytest.approx(102.0)
+
+
+def test_multiple_legs_preserve_input_order_not_grouped_by_kind_short() -> None:
+    """The short-side mirror of the interleaving test above."""
+    legs = [
+        _leg(OrderType.LIMIT, pct=0.06),
+        _leg(OrderType.STOP, pct=0.03),
+        _leg(OrderType.LIMIT, pct=0.02),
+    ]
+    attachments = resolve_exit_leg_attachments(legs, OrderSide.SHORT, 100.0)
+    first, second, third = attachments
+    assert isinstance(first, LimitAttachment)
+    assert first.limit_price == pytest.approx(94.0)
+    assert isinstance(second, StopAttachment)
+    assert second.stop_price == pytest.approx(103.0)
+    assert isinstance(third, LimitAttachment)
+    assert third.limit_price == pytest.approx(98.0)
+
+
 # ---------------------------------------------------------------------------
 # resolve_exit_leg_attachments: defense-in-depth kind check
 # ---------------------------------------------------------------------------
