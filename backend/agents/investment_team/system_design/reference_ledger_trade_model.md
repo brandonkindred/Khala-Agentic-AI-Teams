@@ -34,10 +34,19 @@ trivially "diverge." Implementers should not be surprised that this document
 does not match the current `_build_close_order` behavior for those three
 rule kinds; that divergence is intentional and temporary. Until the
 execution-fidelity change ships, the later trade-matching module must read
-every `stop_loss`/`take_profit`/`scaled_take_profit` divergence during this
-interim window the same way it reads a participation-cap divergence below —
-as outside this module's modeled (target) behavior, not a spec/engine
-mismatch to flag.
+a **fill-mechanics** divergence for `stop_loss`/`take_profit`/
+`scaled_take_profit` during this interim window the same way it reads a
+participation-cap divergence below — as outside this module's modeled
+(target) behavior, not a spec/engine mismatch to flag. This suppression is
+narrower than "every divergence," though: it covers a trade whose
+*identity* matches (same rule kind, direction, decision bar, and relative
+sequence) but whose fill price/fill bar differ only because of the
+next-bar-open approximation — not a **structural** divergence, such as a
+trade present in one ledger but absent from the other, or a
+`scaled_take_profit` position that fires a different number of rungs
+between the two. A structural divergence during the interim window is
+still a genuine spec/engine mismatch this reference ledger exists to catch
+and must not be suppressed alongside the expected fill-mechanics noise.
 
 It is **not** a fill-cost engine. Explicitly out of scope:
 
@@ -45,13 +54,13 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   levels (a resting order's authored price, or worse-of-open-and-level on a
   gap), not slippage-adjusted fills. See §3 for exactly which production
   field this corresponds to. `entry_slippage_bps` has exactly two internal
-  uses — anchoring `basis="entry_price"` levels (and the trailing-stop
-  watermark seed) via `entry_price_basis`, and the post-slippage **capital**
-  (cash) ledger that the **equity** figure sizing is computed against is
-  itself built from (equity is capital plus unrealized mark-to-market value
-  — see this section's own "Cost-aware position sizing" bullet and §5's
-  "Entries" subsection — so it inherits capital's post-slippage basis
-  rather than being a separate no-slippage figure) — detailed in full, as the
+  uses: (1) anchoring `basis="entry_price"` levels (and the trailing-stop
+  watermark seed) via `entry_price_basis`; (2) building the post-slippage
+  **capital** (cash) ledger. The **equity** figure used for sizing — capital
+  plus unrealized mark-to-market value (see this section's own "Cost-aware
+  position sizing" bullet and §5's "Entries" subsection) — inherits
+  capital's post-slippage basis rather than being a separate no-slippage
+  figure. Both uses are detailed in full, as the
   single authoritative enumeration, in §2's `entry_slippage_bps` parameter
   description. `ReferenceTrade.entry_price` itself is always the
   pre-slippage bid, unaffected by this parameter — but it does reach
@@ -454,7 +463,11 @@ field above, `exit_reason` superseded by the structured
   represents a position that actually opened via some matched entry rule).
 - `exit_rule_kind` and `exit_rule_index` are always populated (every emitted
   `ReferenceTrade` represents a fully closed position, and full closure
-  always happens via some exit rule firing).
+  always happens via some exit rule firing), and `exit_rule_kind` is always
+  one of the six §4 vocabulary values — validated in `__post_init__`
+  against that same set, the same stricter-typing treatment `side` gets
+  above (a `Literal` annotation alone is not runtime-enforced on a plain
+  dataclass).
 - `level_index is not None` **if and only if**
   `exit_rule_kind == "scaled_take_profit"`. The forward direction (every
   `scaled_take_profit` close identifies its fired level) is enforced by
@@ -556,9 +569,11 @@ those extra symbols by this rule.
 
 **Nonpositive (or non-finite) close.** `Bar` does not itself validate OHLC
 values as positive or finite, so a trigger bar with `close <= 0` — or
-`NaN`/`±inf`, which no `<= 0` comparison catches (`NaN <= 0` is `False` in
-Python, same as `NaN > 0`) — is not excluded by this document's own
-preconditions. Mirror `_compute_qty`'s own guard for the ordinary
+`NaN`/`+inf`, which no `<= 0` comparison catches (`NaN <= 0` is `False` in
+Python, same as `NaN > 0`; `+inf <= 0` is also `False`) — is not excluded by
+this document's own preconditions. (`-inf` is the one non-finite case the
+existing `<= 0` guard already catches on its own — `float('-inf') <= 0` is
+`True` in Python — so it needs no separate handling.) Mirror `_compute_qty`'s own guard for the ordinary
 nonpositive case (`trigger_bar.close <= 0` sizes the entry to zero and no
 position opens), and additionally require `math.isfinite(trigger_bar.close)`
 before using it in any sizing division: a `NaN`/`inf` close must produce
@@ -581,10 +596,12 @@ math.isfinite(bars[symbol][entry_bar].open))` itself and,
 if true, skip opening a position for that trigger — the same no-position
 outcome as a nonpositive trigger-bar close, just guarding the other price
 this module reads before a `ReferenceTrade` can be constructed. Because
-production lacks this guard, a degenerate fill-bar open `<= 0` yields a
+production lacks this guard, a degenerate fill-bar open (`<= 0` **or**
+non-finite — production has no `math.isfinite` check either) yields a
 **production** trade with no reference counterpart at all — the later
-trade-matching module must treat that case as an expected unmatched
-production trade, not a matching failure.
+trade-matching module must treat any production trade whose entry price is
+not a positive finite number as an expected unmatched production trade,
+not a matching failure.
 
 **Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
 against a running equity figure it tracks itself — seeded at
