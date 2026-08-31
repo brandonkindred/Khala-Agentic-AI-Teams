@@ -1,9 +1,10 @@
 # Strategy Lab — Diff-Prompt Reconstruction Fidelity
 
-`RefinementAgent.run()` and `DesignAgent.revise()` (plus its internal
-self-revision loop in `_with_self_review()`) both shrink round-over-round
-revision prompts by resending only a compact delta against the previous
-round's content, via `_diff_format.py`'s `diff_or_full`. Both agents'
+`RefinementAgent.run()` (via `_diff_format.diff_or_full`) and
+`DesignAgent.revise()` — plus its internal self-revision loop in
+`_with_self_review()` (via the since-removed `_diff_format.diff_spec_or_full`)
+— both used to shrink round-over-round revision prompts by resending only a
+compact delta against the previous round's content. Both agents'
 `_invoke_and_parse` deliberately builds a **fresh, history-free**
 `strands.Agent` per round — reusing one `Agent` would feed the model its own
 unparseable output back as context, defeating the correction-retry contract.

@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Tuple
 
+import pytest
+
 from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents.design import DesignAgent
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
@@ -155,7 +157,9 @@ def test_failed_revise_invocation_still_sends_full_spec_on_retry() -> None:
     assert "structural diff" not in retry_prompt
 
 
-def test_self_revision_loop_sends_full_spec_every_round() -> None:
+def test_self_revision_loop_sends_full_spec_every_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The internal self-revision loop never diffs against its own prior round either."""
     strategy_dict = {"entry_rules": _big_entry_rule_dicts(), "hypothesis": "h0"}
 
@@ -196,18 +200,9 @@ def test_self_revision_loop_sends_full_spec_every_round() -> None:
             idx = len(self.captured_prompts) - 1
             return dict(revision_dicts[idx]), f"self-revision {idx + 1}"
 
-    import os
-
-    original = os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS")
-    os.environ["STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS"] = "2"
-    try:
-        agent = _StubbedSelfReviewAgent()
-        agent._with_self_review(strategy_dict, "initial rationale")
-    finally:
-        if original is None:
-            os.environ.pop("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", None)
-        else:
-            os.environ["STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS"] = original
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "2")
+    agent = _StubbedSelfReviewAgent()
+    agent._with_self_review(strategy_dict, "initial rationale")
 
     assert len(agent.captured_prompts) == 2
     first_full_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
