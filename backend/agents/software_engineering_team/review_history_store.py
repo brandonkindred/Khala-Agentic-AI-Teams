@@ -23,6 +23,7 @@ from __future__ import annotations
 import functools
 import logging
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, Callable, Optional, TypeVar
 
 from psycopg import sql
@@ -30,6 +31,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from shared.postgres import get_conn, is_postgres_enabled
+from shared.postgres.helpers import best_effort_write as _shared_best_effort_write
 from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,10 @@ _STORE = "coding_team"
 _UPDATABLE_COLUMNS = frozenset({"status", "status_text", "review_summary", "error", "completed_at"})
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+_best_effort_write: Callable[[str, Callable[[], None]], None] = partial(
+    _shared_best_effort_write, "code_review_runs"
+)
 
 
 def _now() -> datetime:
@@ -80,24 +86,6 @@ def _readonly_query(default: Any) -> Callable[[_F], _F]:
         return wrapper  # type: ignore[return-value]
 
     return decorator
-
-
-def _best_effort_write(op_name: str, write_fn: Callable[[], None]) -> None:
-    """Run `write_fn` when Postgres is enabled, logging and swallowing any failure.
-
-    Preconditions:
-        - Postgres is enabled (callers check `is_postgres_enabled()` first, since
-          they may need to skip other work — e.g. building a query — on top of
-          the write itself). `write_fn` takes no arguments and performs the
-          Postgres write.
-    Postconditions:
-        - `write_fn` is invoked. Any exception it raises is logged as a warning
-          tagged with `op_name` and swallowed. Never raises.
-    """
-    try:
-        write_fn()
-    except Exception:  # noqa: BLE001 - persistence must never break the review
-        logger.warning("code_review_runs: %s failed", op_name, exc_info=True)
 
 
 @timed_query(store=_STORE, op="record_review_start")
