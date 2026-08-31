@@ -873,6 +873,40 @@ def _security_review_step(
         )
 
 
+def _dispatch_review_thunks(thunks: List[Callable[[], Any]], *, llm: LLMClient) -> List[Any]:
+    """Run zero-arg thunks sequentially, unless ``llm`` allows concurrent fan-out.
+
+    The single source of the "how" for every review fan-out in this module
+    (code-review/QA/security steps via ``_run_review_steps``, tool agents via
+    ``_run_tool_agents_review``) — each caller supplies its own thunks and
+    decides what to do with the results; this only decides sequential vs.
+    concurrent dispatch.
+
+    Preconditions:
+        - No thunk raises: ``parallel_map`` fast-fails (cancels the round's
+          other pending thunks and re-raises) on the first worker exception,
+          so each caller must contain its own thunks' failures (see
+          ``_code_review_step``/``_qa_review_step``/``_security_review_step``
+          and ``_run_tool_agents_review``'s per-agent ``try``).
+    Postconditions:
+        - Sequential (``[t() for t in thunks]``, in order) when
+          ``_review_steps_run_sequentially(llm)`` is true (scripted
+          ``DummyLLMClient`` doubles use a shared non-thread-safe response
+          index) or ``len(thunks) <= 1``.
+        - Otherwise concurrent via ``shared.concurrency.parallel_map``,
+          bounded to ``len(thunks)`` workers, order preserved, ``None``
+          results kept (``skip_none=False``).
+    """
+    if _review_steps_run_sequentially(llm) or len(thunks) <= 1:
+        return [t() for t in thunks]
+    # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
+    # parallel_map import — keeps the module import light for callers that never hit the
+    # concurrent branch (e.g. every DummyLLMClient-backed test).
+    from shared.concurrency import parallel_map  # noqa: PLC0415
+
+    return parallel_map(thunks, lambda fn: fn(), max_workers=len(thunks), skip_none=False)
+
+
 def _run_review_steps(
     step_fns: List[Callable[[], _ReviewStepResult]], *, llm: LLMClient
 ) -> _ReviewStepResult:
@@ -888,17 +922,7 @@ def _run_review_steps(
           which step's underlying call actually completed first, plus the first non-``None``
           ``raw_issue_count`` among those steps (the CR LLM fallback).
     """
-    if _review_steps_run_sequentially(llm) or len(step_fns) <= 1:
-        results = [step() for step in step_fns]
-    else:
-        # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
-        # parallel_map import — keeps the module import light for callers that never hit the
-        # concurrent branch (e.g. every DummyLLMClient-backed test).
-        from shared.concurrency import parallel_map
-
-        results = parallel_map(
-            step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False
-        )
+    results = _dispatch_review_thunks(step_fns, llm=llm)
     issues = [issue for step_result in results for issue in step_result.issues]
     raw_issue_count = next(
         (
@@ -1082,10 +1106,8 @@ def _run_tool_agents_review(
     # Each thunk is fully self-contained (its own try/except, cache read/write, and
     # fold into the shared `issues` list -- list.append is GIL-atomic, so concurrent
     # folds from multiple worker threads never corrupt `issues`, only interleave its
-    # order), so they can be fanned out the same way _run_review_steps fans out the
-    # code-review/QA/security steps: concurrently via parallel_map, unless `llm`
-    # requires sequential calls (see _review_steps_run_sequentially) or there's only
-    # one agent to run.
+    # order), so they can be fanned out via the same dispatch policy _run_review_steps
+    # uses for the code-review/QA/security steps (see _dispatch_review_thunks).
     thunks = [
         (lambda kind=kind, agent=agent: _review_one(kind, agent))
         for kind, agent in tool_agents.items()
@@ -1093,13 +1115,10 @@ def _run_tool_agents_review(
     ]
     if not thunks:
         return
-    if _review_steps_run_sequentially(llm) or len(thunks) <= 1:
-        for thunk in thunks:
-            thunk()
-    else:
-        from shared.concurrency import parallel_map  # noqa: PLC0415
-
-        parallel_map(thunks, lambda fn: fn(), max_workers=len(thunks), skip_none=False)
+    # Each thunk already folds its own result into `issues` (see _review_one above), unlike
+    # _run_review_steps' thunks which return a _ReviewStepResult for the caller to fold -- so
+    # the dispatched results themselves are discarded here.
+    _dispatch_review_thunks(thunks, llm=llm)
 
 
 def run_review(
@@ -1306,6 +1325,11 @@ def run_microtask_review(
           ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
         - ``tool_agent_cache``, when given, is forwarded to the tool-agent fan-out
           step only — see ``_run_tool_agents_review``.
+        - ``llm`` is forwarded to both the step fan-out (``_run_review_steps``)
+          and the tool-agent fan-out (``_run_tool_agents_review``), where it
+          selects sequential vs. concurrent dispatch via
+          ``_dispatch_review_thunks`` — a scripted test-double client (see
+          ``_review_steps_run_sequentially``) forces both fan-outs sequential.
         - ``old_contents`` is forwarded to the code-review step only (see
           ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
           caller-supplied base" -- the code-review step then auto-resolves a base from

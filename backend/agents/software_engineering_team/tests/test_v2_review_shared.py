@@ -1383,7 +1383,7 @@ def test_run_review_tool_agents_concurrent_output_matches_sequential(tmp_path: P
     (``MagicMock`` llm) or sequentially (``DummyLLMClient``)."""
     from software_engineering_team.codegen_team.models import ToolAgentKind
 
-    def _make_tool_agents() -> Dict[Any, Any]:
+    def _make_tool_agents() -> Dict[ToolAgentKind, Any]:
         agents = {}
         for kind in [
             ToolAgentKind.ACCESSIBILITY,
