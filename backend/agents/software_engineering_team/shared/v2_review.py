@@ -968,6 +968,7 @@ def _run_tool_agents_review(
     failure_context: str = "",
     language: str = "",
     tool_agent_cache: Optional[AgentReviewCache] = None,
+    llm: LLMClient,
 ) -> None:
     """Run each wired tool agent's ``review`` and fold its output into issues.
 
@@ -1013,6 +1014,19 @@ def _run_tool_agents_review(
           fold is never cached -- it is retried as a live call next time,
           mirroring ``AgentReviewCache``'s existing "failed piece is not
           cached" behavior for the QA/security steps.
+
+    Invariants:
+        - Concurrency contract (mirrors ``_run_review_steps``): tool agents are
+          dispatched concurrently via ``shared.concurrency.parallel_map`` unless
+          ``_review_steps_run_sequentially(llm)`` is true (scripted
+          ``DummyLLMClient`` doubles use a shared non-thread-safe response
+          index) or there is at most one wired agent. There is **no ordering
+          guarantee** across tool agents -- ``issues`` may receive their
+          contributions in any order -- and one agent's failure (a raising
+          ``review()`` call, or a cache hit whose stored output fails to fold)
+          never drops another agent's result, since each agent's cache
+          read/call/fold/cache-write sequence is independently wrapped in its
+          own ``try`` inside the dispatched unit of work.
     """
     if not tool_agents:
         return
@@ -1039,9 +1053,8 @@ def _run_tool_agents_review(
         phase_inp_kwargs["language"] = language
 
     phase_inp = config.tool_phase_input_factory(**phase_inp_kwargs)
-    for kind, agent in tool_agents.items():
-        if not hasattr(agent, "review"):
-            continue
+
+    def _review_one(kind: Any, agent: Any) -> None:
         cache_key = None
         if tool_agent_cache is not None and microtask is not None:
             cache_key = _tool_agent_cache_key(
@@ -1052,7 +1065,7 @@ def _run_tool_agents_review(
                 cached = tool_agent_cache.get(cache_key)
                 if cached is not None:
                     _fold_tool_agent_output(config, issues, kind, cached[0])
-                    continue
+                    return
             out = agent.review(phase_inp)
             _fold_tool_agent_output(config, issues, kind, out)
             if cache_key is not None:
@@ -1065,6 +1078,28 @@ def _run_tool_agents_review(
                 failure_context,
                 exc,
             )
+
+    # Each thunk is fully self-contained (its own try/except, cache read/write, and
+    # fold into the shared `issues` list -- list.append is GIL-atomic, so concurrent
+    # folds from multiple worker threads never corrupt `issues`, only interleave its
+    # order), so they can be fanned out the same way _run_review_steps fans out the
+    # code-review/QA/security steps: concurrently via parallel_map, unless `llm`
+    # requires sequential calls (see _review_steps_run_sequentially) or there's only
+    # one agent to run.
+    thunks = [
+        (lambda kind=kind, agent=agent: _review_one(kind, agent))
+        for kind, agent in tool_agents.items()
+        if hasattr(agent, "review")
+    ]
+    if not thunks:
+        return
+    if _review_steps_run_sequentially(llm) or len(thunks) <= 1:
+        for thunk in thunks:
+            thunk()
+    else:
+        from shared.concurrency import parallel_map  # noqa: PLC0415
+
+        parallel_map(thunks, lambda fn: fn(), max_workers=len(thunks), skip_none=False)
 
 
 def run_review(
@@ -1209,6 +1244,7 @@ def run_review(
         current_files=execution_result.files,
         tool_repo_path=str(repo_path),
         language=language,
+        llm=llm,
     )
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]
@@ -1410,6 +1446,7 @@ def run_microtask_review(
         failure_context=f" for microtask {microtask_id}",
         language=language,
         tool_agent_cache=tool_agent_cache,
+        llm=llm,
     )
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]

@@ -1322,6 +1322,145 @@ def test_microtask_tool_agent_malformed_output_is_never_cached_and_stays_contain
     assert calls["n"] == 2  # the bad output was never cached -> both calls were live
 
 
+# ---------------------------------------------------------------------------
+# Concurrent tool-agent fan-out
+# ---------------------------------------------------------------------------
+#
+# Unlike every other test in this file, these use a plain ``MagicMock()`` llm
+# (not ``DummyLLMClient``) so ``_review_steps_run_sequentially`` does *not*
+# force the sequential branch -- mirroring ``test_run_review_steps_run_concurrently``
+# in test_v2_review_phase.py for the code-review/QA/security fan-out.
+
+
+def test_run_review_tool_agents_run_concurrently(tmp_path: Path) -> None:
+    """Wired tool agents must fan out -- a barrier that needs all agents to
+    release only clears if every ``review()`` call runs in its own worker
+    thread; a sequential loop would deadlock and time out."""
+    import threading
+
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    kinds = [
+        ToolAgentKind.ACCESSIBILITY,
+        ToolAgentKind.LINTER,
+        ToolAgentKind.PERFORMANCE,
+        ToolAgentKind.UX_USABILITY,
+    ]
+    barrier = threading.Barrier(len(kinds), timeout=30)
+
+    class _BarrierAgent:
+        def review(self, phase_inp):
+            barrier.wait()
+            return SimpleNamespace(issues=[], recommendations=[])
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={kind: _BarrierAgent() for kind in kinds},
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert result is not None  # the barrier releasing (not timing out) is the real assertion
+
+
+def test_run_review_tool_agents_concurrent_output_matches_sequential(tmp_path: Path) -> None:
+    """A fixed set of stub tool-agent outputs folds into the same merged
+    ``issues`` (order-independent) whether dispatched concurrently
+    (``MagicMock`` llm) or sequentially (``DummyLLMClient``)."""
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    def _make_tool_agents() -> Dict[Any, Any]:
+        agents = {}
+        for kind in [
+            ToolAgentKind.ACCESSIBILITY,
+            ToolAgentKind.LINTER,
+            ToolAgentKind.PERFORMANCE,
+            ToolAgentKind.UX_USABILITY,
+            ToolAgentKind.BUILD_SPECIALIST,
+        ]:
+
+            def _review(phase_inp, _kind=kind):
+                return SimpleNamespace(
+                    issues=[
+                        ReviewIssue(
+                            source=_kind.value,
+                            severity="low",
+                            description=f"issue from {_kind.value}",
+                        )
+                    ],
+                    recommendations=[f"rec from {_kind.value}"],
+                )
+
+            agents[kind] = SimpleNamespace(review=_review)
+        return agents
+
+    config = _build_config()
+
+    def _run(llm: Any) -> Any:
+        return run_review(
+            config=config,
+            llm=llm,
+            task=_task(),
+            execution_result=_execution_result({"x.py": "code"}),
+            repo_path=tmp_path,
+            tool_agents=_make_tool_agents(),
+            language="python",
+            **_noop_runners(),
+        )
+
+    concurrent_result = _run(MagicMock())
+    sequential_result = _run(DummyLLMClient())
+
+    def _issue_set(result: Any) -> set:
+        return {(i.source, i.severity, i.description) for i in result.issues}
+
+    assert _issue_set(concurrent_result) == _issue_set(sequential_result)
+    assert len(concurrent_result.issues) == len(sequential_result.issues)
+
+
+def test_run_review_tool_agent_failure_does_not_drop_others_when_concurrent(
+    tmp_path: Path,
+) -> None:
+    """One tool agent raising during concurrent dispatch must not drop the
+    other agents' issues -- each agent's failure is contained to its own
+    dispatched unit of work."""
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    class _RaisingAgent:
+        def review(self, phase_inp):
+            raise RuntimeError("boom")
+
+    class _OkAgent:
+        def review(self, phase_inp):
+            return SimpleNamespace(
+                issues=[ReviewIssue(source="ok", severity="low", description="fine")],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            ToolAgentKind.SECURITY: _RaisingAgent(),
+            ToolAgentKind.TESTING_QA: _OkAgent(),
+        },
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert result is not None  # did not raise
+    assert any(i.description == "fine" for i in result.issues)
+
+
 def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
     """The microtask opening INFO line uses the config's ``microtask_intro``."""
     import logging
