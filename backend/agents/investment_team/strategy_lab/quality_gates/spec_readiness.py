@@ -999,18 +999,47 @@ class SpecReadinessGate(GateResultsMixin):
         assert capital > 0, "initial_capital must be strictly positive"
         enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
+        max_concurrent = ctx.spec.max_concurrent_positions
 
         # Notional is symbol-independent for both supported kinds, so resolve
         # it once. fixed_notional with notional_usd > initial_capital can
         # never produce a fillable order — the fill engine rejects with
         # ``insufficient_capital`` the moment ``portfolio.capital < notional``
         # (see ``fill_simulator.py``). fixed_fraction is bounded by
-        # ``fraction <= 1.0`` in the DSL so it cannot trip this branch.
+        # ``fraction <= 1.0`` in the DSL so a single order cannot trip this
+        # branch — but ``max_concurrent_positions`` simultaneous entries each
+        # sized at ``fraction``/``notional_usd`` can jointly overcommit
+        # capital even when no single order would. At the default
+        # concurrency of 1 both worst-case checks below degenerate to the
+        # single-order case and are no-ops.
         if kind == "fixed_fraction":
-            notional = capital * float(ctx.spec.sizing.fraction)
+            fraction = float(ctx.spec.sizing.fraction)
+            notional = capital * fraction
+            worst_case_fraction = fraction * max_concurrent
+            if worst_case_fraction > 1.0:
+                return (
+                    self._critical(
+                        f"Sizing realisability: fixed_fraction {fraction:.4f} × "
+                        f"max_concurrent_positions {max_concurrent} = "
+                        f"{worst_case_fraction:.2f}x equity would exceed "
+                        f"initial_capital ${capital:.0f} if all concurrent "
+                        "positions filled simultaneously."
+                    ),
+                )
         elif kind == "fixed_notional":
             notional = float(ctx.spec.sizing.notional_usd)
-            if notional > capital:
+            worst_case_notional = notional * max_concurrent
+            if worst_case_notional > capital:
+                if max_concurrent > 1:
+                    return (
+                        self._critical(
+                            f"Sizing realisability: fixed_notional ${notional:.0f} × "
+                            f"max_concurrent_positions {max_concurrent} = "
+                            f"${worst_case_notional:.0f}, which exceeds "
+                            f"initial_capital ${capital:.0f} if all concurrent "
+                            "positions filled simultaneously."
+                        ),
+                    )
                 return (
                     self._critical(
                         f"Sizing realisability: fixed_notional ${notional:.0f} "
