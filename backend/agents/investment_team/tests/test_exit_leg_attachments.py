@@ -304,6 +304,29 @@ def test_accepts_limit_offset_that_only_rounds_away_in_the_unused_direction() ->
     assert att.limit_offset == pytest.approx(2**-53)
 
 
+def test_rejects_stop_limit_derived_price_that_underflows_to_zero() -> None:
+    """limit_offset can itself be finite, positive, and non-negligible
+    relative to stop_price, while the *derived* protective limit price
+    (stop_price - limit_offset, what materialization actually submits)
+    still underflows to exactly 0.0 at subnormal-scale stop_price -- a
+    failure the limit_offset-only checks can't see, since they never
+    compute this combination."""
+    with pytest.raises(ValueError, match="non-finite/non-positive/negligible limit_offset"):
+        resolve_exit_leg_attachments(
+            [_leg(OrderType.STOP_LIMIT, pct=0.5, limit_offset_pct=0.9)], OrderSide.LONG, 1e-323
+        )
+
+
+def test_rejects_stop_limit_derived_price_that_overflows() -> None:
+    """The same gap in the other direction: limit_offset is finite and
+    non-negligible, but stop_price + limit_offset (the short-side derived
+    protective limit) overflows to inf."""
+    with pytest.raises(ValueError, match="non-finite/non-positive/negligible limit_offset"):
+        resolve_exit_leg_attachments(
+            [_leg(OrderType.STOP_LIMIT, pct=0.1, limit_offset_pct=0.9)], OrderSide.SHORT, 1e308
+        )
+
+
 def test_rejects_underflowed_trail_offset() -> None:
     """trail_offset is computed independently from stop_price (its own
     multiplication, rounded separately), so it can underflow to a

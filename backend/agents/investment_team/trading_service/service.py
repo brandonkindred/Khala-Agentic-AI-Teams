@@ -1531,20 +1531,26 @@ def resolve_exit_leg_attachments(
     ``TRAILING_STOP`` leg's ``trail_offset`` are each finite, strictly
     positive, and large enough to survive the side-specific addition/
     subtraction materialization actually applies (``stop_price``/
-    ``ref_price`` respectively); empty ``legs`` yields ``[]``.
+    ``ref_price`` respectively); for ``STOP_LIMIT`` the *derived* protective
+    limit price (``stop_price ∓ limit_offset``, the value materialization
+    actually submits) is itself finite, strictly positive, and distinct from
+    ``stop_price`` — checking ``limit_offset`` alone doesn't rule this out,
+    since it's an independent secondary quantity (unlike ``trail_offset``,
+    which is mathematically anchored to ``stop_price``'s own validity: no
+    counterexample exists where ``stop_price`` is valid but the trailing
+    derivation isn't). Empty ``legs`` yields ``[]``.
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
             ``<= 0``, or if a resolved price (or a ``STOP_LIMIT``/
-            ``TRAILING_STOP`` leg's secondary offset) is non-finite,
+            ``TRAILING_STOP`` leg's secondary offset, or a ``STOP_LIMIT``
+            leg's derived protective limit price) is non-finite,
             non-positive, or too small to survive its downstream
             arithmetic — a defensive guard that would only trip if a leg
             field bound were loosened without updating this math, an
             extreme ``ref_price`` overflowed the resolved price to ``inf``,
             or a vanishingly small ``pct``/``limit_offset_pct`` rounded away
             to nothing in float64 on the side-specific direction
-            materialization applies (``ref_price ∓ price_delta ==
-            ref_price``, ``stop_price ∓ limit_offset == stop_price``, or
-            ``ref_price ∓ trail_offset == ref_price``, bit-for-bit).
+            materialization applies.
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
     # contract stays enforced in optimized production runs. ``ref_price`` is a
@@ -1626,21 +1632,34 @@ def resolve_exit_leg_attachments(
             # ``fill_simulator._materialize_bracket_children`` call site —
             # else ``stop_price + offset``) combines it with ``stop_price``,
             # and float64 has only ~15-17 significant digits, so the result
-            # can equal ``stop_price`` bit-for-bit. Check only the direction
-            # materialization will actually use — checking both would reject
-            # legs where only the *unused* direction rounds away (float
-            # spacing is asymmetric around a power of two, so addition and
-            # subtraction can behave differently at the same magnitude).
-            negligible_offset = (
-                stop_price - limit_offset == stop_price
-                if is_long
-                else stop_price + limit_offset == stop_price
+            # can equal ``stop_price`` bit-for-bit, underflow to a
+            # non-positive price, or overflow to ``inf`` — none of which are
+            # ruled out by checking ``limit_offset`` alone (it can itself be
+            # finite/positive/non-negligible while the *combination* still
+            # misbehaves, e.g. a subnormal ``stop_price`` where ``limit_offset``
+            # rounds to exactly ``stop_price``, making the derived limit
+            # exactly ``0.0``). So compute the actual side-specific derived
+            # limit price here (mirroring ``protective_limit_price``) and
+            # validate it directly, on top of validating ``limit_offset``
+            # itself. Only the direction materialization will actually use is
+            # checked — checking both would reject legs where only the
+            # *unused* direction misbehaves (float spacing is asymmetric
+            # around a power of two, so addition and subtraction can behave
+            # differently at the same magnitude).
+            derived_limit_price = (
+                stop_price - limit_offset if is_long else stop_price + limit_offset
             )
-            if not math.isfinite(limit_offset) or limit_offset <= 0 or negligible_offset:
+            if (
+                not math.isfinite(limit_offset)
+                or limit_offset <= 0
+                or not math.isfinite(derived_limit_price)
+                or derived_limit_price <= 0
+                or derived_limit_price == stop_price
+            ):
                 raise ValueError(
-                    f"exit leg resolved non-finite/non-positive/negligible "
-                    f"limit_offset={limit_offset!r} from stop_price={stop_price!r}, "
-                    f"limit_offset_pct={leg.limit_offset_pct!r}"
+                    f"exit leg resolved non-finite/non-positive/negligible limit_offset="
+                    f"{limit_offset!r} (derived limit price {derived_limit_price!r}) "
+                    f"from stop_price={stop_price!r}, limit_offset_pct={leg.limit_offset_pct!r}"
                 )
         # ``trail_offset`` is derived from ``ref_price`` (not ``stop_price``)
         # via its own multiplication, independently rounded from
