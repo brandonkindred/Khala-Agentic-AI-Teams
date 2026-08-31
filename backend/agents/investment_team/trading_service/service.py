@@ -1578,11 +1578,17 @@ def _validated_trail_offset(leg: ExitLegSpec, i: int, ref_price: float, is_long:
     trail_offset = leg.pct * BPS_DIVISOR
     preview_offset = ref_price * (trail_offset / BPS_DIVISOR)
     preview_stop = ref_price - preview_offset if is_long else ref_price + preview_offset
-    if not math.isfinite(preview_offset) or preview_offset <= 0 or preview_stop == ref_price:
+    if (
+        not math.isfinite(preview_offset)
+        or preview_offset <= 0
+        or not math.isfinite(preview_stop)
+        or preview_stop <= 0
+        or preview_stop == ref_price
+    ):
         raise ValueError(
             f"exit leg #{i} ({leg.kind!r}) resolved trail_offset={trail_offset!r} whose "
-            f"materialization round-trip vanishes at ref_price={ref_price!r} "
-            f"(preview_offset={preview_offset!r}, pct={leg.pct!r})"
+            f"materialization round-trip vanishes or misbehaves at ref_price={ref_price!r} "
+            f"(preview_offset={preview_offset!r}, preview_stop={preview_stop!r}, pct={leg.pct!r})"
         )
     return trail_offset
 
@@ -1635,8 +1641,9 @@ def resolve_exit_leg_attachments(
     known at resolve time. Empty ``legs`` yields ``[]``.
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
-            ``<= 0``, or if a resolved price, a ``STOP_LIMIT`` leg's
-            ``limit_offset`` or derived protective limit price, or a
+            ``<= 0``, if ``side`` is not ``OrderSide.LONG`` or
+            ``OrderSide.SHORT``, or if a resolved price, a ``STOP_LIMIT``
+            leg's ``limit_offset`` or derived protective limit price, or a
             ``TRAILING_STOP`` leg's round-trip-previewed effective stop is
             non-finite, non-positive, or too small to survive its downstream
             arithmetic — a defensive guard that would only trip if a leg
@@ -1654,6 +1661,13 @@ def resolve_exit_leg_attachments(
     # prices into the returned attachments instead of raising here.
     if not math.isfinite(ref_price) or ref_price <= 0:
         raise ValueError(f"exit leg reference price must be positive and finite, got {ref_price!r}")
+    # Same defense-in-depth posture as the per-leg ``kind`` check below: an
+    # unrecognized ``side`` must fail loudly rather than being silently
+    # treated as SHORT by the ``==`` comparison, which would invert every
+    # leg's placement (protective legs above the reference, targets below)
+    # without raising.
+    if side not in (OrderSide.LONG, OrderSide.SHORT):
+        raise ValueError(f"exit leg side must be OrderSide.LONG or OrderSide.SHORT, got {side!r}")
     is_long = side == OrderSide.LONG
     attachments: list[Union[StopAttachment, LimitAttachment]] = []
     # Every resolved-price check below (LIMIT's limit_price, the stop-family's

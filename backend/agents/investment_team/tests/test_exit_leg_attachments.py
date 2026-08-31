@@ -21,6 +21,7 @@ from investment_team.strategy_lab.spec_dsl import (
 from investment_team.trading_service.service import (
     _as_bracket_attachment_pair,
     _bracket_to_leg_specs,
+    _validated_trail_offset,
     resolve_bracket_attachments,
     resolve_exit_leg_attachments,
 )
@@ -437,6 +438,45 @@ def test_rejects_trailing_stop_whose_bps_round_trip_vanishes_at_ref_price() -> N
         resolve_exit_leg_attachments(
             [_leg(OrderType.TRAILING_STOP, pct=5.6e-17)], OrderSide.LONG, 0.1
         )
+
+
+def test_validated_trail_offset_rejects_preview_stop_that_underflows_to_zero() -> None:
+    """The round-trip *offset* can itself be finite and positive while the
+    *preview stop* it produces still underflows to exactly 0.0: at
+    ref_price=5e-324 (the smallest positive subnormal) and pct=0.9,
+    preview_offset rounds to 5e-324 too (equal to ref_price itself), so
+    preview_offset > 0 and preview_stop != ref_price both hold, yet
+    ref_price - preview_offset == 0.0 — a non-positive price that checking
+    preview_offset alone can't see. Calls _validated_trail_offset directly
+    (rather than through resolve_exit_leg_attachments) because at this same
+    ref_price/pct, stop_price's own check (ref_price * (1 - pct) == 0.0)
+    already rejects the leg first — this pins _validated_trail_offset's own
+    postcondition in isolation, as a defense-in-depth guard independent of
+    whatever stop_price happens to compute."""
+    with pytest.raises(ValueError, match="materialization round-trip vanishes"):
+        _validated_trail_offset(_leg(OrderType.TRAILING_STOP, pct=0.9), 0, 5e-324, True)
+
+
+def test_validated_trail_offset_rejects_preview_stop_that_overflows() -> None:
+    """The short-side mirror of the underflow case above: at a ref_price
+    near DBL_MAX, preview_offset is itself finite, but ref_price +
+    preview_offset overflows to inf. Also calls _validated_trail_offset
+    directly for the same reason as above."""
+    with pytest.raises(ValueError, match="materialization round-trip vanishes"):
+        _validated_trail_offset(_leg(OrderType.TRAILING_STOP, pct=0.9), 0, 1.7e308, False)
+
+
+# ---------------------------------------------------------------------------
+# resolve_exit_leg_attachments: invalid side
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_side_that_is_not_a_valid_order_side() -> None:
+    """An unrecognized side must fail loudly rather than being silently
+    treated as SHORT by the == comparison, which would invert every leg's
+    placement without raising."""
+    with pytest.raises(ValueError, match="side must be OrderSide.LONG or OrderSide.SHORT"):
+        resolve_exit_leg_attachments([_leg()], "not-a-side", 100.0)
 
 
 # ---------------------------------------------------------------------------
