@@ -42,6 +42,12 @@ def reentry_outcome(**overrides: Any) -> Dict[str, Any]:
         "last_code": "code",
         "failure_phase": "evaluation",
         "design_context": {"rounds": 1, "critiques": [], "stop_reason": "x", "loop_telemetry": {}},
+        # Matches ``SpecImplementabilityError.spec_implicated``'s own default
+        # (``exceptions.py``) — every current production raise site passes
+        # this explicitly as ``True``, so the default here keeps every
+        # existing test's full-restart behavior unchanged unless a test
+        # deliberately overrides it to exercise cross-attempt resume.
+        "spec_implicated": True,
         "convergence_tracker_state": {"trial_count": 0},
         "gate_results": [],
         "budget_calls": 0,
@@ -68,3 +74,53 @@ def record_outcome(**overrides: Any) -> Dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def checkpoint_json(
+    checkpoint_cls, *, run_id: str = "run-1", generation: int = 1, **overrides: Any
+) -> Dict[str, Any]:
+    """Build one real ``PipelineCheckpoint`` subclass instance -- with the
+    identity fields matching the ``run_id``/``generation`` convention used
+    across both ``test_strategy_lab_temporal_workflows.py`` and
+    ``test_strategy_lab_temporal_workflow_replay.py`` -- and return its wire
+    (``model_dump(mode="json")``) form, exactly as ``activities.py``'s
+    ``_pipeline_checkpoints_to_wire`` produces it. Building from the real
+    Pydantic classes (rather than hand-rolled dicts) means this fixture can't
+    drift from the real wire shape. ``cycle_scope`` (default
+    ``"cycle-scope-1"``) and every stage-specific field are overridable via
+    ``**overrides`` like any other key.
+    """
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab import phases
+
+    spec = overrides.pop(
+        "spec",
+        StrategySpec(
+            strategy_id="strat-1",
+            authored_by="DesignAgent",
+            asset_class="stocks",
+            hypothesis="test hypothesis",
+            signal_definition="test signal",
+            timeframe="1d",
+        ),
+    )
+    code = overrides.pop("code", "def run(): pass")
+    base: Dict[str, Any] = {
+        "run_id": run_id,
+        "cycle_scope": "cycle-scope-1",
+        "design_attempt": 0,
+        "generation": generation,
+        "spec_hash": phases.hash_spec(spec),
+        "code_hash": phases.hash_code(code)
+        if "code" in checkpoint_cls.model_fields
+        else phases.hash_code(None),
+        "captured_at": "2026-08-27T00:00:00Z",
+        "budget_calls": 5,
+        "gate_results": [],
+        "spec": spec,
+        "rationale": "because",
+    }
+    if "code" in checkpoint_cls.model_fields:
+        base["code"] = code
+    base.update(overrides)
+    return checkpoint_cls(**base).model_dump(mode="json")

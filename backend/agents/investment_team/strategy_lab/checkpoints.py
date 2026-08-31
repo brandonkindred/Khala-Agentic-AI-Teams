@@ -441,16 +441,18 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
 # Resume-point determination.
 #
 # The module docstring above documents this family as same-attempt-only, with
-# one narrow, explicitly-gated exception. The two functions below *compute*
-# where a subsequent attempt could resume from -- that computation is
-# consumed by ``orchestrator.run_cycle``'s ``except SpecImplementabilityError``
-# branch, but only when the caught exception's ``spec_implicated`` is
-# ``False`` and the result is ``PipelineStage.SYNTHESIS`` (the located
-# checkpoint's ``stage`` is ``PipelineStage.REVIEW``): ``run_cycle`` hands
-# that ``ReviewCheckpoint``'s state to the next ``design_attempt`` via
-# ``_run_design_attempt``'s ``resume_spec``/``resume_design_context``. Every
-# other result (``REVIEW``, ``REFINEMENT``, ``ALIGNMENT``, or ``None``) has
-# no matching resume parameter on ``_run_design_attempt`` and is left for a
+# one narrow, explicitly-gated exception. ``find_latest_checkpoint_for_attempt``
+# and ``determine_resume_stage`` below *compute* where a subsequent attempt
+# could resume from; ``resolve_cross_attempt_resume`` (further below) is the
+# actual gate consumed by both ``orchestrator.run_cycle``'s
+# ``except SpecImplementabilityError`` branch and Temporal mode's
+# ``StrategyLabCycleWorkflow.run`` re-entry branch -- shared so the two modes'
+# soundness gate can't independently drift out of sync (see that function's
+# own docstring for the gate itself, and why per-mode resume-state extraction
+# is deliberately NOT also unified here). Every ``determine_resume_stage``
+# result other than ``PipelineStage.SYNTHESIS`` (i.e. ``REVIEW``,
+# ``REFINEMENT``, ``ALIGNMENT``, or ``None``) has no matching resume
+# parameter on either mode's per-attempt entry point and is left for a
 # future, separately-scoped amendment -- ``REFINEMENT`` (a checkpoint that
 # converged through SYNTHESIS) deliberately included, since resuming past
 # code synthesis would need its own code-soundness signal that
@@ -534,3 +536,52 @@ def determine_resume_stage(checkpoint: AnyPipelineCheckpoint | None) -> Pipeline
     if idx + 1 >= len(PIPELINE_STAGES):
         return None
     return PIPELINE_STAGES[idx + 1]
+
+
+def resolve_cross_attempt_resume(
+    checkpoint: AnyPipelineCheckpoint | None, *, spec_implicated: bool
+) -> AnyPipelineCheckpoint | None:
+    """Decide whether the next design attempt may resume from ``checkpoint``.
+
+    The single soundness gate shared by both thread mode
+    (``orchestrator.py::run_cycle``) and Temporal mode
+    (``temporal/workflows.py::StrategyLabCycleWorkflow.run``): resume is sound
+    only when the raising ``SpecImplementabilityError`` declares the
+    checkpointed spec was NOT implicated in the failure
+    (``spec_implicated=False``) AND ``checkpoint`` converged through exactly
+    ``PipelineStage.REVIEW`` (i.e. :func:`determine_resume_stage` returns
+    ``PipelineStage.SYNTHESIS``) -- the one stage boundary either caller's
+    ``_run_design_attempt`` actually knows how to resume into. See this
+    module's docstring for the full soundness contract (why an unconditional
+    version of this was tried and reverted, and why a ``SynthesisCheckpoint``
+    boundary is deliberately excluded).
+
+    Deliberately does not also unify the per-mode extraction of
+    ``checkpoint.spec``/``.rationale``/``.design_context``/
+    ``.spec_history``/``.code_history``/``.gate_timeline`` into the caller's
+    own resume-state representation: thread mode needs a live
+    ``_DesignPersistContext``/``_DriftCollector`` (reconstructed via
+    ``orchestrator_record_assembly._design_context_from_checkpoint``, in-process),
+    while Temporal mode needs a JSON-wire dict (crossing the activity
+    boundary via ``run_design_attempt_activity``'s params, reconstructed
+    there via ``_design_context_from_wire``) -- plain attribute reads with no
+    policy of their own to drift, unlike this gate.
+
+    Preconditions:
+      - ``checkpoint`` is the result of :func:`find_latest_checkpoint_for_attempt`
+        for the just-failed attempt (or ``None`` when none was found).
+    Postconditions:
+      - Returns ``checkpoint`` unchanged when resume should activate.
+      - Returns ``None`` ("no usable checkpoint" / full restart) otherwise --
+        including when ``checkpoint`` itself is ``None``.
+    Invariants:
+      - Pure: only reads ``checkpoint``'s already-validated fields, no I/O, no
+        mutation, no wall-clock or random calls -- safe to call from inside a
+        temporalio workflow sandbox, same discipline as
+        :func:`determine_resume_stage` above.
+    """
+    if spec_implicated:
+        return None
+    if determine_resume_stage(checkpoint) is not PipelineStage.SYNTHESIS:
+        return None
+    return checkpoint
