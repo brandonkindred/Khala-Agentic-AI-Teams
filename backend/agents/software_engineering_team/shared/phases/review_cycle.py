@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 from llm_service import LLMClient
 from shared.concurrency import KeyedLockManager, parallel_map
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _dedup_issues(issues: List[Any], seen: set[tuple[str, str]]) -> List[Any]:
+def _dedup_issues(issues: List[Any], seen: Set[Tuple[str, str]]) -> List[Any]:
     """Remove duplicate issues across review cycles based on (file_path, description).
 
     Preconditions:
@@ -602,7 +602,7 @@ def _run_review_cycles(
         # a failed fix attempt is included again in the next cycle's
         # fix-context; only exact duplicates within this same cycle's
         # batch(es) are suppressed.
-        seen_issues: set[tuple[str, str]] = set()
+        seen_issues: Set[Tuple[str, str]] = set()
         # True iff any CR gate call this outer cycle (initial or retry) was
         # both failing and grounding-heavy; drives the streak below.
         # ``last_bad_cr_outcome`` keeps the last such call for telemetry when
