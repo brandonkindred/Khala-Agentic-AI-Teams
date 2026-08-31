@@ -37,16 +37,13 @@ def phase_input_hash(
     field, shouldn't have its cache entry invalidated by a change to that
     irrelevant input.
 
-    Today no ``_PhaseSpec`` sets ``mission_fields`` (``orchestrator._phase_task``
-    still calls ``serialize_mission(mission)`` unconditionally — there is no
-    per-phase mission-field subsetting of the *prompt* anywhere in this
-    codebase yet), so every current caller hashes the full mission, exactly
-    as before this parameter existed. Over-hashing only lowers a future
-    cache's hit rate; under-hashing could make it return a stale hit. When a
-    phase -> mission-fields mapping is wired into ``_PHASE_SPEC``, this
-    parameter lets that phase's cache key narrow to just the fields its
-    agents' prompts actually reference, without changing this function's
-    other behavior.
+    ``orchestrator._PHASE_SPEC`` now sets ``mission_fields`` for every
+    runnable phase, and ``orchestrator._phase_task`` filters the *prompt*
+    the same way via ``serialize_mission(mission, include=spec.mission_fields)``
+    — so both the cache key computed here and the prompt an agent actually
+    sees are scoped to the same per-phase allowlist. Passing ``None`` (the
+    default) still hashes the full mission, preserving this function's
+    original behavior for any caller that omits the allowlist.
 
     Preconditions:
         - ``phase`` is one of the five runnable pipeline phases in

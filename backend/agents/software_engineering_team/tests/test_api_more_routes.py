@@ -272,6 +272,164 @@ def test_submit_pending_answers_clamps_progress_in_response(client, fake_job_cli
 
 
 # ---------------------------------------------------------------------------
+# submit_pending_answers — Temporal-native pause (resume_token present)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_pending_answers_temporal_native_signals_workflow(
+    client, fake_job_client, monkeypatch
+):
+    """A pause with a persisted resume_token (set by plan_project_activity's
+    PlanningAnswerPauseSignal handler) must append-only store the answers and signal
+    RunTeamWorkflowV2 directly, instead of the thread-liveness/auto-resume dance that only
+    applies to a thread-mode pause."""
+    import software_engineering_team.api.routes.hitl as hitl_mod
+
+    job_id = "job-signal-1"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        resume_token=f"{job_id}:tok-1",
+        pending_questions=[
+            {
+                "id": "q1",
+                "question_text": "Which auth provider?",
+                "required": True,
+                "options": [{"id": "okta", "label": "Okta"}],
+            }
+        ],
+    )
+
+    appended: dict = {}
+    signaled: dict = {}
+
+    def _fake_append(jid, answers):
+        appended.update(job_id=jid, answers=answers)
+
+    def _fake_signal(workflow_id, signal, payload):
+        signaled.update(workflow_id=workflow_id, signal=signal, payload=payload)
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
+
+    monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", _fake_append)
+    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", _fake_signal)
+    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={
+            "answers": [{"question_id": "q1", "selected_option_id": "okta"}],
+            "resume_token": f"{job_id}:tok-1",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert appended["job_id"] == job_id
+    assert appended["answers"][0]["question_id"] == "q1"
+    assert signaled["workflow_id"] == f"se-run-team-{job_id}"
+    assert signaled["signal"] == "submit_planning_answers"
+    assert signaled["payload"]["resume_token"] == f"{job_id}:tok-1"
+    assert signaled["payload"]["answers"] == appended["answers"]
+    assert resp.json()["resume_token"] == f"{job_id}:tok-1"
+
+
+def test_submit_pending_answers_temporal_native_rejects_stale_resume_token(
+    client, fake_job_client, monkeypatch
+):
+    """A client echoing a stale/mismatched resume_token must get 409, not a false-confidence
+    200 while the workflow silently drops the mismatched signal."""
+    import software_engineering_team.api.routes.hitl as hitl_mod
+
+    job_id = "job-signal-2"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        resume_token=f"{job_id}:tok-current",
+        pending_questions=[{"id": "q1", "required": True, "options": []}],
+    )
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not append/signal/store on a resume_token mismatch")
+
+    monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", _must_not_run)
+    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", _must_not_run)
+    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={
+            "answers": [{"question_id": "q1", "other_text": "x"}],
+            "resume_token": f"{job_id}:tok-stale",
+        },
+    )
+    assert resp.status_code == 409
+
+
+def test_submit_pending_answers_temporal_native_rejects_missing_resume_token(
+    client, fake_job_client, monkeypatch
+):
+    """A client omitting resume_token entirely for a Temporal-native pause is treated the
+    same as a mismatch — a legitimate client always has one, from the pause notification or a
+    status poll."""
+    import software_engineering_team.api.routes.hitl as hitl_mod
+
+    job_id = "job-signal-3"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        resume_token=f"{job_id}:tok-current",
+        pending_questions=[{"id": "q1", "required": True, "options": []}],
+    )
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not append/signal/store when resume_token is missing")
+
+    monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", _must_not_run)
+    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", _must_not_run)
+    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={"answers": [{"question_id": "q1", "other_text": "x"}]},
+    )
+    assert resp.status_code == 409
+
+
+def test_submit_pending_answers_without_resume_token_never_signals(
+    client, fake_job_client, monkeypatch
+):
+    """Thread-mode /answers (no resume_token on the job record) must not signal a workflow —
+    unchanged existing behavior."""
+    import software_engineering_team.api.routes.hitl as hitl_mod
+
+    job_id = "job-signal-4"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        pending_questions=[
+            {"id": "q1", "required": True, "options": [{"id": "opt_a", "label": "A"}]}
+        ],
+    )
+
+    def _must_not_signal(*_a, **_k):  # pragma: no cover
+        raise AssertionError("block-mode path must never signal a workflow")
+
+    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", _must_not_signal)
+
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={"answers": [{"question_id": "q1", "selected_option_id": "opt_a"}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["resume_token"] is None
+
+
+# ---------------------------------------------------------------------------
 # retry_failed_tasks
 # ---------------------------------------------------------------------------
 

@@ -32,6 +32,7 @@ Contract summary (see per-function docstrings for detail):
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 
@@ -61,6 +62,42 @@ WAITING_FOR_REVIEW_LABEL = "waiting for review"
 # not actionable is skipped. Comments Khala itself posted (carrying the marker)
 # are also skipped so the flow never chases its own replies.
 _KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
+
+# Embedded in every reply this flow posts (in addition to `_KHALA_COMMENT_MARKER`,
+# which only proves authorship): records the highest comment id in the thread's
+# history that was actually shown to the LLM when this specific reply was
+# generated. Comment ids are assigned at creation and don't necessarily match a
+# thread's GitHub-response chronological order under a race — a reviewer's
+# follow-up (H) can end up with a LOWER id than Khala's own reply (R) even though
+# H predates R chronologically. `_unresolved_comments` classifies a thread by its
+# chronologically-latest message, so id order alone can't tell a thread where R
+# genuinely accounted for everything before it apart from one where H slipped in
+# too late to be reflected in R's content but too "early" (by id) to trip an
+# id-only "is there anything newer than R" check. Embedding the boundary in the
+# reply itself — on GitHub, which already persists it durably per-thread — answers
+# that without a new datastore: any non-Khala message with an id greater than this
+# value was NOT part of what generated the reply, regardless of chronological
+# position relative to the reply itself.
+_KHALA_ACCOUNTED_THROUGH_RE = re.compile(r"<!--\s*khala-accounted-through:(\d+)\s*-->")
+
+
+def _accounted_through_marker(comment_id: int) -> str:
+    """Hidden HTML-comment marker recording the id a Khala reply accounted through."""
+    return f"<!-- khala-accounted-through:{comment_id} -->"
+
+
+def _parse_accounted_through(body: str) -> Optional[int]:
+    """Extract the id embedded by :func:`_accounted_through_marker`, if present.
+
+    Postconditions:
+        - Returns the embedded integer id when ``body`` carries the marker.
+        - Returns None when the marker is absent or malformed — notably for
+          any reply this flow posted BEFORE this marker existed, so callers
+          must treat None as "unknown provenance", not "accounted for nothing".
+    """
+    match = _KHALA_ACCOUNTED_THROUGH_RE.search(body or "")
+    return int(match.group(1)) if match else None
+
 
 # Cap on cited file content included in an LLM prompt (triage and planning both use
 # this), to bound prompt size regardless of the actual file's length.
@@ -297,6 +334,21 @@ def _unresolved_comments(
           (:func:`_thread_has_new_reviewer_feedback` with ``khala_reply_comment_id``
           as ``since_comment_id``), since a reviewer can post a follow-up in the
           window between this snapshot and the retry loop actually running.
+          "LATEST message is Khala's own reply" alone is NOT sufficient to
+          reach this list: a thread only qualifies once every OTHER message
+          in it is either Khala's own or at-or-before the id embedded by
+          :func:`_accounted_through_marker` in that reply's body — the
+          highest comment id the reply was actually generated from. A
+          reviewer's follow-up that predates the reply chronologically but
+          was assigned a HIGHER id than the boundary the reply was generated
+          from (whether or not that id also happens to be lower than the
+          reply's own id — GitHub id assignment doesn't strictly track
+          response order under a race) was never accounted for and is routed
+          to ``comments`` instead, using that follow-up as the representative
+          message, exactly like ordinary new-feedback-after-reply handling.
+          A reply posted before this marker existed carries no boundary
+          (``_parse_accounted_through`` returns None) and is treated under
+          the prior, order-only rule.
         - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
           GitHub returned (resolved threads included) to its owning
           :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
@@ -422,28 +474,65 @@ def _unresolved_comments(
             )
         latest = messages[-1]
         if _is_khala_authored(latest, authenticated_login):
-            # Nothing has been said since Khala's reply — but GitHub reporting
-            # the thread unresolved is ambiguous on its own: it means EITHER
-            # "our resolve mutation failed previously" (safe to retry) OR "a
-            # reviewer clicked Reopen conversation with no new comment"
-            # (must NOT be silently auto-resolved — the reviewer never gets a
-            # chance to have their reopen looked at). `isResolved` reports the
-            # same False in both cases and GitHub exposes no history/audit
-            # trail to tell them apart, so only PERSISTED evidence that
-            # Khala's own resolve call for THIS reply actually ran and failed
-            # (`resolve_attempt_store`, written by the resolve step itself)
-            # authorizes the retry-resolve path.
+            # Nothing has been said since Khala's reply — the fix already
+            # landed but GitHub still reports the thread unresolved. The
+            # reply's own id travels with the thread id so the caller can
+            # re-verify freshness immediately before resolving. Also
+            # snapshot the thread's full history under the SAME dict retry
+            # threads share with genuinely-unresolved ones — keyed by
+            # `latest.id` (the reply's id) here — so the caller's freshness
+            # re-check can pass it as `since_history` and catch an EARLIER
+            # message being edited (not just a new one appearing), which an
+            # id-only ">" comparison against the reply's own id could never
+            # see: any message that predates the reply always has a lower id
+            # — UNLESS a reviewer's follow-up (H) was created before `latest`
+            # (R) chose to post but happened to be assigned a lower comment
+            # id than R (a GitHub id-vs-creation-order race). `_reply_and_
+            # resolve`'s own freshness checks catch H at the time R was
+            # generated/resolved (they compare against the much older
+            # representative comment's id, not R's), so THIS run never
+            # resolves over it — but H still predates R in "chronological
+            # response order", so a NEXT run naively picking `messages[-1]`
+            # as "latest" would see R here and misclassify the thread as a
+            # clean resolve-only retry, silently burying H forever the
+            # moment the retry succeeds. Use R's own embedded
+            # `_accounted_through_marker` (the highest id R was actually
+            # generated from) instead of message order to settle this: any
+            # non-Khala message with an id greater than that boundary —
+            # REGARDLESS of its position in `messages` — was never accounted
+            # for and still needs triage. A reply posted before this marker
+            # existed has no boundary to check (`accounted_through` is None)
+            # and falls back to the prior, order-only behavior.
+            accounted_through = _parse_accounted_through(latest.body or "")
+            unaddressed = (
+                [
+                    m
+                    for m in messages
+                    if m.id != latest.id
+                    and m.id > accounted_through
+                    and not _is_khala_authored(m, authenticated_login)
+                ]
+                if accounted_through is not None
+                else []
+            )
+            if unaddressed:
+                representative = max(unaddressed, key=lambda m: m.id)
+                unresolved.append(representative)
+                thread_history_by_comment_id[representative.id] = messages
+                continue
+            # No unaddressed follow-up found — but GitHub reporting the
+            # thread unresolved is STILL ambiguous on its own: it means
+            # EITHER "our resolve mutation failed previously" (safe to
+            # retry) OR "a reviewer clicked Reopen conversation with no new
+            # comment" (must NOT be silently auto-resolved — the reviewer
+            # never gets a chance to have their reopen looked at).
+            # `isResolved` reports the same False in both cases and GitHub
+            # exposes no history/audit trail to tell them apart, so only
+            # PERSISTED evidence that Khala's own resolve call for THIS
+            # reply actually ran and failed (`resolve_attempt_store`,
+            # written by the resolve step itself) authorizes the
+            # retry-resolve path.
             if _main.has_recorded_resolve_failure(owner, repo, pr_number, thread.id, latest.id):
-                # The reply's own id travels with the thread id so the caller
-                # can re-verify freshness immediately before resolving. Also
-                # snapshot the thread's full history under the SAME dict
-                # retry threads share with genuinely-unresolved ones — keyed
-                # by `latest.id` (the reply's id) here — so the caller's
-                # freshness re-check can pass it as `since_history` and catch
-                # an EARLIER message being edited (not just a new one
-                # appearing), which an id-only ">" comparison against the
-                # reply's own id could never see: any message that predates
-                # the reply always has a lower id.
                 retry_resolve_threads.append((thread.id, latest.id))
                 thread_history_by_comment_id[latest.id] = messages
             else:
@@ -454,8 +543,7 @@ def _unresolved_comments(
                 # overriding a reviewer. It surfaces again on the next run,
                 # by which point either the evidence has landed (retried) or
                 # the reviewer has posted follow-up feedback (re-triaged via
-                # the branch below once that feedback becomes the latest
-                # message).
+                # the branch above once that feedback becomes visible).
                 logger.info(
                     "address-comments: thread %s is unresolved with Khala's own reply as its "
                     "latest message but no recorded resolve-failure evidence — treating as an "
@@ -1134,8 +1222,19 @@ def _reply_and_resolve(
           fallback applies when ``thread`` IS known but carries an empty
           ``comment_ids`` (should also not normally happen — a real thread
           always has at least a root comment).
+        - The posted reply body carries :func:`_accounted_through_marker` for
+          the highest comment id in ``history`` (i.e. the boundary of what
+          this specific reply was actually generated from), in addition to
+          the client's own authorship marker. A LATER run's
+          ``_unresolved_comments`` uses this to tell a thread where nothing
+          arrived before this reply was generated apart from one where a
+          reviewer's message slipped in during generation but happened to be
+          assigned a lower id than the reply itself — see that marker's own
+          docstring.
     """
     history = thread_history if thread_history is not None else [comment]
+    accounted_through_id = max((m.id for m in history), default=comment.id)
+    reply_body = f"{reply_body}\n\n{_accounted_through_marker(accounted_through_id)}"
     if thread is not None and _thread_has_new_reviewer_feedback(
         client,
         request.owner,

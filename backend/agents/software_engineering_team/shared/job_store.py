@@ -289,6 +289,7 @@ def add_task_result(
     submit_answers,
     is_waiting_for_answers,
     get_submitted_answers,
+    append_submitted_answers,
 ) = _jsc.make_cachedir_hitl(lambda cd: _client(cd), DEFAULT_CACHE_DIR)
 
 

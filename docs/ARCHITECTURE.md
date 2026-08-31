@@ -141,7 +141,6 @@ flowchart TB
         qaAgent["QA Expert"]
         secAgent["Cybersecurity Expert"]
         a11yAgent["Accessibility Expert"]
-        acceptV["Acceptance Verifier"]
         dbcAgent["DbC Comments"]
         lintAgent["Linting Tool"]
     end
@@ -165,7 +164,7 @@ flowchart TB
     execGroup -.->|"on crash"| supportGroup
 ```
 
-Quality gate agents (code review, QA, security, accessibility, acceptance verifier, DbC, linting) are not task assignees — they are invoked inside backend and frontend workflows for every task. The repair agent and build fix specialist handle agent crashes and persistent build failures respectively. Lint/build verification is a distinct, CI-owned gate that runs once ahead of code review (see §5, §6) — it is not re-executed as part of the code review step.
+Quality gate agents (code review, QA, security, accessibility, DbC, linting) are not task assignees — they are invoked inside backend and frontend workflows for every task. The repair agent and build fix specialist handle agent crashes and persistent build failures respectively. Lint/build verification is a distinct, CI-owned gate that runs once ahead of code review (see §5, §6) — it is not re-executed as part of the code review step.
 
 ---
 
@@ -222,7 +221,6 @@ flowchart TB
     Lint["Lint Verification\n(Linting Tool Agent)"]
     Build["Build Verification\n(pytest)"]
     CR["Code Review"]
-    AV["Acceptance Verifier"]
     Sec["Security Review"]
     QA["QA Review\n(bugs + tests + README)"]
     Dbc["DbC Comments\n(pre/postconditions)"]
@@ -231,7 +229,7 @@ flowchart TB
     Merge["Merge to development"]
 
     Branch --> TaskPlan --> CodeGen --> WriteCode --> Lint --> Build
-    Build --> CR --> AV --> Sec --> QA
+    Build --> CR --> Sec --> QA
     QA --> Dbc --> TLReview --> Doc --> Merge
 
     Build -->|"failure"| BuildFix["Build Fix Specialist\n(targeted fix)"]
@@ -325,7 +323,6 @@ flowchart TB
     Lint["Lint Verification"]
     Build["Build Verification\n(ng build)"]
     CR["Code Review"]
-    AV["Acceptance Verifier"]
     Sec["Security Review"]
     QA["QA Review"]
     A11y["Accessibility Review\n(WCAG 2.2)"]
@@ -336,7 +333,7 @@ flowchart TB
 
     Branch --> InstallDeps --> TaskPlan --> CodeGen --> WriteCode --> NpmPkgs
     NpmPkgs --> Lint --> Build
-    Build --> CR --> AV --> Sec --> QA
+    Build --> CR --> Sec --> QA
     QA --> A11y --> Dbc --> TLReview --> Doc --> Merge
 
     Build -->|"failure"| BuildFix["Build Fix Specialist"]
@@ -371,7 +368,7 @@ flowchart TB
 
     subgraph implPhase [Implementation Phase]
         FeatureAgent["Feature Agent\n(FrontendExpertAgent)"]
-        QualityLoop["Quality Gate Loop\n(lint, build, code review, QA,\naccessibility, security,\nacceptance verifier, DbC)"]
+        QualityLoop["Quality Gate Loop\n(lint, build, code review, QA,\naccessibility, security, DbC)"]
         FeatureAgent --> QualityLoop
     end
 
@@ -671,7 +668,6 @@ flowchart TB
     SWTeam --> swBackendV2["codegen_team/\n(config-driven 7-phase team,\nstack: backend|frontend, backend has\n8 tool agents; both stacks share one\nphase implementation via shared/v2_team_config.py)"]
     SWTeam --> swFrontend["frontend_team/\n(12 agents)"]
     SWTeam --> swDevops["devops_team/\n(9 agents + 5 tool agents)"]
-    SWTeam --> swQuality["quality_gates/"]
     SWTeam --> swIntegration["integration_team/"]
     SWTeam --> swShared["shared/\n(LLM, models, git, utils)"]
     SWTeam --> swTests["tests/"]

@@ -32,6 +32,7 @@ from investment_team.models import (
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
+from investment_team.strategy_lab.checkpoints import PipelineStage
 from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import (
     MAX_DESIGN_REENTRIES,
@@ -267,6 +268,28 @@ def test_apply_updates_trips_after_threshold_consecutive_stray_keys() -> None:
     assert exc_info.value.failure_phase == "execution"
     assert exc_info.value.last_spec is spec
     assert exc_info.value.last_code == "# c3"
+    # LLM-driven trip: treated conservatively as spec-implicated (see
+    # exceptions.py's ``spec_implicated`` contract) until a site-specific
+    # analysis proves otherwise -- ``run_cycle`` must full-restart on this
+    # raise, never resume from a checkpoint.
+    assert exc_info.value.spec_implicated is True
+
+
+def test_apply_updates_trips_on_risk_limits_loosening() -> None:
+    orch = StrategyLabOrchestrator()
+    spec = _spec()
+    with pytest.raises(SpecImplementabilityError) as exc_info:
+        orch._apply_updates(
+            spec,
+            {"risk_limits": {"max_position_pct": 99.0}},
+            "# c1",
+            failure_phase="validation",
+        )
+    assert exc_info.value.failure_phase == "validation"
+    assert exc_info.value.last_spec is spec
+    assert exc_info.value.last_code == "# c1"
+    # Same conservative default as the stray-key trip above.
+    assert exc_info.value.spec_implicated is True
 
 
 def test_apply_updates_resets_counter_on_clean_round() -> None:
@@ -483,6 +506,17 @@ def test_run_cycle_reroutes_then_short_circuits_on_persistent_loosening(
     ]
     assert len(loopback_events) == MAX_DESIGN_REENTRIES
     assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    # The most-converged checkpoint per failed attempt is a SynthesisCheckpoint
+    # (the loosening trip fires from inside the refinement loop, after
+    # synthesis already converged via the ``compile_strategy`` stub) --
+    # ``last_resume_determination`` reflects that correctly. It is only
+    # ever consumed to resume a subsequent attempt when the raising
+    # exception's ``spec_implicated`` is ``False``; ``_apply_updates``'s
+    # loosening trip sets ``True`` (see the direct unit test above), so
+    # every re-entry here still re-runs DESIGN+REVIEW+SYNTHESIS from
+    # scratch (see ``checkpoints.py``'s module docstring for the full
+    # gating contract).
+    assert orch.last_resume_determination is PipelineStage.REFINEMENT
     assert record.backtest.status == "failed: spec_unimplementable"
     # Short-circuit records must populate ``acceptance_reason`` so a
     # reader of the persisted record sees the rejection cause without
@@ -562,6 +596,17 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
         assert "consecutive mutation attempts" in ev["evidence"]
         assert ev["failure_phase"] == "execution"
     assert orch.design_agent.call_count == MAX_DESIGN_REENTRIES + 1  # type: ignore[attr-defined]
+    # The most-converged checkpoint per failed attempt is a SynthesisCheckpoint
+    # (the threshold trip fires from inside the refinement loop, after
+    # synthesis already converged via the ``compile_strategy`` stub) --
+    # ``last_resume_determination`` reflects that correctly. It is only
+    # ever consumed to resume a subsequent attempt when the raising
+    # exception's ``spec_implicated`` is ``False``; ``_apply_updates``'s
+    # stray-key trip sets ``True`` (see the direct unit test above), so
+    # every re-entry here still re-runs DESIGN+REVIEW+SYNTHESIS from
+    # scratch (see ``checkpoints.py``'s module docstring for the full
+    # gating contract).
+    assert orch.last_resume_determination is PipelineStage.REFINEMENT
     assert record.backtest.status == "failed: spec_unimplementable"
     assert "spec_unimplementable" in record.backtest.status
     # PR #573 round-5 Note 2: short-circuit records must populate

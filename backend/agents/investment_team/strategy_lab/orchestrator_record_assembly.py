@@ -110,6 +110,66 @@ def _design_context_to_checkpoint(context: _DesignPersistContext) -> Dict[str, A
     }
 
 
+_DESIGN_CONTEXT_CHECKPOINT_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
+
+
+def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistContext:
+    """Inverse of :func:`_design_context_to_checkpoint` -- rebuilds real ``SpecCritique`` objects.
+
+    A checkpoint's ``design_context`` payload is the JSON-shaped dict
+    ``_design_context_to_checkpoint`` produced at capture time, not a live
+    ``_DesignPersistContext`` -- its ``critiques`` entries are plain dicts.
+    Consuming that payload to resume a *later* design attempt (``run_cycle``'s
+    cross-attempt resume path, gated on ``SpecImplementabilityError.spec_implicated
+    is False``) needs the real dataclass back, with real ``SpecCritique``
+    instances, or record assembly's ``design_context.critiques[i].model_dump()``
+    calls raise ``AttributeError`` deep inside a resumed attempt.
+
+    Mirrors ``temporal.activities._design_context_from_wire``'s validation
+    shape (a separate, Temporal-only wire pair with its own scope); this is
+    a new, independent function scoped to thread-mode's in-process resume.
+
+    Preconditions:
+      - ``data`` is a non-empty dict containing every key
+        ``_design_context_to_checkpoint`` produces (``rounds`` int,
+        ``critiques`` list, ``stop_reason`` str, ``loop_telemetry`` dict).
+    Postconditions:
+      - Returns a ``_DesignPersistContext`` with ``critiques`` rebuilt as
+        real ``SpecCritique`` instances.
+    Raises:
+      - ``ValueError`` if a required key is missing.
+      - ``TypeError`` if a present key has the wrong shape.
+      Both signal to the caller that the checkpoint payload is unusable for
+      resume -- the caller is expected to fail open to a full restart rather
+      than propagate either exception.
+    """
+    from .agents.design_review import SpecCritique
+
+    missing = [key for key in _DESIGN_CONTEXT_CHECKPOINT_KEYS if key not in data]
+    if missing:
+        raise ValueError(f"design_context missing checkpoint fields: {missing}")
+    rounds = data["rounds"]
+    critiques = data["critiques"]
+    stop_reason = data["stop_reason"]
+    loop_telemetry = data["loop_telemetry"]
+    if isinstance(rounds, bool) or not isinstance(rounds, int):
+        raise TypeError(f"design_context.rounds must be int, got {type(rounds).__name__}")
+    if not isinstance(critiques, list):
+        raise TypeError(f"design_context.critiques must be list, got {type(critiques).__name__}")
+    if not isinstance(stop_reason, str):
+        raise TypeError(f"design_context.stop_reason must be str, got {type(stop_reason).__name__}")
+    if not isinstance(loop_telemetry, dict):
+        raise TypeError(
+            f"design_context.loop_telemetry must be dict, got {type(loop_telemetry).__name__}"
+        )
+    return _DesignPersistContext(
+        rounds=rounds,
+        critiques=[SpecCritique.model_validate(c) for c in critiques],
+        stop_reason=stop_reason,
+        loop_telemetry=dict(loop_telemetry),
+    )
+
+
 def _finalize_loop_telemetry(
     design_context: "_DesignPersistContext",
     all_gate_results: List[QualityGateResult],

@@ -43,16 +43,28 @@ budget is not double-charged (the resumed attempt starts from exactly the
 checkpoint's boundary-time ``budget_calls``, never from zero -- which would
 silently reopen already-spent headroom -- and never re-charged for Phase 1 a
 second time).
+
+A third section below covers a distinct re-entry shape: thread mode's
+cross-*attempt* resume (``StrategyLabOrchestrator.run_cycle`` re-entering
+after a ``SpecImplementabilityError`` between design attempts within the
+same cycle -- see ``checkpoints.py`` and ``exceptions.py``'s
+``spec_implicated`` contract), as opposed to this file's Temporal same-
+*attempt* crash recovery above. ``test_strategy_lab_cross_attempt_resume.py``
+already proves the right pipeline stages are skipped/re-run on such a
+resume via stub call counters; the tests below close the gap that leaves --
+that skipping those stages actually bounds the cycle's real LLM-call cost to
+the resumed portion of the pipeline, not the full pipeline again.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-from typing import Any, Dict
+from typing import Any, Dict, List
 from unittest import mock
 
 import pytest
 
+from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab.temporal import activities as act
 from shared.temporal.testing import workflow_environment as _workflow_environment
 
@@ -436,3 +448,223 @@ async def test_design_attempt_activity_resumes_from_checkpoint_after_temporal_re
         ("resume", phase1_calls + phase2_calls),
     ], "LLM-call budget was double-charged (or lost) across the crash/resume cycle"
     assert result["record"]["lab_record_id"] == "rec-resumed"
+
+
+# ---------------------------------------------------------------------------
+# Thread mode: cross-attempt re-entry LLM-call count is bounded
+# ---------------------------------------------------------------------------
+#
+# The design/review stubs below charge the same per-cycle LLMCallBudget the
+# real agents charge (via ``charge_active_budget()``), mirroring
+# ``test_strategy_lab_design_loop.py``'s ``_charging_run`` helper and this
+# file's own ``active_budget().charge()`` stubs above -- there is no
+# ``MockLLMClient`` anywhere in this suite, so a stub that charges is the
+# established way to make an LLM round-trip's cost observable in a test.
+# Everything downstream of design+review (synthesis, and -- on the no-
+# market-data short circuit these tests reuse -- refinement/alignment) is
+# ``CodeSynthesisAgent``/a structural no-op, so it is genuinely free
+# (``_llm_budget.py``'s ``LLMCallBudget`` docstring: only ``CodeSynthesisAgent``
+# and ``AnalysisAgent`` never charge); design+review is where the epic's
+# "known number of refinement rounds" cost actually lives, and it is the
+# only phase this test needs to bound.
+
+
+def _config() -> Any:
+    from investment_team.models import BacktestConfig
+
+    return BacktestConfig(
+        start_date="2023-01-01",
+        end_date="2023-12-31",
+        initial_capital=100_000.0,
+        benchmark_symbol="SPY",
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+
+def _charging_design_stubs(monkeypatch, orch, *, review_not_ready_rounds: int) -> int:
+    """Wire ``design_agent.run``/``revise`` and ``design_review_agent.run`` so
+    each simulated call charges one unit of the active LLM budget, and the
+    reviewer returns ``ready=False`` for ``review_not_ready_rounds`` rounds
+    (a known number of design-refinement rounds) before converging on each
+    design attempt -- so a fully re-run attempt pays the identical, known
+    cost every time (the review-round counter resets on every ``run()``,
+    i.e. at the start of each design attempt, mirroring one real design
+    attempt's shape rather than accumulating across attempts).
+
+    Postconditions:
+        Returns the exact number of budget units one design attempt charges:
+        one ``run()`` + one ``review()`` per round (``review_not_ready_rounds``
+        not-ready rounds plus the final ready round) + one ``revise()`` per
+        not-ready round.
+    """
+    from investment_team.strategy_lab.agents._llm_budget import charge_active_budget
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    from .test_strategy_lab_phase_transitions import _spec_dict
+
+    def _revised_spec_dict() -> Dict[str, Any]:
+        revised = _spec_dict()
+        revised["hypothesis"] = "revised hypothesis"
+        return revised
+
+    review_calls = {"n": 0}
+
+    def _run(**_kw: Any) -> Any:
+        review_calls["n"] = 0
+        charge_active_budget()
+        return _spec_dict(), "scripted rationale"
+
+    def _review(*_a: Any, **_kw: Any) -> SpecCritique:
+        charge_active_budget()
+        review_calls["n"] += 1
+        if review_calls["n"] <= review_not_ready_rounds:
+            return SpecCritique(ready=False, rationale="tighten entry threshold")
+        return SpecCritique(ready=True, rationale="ok")
+
+    def _revise(*_a: Any, **_kw: Any) -> Any:
+        charge_active_budget()
+        return _revised_spec_dict(), "revised rationale"
+
+    monkeypatch.setattr(orch.design_agent, "run", _run)
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+
+    return 1 + (review_not_ready_rounds + 1) + review_not_ready_rounds
+
+
+def _capture_cycle_budget(monkeypatch) -> List[Any]:
+    """Monkeypatch ``orchestrator_module.LLMCallBudget`` to a wrapper that
+    still constructs the real class but stashes every instance ``run_cycle``
+    creates, so the test can read ``.calls_made`` after the call returns.
+    ``run_cycle`` never exposes the budget on its return value in thread
+    mode (that field is a Temporal-activity-output concept, from
+    ``run_design_attempt_activity``'s ``out["budget_calls"]`` above) -- one
+    instance is created per cycle (``orchestrator.py``, bound for the whole
+    attempt loop via ``use_budget``), so ``captured[0]`` is the whole
+    cycle's real cost.
+    """
+    captured: List[Any] = []
+    real_cls = orchestrator_module.LLMCallBudget
+
+    def _capturing(*args: Any, **kwargs: Any) -> Any:
+        budget = real_cls(*args, **kwargs)
+        captured.append(budget)
+        return budget
+
+    monkeypatch.setattr(orchestrator_module, "LLMCallBudget", _capturing)
+    return captured
+
+
+@pytest.mark.strategy_lab_integration
+def test_cross_attempt_resume_llm_call_count_bounded_to_resumed_portion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attempt 0 converges DESIGN+REVIEW after one real not-ready round, then
+    fails at the synthesis boundary with ``spec_implicated=False``. Attempt 1
+    resumes past DESIGN+REVIEW (``last_resume_determination is
+    PipelineStage.SYNTHESIS`` -- the one resume shape ``run_cycle`` consumes
+    today, per #7315/PR #7469) straight into synthesis, which is free. The
+    cycle's *total* LLM-call cost must equal exactly one design attempt's
+    worth of charges -- proving design+review's cost was not paid again on
+    re-entry, i.e. the re-entry's cost is bounded to the resumed portion of
+    the pipeline rather than the full pipeline.
+    """
+    from investment_team.strategy_lab.checkpoints import PipelineStage
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    from .test_strategy_lab_phase_transitions import _stub_pipeline_for_happy_path
+
+    # Pin both env-derived limits rather than rely on their (generous, but
+    # environment-overridable) defaults: this fixture needs >= 2 review
+    # rounds per attempt and, on the full-restart contrast test, >= 2x this
+    # attempt's charges -- a smaller configured limit would exhaust the
+    # budget or cap review rounds before the forced failure, for reasons
+    # unrelated to re-entry (Codex review finding).
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "20")
+
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+    phase1_calls = _charging_design_stubs(monkeypatch, orch, review_not_ready_rounds=1)
+    captured_budgets = _capture_cycle_budget(monkeypatch)
+
+    real_synthesize = orch._synthesize_initial_code
+
+    def _fail_first_attempt_not_spec_implicated(**kwargs: Any) -> Any:
+        if kwargs["design_attempt"] == 0:
+            raise SpecImplementabilityError(
+                "forced fail at synthesis boundary, not spec-implicated",
+                failure_phase="synthesis",
+                last_spec=kwargs["spec"],
+                last_code="",
+                spec_implicated=False,
+            )
+        return real_synthesize(**kwargs)
+
+    monkeypatch.setattr(orch, "_synthesize_initial_code", _fail_first_attempt_not_spec_implicated)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert orch.last_resume_determination is PipelineStage.SYNTHESIS
+    assert len(captured_budgets) == 1, "run_cycle must bind exactly one budget for the whole cycle"
+    # Bounded to the resumed portion: design+review charged once (attempt
+    # 0), not twice (attempt 0 AND a re-derived attempt 1) -- a full restart
+    # would cost 2 * phase1_calls instead (see the companion test below).
+    assert captured_budgets[0].calls_made == phase1_calls
+    assert record.backtest.status.startswith("failed")
+
+
+@pytest.mark.strategy_lab_integration
+def test_full_restart_reentry_pays_full_pipeline_llm_call_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Companion/contrast case: an otherwise-identical fixture, but the
+    triggering failure declares ``spec_implicated=True`` (every current
+    production raise site's default), so ``run_cycle`` falls back to a full
+    restart on re-entry instead of resuming. Design+review is paid for
+    twice -- once per attempt -- proving the bounded case above is a real,
+    tight regression guard against the unbounded cost this test locks in as
+    the (undesirable, but currently-still-possible for any real raise site
+    today) alternative.
+    """
+    from investment_team.strategy_lab.checkpoints import PipelineStage
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    from .test_strategy_lab_phase_transitions import _stub_pipeline_for_happy_path
+
+    # Pin both env-derived limits -- see the identical note on the bounded-
+    # resume test above; this contrast case needs headroom for TWICE one
+    # attempt's charges (a full restart pays design+review twice).
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "5")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "20")
+
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+    phase1_calls = _charging_design_stubs(monkeypatch, orch, review_not_ready_rounds=1)
+    captured_budgets = _capture_cycle_budget(monkeypatch)
+
+    real_synthesize = orch._synthesize_initial_code
+
+    def _fail_first_attempt_spec_implicated(**kwargs: Any) -> Any:
+        if kwargs["design_attempt"] == 0:
+            raise SpecImplementabilityError(
+                "forced fail at synthesis boundary, spec-implicated",
+                failure_phase="synthesis",
+                last_spec=kwargs["spec"],
+                last_code="",
+                spec_implicated=True,
+            )
+        return real_synthesize(**kwargs)
+
+    monkeypatch.setattr(orch, "_synthesize_initial_code", _fail_first_attempt_spec_implicated)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert orch.last_resume_determination is PipelineStage.SYNTHESIS
+    assert len(captured_budgets) == 1
+    # Full restart: design+review is re-derived (and re-charged) for attempt 1.
+    assert captured_budgets[0].calls_made == 2 * phase1_calls
+    assert record.backtest.status.startswith("failed")

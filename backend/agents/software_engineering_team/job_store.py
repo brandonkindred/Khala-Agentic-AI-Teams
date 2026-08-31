@@ -166,19 +166,5 @@ def list_jobs(
     submit_answers,
     is_waiting_for_answers,
     get_submitted_answers,
+    append_submitted_answers,
 ) = _jsc.make_cachedir_hitl(lambda cd: _client(cd), DEFAULT_CACHE_DIR)
-
-
-def append_submitted_answers(
-    job_id: str,
-    answers: List[Dict[str, Any]],
-    cache_dir: str | Path = DEFAULT_CACHE_DIR,
-) -> None:
-    """cache_dir-bound wrapper for a Temporal-native pause's append-only answer store.
-
-    Not part of the shared ``make_cachedir_hitl`` factory above (that factory's four functions
-    are shared with ``software_engineering_team``'s own job-record contract) — this is
-    coding_team-only, narrower behavior. See ``job_service_client.append_submitted_answers``
-    for the full contract.
-    """
-    _jsc.append_submitted_answers(_client(cache_dir), job_id, answers)
