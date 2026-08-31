@@ -354,15 +354,17 @@ class StrategySpec(BaseModel):
     # Defaults to 1 so every existing spec/caller that omits this field keeps
     # today's implicit one-position-per-symbol behavior exactly — this is a
     # hard backward-compatibility requirement, not just a convenience default.
-    # This field is purely declarative for now: nothing reads it yet, so its
-    # value has no effect on current runtime behavior. The runtime's actual
-    # (and only) concurrency gate today is ``risk_limits.max_open_positions``
-    # (default 10, RiskFilter.can_enter) — this field does NOT derive from or
-    # reconcile with that default; doing so would silently change the
-    # effective default for every spec that omits both fields. Reconciling
-    # the two into a single source of truth is deferred to the follow-up
-    # readiness/sizing validation step, which is where the field gets an
-    # actual consumer.
+    # This field is a declared upper bound on intent; it does NOT itself
+    # derive from ``risk_limits.max_open_positions`` (default 10,
+    # RiskFilter.can_enter) — doing so would silently change the effective
+    # default for every spec that omits both fields. Instead, spec_readiness's
+    # sizing-realizability check (Rule 5) reconciles the two at validation
+    # time by taking ``min(max_concurrent_positions, risk_limits.
+    # max_open_positions)`` as the worst-case concurrency to size against, and
+    # evaluates fixed_fraction/fixed_notional notional against
+    # ``risk_limits.max_gross_leverage`` rather than assuming 1.0x — so a
+    # spec cannot pass readiness with a concurrency/sizing combination the
+    # runtime would actually reject.
     max_concurrent_positions: int = Field(
         default=1,
         ge=1,
@@ -371,11 +373,10 @@ class StrategySpec(BaseModel):
             "Maximum number of positions this spec may hold open "
             "concurrently across target_symbols. Defaults to 1, preserving "
             "today's implicit one-position-per-symbol behavior for any spec "
-            "that omits it. Not yet consumed by any readiness check or the "
-            "trading engine — today's actual runtime concurrency gate is "
-            "``risk_limits.max_open_positions`` (default 10, via "
-            "``RiskFilter.can_enter``); reconciling the two is deferred to "
-            "follow-up work."
+            "that omits it. Reconciled against ``risk_limits."
+            "max_open_positions`` (default 10, via ``RiskFilter.can_enter``) "
+            "by spec_readiness's sizing-realizability check, which sizes "
+            "worst-case notional against the tighter of the two."
         ),
     )
     # Phase 3: risk_limits is validated at spec construction time.  Dicts

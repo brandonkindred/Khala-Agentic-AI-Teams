@@ -568,6 +568,69 @@ def test_rule5_fixed_notional_over_committed_by_concurrency_is_critical() -> Non
     assert matches, _critical(results)
 
 
+def test_rule5_concurrency_reconciled_with_max_open_positions() -> None:
+    """A large ``max_concurrent_positions`` must be capped by the runtime's
+    actual concurrency gate, ``risk_limits.max_open_positions``, not used
+    raw. 20 declared concurrent positions at 0.1 fraction would be 2.0x
+    equity — but max_open_positions=5 caps the worst case at 5 × 0.1 = 0.5x,
+    which fits, so no critical should fire."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.1),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+        max_concurrent_positions=20,
+        risk_limits={
+            "max_position_pct": 15,
+            "max_drawdown_pct": 10,
+            "max_open_positions": 5,
+        },
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "fixed_fraction" in c]
+    assert not matches, matches
+
+
+def test_rule5_fixed_fraction_respects_configured_leverage_above_one() -> None:
+    """A ``risk_limits.max_gross_leverage`` above 1.0 must raise the equity
+    ceiling accordingly — 0.6 fraction × 2 concurrent = 1.2x equity, which
+    would have failed under a hard-coded 1.0x cap but fits under a
+    configured 1.5x max_gross_leverage."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.6),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+        max_concurrent_positions=2,
+        risk_limits={
+            "max_position_pct": 60,
+            "max_drawdown_pct": 10,
+            "max_gross_leverage": 1.5,
+        },
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "fixed_fraction" in c]
+    assert not matches, matches
+
+
+def test_rule5_fixed_fraction_respects_configured_leverage_below_one() -> None:
+    """A ``risk_limits.max_gross_leverage`` below 1.0 must tighten the
+    equity ceiling accordingly — a single 0.6 fraction order fits under the
+    default 1.0x cap but must fail under a configured 0.5x
+    max_gross_leverage."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.6),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+        risk_limits={
+            "max_position_pct": 60,
+            "max_drawdown_pct": 10,
+            "max_gross_leverage": 0.5,
+        },
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "fixed_fraction" in c and "max_gross_leverage" in c]
+    assert matches, _critical(results)
+
+
 def test_rule5_nan_price_fails_closed() -> None:
     """A provider returning NaN must trip Rule 5 — fail closed."""
     spec = _spec(
