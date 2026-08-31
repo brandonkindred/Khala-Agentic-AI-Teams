@@ -522,6 +522,26 @@ def test_ensure_repo_clone_fetch_success_on_existing_checkout(tmp_path):
     assert err is None
 
 
+def test_ensure_repo_clone_fetch_success_on_existing_worktree_checkout(tmp_path):
+    """A git worktree checkout's `.git` is a FILE (a `gitdir:` pointer to the
+    real one elsewhere), not a directory. An `.is_dir()`-only existing-
+    checkout test would miss this, fall through to the clone branch, and
+    attempt `git clone` into a non-empty directory — which fails. Must be
+    recognized and fetched like an ordinary checkout instead."""
+    repo = tmp_path / "checkout"
+    repo.mkdir(parents=True)
+    (repo / ".git").write_text("gitdir: /elsewhere/.git/worktrees/checkout\n")
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="https://github.com/acme/widget\n", stderr=""
+    )
+    fetch_ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+    with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]) as mock_run:
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is None
+    # Fetched (the existing-checkout branch), never attempted a clone.
+    assert mock_run.call_count == 2
+
+
 def test_ensure_repo_clone_fetch_targets_origin_only(tmp_path):
     """Never "--all": a fork PR's branch prep can register a temporary named
     remote (khala-pr-head) that persists on a long-lived operator-pinned

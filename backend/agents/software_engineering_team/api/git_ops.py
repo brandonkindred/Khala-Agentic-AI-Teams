@@ -169,12 +169,23 @@ def _clear_active_issue(repo_path: str) -> None:
 
 
 def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
-    """Remove the marker only when it belongs to this job's issue.
+    """Remove the marker only when it belongs to this job's work item.
 
-    Two different issues may legitimately run against the same checkout (the
-    duplicate guard is per-issue); an older job publishing after a newer job
-    prepped must not unset the newer job's marker, or a crash of the newer
-    job would lose its development-work attribution.
+    Despite the name, ``issue_number`` is not restricted to GitHub issues:
+    the address-comments (PR remediation) flow calls this with a PR number
+    too, matching how it also writes the SAME marker with the PR number
+    during branch preparation (see ``_prepare_issue_branch``). This is safe
+    because GitHub issues and pull requests share ONE number sequence per
+    repository — a given number can never simultaneously be both an issue
+    and a PR there — so the marker's value alone still uniquely identifies
+    one work item regardless of which kind it is. The name is a historical
+    holdover from before PR remediation existed, not a real behavioral
+    restriction.
+
+    Two different issues (or PRs) may legitimately run against the same
+    checkout (the duplicate guard is per-work-item); an older job publishing
+    after a newer job prepped must not unset the newer job's marker, or a
+    crash of the newer job would lose its development-work attribution.
 
     Postconditions:
         - The marker is unset iff it equaled ``issue_number``; any other
@@ -207,6 +218,46 @@ def _is_deletable_ephemeral_checkout(target: Path) -> bool:
         and (is_per_issue_dir(target.name) or is_per_pr_dir(target.name))
         and (target / ".git").exists()
     )
+
+
+def _checkout_remote_matches(repo_path: str, owner: str, repo: str) -> bool:
+    """True iff ``repo_path``'s ``origin`` remote points at ``owner/repo``.
+
+    An operator-pinned ``repo_path`` is only validated as "a git checkout"
+    (``(path / ".git").exists()``) elsewhere — that alone doesn't rule out an
+    existing checkout of a COMPLETELY DIFFERENT repository, which would let
+    this repo's PR remediation plan get committed and pushed to that unrelated
+    repository's ``origin`` if the token happens to have access to it. This
+    compares the checkout's actual remote against the requested coordinates
+    before that can happen.
+
+    Preconditions:
+        - ``repo_path`` names an existing directory with a ``.git`` entry
+          (checked by the caller first — this issues a real git subprocess
+          call and is not itself a "is this a checkout at all" check).
+    Postconditions:
+        - Returns True iff ``git remote get-url origin`` succeeds and its
+          last two ``/``-separated path segments equal ``owner``/``repo``
+          case-insensitively (GitHub owner/repo names are case-insensitive),
+          after stripping a trailing ``.git`` — a substring match would give
+          false positives (``acme/widget`` inside ``acme/widget-extra``).
+          Returns False on any git failure (no ``origin`` remote, git not
+          installed, timeout) — an unverifiable remote is treated the same
+          as a mismatched one, never assumed to match.
+    """
+    rc, out = _git(repo_path, "remote", "get-url", "origin", timeout=10.0)
+    if rc != 0:
+        return False
+    cleaned = out.strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[: -len(".git")]
+    # Normalize the scp-style "git@host:owner/repo" form to use "/" throughout
+    # so both URL styles split into path segments the same way.
+    cleaned = cleaned.replace(":", "/")
+    segments = [s for s in cleaned.split("/") if s]
+    if len(segments) < 2:
+        return False
+    return segments[-2].casefold() == owner.casefold() and segments[-1].casefold() == repo.casefold()
 
 
 def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:

@@ -284,13 +284,23 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
           hardcoded ``"completed"``, which would misreport a partial run).
     Raises:
         ValueError: ``request`` is missing any field in
-            ``_PR_PUBLISH_REQUIRED_FIELDS``.
+            ``_PR_PUBLISH_REQUIRED_FIELDS``, or ``pr_number`` is not a
+            positive integer.
         RuntimeError: The git fast-forward or the push to ``remote`` fails.
     """
     token = _require_activity_github_token(request)
     missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]
     if missing:
         raise ValueError(f"github_pr_publish_activity missing required fields: {missing!r}")
+    pr_number = request["pr_number"]
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1:
+        # The truthiness check above accepts any non-empty value, including a
+        # string — which would later get interpolated straight into
+        # status_text below, producing a nonsensical "Published fix to PR
+        # #abc" rather than a clear rejection here.
+        raise ValueError(
+            f"github_pr_publish_activity requires a positive integer pr_number, got {pr_number!r}"
+        )
 
     from software_engineering_team.api import coding_team_main as _main
     from software_engineering_team.models import JobStatus

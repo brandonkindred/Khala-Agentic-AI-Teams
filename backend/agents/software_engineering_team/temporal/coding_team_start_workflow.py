@@ -102,6 +102,12 @@ def execute_coding_team_workflow(
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
             dict, or ``github`` contains a ``"token"`` key.
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result.
+        Exception: Any other exception ``execute_workflow_sync`` itself raises
+            (a Temporal RPC error, the workflow's own failure exception, a
+            cancellation, etc.) propagates unchanged — this function does not
+            catch or wrap it. Callers such as the per-comment background
+            worker must be prepared for these, not just the two explicit
+            raises above.
     """
     if not job_id:
         raise ValueError("execute_coding_team_workflow requires a non-empty job_id")

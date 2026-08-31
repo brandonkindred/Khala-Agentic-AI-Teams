@@ -229,6 +229,16 @@ class CommentOutcome(BaseModel):
         "resolved), 'false_positive', 'not_an_issue', or 'failed'."
     )
     detail: str = ""
+    left_unpublished_work: bool = Field(
+        default=False,
+        description=(
+            "True iff this comment's implementation was dispatched and may have "
+            "committed work to the shared `development` branch that never reached a "
+            "clean publish — see `_run_address_comments`'s use of this flag to stop "
+            "the run rather than let a later comment's branch preparation treat that "
+            "leftover, unpublished state as same-work continuation."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +515,53 @@ def _thread_history_unchanged(
     return [(m.id, m.body) for m in triaged] == [(m.id, m.body) for m in fresh]
 
 
+def _bounded_cited_excerpt(cited_code: str, line: Optional[int]) -> str:
+    """Bound ``cited_code`` to ``_MAX_CITED_CODE_CHARS``, centered on ``line``.
+
+    A comment on a large file whose cited line falls beyond the first
+    ``_MAX_CITED_CODE_CHARS`` characters would otherwise have its actual
+    referenced code silently dropped by a from-the-start truncation, while
+    triage/planning still runs (and can still act — replying to and resolving
+    a real thread) on a verdict grounded on unrelated code.
+
+    Preconditions:
+        - ``line`` is 1-based (GitHub's convention) or ``None`` for a
+          file-level comment.
+    Postconditions:
+        - When ``cited_code`` already fits within ``_MAX_CITED_CODE_CHARS``,
+          returns it unchanged. Otherwise returns a ``_MAX_CITED_CODE_CHARS``-
+          bounded window of whole lines, centered as closely as possible on
+          ``line`` (or, when ``line`` is ``None``, the first
+          ``_MAX_CITED_CODE_CHARS`` characters — the prior, line-agnostic
+          behavior — since there is no specific line to center on).
+    """
+    if len(cited_code) <= _MAX_CITED_CODE_CHARS:
+        return cited_code
+    if line is None:
+        return cited_code[:_MAX_CITED_CODE_CHARS]
+    lines = cited_code.splitlines(keepends=True)
+    target = max(0, min(line - 1, len(lines) - 1))
+    # Expand outward from the target line, alternating forward/backward, until
+    # the budget is spent — keeps whole lines only, so the excerpt is never
+    # cut mid-line.
+    start = end = target
+    total = len(lines[target])
+    while total < _MAX_CITED_CODE_CHARS and (start > 0 or end < len(lines) - 1):
+        if start > 0:
+            start -= 1
+            total += len(lines[start])
+            if total > _MAX_CITED_CODE_CHARS:
+                start += 1
+                break
+        if end < len(lines) - 1:
+            end += 1
+            total += len(lines[end])
+            if total > _MAX_CITED_CODE_CHARS:
+                end -= 1
+                break
+    return "".join(lines[start : end + 1])
+
+
 def _format_comment_prompt_context(
     comment: ReviewComment,
     cited_code: str,
@@ -530,7 +587,7 @@ def _format_comment_prompt_context(
         f"## Discussion thread (oldest to newest; {thread_history_note})\n"
         f"{_format_thread_history(thread_history)}\n\n"
         "## Cited file content (may be empty if unavailable)\n"
-        f"{cited_code[:_MAX_CITED_CODE_CHARS] if cited_code else '(unavailable)'}\n\n"
+        f"{_bounded_cited_excerpt(cited_code, comment.line) if cited_code else '(unavailable)'}\n\n"
     )
 
 
@@ -657,7 +714,12 @@ def _plan_resolution(
                 plan.chosen_candidate_index,
                 top_index,
             )
-    # Rank candidates best-first so the chosen plan corresponds to the top score.
+    # Rank candidates best-first for display/logging only — this reorders
+    # candidate_solutions but does NOT touch chosen_plan or
+    # chosen_candidate_index. chosen_plan is the model's own independent
+    # free-text plan and remains the sole source of truth for what
+    # _dispatch_implementation actually implements; see the mismatch warning
+    # above for when the two disagree.
     plan.candidate_solutions.sort(key=lambda c: c.score, reverse=True)
     return plan
 
@@ -902,7 +964,7 @@ def _thread_has_new_reviewer_feedback(
           before the implementation workflow has already been dispatched and
           pushed a fix for withdrawn feedback, so this must be caught BEFORE
           dispatch too, not just at the reply step. Returns False only when
-          the thread is found, still open, and none of (a)/(b) hold. Fails
+          the thread is found, still open, and none of (a)/(b)/(c)/(d) hold. Fails
           OPEN (returns True) on any error: resolving a thread whose
           freshness could not be verified risks silently hiding real
           feedback, which is worse than a redundant re-check on the next run.
@@ -1186,6 +1248,37 @@ def _clear_waiting_for_review(client: GitHubClient, owner: str, repo: str, pr_nu
         )
 
 
+def _job_cancelled(job_id: str) -> bool:
+    """Best-effort check: has this job been cancelled through the normal job APIs?
+
+    An operator can cancel an address-comments parent job via the generic
+    ``POST /api/jobs/{team}/{job_id}/cancel`` route (or the SE team's own
+    cancel endpoint), which sets the job's ``status`` to ``"cancelled"`` —
+    but the address-comments background loop otherwise never re-reads its
+    own job's status while running, so a cancellation request would
+    otherwise go completely unnoticed: dispatching further work, then having
+    its final terminal-status write silently overwrite "cancelled" with a
+    completion status.
+
+    Postconditions:
+        - Returns True iff the job's current status is exactly
+          ``"cancelled"``. Returns False (never raises) on a lookup failure —
+          this is advisory, checked at multiple points in the run, so a
+          transient read failure degrades to proceeding rather than
+          incorrectly treating an uncancelled run as cancelled.
+    """
+    try:
+        job = _main.get_job(job_id)
+    except Exception as e:  # noqa: BLE001 - best-effort; a failed check must not block
+        logger.warning(
+            "address-comments: could not check job %s for cancellation: %s",
+            job_id,
+            scrub_token_from_text(str(e)),
+        )
+        return False
+    return bool(job) and job.get("status") == JobStatus.CANCELLED.value
+
+
 # ---------------------------------------------------------------------------
 # Per-comment driver
 # ---------------------------------------------------------------------------
@@ -1373,17 +1466,38 @@ def _handle_comment(
             )
             return base
 
-        child_job_id = _dispatch_implementation(
-            job_id,
-            request,
-            comment,
-            plan,
-            pr_head,
-            pr_base,
-            pr_url,
-            pr_remote,
-            token,
-        )
+        try:
+            child_job_id = _dispatch_implementation(
+                job_id,
+                request,
+                comment,
+                plan,
+                pr_head,
+                pr_base,
+                pr_url,
+                pr_remote,
+                token,
+            )
+        except RuntimeError as e:
+            # Usually a non-"completed" workflow result (see
+            # _dispatch_implementation's own postcondition), meaning a child
+            # job row and Temporal workflow WERE created and may have
+            # committed work to the shared `development` branch that never
+            # reached a clean publish — every comment's branch preparation
+            # writes/reads the SAME `khala.active-issue` marker (the bare PR
+            # number) for every comment of this PR, so a LATER comment's
+            # branch prep would otherwise treat this leftover, unpublished
+            # state as same-work continuation and could publish it alongside
+            # (or instead of) its own fix. (The other raise path — the PR's
+            # fork was deleted, so no remote could be resolved — creates no
+            # job at all and poses no such risk, but is flagged the same way
+            # here too: erring toward the safe/conservative direction for a
+            # rare edge case is cheaper than distinguishing it.) Flagging
+            # this (see left_unpublished_work) lets the caller stop the run
+            # here rather than risk it.
+            base.detail = scrub_token_from_text(str(e))
+            base.left_unpublished_work = True
+            return base
         # `_dispatch_implementation` can block for a long time (an implementation
         # workflow, possibly reattaching across hours), and by the time it returns
         # the child workflow has ALREADY published to the PR's branch — that
@@ -1487,9 +1601,30 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
           a continuous beat ``_running_review_for_pr`` would see this job's
           heartbeat go stale and admit a duplicate run on the same per-PR
           checkout while this one is still legitimately working.
+        - Checks for cancellation (via :func:`_job_cancelled`, an operator
+          using the normal job APIs) before starting, before the resolve-only
+          retry step, before each comment's implementation is dispatched, and
+          once more before the terminal status is written — stopping further
+          work at whichever checkpoint finds it cancelled and, at every one,
+          leaving the job's own ``"cancelled"`` status as the authority
+          rather than overwriting it with a completion status. Does NOT
+          preempt a child implementation workflow already in flight when
+          cancellation is detected — only the address-comments run's own
+          not-yet-dispatched work stops; an already-dispatched child keeps
+          running to its own conclusion.
         - NEVER raises — the daemon thread cannot leave a job wedged.
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
+    if _job_cancelled(job_id):
+        # An operator can cancel this job (via the normal job APIs) before
+        # this background hook even starts running. Writing status="running"
+        # unconditionally below would silently undo that cancellation —
+        # check first and skip the whole run rather than overwrite it.
+        logger.info(
+            "address-comments: job %s was already cancelled before starting; nothing to do",
+            job_id,
+        )
+        return
     try:
         _main.update_job(
             job_id,
@@ -1560,8 +1695,16 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             # a still-failing retry just leaves the thread open for the next
             # run to retry again.
             retry_resolve_ok = True
-            pr_closed_mid_run = False
-            if retry_resolve_threads:
+            run_stopped_early = False
+            if _job_cancelled(job_id):
+                # An operator can cancel this job through the normal job APIs
+                # at any point — check before this run does anything mutating
+                # (resolving threads, dispatching implementations) rather
+                # than finding out only at the very end, if at all.
+                logger.info("address-comments: job %s was cancelled; stopping before any work", job_id)
+                retry_resolve_ok = False
+                run_stopped_early = True
+            if retry_resolve_threads and not run_stopped_early:
                 # This run's PR snapshot at the top of the block can be stale
                 # by the time this loop runs (`_unresolved_comments` above can
                 # take a while) — a PR that closed in that gap must not have
@@ -1591,9 +1734,9 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                             "y" if len(retry_resolve_threads) == 1 else "ies",
                         )
                         retry_resolve_ok = False
-                        pr_closed_mid_run = True
+                        run_stopped_early = True
 
-            if not pr_closed_mid_run:
+            if not run_stopped_early:
                 for thread_id, khala_reply_id in retry_resolve_threads:
                     if _thread_has_new_reviewer_feedback(
                         client,
@@ -1620,6 +1763,21 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
 
             outcomes: List[CommentOutcome] = []
             for comment in unresolved:
+                if run_stopped_early:
+                    # Set by the retry-resolve section above (cancellation or
+                    # PR closure detected before this loop even started) —
+                    # skip straight through without a wasted PR-state
+                    # refresh, matching the mid-loop break below.
+                    break
+                if _job_cancelled(job_id):
+                    logger.info(
+                        "address-comments: job %s was cancelled; stopping before comment %s "
+                        "and any comment after it",
+                        job_id,
+                        comment.id,
+                    )
+                    run_stopped_early = True
+                    break
                 # Refresh PR metadata before each comment: an earlier comment's
                 # real-issue workflow may have already pushed a new head commit,
                 # and grounding this comment's triage on the stale `pr.head_sha`
@@ -1655,7 +1813,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                             pr.state,
                             comment.id,
                         )
-                        pr_closed_mid_run = True
+                        run_stopped_early = True
                         break
                 outcome = _handle_comment(
                     client,
@@ -1672,8 +1830,28 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     token,
                 )
                 outcomes.append(outcome)
+                if outcome.left_unpublished_work:
+                    # This comment's implementation may have left partial,
+                    # unpublished commits on the shared `development` branch
+                    # (see CommentOutcome.left_unpublished_work). Every
+                    # comment of this PR shares the SAME `khala.active-issue`
+                    # marker, so a LATER comment's branch preparation would
+                    # otherwise treat that leftover state as same-work
+                    # continuation and could publish it alongside its own
+                    # fix. Stop here rather than risk that — the remaining
+                    # comments are left unaddressed (not recorded as
+                    # failures; nothing was attempted for them) for a future
+                    # run to pick up once this leftover state is resolved.
+                    logger.info(
+                        "address-comments: comment %s's implementation may have left "
+                        "unpublished work on the shared development branch; stopping "
+                        "before any comment after it",
+                        comment.id,
+                    )
+                    run_stopped_early = True
+                    break
 
-            if (unresolved or retry_resolve_threads) and not pr_closed_mid_run:
+            if (unresolved or retry_resolve_threads) and not run_stopped_early:
                 # The per-iteration state check above catches the PR closing
                 # BETWEEN comments, but not while the FINAL (or only)
                 # comment's own `_handle_comment` call was still running —
@@ -1705,7 +1883,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                             pr_number,
                             final_pr.state,
                         )
-                        pr_closed_mid_run = True
+                        run_stopped_early = True
 
             # Every comment handled without failure AND every retry-resolve
             # succeeded: nothing is still owed to the reviewer, AS FAR AS THIS
@@ -1716,7 +1894,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             # potentially wrong, e.g. reopened-and-repushed) for a closed PR.
             all_succeeded = (
                 retry_resolve_ok
-                and not pr_closed_mid_run
+                and not run_stopped_early
                 and all(o.outcome != "failed" for o in outcomes)
             )
             if all_succeeded:
@@ -1795,32 +1973,47 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         if all_succeeded and request.cleanup_checkout_on_success:
             _main._cleanup_issue_checkout(request.repo_path)
 
-        summary = _build_summary(outcomes)
-        # `all_succeeded` can be False for reasons that never produce a failed
-        # CommentOutcome at all (a resolve-only retry failed, the final re-list
-        # found new feedback, thread state became unverifiable, or the PR
-        # closed mid-run) — the label/cleanup above are already correctly
-        # skipped for those, but the terminal status must say so too, or a
-        # caller polling job status sees "completed" with no indication that
-        # work is still owed and another run is needed.
-        terminal_status = (
-            JobStatus.COMPLETED.value if all_succeeded else JobStatus.COMPLETED_WITH_FAILURES.value
-        )
-        _main.update_job(
-            job_id,
-            status=terminal_status,
-            phase="completed",
-            status_text=summary["status_text"],
-            github_pr_url=pr.html_url,
-            review_summary=summary,
-        )
-        _main.update_review(
-            job_id,
-            status=terminal_status,
-            status_text=summary["status_text"],
-            review_summary=summary,
-            completed=True,
-        )
+        if _job_cancelled(job_id):
+            # Cancellation can arrive during the LAST comment's own
+            # (possibly long-running) _handle_comment call, after the last
+            # per-iteration check above — with no further loop iteration to
+            # observe it. Overwriting an already-cancelled job's status with
+            # a completion status here would silently undo the cancellation
+            # (and the label/cleanup above may already have acted as if this
+            # run succeeded). Leave the job's own cancelled status as the
+            # authority instead of writing over it.
+            logger.info(
+                "address-comments: job %s was cancelled; leaving its status as-is "
+                "rather than overwriting with a completion status",
+                job_id,
+            )
+        else:
+            summary = _build_summary(outcomes)
+            # `all_succeeded` can be False for reasons that never produce a failed
+            # CommentOutcome at all (a resolve-only retry failed, the final re-list
+            # found new feedback, thread state became unverifiable, or the PR
+            # closed mid-run) — the label/cleanup above are already correctly
+            # skipped for those, but the terminal status must say so too, or a
+            # caller polling job status sees "completed" with no indication that
+            # work is still owed and another run is needed.
+            terminal_status = (
+                JobStatus.COMPLETED.value if all_succeeded else JobStatus.COMPLETED_WITH_FAILURES.value
+            )
+            _main.update_job(
+                job_id,
+                status=terminal_status,
+                phase="completed",
+                status_text=summary["status_text"],
+                github_pr_url=pr.html_url,
+                review_summary=summary,
+            )
+            _main.update_review(
+                job_id,
+                status=terminal_status,
+                status_text=summary["status_text"],
+                review_summary=summary,
+                completed=True,
+            )
     except Exception as e:  # noqa: BLE001 - the hook must never raise
         error = f"Failed to address comments: {scrub_token_from_text(str(e))}"
         logger.exception("address-comments job %s failed: %s", job_id, error)

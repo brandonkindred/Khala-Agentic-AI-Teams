@@ -669,6 +669,23 @@ class TestAbsoluteUrl:
         client = _client_with(lambda _req: httpx.Response(200, json={}))
         assert client._absolute_url("repos/o/r") == f"{client._base_url}/repos/o/r"  # type: ignore[attr-defined]
 
+    def test_graphql_url_unchanged_for_github_cloud(self) -> None:
+        """github.com Cloud's REST base (api.github.com, no "/api/v3" suffix)
+        already joins "/graphql" onto the same host correctly — no special
+        case needed there."""
+        client = GitHubClient(token="t", sleep=lambda _s: None)
+        assert client._absolute_url("/graphql") == "https://api.github.com/graphql"  # type: ignore[attr-defined]
+
+    def test_graphql_url_derived_separately_for_ghes(self) -> None:
+        """GitHub Enterprise Server's REST base is "https://host/api/v3", but
+        GHES exposes GraphQL at "https://host/api/graphql" — not
+        "https://host/api/v3/graphql". Naively joining "/graphql" onto the
+        REST base would target a URL GHES doesn't serve GraphQL from."""
+        client = GitHubClient(
+            token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None
+        )
+        assert client._absolute_url("/graphql") == "https://ghes.example.com/api/graphql"  # type: ignore[attr-defined]
+
 
 class TestClientIssueCommentMarker:
     def test_add_issue_comment_appends_khala_marker(self) -> None:
@@ -2653,7 +2670,9 @@ class TestBusyCheckoutGuard:
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
 
-    def test_running_pr_remediation_sibling_blocks_issue_admission(self, patched_app) -> None:
+    def test_running_pr_remediation_sibling_blocks_issue_admission(
+        self, patched_app, monkeypatch
+    ) -> None:
         """The exact cross-route race this admission check exists for: an
         address-comments remediation job (identified by `pr_number`, not
         `issue_number`, in its github_context) already running on a shared,
@@ -2661,6 +2680,7 @@ class TestBusyCheckoutGuard:
         an unrelated issue on that same checkout."""
         from software_engineering_team.job_store import create_job, update_job
 
+        api = patched_app["api"]
         repo_path = patched_app["repo_path"]
         create_job(job_id="pr-sibling", repo_path=repo_path, plan_input=None)
         update_job(
@@ -2668,6 +2688,15 @@ class TestBusyCheckoutGuard:
             status="running",
             github_context={"owner": "o", "repo": "r", "pr_number": 42},
         )
+        # Same isolation as the sibling tests above: if the admission guard
+        # ever fails to block, this must fail cleanly on the status-code
+        # assertion below rather than actually run the real issue workflow
+        # against the sibling's working tree.
+        prep_calls: list = []
+        monkeypatch.setattr(
+            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
+        )
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
         jobs_before = len(patched_app["jobs"].list_jobs())
@@ -2676,6 +2705,8 @@ class TestBusyCheckoutGuard:
         assert "pr-sibling" in resp.json()["detail"]
         assert "PR #42" in resp.json()["detail"]
         assert len(patched_app["jobs"].list_jobs()) == jobs_before
+        # The sibling's own working tree was never touched.
+        assert prep_calls == []
 
 
 class TestPublishWindowLiveness:

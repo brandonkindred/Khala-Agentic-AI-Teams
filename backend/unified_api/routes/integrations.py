@@ -32,7 +32,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from shared.concurrency import flock_lock
 from shared.postgres import bounded_probe
@@ -1457,7 +1457,7 @@ class RunGitHubIssueResponse(BaseModel):
     issue_number: int
     issue_url: str
     status: str = "pending"
-    message: str = "Job started. Poll GET /api/coding-team/status/{job_id} for progress."
+    message: str = "Job started. Poll the job status endpoint for progress."
 
 
 class GitHubPullRequestItem(BaseModel):
@@ -1491,7 +1491,7 @@ class RunPrReviewResponse(BaseModel):
     pr_number: int
     pr_url: str
     status: str = "pending"
-    message: str = "Review started. Poll GET /api/coding-team/status/{job_id} for progress."
+    message: str = "Review started. Poll the job status endpoint for progress."
     # ISO-8601 server-clock start time, forwarded from the coding team so the UI can
     # compute a live review duration on server timestamps at both ends. Optional.
     created_at: str | None = None
@@ -1522,7 +1522,7 @@ class AddressPrCommentsResponse(BaseModel):
     pr_url: str
     unresolved_comment_count: int = 0
     status: str = "pending"
-    message: str = "Addressing unresolved comments. Poll GET /api/coding-team/status/{job_id} for progress."
+    message: str = "Addressing unresolved comments. Poll the job status endpoint for progress."
     created_at: str | None = None
 
 
@@ -2665,7 +2665,13 @@ def _ensure_repo_clone(
 
     def _clone_or_fetch() -> str | None:
         try:
-            if path.is_dir() and (path / ".git").is_dir():
+            # `.git` is a DIRECTORY for an ordinary clone but a FILE for a git
+            # worktree checkout (it contains a `gitdir:` pointer to the real
+            # one elsewhere) — an `.is_dir()`-only check rejects a perfectly
+            # valid worktree checkout, falling through to the clone branch
+            # below and attempting `git clone` into a non-empty directory,
+            # which fails. `.exists()` accepts both shapes.
+            if path.is_dir() and (path / ".git").exists():
                 url_check = subprocess.run(
                     ["git", "-C", repo_path, "remote", "get-url", "origin"],
                     capture_output=True,
@@ -2958,10 +2964,14 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         )
     finally:
         if lock_held:
-            # Pass the ACTIVE exception info (not a hardcoded None, None, None) so this
-            # manual __exit__ call is semantically equivalent to a real `with` block —
-            # matters if lock_cm is ever swapped for a context manager that inspects or
-            # reacts to exception info (e.g. to suppress a specific error).
+            # Pass the ACTIVE exception info (not a hardcoded None, None, None)
+            # so a context manager that inspects it (e.g. to log what error was
+            # in flight) sees the real one. This is NOT a full semantic
+            # replacement for a real `with` block, though: a `with` statement
+            # also honors __exit__'s return value to decide whether to
+            # suppress the active exception, and this call discards that
+            # return value — lock_cm.__exit__ returning True here would NOT
+            # suppress anything, unlike a real `with`.
             exc_type, exc_val, exc_tb = sys.exc_info()
             await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
     try:
@@ -2972,7 +2982,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             status=data.get("status", "pending"),
             message=data.get("message", ""),
         )
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, ValidationError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
@@ -3052,7 +3062,7 @@ async def _start_pr_review(
             message=data.get("message", ""),
             created_at=data.get("created_at"),
         )
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, ValidationError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
@@ -3221,10 +3231,14 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
         )
     finally:
         if lock_held:
-            # Pass the ACTIVE exception info (not a hardcoded None, None, None) so this
-            # manual __exit__ call is semantically equivalent to a real `with` block —
-            # matters if lock_cm is ever swapped for a context manager that inspects or
-            # reacts to exception info (e.g. to suppress a specific error).
+            # Pass the ACTIVE exception info (not a hardcoded None, None, None)
+            # so a context manager that inspects it (e.g. to log what error was
+            # in flight) sees the real one. This is NOT a full semantic
+            # replacement for a real `with` block, though: a `with` statement
+            # also honors __exit__'s return value to decide whether to
+            # suppress the active exception, and this call discards that
+            # return value — lock_cm.__exit__ returning True here would NOT
+            # suppress anything, unlike a real `with`.
             exc_type, exc_val, exc_tb = sys.exc_info()
             await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
     try:
@@ -3237,7 +3251,7 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
             message=data.get("message", ""),
             created_at=data.get("created_at"),
         )
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, ValidationError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",

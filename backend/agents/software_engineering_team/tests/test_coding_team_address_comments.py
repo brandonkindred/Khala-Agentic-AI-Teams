@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import subprocess
 from dataclasses import replace
 from typing import Any, Callable, Optional
 
@@ -392,6 +393,9 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
     job_updates: list[dict[str, Any]] = []
     child_jobs: list[dict[str, Any]] = []
     executions: list[dict[str, Any]] = []
+    # Not cancelled by default — a test simulating cancellation flips this
+    # (e.g. `job_state["status"] = "cancelled"`).
+    job_state: dict[str, Any] = {"status": "running"}
 
     monkeypatch.setattr(_main, "GitHubClient", lambda **_kw: fake)
     monkeypatch.setattr(_main, "update_job", lambda job_id, **kw: job_updates.append(kw))
@@ -402,6 +406,11 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
     # heartbeats continuously (see the P1 fix for the admission-guard race), so
     # every test that reaches it would otherwise pay a real network call.
     monkeypatch.setattr(_main, "heartbeat_job", lambda job_id: None)
+    # The real get_job also hits the job service — _job_cancelled checks it at
+    # multiple points in the run now, so every test would otherwise pay a real
+    # (and, against the deliberately-unreachable test JOB_SERVICE_URL, slow
+    # and retried) network call for each check.
+    monkeypatch.setattr(_main, "get_job", lambda job_id: dict(job_state))
 
     def _execute(*args, **kwargs):
         executions.append({"args": args, "kwargs": kwargs})
@@ -416,6 +425,7 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
         "job_updates": job_updates,
         "child_jobs": child_jobs,
         "executions": executions,
+        "job_state": job_state,
         "request": AddressCommentsRequest(owner="o", repo="r", repo_path="/tmp/x", pr_number=7),
     }
 
@@ -745,6 +755,54 @@ class TestPrHeadRemote:
             ac._pr_head_remote("o", "r", fake.pr, web_host="ghes.example.com")
             == "https://ghes.example.com/contributor/r.git"
         )
+
+
+# ---------------------------------------------------------------------------
+# _bounded_cited_excerpt
+# ---------------------------------------------------------------------------
+
+
+class TestBoundedCitedExcerpt:
+    def test_returns_unchanged_when_already_within_budget(self, address_env) -> None:
+        ac = address_env["ac"]
+        text = "line1\nline2\nline3\n"
+        assert ac._bounded_cited_excerpt(text, 2) == text
+
+    def test_falls_back_to_from_start_when_line_is_none(self, address_env) -> None:
+        """A file-level comment has no specific line to center on — keep the
+        prior, line-agnostic from-the-start behavior."""
+        ac = address_env["ac"]
+        text = "x" * (ac._MAX_CITED_CODE_CHARS + 500)
+        assert ac._bounded_cited_excerpt(text, None) == text[: ac._MAX_CITED_CODE_CHARS]
+
+    def test_centers_excerpt_on_cited_line_beyond_the_char_budget(self, address_env) -> None:
+        """The cited line lies well past the first _MAX_CITED_CODE_CHARS
+        characters — a from-the-start truncation would drop it entirely. The
+        excerpt must actually include the cited line's own content."""
+        ac = address_env["ac"]
+        # Each line is 10 chars ("lineNNNNN\n"); the file is far larger than
+        # the char budget, so a from-the-start truncation would never reach
+        # a line deep in the file.
+        total_lines = (ac._MAX_CITED_CODE_CHARS // 10) * 3
+        lines = [f"line{i:05d}\n" for i in range(total_lines)]
+        text = "".join(lines)
+        cited_line_number = total_lines - 5  # near the end, 1-based
+        cited_line_text = lines[cited_line_number - 1]
+
+        excerpt = ac._bounded_cited_excerpt(text, cited_line_number)
+
+        assert cited_line_text in excerpt
+        assert len(excerpt) <= ac._MAX_CITED_CODE_CHARS
+
+    def test_excerpt_never_exceeds_budget_for_line_near_file_start(self, address_env) -> None:
+        ac = address_env["ac"]
+        total_lines = (ac._MAX_CITED_CODE_CHARS // 10) * 3
+        text = "".join(f"line{i:05d}\n" for i in range(total_lines))
+
+        excerpt = ac._bounded_cited_excerpt(text, 1)
+
+        assert "line00000\n" in excerpt
+        assert len(excerpt) <= ac._MAX_CITED_CODE_CHARS
 
 
 # ---------------------------------------------------------------------------
@@ -1314,6 +1372,103 @@ class TestRunAddressComments:
         assert len(refs_used) == 2
         assert "sha1" not in refs_used
         assert refs_used[0] != refs_used[1]
+
+    def test_skips_all_work_when_job_already_cancelled(self, address_env, monkeypatch) -> None:
+        """An operator can cancel this job through the normal job APIs (e.g.
+        POST /api/jobs/{team}/{job_id}/cancel) at any point. If already
+        cancelled before this run does anything, no comment should be
+        dispatched, no thread resolved, and the terminal status must not be
+        overwritten with a completion status."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+        address_env["job_state"]["status"] = "cancelled"
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert address_env["child_jobs"] == []  # no implementation ever dispatched
+        assert fake.replies == []
+        assert fake.resolved == []
+        assert fake.labels_set == []
+        # The cancelled status must not be overwritten with a completion status.
+        assert address_env["job_updates"] == []
+
+    def test_stops_mid_loop_when_job_is_cancelled_between_comments(
+        self, address_env, monkeypatch
+    ) -> None:
+        """Cancellation arriving BETWEEN comments (not before the run starts)
+        must also stop further dispatch — comment 5 must never be reached
+        once cancellation is detected after comment 2 completes."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        fake.review_comments = [_comment(2), _comment(5)]
+        fake.threads = [
+            ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),
+            ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
+        ]
+
+        # Call 1: the pre-run check (not yet cancelled, so the run starts
+        # normally). Call 2: the pre-retry-section check — not yet
+        # cancelled. Call 3: the per-iteration check before comment 2 — not
+        # yet cancelled, so comment 2 is handled normally. Call 4: the
+        # per-iteration check before comment 5 — cancelled by now, so
+        # comment 5 is never reached.
+        calls = {"n": 0}
+
+        def _get_job_sequenced(_job_id):
+            calls["n"] += 1
+            if calls["n"] >= 4:
+                return {"status": "cancelled"}
+            return {"status": "running"}
+
+        monkeypatch.setattr(address_env["main"], "get_job", _get_job_sequenced)
+
+        ac._run_address_comments("job1", req, "tok")
+
+        # Comment 2 was handled (triaged as not_an_issue) — the run's own
+        # initial "running" marker was written, but no TERMINAL status was:
+        # the job is cancelled, so its status is left as-is rather than
+        # overwritten with a completion status.
+        assert not any(u.get("status") in ("completed", "completed_with_failures") for u in address_env["job_updates"])
+        assert fake.labels_set == []
+
+    def test_stops_processing_when_a_comment_leaves_unpublished_work(
+        self, address_env, monkeypatch
+    ) -> None:
+        """When a comment's implementation is dispatched but the workflow
+        doesn't complete cleanly, a child job/workflow may still have
+        committed partial work to the shared `development` branch. Every
+        comment of this PR shares the SAME `khala.active-issue` marker, so a
+        LATER comment's branch preparation would otherwise treat that
+        leftover state as same-work continuation and could publish it
+        alongside its own fix. The loop must stop rather than risk that."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        fake.review_comments = [_comment(2), _comment(5)]
+        fake.threads = [
+            ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),
+            ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
+        ]
+        monkeypatch.setattr(
+            address_env["main"],
+            "execute_coding_team_workflow",
+            lambda *a, **kw: {"status": "completed_with_failures"},
+        )
+
+        ac._run_address_comments("job1", req, "tok")
+
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed_with_failures"]
+        assert final
+        # Only comment 2 was ever attempted; comment 5 was never reached.
+        assert final[-1]["review_summary"]["counts"].get("failed") == 1
+        assert final[-1]["review_summary"]["total_comments"] == 1
+        assert fake.labels_set == []
+        # Comment 2's own reply/resolve was skipped too — its thread stays
+        # open for the next run rather than getting a reply that implies
+        # completion.
+        assert fake.replies == []
+        assert fake.resolved == []
 
     def test_stops_processing_when_pr_closes_mid_run(self, address_env, monkeypatch) -> None:
         """If the PR is merged/closed by someone else while an earlier
@@ -2389,11 +2544,16 @@ class TestAddressCommentsRoute:
 
         from fastapi.testclient import TestClient
 
-        # The route now validates repo_path is an actual git checkout (a
-        # ".git" entry present) before admitting a job — mark tmp_path as one
-        # so every route test below that doesn't specifically exercise that
+        # The route now validates repo_path is an actual git checkout whose
+        # origin remote matches owner/repo before admitting a job — give
+        # tmp_path a real (if minimal) git repo with a matching origin so
+        # every route test below that doesn't specifically exercise that
         # validation keeps simulating a real, usable checkout.
-        (tmp_path / ".git").mkdir()
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "remote", "add", "origin", "https://github.com/o/r.git"],
+            check=True,
+        )
 
         return {
             "client": TestClient(_main.app),
@@ -2436,9 +2596,13 @@ class TestAddressCommentsRoute:
         assert "repo_path is required" in resp.json()["detail"]
         assert route_env["started"] == []  # never launched
 
-    def test_repo_path_blank_allowed_when_nothing_unresolved(self, route_env) -> None:
-        """A blank `repo_path` is fine when there is nothing to address — no
-        real-issue fix will ever need a checkout that will never be used."""
+    def test_400_when_repo_path_blank_even_with_nothing_unresolved_yet(self, route_env) -> None:
+        """repo_path is required UNCONDITIONALLY, even when THIS admission-time
+        snapshot has nothing unresolved: the background worker takes its own,
+        LATER snapshot, and a reviewer can post genuinely new feedback in the
+        gap between the two. A job admitted with no repo_path because nothing
+        was unresolved yet would then discover a real issue it can't
+        implement a fix for."""
         route_env["fake"].review_comments = []
         route_env["fake"].threads = []
 
@@ -2447,8 +2611,32 @@ class TestAddressCommentsRoute:
             json={"owner": "o", "repo": "r", "repo_path": "", "pr_number": 7},
         )
 
-        assert resp.status_code == 200
-        assert route_env["started"]
+        assert resp.status_code == 400
+        assert "repo_path is required" in resp.json()["detail"]
+        assert route_env["started"] == []
+
+    def test_400_when_repo_path_origin_does_not_match_owner_repo(
+        self, route_env, tmp_path
+    ) -> None:
+        """A repo_path that IS a git checkout but of a DIFFERENT repository
+        must be rejected — without this, this PR's remediation plan could get
+        committed and pushed to that unrelated repo's origin if the token
+        happens to have access to it."""
+        wrong_repo = tmp_path / "wrong-repo"
+        subprocess.run(["git", "init", "-q", str(wrong_repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(wrong_repo), "remote", "add", "origin", "https://github.com/other/repo.git"],
+            check=True,
+        )
+
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": str(wrong_repo), "pr_number": 7},
+        )
+
+        assert resp.status_code == 400
+        assert "does not match" in resp.json()["detail"]
+        assert route_env["started"] == []
 
     def test_400_when_repo_path_is_not_a_git_checkout(self, route_env, tmp_path) -> None:
         """A non-empty repo_path that names a real directory but isn't a git

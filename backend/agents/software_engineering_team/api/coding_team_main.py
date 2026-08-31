@@ -82,6 +82,7 @@ from software_engineering_team.api.git_ops import (  # noqa: F401
     _FORK_REMOTE_NAME,
     ACTIVE_ISSUE_CONFIG_KEY,
     RESCUE_BRANCH_PREFIX,
+    _checkout_remote_matches,
     _cleanup_issue_checkout,
     _clear_active_issue,
     _clear_active_issue_if_matches,

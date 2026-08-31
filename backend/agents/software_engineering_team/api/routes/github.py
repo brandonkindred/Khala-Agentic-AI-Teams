@@ -42,9 +42,18 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
           either directly or through the configured environment.
     Postconditions:
         - A job record is created and tagged with GitHub context for the selected
-          ready issue.
+          ready issue. When a token encryption key is configured, the encrypted
+          token is stored on the job record too, so a later resume can re-drive
+          the GitHub publish flow without the caller supplying it again.
         - The CodingTeamWorkflow is started with a GitHub payload that contains
           branch metadata but never the plaintext token.
+        - A 409 is raised when a job is already running for this issue, OR when
+          another active job (any issue/PR — including an address-comments
+          remediation) is already using the SAME ``request.repo_path``: an
+          operator-pinned checkout is shared (unnamespaced) across every
+          issue/PR of that repo, so two different jobs would otherwise race on
+          the same working tree for each job's entire run, not just at
+          admission.
     """
     token = resolve_github_token(request)
     if not Path(request.repo_path).is_dir():
