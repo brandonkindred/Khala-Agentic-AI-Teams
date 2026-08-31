@@ -12,7 +12,7 @@ of "one team importing the other's internals" by giving it a neutral home.
 
 | Module | Was | Responsibility |
 |---|---|---|
-| `git_utils` | `software_engineering_team/shared/git_utils.py` | `checkout_branch`, `create_feature_branch`, `merge_branch`, `branch_diff`, `commit_paths`, `initialize_new_repo`, `DEVELOPMENT_BRANCH`, … |
+| `git_utils` | `software_engineering_team/shared/git_utils.py` | `checkout_branch`, `create_feature_branch`, `merge_branch`, `branch_diff`, `commit_paths`, `initialize_new_repo`, `get_head_sha`, `resolve_remote_branch_sha`, `DEVELOPMENT_BRANCH`, … |
 | `branch_utils` | `software_engineering_team/shared/branch_utils.py` | Deterministic branch-name helpers. |
 
 ## Usage

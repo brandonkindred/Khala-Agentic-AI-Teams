@@ -21,6 +21,9 @@ from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     git_identity_env,
 )
+from shared.git.git_utils import (
+    resolve_remote_branch_sha as _shared_resolve_remote_branch_sha,
+)
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.clone_workspace import (
     clone_lock_path,
@@ -761,6 +764,15 @@ def resolve_remote_branch_sha(
 ) -> Tuple[bool, str]:
     """Fetch ``branch`` from ``remote`` and resolve its current HEAD SHA.
 
+    Thin coding-team-specific wrapper over the neutral
+    ``shared.git.git_utils.resolve_remote_branch_sha`` primitive: this
+    function's only job is translating ``token`` into the transient GitHub
+    auth env that primitive accepts generically, and scrubbing any
+    credential out of its error text -- exactly what ``_git``'s other
+    callers get. The fetch/rev-parse mechanics themselves live in the
+    shared, team-agnostic layer (see ``backend/shared/git/README.md``) since
+    they have nothing coding-team-specific about them.
+
     Preconditions:
         - repo_path is a git checkout; remote/branch are ref-shaped names
           the caller trusts enough to fetch (this helper does not itself
@@ -771,16 +783,13 @@ def resolve_remote_branch_sha(
           exactly as fetched -- callers use this as a freshness anchor to
           compare against a later re-fetch of the same branch.
         - On failure (fetch or rev-parse error) returns ``(False, message)``,
-          scrubbed of any credential exactly as ``_git``'s other callers get.
+          scrubbed of any credential.
     """
     auth_env = _git_auth_env(token) if token else None
-    rc, msg = _main._git(repo_path, "fetch", "--", remote, branch, env=auth_env)
-    if rc != 0:
-        return False, msg
-    rc, out = _main._git(repo_path, "rev-parse", f"{remote}/{branch}")
-    if rc != 0:
-        return False, out
-    return True, out.strip()
+    ok, msg = _shared_resolve_remote_branch_sha(repo_path, remote, branch, env=auth_env)
+    if not ok:
+        return False, scrub_token_from_text(_scrub_auth_header_values(msg, auth_env))
+    return True, msg
 
 
 def _prepare_issue_branch(

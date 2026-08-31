@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,12 @@ def git_identity_env() -> Dict[str, str]:
 
 
 def _run_git(
-    repo_path: Path, cmd: list[str], timeout: int = 30, *, merge_stderr: bool = True
+    repo_path: Path,
+    cmd: list[str],
+    timeout: int = 30,
+    *,
+    merge_stderr: bool = True,
+    env: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, str]:
     """Run git command in repo. Returns (returncode, output).
 
@@ -84,10 +89,19 @@ def _run_git(
         the caller either raises with this text or discards it — so stderr is
         appended regardless of *merge_stderr*, keeping the failure cause
         (``fatal: ...``) out of an otherwise-empty diagnostic.
+    env:
+        Subprocess environment override. Omitted (default), the process
+        observes a complete author/committer identity (see
+        ``git_identity_env``) -- the right default for any command that may
+        create a commit. Callers that need a *different* environment (e.g. a
+        transient auth header for a network operation against a private
+        remote) pass it explicitly; this module has no opinion on what that
+        environment contains, keeping auth-scheme specifics out of this
+        neutral, team-agnostic layer.
 
     Postconditions:
-        - The spawned git process observes a complete author/committer
-          identity (see git_identity_env).
+        - The spawned git process observes ``env`` when given, else a
+          complete author/committer identity (see git_identity_env).
         - Output is decoded with ``surrogateescape`` so a path containing bytes
           invalid in the locale encoding round-trips instead of raising and
           collapsing the whole command's output.
@@ -100,7 +114,7 @@ def _run_git(
             text=True,
             errors="surrogateescape",
             timeout=timeout,
-            env=git_identity_env(),
+            env=env if env is not None else git_identity_env(),
         )
         out = result.stdout or ""
         # Merge stderr when asked, or unconditionally on failure: a non-zero exit
@@ -437,6 +451,47 @@ def get_head_sha(repo_path: str | Path) -> Tuple[bool, str]:
     code, out = _run_git(path, ["git", "rev-parse", "HEAD"], merge_stderr=False)
     if code != 0:
         return False, f"rev-parse failed: {out}"
+    return True, out.strip()
+
+
+def resolve_remote_branch_sha(
+    repo_path: str | Path,
+    remote: str,
+    branch: str,
+    *,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, str]:
+    """Fetch ``branch`` from ``remote`` and resolve its current HEAD SHA.
+
+    Generic freshness-anchor primitive: fetch a named branch and report
+    exactly the commit it currently points to, so a caller can compare it
+    against a later re-fetch of the same branch to detect drift. This module
+    stays neutral on how a caller authenticates the fetch against a private
+    remote -- pass ``env`` (e.g. augmented with a transient auth header) when
+    one is needed; this function has no opinion on its contents.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout; ``remote``/``branch`` are
+          ref-shaped names the caller trusts enough to fetch -- this helper
+          does not itself validate them, so a caller accepting these from an
+          untrusted source must validate first.
+    Postconditions:
+        - On success returns ``(True, <full sha>)`` for ``<remote>/<branch>``
+          exactly as fetched.
+        - On failure (not a repo, or a fetch/rev-parse error) returns
+          ``(False, message)`` and never a partial/garbage SHA.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    code, out = _run_git(path, ["git", "fetch", "--", remote, branch], env=env)
+    if code != 0:
+        return False, out
+    code, out = _run_git(
+        path, ["git", "rev-parse", f"{remote}/{branch}"], merge_stderr=False, env=env
+    )
+    if code != 0:
+        return False, out
     return True, out.strip()
 
 

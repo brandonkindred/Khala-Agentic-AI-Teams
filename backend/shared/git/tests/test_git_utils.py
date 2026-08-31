@@ -27,6 +27,7 @@ from shared.git.git_utils import (
     prune_worktrees,
     remove_worktree,
     reset_hard_to,
+    resolve_remote_branch_sha,
 )
 
 
@@ -561,3 +562,70 @@ def test_reset_hard_to_propagates_untracked_cleanup_failure(repo: Path, monkeypa
 
     assert not ok
     assert "boom" in msg
+
+
+def _self_alias_origin(repo: Path) -> None:
+    """Add ``origin`` pointing at ``repo`` itself, so fetch works without a real remote."""
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_resolve_remote_branch_sha_returns_fetched_head(repo: Path) -> None:
+    _self_alias_origin(repo)
+    expected = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", DEVELOPMENT_BRANCH],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    ok, sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+
+    assert ok is True, sha
+    assert sha == expected
+
+
+def test_resolve_remote_branch_sha_fails_honestly_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = resolve_remote_branch_sha(not_a_repo, "origin", "main")
+    assert not ok
+    assert "Not a git repository" in msg
+
+
+def test_resolve_remote_branch_sha_fails_honestly_when_fetch_fails(repo: Path) -> None:
+    """No remote named 'origin' exists: fetch fails, and the caller gets that failure
+    rather than a rev-parse error against stale/nonexistent local state."""
+    ok, msg = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+    assert not ok
+    assert msg
+
+
+def test_resolve_remote_branch_sha_threads_env_through_both_git_calls(repo: Path, monkeypatch) -> None:
+    """The caller-supplied env (e.g. a transient auth header) must reach both the
+    fetch and the rev-parse, and this module must not fall back to
+    git_identity_env() when an env was explicitly supplied."""
+    import os
+
+    import shared.git.git_utils as git_utils_mod
+
+    _self_alias_origin(repo)
+    seen_envs = []
+    real_run_git = git_utils_mod._run_git
+
+    def _spy(path, cmd, *a, **kw):
+        seen_envs.append(kw.get("env"))
+        return real_run_git(path, cmd, *a, **kw)
+
+    monkeypatch.setattr(git_utils_mod, "_run_git", _spy)
+
+    sentinel_env = {**os.environ, "CUSTOM_MARKER": "1"}
+    ok, _sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH, env=sentinel_env)
+
+    assert ok is True
+    assert len(seen_envs) == 2
+    assert all(env == sentinel_env for env in seen_envs)
