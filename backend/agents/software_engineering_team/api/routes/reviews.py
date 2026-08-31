@@ -30,7 +30,10 @@ from software_engineering_team.api.coding_team_models import (
     TranscriptEntry,
     TranscriptResponse,
 )
-from software_engineering_team.api.routes._common import resolve_github_token
+from software_engineering_team.api.routes._common import (
+    raise_if_checkout_occupied,
+    resolve_github_token,
+)
 from software_engineering_team.code_review_agent import transcript
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -420,16 +423,7 @@ def post_address_comments(
         # row) exists — so once a job IS created here, this blocks a sibling
         # for that job's ENTIRE run, not just a momentary admission window.
         with _main._checkout_admission(request.repo_path):
-            sibling = _main._running_sibling_on_checkout(request.repo_path)
-            if sibling is not None:
-                sib_ctx = sibling.get("github_context") or {}
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"job {sibling.get('job_id', '?')} (PR #{sib_ctx.get('pr_number', '?')}) is still "
-                        f"running on checkout {request.repo_path}; retry after it finishes"
-                    ),
-                )
+            raise_if_checkout_occupied(request.repo_path)
 
             job_id = str(uuid.uuid4())
             try:

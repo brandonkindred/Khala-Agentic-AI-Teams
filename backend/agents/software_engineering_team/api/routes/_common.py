@@ -17,6 +17,42 @@ _JOB_SERVICE_UNAVAILABLE_DETAIL = (
 )
 
 
+def raise_if_checkout_occupied(repo_path: str) -> None:
+    """Raise 409 when another live job is already using ``repo_path``.
+
+    Shared by ``/run-from-github`` and ``/pulls/{pr_number}/address-comments``:
+    both admit onto an operator-pinned, unnamespaced checkout that is shared
+    across every issue/PR of a repo, so each must reject admission when a
+    sibling job (any issue or PR) is already running on the SAME checkout.
+    Callers hold their own checkout-admission lock around this call.
+
+    Preconditions:
+        - ``repo_path`` is the (already-stripped) checkout path being admitted
+          onto; non-empty, per :func:`coding_team_main.get_running_job_on_checkout`.
+    Postconditions:
+        - Returns ``None`` when no sibling job is running on ``repo_path``.
+        - Raises ``HTTPException(409)`` when one is, with a detail naming the
+          sibling job id and its PR/issue label. Never raises otherwise.
+    """
+    from software_engineering_team.api import coding_team_main as _main
+
+    sibling = _main.get_running_job_on_checkout(repo_path)
+    if sibling is None:
+        return
+    sib_ctx = sibling.get("github_context") or {}
+    if "pr_number" in sib_ctx:
+        sib_label = f"PR #{sib_ctx.get('pr_number')}"
+    else:
+        sib_label = f"issue #{sib_ctx.get('issue_number', '?')}"
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"job {sibling.get('job_id')} ({sib_label}) is still "
+            f"running on checkout {repo_path}; retry after it finishes"
+        ),
+    )
+
+
 class _HasGitHubToken(Protocol):
     github_token: Optional[str]
 

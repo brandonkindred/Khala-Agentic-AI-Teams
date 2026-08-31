@@ -15,7 +15,10 @@ from software_engineering_team.api.coding_team_models import (
     RunFromGitHubRequest,
     RunFromGitHubResponse,
 )
-from software_engineering_team.api.routes._common import resolve_github_token
+from software_engineering_team.api.routes._common import (
+    raise_if_checkout_occupied,
+    resolve_github_token,
+)
 from software_engineering_team.github_source import (
     GitHubAPIError,
     NotAnIssueError,
@@ -115,20 +118,7 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     # that one serialize against each other regardless of which one is admitted
     # first.
     with _main._checkout_admission(request.repo_path):
-        sibling = _main._running_sibling_on_checkout(request.repo_path)
-        if sibling is not None:
-            sib_ctx = sibling.get("github_context") or {}
-            if "pr_number" in sib_ctx:
-                sib_label = f"PR #{sib_ctx.get('pr_number')}"
-            else:
-                sib_label = f"issue #{sib_ctx.get('issue_number', '?')}"
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"job {sibling.get('job_id')} ({sib_label}) is still "
-                    f"running on checkout {request.repo_path}; retry after it finishes"
-                ),
-            )
+        raise_if_checkout_occupied(request.repo_path)
 
         job_id = str(uuid.uuid4())
         _main.create_job(job_id=job_id, repo_path=request.repo_path, plan_input=plan.model_dump())
