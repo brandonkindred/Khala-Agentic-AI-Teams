@@ -197,7 +197,11 @@ def execute_workflow_sync(
           per window, until the workflow reaches its own terminal state. This
           exists for callers where "the client gave up waiting" must never be
           conflated with "the workflow failed" (e.g. a long-running
-          implementation or a HITL pause that outlives one wait window).
+          implementation or a HITL pause that outlives one wait window). The
+          initial ``execute_workflow`` waiter is cancelled before reattaching
+          so exactly one coroutine ever long-polls Temporal for this workflow
+          at a time — never both the abandoned initial wait and the new
+          reattach waiter.
 
     Invariants:
         - Runs the coroutine on the worker's shared event loop via
@@ -218,11 +222,23 @@ def execute_workflow_sync(
     coro = client.execute_workflow(
         workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
     )
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
-        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=execute_timeout_s)
+        return future.result(timeout=execute_timeout_s)
     except futures.TimeoutError:
         if not reattach_on_timeout:
             raise
+        # The client-side wait gave up, but `coro` is still running on the
+        # worker loop (Temporal itself doesn't know the client stopped
+        # waiting). Cancel THIS future before reattaching — `_reattach_and_
+        # wait_sync` below schedules a SEPARATE `handle.result()` waiter for
+        # the same workflow; leaving this one running would mean two
+        # coroutines both long-polling Temporal for the same workflow for
+        # its remaining lifetime. `run_coroutine_threadsafe`'s returned
+        # future propagates `.cancel()` into a real `Task.cancel()` on the
+        # loop even mid-flight (not just before the coroutine starts), so
+        # this reliably stops it.
+        future.cancel()
         logger.warning(
             "execute_workflow_sync: client-side wait for workflow id=%s timed out after "
             "%ss; the workflow keeps running server-side — reattaching instead of "

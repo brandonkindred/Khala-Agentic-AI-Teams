@@ -864,7 +864,7 @@
     font-size: var(--kh-text-xs);
     padding: 0.1rem 0.4rem;
     border-radius: var(--kh-radius-sm);
-    background: var(--kh-surface-3, rgba(0, 0, 0, 0.06));
+    background: var(--kh-surface-3);
     color: var(--kh-text-secondary);
 
     &--draft {

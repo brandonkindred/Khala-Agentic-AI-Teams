@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -317,8 +318,16 @@ def test_execute_requires_non_empty_ids():
 class _FakeSlowExecClient:
     """A client whose ``execute_workflow`` never resolves within the test's timeout."""
 
+    def __init__(self, captured: "dict | None" = None) -> None:
+        self._captured = captured
+
     async def execute_workflow(self, workflow_run, *, args, id, task_queue):
-        await asyncio.sleep(10)
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            if self._captured is not None:
+                self._captured["execute_workflow_cancelled"] = True
+            raise
 
 
 class _FakeReattachHandle:
@@ -389,6 +398,33 @@ def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loo
 
     assert out is sentinel
     assert captured["reattach_workflow_id"] == "wid"
+
+
+def test_execute_workflow_sync_reattach_cancels_initial_waiter(running_loop):
+    """P1 regression: reattaching must cancel the abandoned initial
+    `execute_workflow` waiter, not leave it running alongside the new
+    reattach waiter — otherwise two coroutines both long-poll Temporal for
+    the same workflow for its remaining lifetime, leaking a connection and
+    degrading the shared worker event loop."""
+    captured: dict = {}
+    sentinel = {"ok": True}
+    handle = _FakeReattachHandle(captured, delay_s=0.02, result=sentinel)
+    client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = runner.execute_workflow_sync(
+        object(),
+        workflow_id="wid",
+        task_queue="q",
+        execute_timeout_s=0.01,
+        reattach_on_timeout=True,
+    )
+
+    assert out is sentinel
+    # Give the cancelled coroutine's CancelledError handler a moment to run
+    # on the worker loop before asserting on it from this thread.
+    time.sleep(0.05)
+    assert captured.get("execute_workflow_cancelled") is True
 
 
 def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
