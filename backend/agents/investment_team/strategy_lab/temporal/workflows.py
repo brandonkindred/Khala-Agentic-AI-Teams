@@ -533,6 +533,7 @@ class StrategyLabCycleWorkflow:
             # for ``investment_team.models`` types.
             from investment_team.strategy_lab.checkpoints import (
                 determine_resume_stage,
+                drift_histories_past_seed,
                 find_latest_checkpoint_for_attempt,
                 parse_checkpoint,
                 resolve_cross_attempt_resume,
@@ -570,15 +571,17 @@ class StrategyLabCycleWorkflow:
             # ``orchestrator.py::run_cycle``'s identical fix).
             child_drift = outcome["drift"]
             if attempt_drift_seed is not None:
-                parent_drift["spec_history"].extend(
-                    child_drift["spec_history"][len(attempt_drift_seed["spec_history"]) :]
+                spec_history, code_history, gate_timeline = drift_histories_past_seed(
+                    child_drift["spec_history"],
+                    child_drift["code_history"],
+                    child_drift["gate_timeline"],
+                    seed_spec_len=len(attempt_drift_seed["spec_history"]),
+                    seed_code_len=len(attempt_drift_seed["code_history"]),
+                    seed_gate_len=len(attempt_drift_seed["gate_timeline"]),
                 )
-                parent_drift["code_history"].extend(
-                    child_drift["code_history"][len(attempt_drift_seed["code_history"]) :]
-                )
-                parent_drift["gate_timeline"].extend(
-                    child_drift["gate_timeline"][len(attempt_drift_seed["gate_timeline"]) :]
-                )
+                parent_drift["spec_history"].extend(spec_history)
+                parent_drift["code_history"].extend(code_history)
+                parent_drift["gate_timeline"].extend(gate_timeline)
             else:
                 parent_drift["spec_history"].extend(child_drift["spec_history"])
                 parent_drift["code_history"].extend(child_drift["code_history"])

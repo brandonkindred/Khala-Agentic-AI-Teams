@@ -122,12 +122,20 @@ def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistConte
     instances, or record assembly's ``design_context.critiques[i].model_dump()``
     calls raise ``AttributeError`` deep inside a resumed attempt.
 
-    Shape check delegates to ``checkpoints.design_context_wire_shape_is_valid``
-    -- the single source of truth for this check, shared with
+    Thin wrapper around ``_orchestrator_helpers.rebuild_design_context`` --
+    the shared validate+rebuild core also used by
     ``temporal.activities._design_context_from_wire`` (a separate,
     Temporal-only reconstruction with its own scope) -- so the two can never
     drift out of sync on what counts as a well-formed ``design_context``
-    payload.
+    payload or how it's rebuilt. This function's own contribution is only
+    its ``data``-must-be-non-empty contract: unlike ``_design_context_from_wire``
+    (where an absent/empty ``design_context`` is a legitimate "no context
+    supplied" case returning ``None``), a checkpoint's ``design_context`` is
+    never legitimately empty here, so this wrapper turns
+    ``rebuild_design_context``'s ``None`` return into a raised ``ValueError``
+    instead of silently propagating it -- a caller checking ``is not None``
+    to decide whether resume succeeded would otherwise wrongly treat "empty
+    context" as success.
 
     Preconditions:
       - ``data`` is a non-empty dict containing every key
@@ -137,22 +145,18 @@ def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistConte
       - Returns a ``_DesignPersistContext`` with ``critiques`` rebuilt as
         real ``SpecCritique`` instances.
     Raises:
-      - ``ValueError`` if the payload fails the shared shape check (a
-        missing key or a wrong-typed field). Signals to the caller that the
-        checkpoint payload is unusable for resume -- the caller is expected
-        to fail open to a full restart rather than propagate it.
+      - ``ValueError`` if ``data`` is empty/``None``, or the payload fails
+        the shared shape check (a missing key or a wrong-typed field).
+        Signals to the caller that the checkpoint payload is unusable for
+        resume -- the caller is expected to fail open to a full restart
+        rather than propagate it.
     """
-    from .agents.design_review import SpecCritique
-    from .checkpoints import design_context_wire_shape_is_valid
+    from ._orchestrator_helpers import rebuild_design_context
 
-    if not design_context_wire_shape_is_valid(data):
+    context = rebuild_design_context(data)
+    if context is None:
         raise ValueError(f"design_context has an invalid checkpoint shape: {data!r}")
-    return _DesignPersistContext(
-        rounds=data["rounds"],
-        critiques=[SpecCritique.model_validate(c) for c in data["critiques"]],
-        stop_reason=data["stop_reason"],
-        loop_telemetry=dict(data["loop_telemetry"]),
-    )
+    return context
 
 
 def _finalize_loop_telemetry(

@@ -755,22 +755,16 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
         ``design_context.critiques`` element). Raises ``ValueError`` when a
         nonempty payload fails ``checkpoints.design_context_wire_shape_is_valid``
         (missing keys or a wrong-typed field), so checkpoint resume can fail
-        open instead of fabricating default audit fields.
+        open instead of fabricating default audit fields. Thin wrapper around
+        ``_orchestrator_helpers.rebuild_design_context`` -- the shared
+        validate+rebuild core also used by
+        ``orchestrator_record_assembly._design_context_from_checkpoint`` --
+        this function's own contribution is only the ``data`` empty/``None``
+        precondition and this docstring's Temporal-specific framing.
     """
-    if not data:
-        return None
-    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
-    from investment_team.strategy_lab.agents.design_review import SpecCritique
-    from investment_team.strategy_lab.checkpoints import design_context_wire_shape_is_valid
+    from investment_team.strategy_lab._orchestrator_helpers import rebuild_design_context
 
-    if not design_context_wire_shape_is_valid(data):
-        raise ValueError(f"design_context has an invalid wire shape: {data!r}")
-    return _DesignPersistContext(
-        rounds=data["rounds"],
-        critiques=[SpecCritique.model_validate(c) for c in data["critiques"]],
-        stop_reason=data["stop_reason"],
-        loop_telemetry=dict(data["loop_telemetry"]),
-    )
+    return rebuild_design_context(data)
 
 
 def _cross_attempt_resume_from_params(
@@ -1009,6 +1003,12 @@ def _strip_unused_resume_seed_from_record(
 ) -> Dict[str, Any]:
     """Drop a discarded cross-attempt resume seed's prefix from a JSON-dumped record.
 
+    Delegates the actual slicing to ``checkpoints.drift_histories_past_seed``
+    -- the same pure helper thread mode's ``orchestrator.py::run_cycle`` and
+    Temporal mode's ``StrategyLabCycleWorkflow.run`` use for their own
+    (structurally different) seed-prefix stripping, so the three sites can't
+    drift out of sync on the drift-triple key set or prefix semantics.
+
     A no-op (returns ``record_dump`` unchanged) unless ``unused`` -- ``True``
     only when the workflow supplied a cross-attempt resume seed
     (``params["drift"]``, seeded from a checkpoint) that this attempt never
@@ -1044,9 +1044,20 @@ def _strip_unused_resume_seed_from_record(
     """
     if not unused or not (seed_spec_len or seed_code_len or seed_gate_len):
         return record_dump
-    record_dump["spec_history"] = record_dump["spec_history"][seed_spec_len:]
-    record_dump["code_history"] = record_dump["code_history"][seed_code_len:]
-    record_dump["gate_timeline"] = record_dump["gate_timeline"][seed_gate_len:]
+    from investment_team.strategy_lab.checkpoints import drift_histories_past_seed
+
+    (
+        record_dump["spec_history"],
+        record_dump["code_history"],
+        record_dump["gate_timeline"],
+    ) = drift_histories_past_seed(
+        record_dump["spec_history"],
+        record_dump["code_history"],
+        record_dump["gate_timeline"],
+        seed_spec_len=seed_spec_len,
+        seed_code_len=seed_code_len,
+        seed_gate_len=seed_gate_len,
+    )
     return record_dump
 
 

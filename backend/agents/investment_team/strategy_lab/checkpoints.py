@@ -624,3 +624,49 @@ def design_context_wire_shape_is_valid(data: Any) -> bool:
     if not isinstance(data["stop_reason"], str):
         return False
     return isinstance(data["loop_telemetry"], dict)
+
+
+def drift_histories_past_seed(
+    spec_history: list[Any],
+    code_history: list[Any],
+    gate_timeline: list[Any],
+    *,
+    seed_spec_len: int,
+    seed_code_len: int,
+    seed_gate_len: int,
+) -> tuple[list[Any], list[Any], list[Any]]:
+    """Slice a resumed attempt's drift histories past their seed prefix.
+
+    A cross-attempt resume seeds an attempt's drift with a checkpoint's own
+    ``spec_history``/``code_history``/``gate_timeline``, spliced onto the
+    front before the attempt runs (``orchestrator.py``'s
+    ``resume_drift_seed_for_attempt``, ``temporal/workflows.py``'s
+    ``attempt_drift_seed``). Three independent sites each need to isolate
+    the entries *beyond* that seed -- this attempt's own provenance, not a
+    duplicate of history the parent commit log (or, for a discarded seed, no
+    log at all) already has: thread mode's ``orchestrator.py::run_cycle``
+    (folding a resumed-then-failed attempt's drift into its parent commit
+    log), Temporal mode's ``StrategyLabCycleWorkflow.run`` (the same fold,
+    wire-dict-shaped), and
+    ``temporal.activities._strip_unused_resume_seed_from_record`` (stripping
+    a seed's provenance out of a persisted record when the resume it
+    speculatively seeded was never actually adopted). Generic over element
+    type -- callers pass either wire dicts or live
+    ``SpecRevision``/``CodeRevision``/``GateEvent`` objects; this function
+    only slices, never inspects, each list's elements, so it never needs to
+    import any of those types.
+
+    Preconditions:
+        Each ``seed_*_len`` is between 0 and the length of its corresponding
+        history list, inclusive -- the length of the seed originally
+        spliced onto that same list's front.
+    Postconditions:
+        Returns ``(spec_history[seed_spec_len:], code_history[seed_code_len:],
+        gate_timeline[seed_gate_len:])`` as new lists; never mutates any
+        input list.
+    """
+    return (
+        spec_history[seed_spec_len:],
+        code_history[seed_code_len:],
+        gate_timeline[seed_gate_len:],
+    )
