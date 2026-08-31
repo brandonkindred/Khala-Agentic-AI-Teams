@@ -2122,6 +2122,47 @@ def test_dedup_suppresses_repeated_issue_across_batch_fixes(tmp_path):
     assert captured[1] == []  # exact repeat suppressed on the second attempt
 
 
+def test_dedup_resets_across_review_cycles(tmp_path):
+    """An issue that recurs in a later outer cycle (after an earlier cycle's fix
+    attempt didn't actually resolve it) is included again in that cycle's
+    fix-context -- only same-cycle duplicates are suppressed, not cross-cycle ones."""
+    captured: List[List[Any]] = []
+
+    def _capturing_batch_fix(*, issues, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        captured.append(list(issues))
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    recurring_issue = _issue()  # same (file_path, description) both cycles
+    cr = _ScriptedGate(
+        [
+            GateOutcome(passed=False, issues=[recurring_issue], summary="bad"),  # cycle 1 initial
+            GateOutcome(passed=True),  # cycle 1 retry: "fixed"
+            GateOutcome(
+                passed=False, issues=[recurring_issue], summary="still bad"
+            ),  # cycle 2 initial: recurs
+        ]
+    )
+    qa_issue = ReviewIssue(source="qa", severity="high", description="different", file_path="other")
+    qa = _ScriptedGate([GateOutcome(passed=False, issues=[qa_issue], summary="qa bad")])
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=cr, qa_gate=qa, batch_fix=_capturing_batch_fix)
+    _run(
+        cfg,
+        [mt],
+        tmp_path,
+        review_config=_config(cr=2, qa=1, sec=1, on_failure="skip_continue"),
+    )
+
+    assert len(captured) == 3
+    assert len(captured[0]) == 1  # cycle 1 CR fix: first time seeing the issue
+    assert captured[1] == [qa_issue]  # QA fix (different issue key): unaffected
+    assert captured[2] == [
+        recurring_issue
+    ]  # cycle 2 CR fix: issue recurred, must not be suppressed
+
+
 def test_independent_microtasks_execute_concurrently(tmp_path):
     """Two independent microtasks overlap in wall-clock time (true concurrent coding)."""
     a_entered = threading.Event()
