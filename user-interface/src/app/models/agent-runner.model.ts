@@ -27,6 +27,20 @@ export interface InvokeEnvelope {
   sandbox?: { agent_id: string; url: string | null };
 }
 
+/**
+ * Type guard for `InvokeEnvelope`. Used to distinguish a 422 response whose
+ * `detail` is a wrapped invocation envelope (trace_id + logs_tail) from a
+ * plain validation-error string or array.
+ */
+export function isInvokeEnvelope(value: unknown): value is InvokeEnvelope {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>)['trace_id'] === 'string' &&
+    Array.isArray((value as Record<string, unknown>)['logs_tail'])
+  );
+}
+
 export interface InvokeWarmingResponse {
   status: SandboxStatus;
   message: string;
