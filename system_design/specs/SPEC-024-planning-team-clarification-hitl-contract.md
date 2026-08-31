@@ -1082,8 +1082,18 @@ The primitive #7445-B builds must satisfy:
   requirement:** this activity must return a distinct `{"outcome": "skipped_terminal"}`-shaped
   result (as opposed to the checkpoint-bearing success shape) when it takes the terminal no-op path,
   and the workflow must branch on that outcome to stop the `document_production` phase entirely
-  (skip straight to whatever finalize/no-op path is appropriate for an already-terminal job) rather
-  than calling `document_production_activity` next.
+  rather than calling `document_production_activity` next.
+
+  **Correction — "skip to whatever finalize/no-op path is appropriate" is not safe as originally
+  worded: `finalize_planning_activity` calls `mark_job_completed` unconditionally.**
+  (`temporal/activities.py:443-473`, `mark_job_completed(job_id, summary=summary)` with no status
+  guard.) If the workflow reached `finalize_planning_activity` after a `skipped_terminal` outcome —
+  exactly what "skip to the finalize path" could be read to mean — it would overwrite a cancelled or
+  interrupted job's status with `completed`, the same class of terminal-state-clobbering bug this
+  whole line of fixes exists to prevent. **Contract requirement:** on `skipped_terminal`, the
+  workflow must `return` immediately — schedule no further activity at all: not
+  `document_production_activity`, not `sub_agent_provisioning`, and not `finalize_planning_activity`
+  — leaving the job record exactly as whatever terminal state it already reached untouched.
   If absent (checkpoint) and active (status), calls `run_pra(...)`. **`run_pra`/`run_product_analysis`
   returns `None` when the Software Engineering service is unconfigured or the submission POST fails
   (`adapters/product_analysis.py:33-48`) — this activity must treat a `None`/falsy return as a
@@ -1368,6 +1378,24 @@ this contract:
   whatever the job record's *current* state actually is (paused on a newer round, or already
   completed) rather than assuming its own now-invalid pending-questions snapshot is still current.
 
+  **A third, undefined reload outcome exists between those two: active, no pause envelope, and no
+  completion marker yet — a round genuinely still in flight.** The resume path's step (2) clears the
+  *previous* round's pause envelope (`waiting_for_answers: False`) as soon as PRA confirms the
+  answer applied, but that clearing attempt may still be mid-flight on `wait_pra`'s next poll (to
+  learn whether PRA has a further round or is done) when a stale, fenced-out attempt reloads —
+  finding the job `running`, `waiting_for_answers` falsy, and no pause envelope *and* no completion
+  marker, because the winning attempt genuinely hasn't reached either outcome yet. Because the
+  surviving (non-discarded) Temporal attempt can be the one that lost this generation CAS, leaving
+  this intermediate state unhandled risks the only attempt Temporal will actually accept for this
+  invocation having nothing well-defined to return — erroring, or replaying stale work, rather than
+  advancing the workflow. **Contract requirement:** a losing attempt that reloads into this
+  intermediate state (active, no pause, no completion marker) must not error or fabricate a result —
+  it must retry the reload after a short bounded wait (the winning attempt is, by construction,
+  still actively working toward one of the two defined outcomes and will reach one), or equivalently
+  treat this as "not yet resolved, poll again" rather than a terminal branch of its own. This is a
+  transient state by construction, not a fourth durable outcome this contract needs to define new
+  persisted fields for.
+
   **The terminal-status guard alone leaves one more race: a stale attempt's pause-creation write can
   still land in the narrow window *before* the job's status actually flips to terminal.** Two
   overlapping attempts (the same heartbeat-loss scenario throughout this section) can each be
@@ -1571,14 +1599,23 @@ this contract:
   still match — a per-question rule would find "`q0` matches" and conclude PRA is still on the old
   round, resubmitting the *entire* persisted batch; PRA's id-only answer validation
   (`api/routes/product_analysis.py:262-275`) then accepts the stale `q1` answer against the new
-  question with no error. **Contract requirement:** treat this as one set-equality check — every
-  `(id, question_text)` pair PRA currently reports must equal, as a set, every pair this pause round
+  question with no error. **Contract requirement:** treat this as one equality check over the
+  complete persisted round — every `(id, question_text)` pair PRA currently reports must match,
+  **as a multiset (a list with occurrence counts), never a set**, every pair this pause round
   persisted — before concluding "PRA is still waiting on exactly this round, safe to (re-)submit."
-  Any partial difference (even a single question's id or text changed, added, or missing) must be
-  treated as advancement — proceed straight to step (2), submitting nothing — never as "the
+  **Set equality is the wrong comparison: PRA's own question parser does not enforce unique ids and
+  accepts explicit duplicates** (`question_processing.py`'s parser has no uniqueness check), so a
+  set collapses duplicate `(id, question_text)` pairs before comparing — a persisted two-question
+  round with a duplicated pair and a later, genuinely different one-question round that happens to
+  carry the same single pair would compare equal under set semantics (both sets are `{pair}`), even
+  though the actual questions differ in count and the round has clearly advanced; the retry would
+  then incorrectly resubmit the stale batch. Comparing as an ordered multiset/canonical list
+  (including how many times each pair occurs) does not have this collapsing problem. Any partial
+  difference (even a single question's id, text, or occurrence count changed, added, or missing)
+  must be treated as advancement — proceed straight to step (2), submitting nothing — never as "the
   unchanged questions are still safe to resubmit." This still leaves the residual risk below when
-  the *entire* set is identical across rounds. **This is not a complete fix.** `question_text` has
-  the identical fallback problem as `id`:
+  the *entire* multiset is identical across rounds. **This is not a complete fix.** `question_text`
+  has the identical fallback problem as `id`:
   `_require_string_field(q_data, "question_text", "")` (`question_processing.py:822`) defaults a
   missing `question_text` to `""`, exactly as `id` defaults to `q{index}` — so two consecutive
   rounds can in principle share the *same* `(id, question_text)` pair (e.g., both malformed-parse
@@ -1639,6 +1676,22 @@ no persisted pause to resume from, silently hanging the job.
   is a bounded and safe policy; the same reload/re-emit correction pattern used elsewhere in this
   contract does not apply here since no client-visible durability guarantee for an early signal
   (received before any matching pause exists) is being made in the first place.
+
+  **This cap must be version-gated for `CodingTeamWorkflow`, whose existing histories this
+  contract's mandatory extraction (§4.4) requires migrating onto the same shared state machine.**
+  Unlike this contract's other behavior changes (all new, on a workflow type with no pre-existing
+  histories), an eviction policy applied unconditionally to the shared component would change
+  `CodingTeamWorkflow`'s own replay behavior: an in-flight history recorded *before* this cap existed
+  can already contain more than the new cap's number of buffered early signals, and replaying it
+  against the capped implementation can evict a token the original run retained — if that history
+  also recorded a resumed-activity command keyed on the now-evicted token, the replayed workflow
+  instead sits blocked in `wait_condition` waiting for a signal it already buffered under the old
+  behavior, a nondeterministic replay divergence. **Contract requirement:** gate the eviction cap
+  itself behind a `workflow.patched` marker for `CodingTeamWorkflow` specifically (a new patch,
+  distinct from this contract's own `_CLARIFICATION_PAUSE_PATCH`) — an execution whose history
+  predates the patch keeps the old unbounded-within-one-stretch buffering behavior for its own
+  replay, and only executions started after the patch (Planning's new workflow included, which has
+  no pre-existing histories to protect) get the capped behavior from the start.
 
 **Open risks, not resolved by this spec:**
 1. *Carried over from `hitl_pause_resume_contract.md` §4:* `workflow.wait_condition` here is
