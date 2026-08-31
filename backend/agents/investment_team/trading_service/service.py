@@ -1676,6 +1676,40 @@ def resolve_exit_leg_attachments(
     return attachments
 
 
+def _as_bracket_attachment_pair(
+    attachments: list[Union[StopAttachment, LimitAttachment]],
+) -> tuple[StopAttachment, LimitAttachment]:
+    """Narrow a generalized attachment list to the bracket-specific
+    ``(StopAttachment, LimitAttachment)`` pair.
+
+    ``_bracket_to_leg_specs`` always produces exactly ``[stop_leg,
+    target_leg]``, so ``resolve_exit_leg_attachments`` always resolves them
+    to ``[StopAttachment, LimitAttachment]`` — but that invariant lives in
+    ``_bracket_to_leg_specs``, not in the generic list return type, so
+    static typing alone can't prove it here. Verifying it explicitly (and
+    failing loudly if it's ever violated) is preferable to a bare ``#
+    type: ignore``, which would silently trust the invariant forever,
+    including if a future change to ``_bracket_to_leg_specs`` broke it.
+
+    Preconditions: ``attachments`` is the result of resolving a
+    ``_bracket_to_leg_specs``-produced leg list.
+    Postconditions: returns ``(attachments[0], attachments[1])`` narrowed to
+    ``(StopAttachment, LimitAttachment)``.
+    Raises:
+        TypeError: if ``attachments`` is not exactly a two-element
+            ``(StopAttachment, LimitAttachment)`` pair.
+    """
+    stop_attachment, limit_attachment = attachments
+    if not isinstance(stop_attachment, StopAttachment) or not isinstance(
+        limit_attachment, LimitAttachment
+    ):
+        raise TypeError(
+            "bracket attachment resolution must produce (StopAttachment, LimitAttachment); "
+            f"got ({type(stop_attachment).__name__}, {type(limit_attachment).__name__})"
+        )
+    return stop_attachment, limit_attachment
+
+
 def _bracket_to_leg_specs(bracket: OcoBracketRule) -> list[ExitLegSpec]:
     """Translate an OCO bracket's two fixed legs into generic exit-leg specs.
 
@@ -1726,10 +1760,8 @@ def resolve_bracket_attachments(
             ``ref_price``, or (for ``limit_offset``) too small to survive
             its downstream arithmetic.
     """
-    stop_attachment, limit_attachment = resolve_exit_leg_attachments(
-        _bracket_to_leg_specs(bracket), side, ref_price
-    )
-    return stop_attachment, limit_attachment  # type: ignore[return-value]
+    attachments = resolve_exit_leg_attachments(_bracket_to_leg_specs(bracket), side, ref_price)
+    return _as_bracket_attachment_pair(attachments)
 
 
 @dataclass
@@ -1901,10 +1933,10 @@ class _EngineEntryDispatcher:
         """
         if self._bracket is None:
             return None, None
-        stop_attachment, limit_attachment = resolve_exit_leg_attachments(
+        attachments = resolve_exit_leg_attachments(
             _bracket_to_leg_specs(self._bracket), side, ref_price
         )
-        return stop_attachment, limit_attachment  # type: ignore[return-value]
+        return _as_bracket_attachment_pair(attachments)
 
     def _compute_qty(
         self,

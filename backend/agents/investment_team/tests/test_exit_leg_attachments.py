@@ -19,6 +19,7 @@ from investment_team.strategy_lab.spec_dsl import (
     OcoBracketRule,
 )
 from investment_team.trading_service.service import (
+    _as_bracket_attachment_pair,
     _bracket_to_leg_specs,
     resolve_bracket_attachments,
     resolve_exit_leg_attachments,
@@ -386,3 +387,27 @@ def test_bracket_adapter_matches_generalized_resolution(side: OrderSide) -> None
     # signature); list(...) normalizes it for comparison against
     # via_generalized's list — tuple != list in Python regardless of contents.
     assert list(via_adapter) == via_generalized
+
+
+# ---------------------------------------------------------------------------
+# _as_bracket_attachment_pair: defense-in-depth shape check
+# ---------------------------------------------------------------------------
+
+
+def test_as_bracket_attachment_pair_narrows_valid_list() -> None:
+    """The happy path: a well-formed [StopAttachment, LimitAttachment] list
+    narrows to the identical tuple."""
+    stop = StopAttachment(stop_price=97.0)
+    limit = LimitAttachment(limit_price=106.0)
+    assert _as_bracket_attachment_pair([stop, limit]) == (stop, limit)
+
+
+def test_as_bracket_attachment_pair_rejects_wrong_shape() -> None:
+    """A list that isn't exactly (StopAttachment, LimitAttachment) — e.g. the
+    order swapped — is rejected rather than silently trusted, since nothing
+    in the generic list return type of resolve_exit_leg_attachments proves
+    this shape; only _bracket_to_leg_specs's own leg ordering does."""
+    stop = StopAttachment(stop_price=97.0)
+    limit = LimitAttachment(limit_price=106.0)
+    with pytest.raises(TypeError, match="must produce \\(StopAttachment, LimitAttachment\\)"):
+        _as_bracket_attachment_pair([limit, stop])  # type: ignore[list-item]

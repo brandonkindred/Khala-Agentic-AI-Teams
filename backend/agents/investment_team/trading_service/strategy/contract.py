@@ -152,6 +152,10 @@ class ExitLegSpec(BaseModel):
     trailing case since ``limit_offset``/``trail_offset`` are mutually
     exclusive on :class:`StopAttachment`); required iff ``kind ==
     STOP_LIMIT``, the same coupling as ``BracketStopLeg._validate_limit_style``.
+    ``note`` is a free-form, optional annotation for callers/maintainers
+    (e.g. which DSL rule this leg was translated from); it plays no part in
+    resolution or validation and is not carried onto the resolved
+    ``StopAttachment``/``LimitAttachment``.
 
     Preconditions: ``pct`` in ``(0, 1)``; ``kind`` in ``{STOP, STOP_LIMIT,
     TRAILING_STOP, LIMIT}``; ``limit_offset_pct`` set iff ``kind ==
