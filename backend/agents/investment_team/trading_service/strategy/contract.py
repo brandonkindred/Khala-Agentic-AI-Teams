@@ -140,14 +140,19 @@ class ExitLegSpec(BaseModel):
     distance off the entry reference price, as a positive fraction in
     ``(0, 1)`` (direction implied by side — the same convention as
     ``BracketStopLeg``/``BracketTakeProfitLeg``). For ``TRAILING_STOP``,
-    ``pct`` is *also* the trailing distance (``StopAttachment.trail_offset``
-    is derived from it as ``ref_price * pct``, not from a second,
-    independently-settable fraction): the fill simulator's trailing-stop
-    materialization (``fill_simulator._materialize_bracket_children``) seeds
-    the live child's initial stop as ``entry_fill_price ∓ trail_offset``,
-    discarding any separately-resolved ``stop_price`` — so a second knob for
-    the "initial" distance would silently diverge from the level the engine
-    actually arms. ``limit_offset_pct`` is the ``STOP_LIMIT`` leg's secondary
+    ``pct`` is *also* the trailing distance, resolved as a ``"bps"``
+    (basis-point) :class:`StopAttachment.trail_offset` rather than an
+    absolute one — NOT from a second, independently-settable fraction: the
+    fill simulator's trailing-stop materialization
+    (``fill_simulator._materialize_bracket_children``) seeds the live
+    child's initial stop from the *actual* ``entry_fill_price ∓ offset``,
+    discarding any separately-resolved ``stop_price``, and re-derives
+    ``offset`` from whatever price it is combined with each time (its
+    bar-by-bar ratchet does the same) — so a ``"bps"`` offset preserves the
+    requested percentage distance regardless of where the entry actually
+    fills (e.g. a gap), whereas a stale ``ref_price``-anchored absolute
+    offset would not (and could even go non-positive on a large gap).
+    ``limit_offset_pct`` is the ``STOP_LIMIT`` leg's secondary
     offset (a fraction of the resolved stop level, unaffected by the
     trailing case since ``limit_offset``/``trail_offset`` are mutually
     exclusive on :class:`StopAttachment`); required iff ``kind ==

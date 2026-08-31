@@ -83,36 +83,50 @@ def test_single_stop_limit_leg_sets_limit_offset() -> None:
 
 
 def test_single_trailing_stop_leg_sets_trail_offset() -> None:
-    """A lone TRAILING_STOP leg resolves a trail_offset derived from ref_price
-    (ref_price * pct = 3.0), not from stop_price, so it matches the level
-    fill_simulator actually seeds (entry_fill_price - trail_offset) when
-    entry_fill_price == ref_price; no limit offset."""
+    """A lone TRAILING_STOP leg resolves trail_offset as a "bps" (basis-point)
+    value — pct * 10_000 — not an absolute distance, so it self-scales to
+    whatever price fill_simulator actually applies it to (the entry fill,
+    which may gap away from ref_price) instead of going stale; no limit
+    offset. stop_price is still resolved as the nominal ref_price-anchored
+    preview."""
     [att] = resolve_exit_leg_attachments(
         [_leg(OrderType.TRAILING_STOP, pct=0.03)], OrderSide.LONG, 100.0
     )
     assert isinstance(att, StopAttachment)
     assert att.stop_price == pytest.approx(97.0)
-    assert att.trail_offset == pytest.approx(3.0)
-    assert att.trail_offset_kind == "abs"
+    assert att.trail_offset == pytest.approx(300.0)
+    assert att.trail_offset_kind == "bps"
     assert att.limit_offset is None
-    # The advertised stop_price matches entry_fill_price - trail_offset
-    # (the level fill_simulator actually arms) when entry_fill_price == ref_price.
-    assert att.stop_price == pytest.approx(100.0 - att.trail_offset)
 
 
 def test_single_trailing_stop_leg_sets_trail_offset_short() -> None:
     """The short-side mirror of the long case above: stop sits above the
-    reference and the advertised stop_price matches entry_fill_price +
-    trail_offset."""
+    reference; trail_offset is still a side-independent "bps" value."""
     [att] = resolve_exit_leg_attachments(
         [_leg(OrderType.TRAILING_STOP, pct=0.03)], OrderSide.SHORT, 100.0
     )
     assert isinstance(att, StopAttachment)
     assert att.stop_price == pytest.approx(103.0)
-    assert att.trail_offset == pytest.approx(3.0)
-    assert att.trail_offset_kind == "abs"
+    assert att.trail_offset == pytest.approx(300.0)
+    assert att.trail_offset_kind == "bps"
     assert att.limit_offset is None
-    assert att.stop_price == pytest.approx(100.0 + att.trail_offset)
+
+
+def test_trailing_stop_leg_offset_scales_to_actual_entry_fill_price() -> None:
+    """The whole point of "bps" mode: applying the resolved trail_offset to
+    a fill price that gapped away from ref_price still yields the requested
+    percentage distance, unlike a stale ref_price-anchored absolute offset
+    (which could even go non-positive on a large gap). Mirrors
+    fill_simulator's bps handling: entry_fill_price * (trail_offset / 10_000)."""
+    [att] = resolve_exit_leg_attachments(
+        [_leg(OrderType.TRAILING_STOP, pct=0.5)], OrderSide.LONG, 100.0
+    )
+    gapped_entry_fill_price = 40.0
+    offset = gapped_entry_fill_price * (att.trail_offset / 10_000.0)
+    effective_stop = gapped_entry_fill_price - offset
+    assert offset == pytest.approx(20.0)
+    assert effective_stop == pytest.approx(20.0)
+    assert effective_stop > 0
 
 
 def test_single_limit_target_leg_long() -> None:
@@ -159,7 +173,8 @@ def test_multiple_legs_resolve_in_order() -> None:
 
     assert isinstance(trailing, StopAttachment)
     assert trailing.stop_price == pytest.approx(95.0)
-    assert trailing.trail_offset == pytest.approx(5.0)
+    assert trailing.trail_offset == pytest.approx(500.0)
+    assert trailing.trail_offset_kind == "bps"
 
     assert isinstance(target, LimitAttachment)
     assert target.limit_price == pytest.approx(106.0)
@@ -189,7 +204,8 @@ def test_multiple_legs_resolve_in_order_short() -> None:
 
     assert isinstance(trailing, StopAttachment)
     assert trailing.stop_price == pytest.approx(105.0)
-    assert trailing.trail_offset == pytest.approx(5.0)
+    assert trailing.trail_offset == pytest.approx(500.0)
+    assert trailing.trail_offset_kind == "bps"
 
     assert isinstance(target, LimitAttachment)
     assert target.limit_price == pytest.approx(94.0)
@@ -327,17 +343,18 @@ def test_rejects_stop_limit_derived_price_that_overflows() -> None:
         )
 
 
-def test_rejects_underflowed_trail_offset() -> None:
-    """trail_offset is computed independently from stop_price (its own
-    multiplication, rounded separately), so it can underflow to a
-    negligible or literal-zero value even when stop_price is a valid,
-    distinct, nonzero price -- e.g. at a subnormal-scale ref_price, where
-    ref_price * pct underflows to exactly 0.0 while ref_price * (1 + pct)
-    does not."""
-    with pytest.raises(ValueError, match="non-finite/non-positive/negligible trail_offset"):
-        resolve_exit_leg_attachments(
-            [_leg(OrderType.TRAILING_STOP, pct=0.5)], OrderSide.SHORT, 5e-324
-        )
+def test_trailing_stop_leg_valid_at_subnormal_ref_price() -> None:
+    """Since trail_offset is now a "bps" value derived purely from pct (not
+    from ref_price), a subnormal-scale ref_price that would have underflowed
+    an absolute trail_offset to 0.0 no longer causes any trail_offset
+    problem — only stop_price's own (unrelated) validity is at stake here,
+    and it is fine at this magnitude."""
+    [att] = resolve_exit_leg_attachments(
+        [_leg(OrderType.TRAILING_STOP, pct=0.5)], OrderSide.SHORT, 5e-323
+    )
+    assert isinstance(att, StopAttachment)
+    assert att.trail_offset == pytest.approx(5000.0)
+    assert att.trail_offset_kind == "bps"
 
 
 # ---------------------------------------------------------------------------

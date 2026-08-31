@@ -1512,13 +1512,15 @@ def resolve_exit_leg_attachments(
     ``protective_limit_price`` (``fill_simulator._materialize_bracket_children``)
     with the same ``(stop_price, offset, closing_long)`` inputs used here,
     keeping emit-time and materialization-time limits consistent. A
-    ``TRAILING_STOP`` leg's ``trail_offset`` is derived from ``ref_price``
-    (not from ``stop_price``, unlike ``limit_offset``): the fill simulator
-    seeds a trailing child's live initial stop as ``entry_fill_price ∓
-    trail_offset`` and discards the resolved ``stop_price`` outright, so
-    deriving ``trail_offset`` off ``ref_price`` (≈ ``entry_fill_price`` for a
-    market entry) keeps the attachment's advertised ``stop_price`` equal to
-    the level the engine actually arms.
+    ``TRAILING_STOP`` leg's ``trail_offset`` is instead expressed in
+    ``"bps"`` (basis points), not ``"abs"``: the fill simulator seeds (and
+    later ratchets) a trailing child's live stop from the *actual*
+    ``entry_fill_price ∓ offset`` — discarding the resolved ``stop_price``
+    outright — and re-derives ``offset`` from whichever price it is applied
+    to each time, so a ``"bps"`` value preserves the requested percentage
+    distance regardless of where the entry actually fills (an absolute
+    offset anchored at ``ref_price`` would not, and could even go
+    non-positive on a large gap). See :class:`ExitLegSpec` for detail.
 
     Preconditions: ``ref_price`` is a finite number ``> 0``; ``side`` is the
     entry's ``OrderSide``; each element of ``legs`` is a validated
@@ -1527,30 +1529,28 @@ def resolve_exit_leg_attachments(
     each element is a :class:`StopAttachment` (``STOP``/``STOP_LIMIT``/
     ``TRAILING_STOP`` legs) or :class:`LimitAttachment` (``LIMIT`` legs) whose
     absolute price is finite, strictly positive, and strictly on the correct
-    side of ``ref_price``; a ``STOP_LIMIT`` leg's ``limit_offset`` and a
-    ``TRAILING_STOP`` leg's ``trail_offset`` are each finite, strictly
-    positive, and large enough to survive the side-specific addition/
-    subtraction materialization actually applies (``stop_price``/
-    ``ref_price`` respectively); for ``STOP_LIMIT`` the *derived* protective
-    limit price (``stop_price ∓ limit_offset``, the value materialization
-    actually submits) is itself finite, strictly positive, and distinct from
-    ``stop_price`` — checking ``limit_offset`` alone doesn't rule this out,
-    since it's an independent secondary quantity (unlike ``trail_offset``,
-    which is mathematically anchored to ``stop_price``'s own validity: no
-    counterexample exists where ``stop_price`` is valid but the trailing
-    derivation isn't). Empty ``legs`` yields ``[]``.
+    side of ``ref_price``; a ``STOP_LIMIT`` leg's ``limit_offset`` is finite,
+    strictly positive, and large enough to survive the side-specific
+    addition/subtraction materialization actually applies to ``stop_price``,
+    and the *derived* protective limit price itself (``stop_price ∓
+    limit_offset``, the value materialization actually submits) is finite,
+    strictly positive, and distinct from ``stop_price`` — checking
+    ``limit_offset`` alone doesn't rule this out, since it's an independent
+    secondary quantity; a ``TRAILING_STOP`` leg's ``trail_offset`` is a
+    ``"bps"`` value in ``(0, 10_000)``, trivially always valid since
+    ``ExitLegSpec.pct`` is Pydantic-bounded to ``(0, 1)``. Empty ``legs``
+    yields ``[]``.
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
-            ``<= 0``, or if a resolved price (or a ``STOP_LIMIT``/
-            ``TRAILING_STOP`` leg's secondary offset, or a ``STOP_LIMIT``
-            leg's derived protective limit price) is non-finite,
-            non-positive, or too small to survive its downstream
-            arithmetic — a defensive guard that would only trip if a leg
-            field bound were loosened without updating this math, an
-            extreme ``ref_price`` overflowed the resolved price to ``inf``,
-            or a vanishingly small ``pct``/``limit_offset_pct`` rounded away
-            to nothing in float64 on the side-specific direction
-            materialization applies.
+            ``<= 0``, or if a resolved price (or a ``STOP_LIMIT`` leg's
+            ``limit_offset`` or derived protective limit price) is
+            non-finite, non-positive, or too small to survive its
+            downstream arithmetic — a defensive guard that would only trip
+            if a leg field bound were loosened without updating this math,
+            an extreme ``ref_price`` overflowed the resolved price to
+            ``inf``, or a vanishingly small ``pct``/``limit_offset_pct``
+            rounded away to nothing in float64 on the side-specific
+            direction materialization applies.
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
     # contract stays enforced in optimized production runs. ``ref_price`` is a
@@ -1661,35 +1661,33 @@ def resolve_exit_leg_attachments(
                     f"{limit_offset!r} (derived limit price {derived_limit_price!r}) "
                     f"from stop_price={stop_price!r}, limit_offset_pct={leg.limit_offset_pct!r}"
                 )
-        # ``trail_offset`` is derived from ``ref_price`` (not ``stop_price``)
-        # via its own multiplication, independently rounded from
-        # ``stop_price``'s — so it is not guaranteed to equal
-        # ``ref_price - stop_price`` bit-for-bit, and can itself underflow
-        # to a negligible (or literal zero) value even when ``stop_price``
-        # is a valid, distinct, nonzero price (e.g. at subnormal-scale
-        # ``ref_price``). Checked below, on the same side-specific
-        # direction ``_materialize_bracket_children`` actually applies
-        # (``entry_fill_price - offset`` when ``req.side == LONG`` — i.e.
-        # ``is_long`` here — else ``entry_fill_price + offset``).
-        trail_offset = ref_price * leg.pct if leg.kind == OrderType.TRAILING_STOP else None
-        if trail_offset is not None:
-            negligible_trail = (
-                ref_price - trail_offset == ref_price
-                if is_long
-                else ref_price + trail_offset == ref_price
-            )
-            if not math.isfinite(trail_offset) or trail_offset <= 0 or negligible_trail:
-                raise ValueError(
-                    f"exit leg resolved non-finite/non-positive/negligible "
-                    f"trail_offset={trail_offset!r} from ref={ref_price!r}, pct={leg.pct!r}"
-                )
+        # ``trail_offset`` is expressed in ``"bps"`` (basis points of
+        # whatever price it is later combined with), NOT ``"abs"``. An
+        # absolute distance anchored at ``ref_price`` would only be correct
+        # if the entry actually fills at ``ref_price``; on a gap, materialization
+        # seeds the trailing child from the *actual* ``entry_fill_price``
+        # (``fill_simulator._materialize_bracket_children``:
+        # ``entry_fill_price ∓ offset``), so a stale ``ref_price``-scaled
+        # absolute offset would misrepresent the requested percentage
+        # distance — for a large-enough gap, it could even drive the
+        # effective stop non-positive. ``"bps"`` mode instead re-derives the
+        # offset from whatever price it is applied to at each use
+        # (``fill_simulator``'s trailing seed *and* its bar-by-bar ratchet
+        # both already support this), so the requested percentage distance
+        # is preserved regardless of where the entry actually fills. Since
+        # ``leg.pct`` is Pydantic-bounded to ``(0, 1)``, ``pct * 10_000`` is
+        # always a finite value in ``(0, 10_000)`` — no defensive check
+        # needed (unlike ``limit_offset``, this isn't combined with anything
+        # here at resolve time).
+        is_trailing = leg.kind == OrderType.TRAILING_STOP
+        trail_offset = leg.pct * 10_000.0 if is_trailing else None
         attachments.append(
             StopAttachment(
                 stop_price=stop_price,
                 limit_offset=limit_offset,
                 limit_offset_kind="abs",
                 trail_offset=trail_offset,
-                trail_offset_kind="abs",
+                trail_offset_kind="bps" if is_trailing else "abs",
             )
         )
     return attachments
