@@ -19,7 +19,7 @@ forced error must be.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 if TYPE_CHECKING:
     import pytest
@@ -46,6 +46,8 @@ def design_attempt_llm_call_cost(review_not_ready_rounds: int) -> int:
         Returns the exact number of LLM-budget units one design attempt
         charges before converging, given that round count.
     """
+    if review_not_ready_rounds < 0:
+        raise ValueError("review_not_ready_rounds must be >= 0")
     return 1 + (review_not_ready_rounds + 1) + review_not_ready_rounds
 
 
@@ -81,6 +83,24 @@ def synthesis_boundary_spec_implementability_error(
     )
 
 
+def _not_ready_then_ready_critiques(review_not_ready_rounds: int) -> List[Any]:
+    """Build the ``review_not_ready_rounds`` not-ready critiques followed by
+    the final ready critique that both re-entry fixture shapes below drive
+    a design attempt's review loop through."""
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    return [
+        SpecCritique(ready=False, rationale="tighten entry threshold")
+        for _ in range(review_not_ready_rounds)
+    ] + [SpecCritique(ready=True, rationale="ok")]
+
+
+def _revised_spec_dict(spec_dict: Any) -> Any:
+    revised = dict(spec_dict)
+    revised["hypothesis"] = "revised hypothesis"
+    return revised
+
+
 def _charging_design_stubs(
     monkeypatch: "pytest.MonkeyPatch", orch: Any, *, review_not_ready_rounds: int
 ) -> int:
@@ -89,47 +109,89 @@ def _charging_design_stubs(
     reviewer returns ``ready=False`` for ``review_not_ready_rounds`` rounds
     (a known number of design-refinement rounds) before converging on each
     design attempt -- so a fully re-run attempt pays the identical, known
-    cost every time (the review-round counter resets on every ``run()``,
-    i.e. at the start of each design attempt, mirroring one real design
-    attempt's shape rather than accumulating across attempts).
+    cost every time (the review/revise stubs are rebuilt fresh on every
+    ``run()``, i.e. at the start of each design attempt, mirroring one real
+    design attempt's shape rather than accumulating across attempts).
+
+    Built on top of ``conftest.py``'s ``design_returning``/``design_revising``/
+    ``review_returning`` stub builders rather than re-implementing their
+    return shapes, with only the per-call budget charge and the per-attempt
+    rebuild genuinely new here.
 
     Postconditions:
         Returns the exact number of budget units one design attempt charges
         (``design_attempt_llm_call_cost(review_not_ready_rounds)``).
     """
     from investment_team.strategy_lab.agents._llm_budget import charge_active_budget
-    from investment_team.strategy_lab.agents.design_review import SpecCritique
 
+    from .conftest import design_returning, design_revising, review_returning
     from .test_strategy_lab_phase_transitions import _spec_dict
 
-    def _revised_spec_dict() -> Any:
-        revised = _spec_dict()
-        revised["hypothesis"] = "revised hypothesis"
-        return revised
+    attempt: Dict[str, Any] = {}
 
-    review_calls = {"n": 0}
-
-    def _run(**_kw: Any) -> Any:
-        review_calls["n"] = 0
+    def _run(**kwargs: Any) -> Any:
         charge_active_budget()
-        return _spec_dict(), "scripted rationale"
+        attempt["review"] = review_returning(
+            *_not_ready_then_ready_critiques(review_not_ready_rounds)
+        )
+        attempt["revise"] = design_revising(
+            [_revised_spec_dict(_spec_dict()) for _ in range(review_not_ready_rounds)]
+        )
+        return design_returning(_spec_dict())(**kwargs)
 
-    def _review(*_a: Any, **_kw: Any) -> SpecCritique:
+    def _review(*args: Any, **kwargs: Any) -> Any:
         charge_active_budget()
-        review_calls["n"] += 1
-        if review_calls["n"] <= review_not_ready_rounds:
-            return SpecCritique(ready=False, rationale="tighten entry threshold")
-        return SpecCritique(ready=True, rationale="ok")
+        return attempt["review"](*args, **kwargs)
 
-    def _revise(*_a: Any, **_kw: Any) -> Any:
+    def _revise(*args: Any, **kwargs: Any) -> Any:
         charge_active_budget()
-        return _revised_spec_dict(), "revised rationale"
+        return attempt["revise"](**kwargs)
 
     monkeypatch.setattr(orch.design_agent, "run", _run)
     monkeypatch.setattr(orch.design_review_agent, "run", _review)
     monkeypatch.setattr(orch.design_agent, "revise", _revise)
 
     return design_attempt_llm_call_cost(review_not_ready_rounds)
+
+
+def _one_revision_review_stubs(
+    monkeypatch: "pytest.MonkeyPatch",
+    orch: Any,
+    *,
+    review_not_ready_rounds: int = REENTRY_REVIEW_NOT_READY_ROUNDS,
+) -> None:
+    """Wire ``design_review_agent.run``/``design_agent.revise`` (but not
+    ``design_agent.run`` -- callers already have that stubbed, typically via
+    ``_stub_pipeline_for_happy_path``) so the review loop returns
+    ``ready=False`` for ``review_not_ready_rounds`` rounds before converging,
+    without charging any LLM budget. Shared by
+    ``test_strategy_lab_cross_attempt_resume.py``'s several re-entry tests,
+    which only ever drive one such sequence across a whole cycle (no
+    per-attempt reset needed, unlike ``_charging_design_stubs`` above).
+
+    Preconditions:
+        ``orch.design_agent.run`` is already stubbed by the caller.
+    Postconditions:
+        ``orch.design_review_agent.run`` and ``orch.design_agent.revise``
+        are replaced with stubs producing the known not-ready-then-ready
+        sequence.
+    """
+    from .conftest import design_revising, review_returning
+    from .test_strategy_lab_phase_transitions import _spec_dict
+
+    revise_stub = design_revising(
+        [_revised_spec_dict(_spec_dict()) for _ in range(review_not_ready_rounds)]
+    )
+
+    def _revise(*_args: Any, **kwargs: Any) -> Any:
+        return revise_stub(**kwargs)
+
+    monkeypatch.setattr(
+        orch.design_review_agent,
+        "run",
+        review_returning(*_not_ready_then_ready_critiques(review_not_ready_rounds)),
+    )
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
 
 
 def _capture_cycle_budget(monkeypatch: "pytest.MonkeyPatch") -> List[Any]:

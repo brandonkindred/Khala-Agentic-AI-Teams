@@ -56,6 +56,11 @@ from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.phases import PHASE_TRANSITION_EVENT_NAME, Phase
 
+from .strategy_lab_reentry_fixtures import (
+    REENTRY_REVIEW_NOT_READY_ROUNDS,
+    _one_revision_review_stubs,
+    synthesis_boundary_spec_implementability_error,
+)
 from .test_strategy_lab_phase_transitions import (
     _spec_dict,
     _stub_pipeline_for_happy_path,
@@ -253,40 +258,20 @@ def test_spec_implicated_false_resumes_from_review_checkpoint(
     assertion below would pass trivially whether or not seeding actually
     happened.
     """
-    from investment_team.strategy_lab.agents.design_review import SpecCritique
-
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
     design_run_calls = _wrap_with_call_counter(monkeypatch, orch.design_agent, "run")
 
-    review_call_count = {"n": 0}
-
-    def _review_with_one_revision(*_a: Any, **_kw: Any) -> SpecCritique:
-        review_call_count["n"] += 1
-        if review_call_count["n"] == 1:
-            return SpecCritique(ready=False, rationale="tighten entry threshold")
-        return SpecCritique(ready=True, rationale="ok")
-
-    def _revised_spec_dict() -> Dict[str, Any]:
-        revised = _spec_dict()
-        revised["hypothesis"] = "RSI mean reversion, revised threshold"
-        return revised
-
-    monkeypatch.setattr(orch.design_review_agent, "run", _review_with_one_revision)
-    monkeypatch.setattr(
-        orch.design_agent, "revise", lambda *_a, **_kw: (_revised_spec_dict(), "revised rationale")
+    _one_revision_review_stubs(
+        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
     )
 
     real_synthesize = orch._synthesize_initial_code
 
     def _synthesize_raise_on_first_attempt(**kwargs: Any) -> Any:
         if kwargs["design_attempt"] == 0:
-            raise SpecImplementabilityError(
-                "forced fail at synthesis boundary, not spec-implicated",
-                failure_phase="synthesis",
-                last_spec=kwargs["spec"],
-                last_code="",
-                spec_implicated=False,
+            raise synthesis_boundary_spec_implementability_error(
+                spec=kwargs["spec"], spec_implicated=False
             )
         return real_synthesize(**kwargs)
 
@@ -351,36 +336,17 @@ def test_repeated_resume_does_not_duplicate_seeded_drift_history(
     each time. The exhaustion short-circuit record is built from the parent
     drift collector -- the exact path the duplication would surface on.
     """
-    from investment_team.strategy_lab.agents.design_review import SpecCritique
-
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 
-    review_call_count = {"n": 0}
-
-    def _review_with_one_revision(*_a: Any, **_kw: Any) -> SpecCritique:
-        review_call_count["n"] += 1
-        if review_call_count["n"] == 1:
-            return SpecCritique(ready=False, rationale="tighten entry threshold")
-        return SpecCritique(ready=True, rationale="ok")
-
-    def _revised_spec_dict() -> Dict[str, Any]:
-        revised = _spec_dict()
-        revised["hypothesis"] = "RSI mean reversion, revised threshold"
-        return revised
-
-    monkeypatch.setattr(orch.design_review_agent, "run", _review_with_one_revision)
-    monkeypatch.setattr(
-        orch.design_agent, "revise", lambda *_a, **_kw: (_revised_spec_dict(), "revised rationale")
+    _one_revision_review_stubs(
+        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
     )
+    review_call_count = _wrap_with_call_counter(monkeypatch, orch.design_review_agent, "run")
 
     def _always_raise_not_spec_implicated(**kwargs: Any) -> Any:
-        raise SpecImplementabilityError(
-            "forced fail at synthesis boundary, not spec-implicated",
-            failure_phase="synthesis",
-            last_spec=kwargs["spec"],
-            last_code="",
-            spec_implicated=False,
+        raise synthesis_boundary_spec_implementability_error(
+            spec=kwargs["spec"], spec_implicated=False
         )
 
     monkeypatch.setattr(orch, "_synthesize_initial_code", _always_raise_not_spec_implicated)
@@ -417,27 +383,11 @@ def test_non_spec_implicated_failure_does_not_mislabel_convergence_directive(
     receives on each call: attempt 2's should carry only attempt 1's
     (correctly labeled) directive, never attempt 0's.
     """
-    from investment_team.strategy_lab.agents.design_review import SpecCritique
-
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 
-    review_call_count = {"n": 0}
-
-    def _review_with_one_revision(*_a: Any, **_kw: Any) -> SpecCritique:
-        review_call_count["n"] += 1
-        if review_call_count["n"] == 1:
-            return SpecCritique(ready=False, rationale="tighten entry threshold")
-        return SpecCritique(ready=True, rationale="ok")
-
-    def _revised_spec_dict() -> Dict[str, Any]:
-        revised = _spec_dict()
-        revised["hypothesis"] = "RSI mean reversion, revised threshold"
-        return revised
-
-    monkeypatch.setattr(orch.design_review_agent, "run", _review_with_one_revision)
-    monkeypatch.setattr(
-        orch.design_agent, "revise", lambda *_a, **_kw: (_revised_spec_dict(), "revised rationale")
+    _one_revision_review_stubs(
+        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
     )
 
     real_synthesize = orch._synthesize_initial_code
