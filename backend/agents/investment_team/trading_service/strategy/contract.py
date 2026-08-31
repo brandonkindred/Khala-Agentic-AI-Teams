@@ -202,7 +202,12 @@ class ExitLegSpec(BaseModel):
     # ``limit_offset_pct`` after construction and silently break the
     # kind/offset coupling ``_validate_kind_fields`` exists to guarantee
     # (Pydantic validators run on construction, not on attribute assignment).
-    model_config = ConfigDict(frozen=True)
+    # ``extra="forbid"`` (Pydantic's default is "ignore") so a misspelled or
+    # unexpected keyword (e.g. ``limit_offset`` instead of
+    # ``limit_offset_pct``) raises at construction instead of being silently
+    # dropped and surfacing later as a confusing "requires limit_offset_pct"
+    # error from ``_validate_kind_fields``.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: OrderType
     pct: float = Field(gt=0, lt=1.0)

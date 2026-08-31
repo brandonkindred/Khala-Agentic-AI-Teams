@@ -528,6 +528,15 @@ def test_leg_is_frozen() -> None:
         leg.pct = 0.5
 
 
+def test_leg_rejects_unknown_field() -> None:
+    """An unexpected/misspelled keyword (e.g. limit_offset instead of
+    limit_offset_pct) is rejected at construction rather than silently
+    dropped, which would otherwise surface later as a confusing
+    "requires limit_offset_pct" error instead of naming the real typo."""
+    with pytest.raises(ValueError):
+        ExitLegSpec(kind=OrderType.STOP, pct=0.03, limit_offset=0.01)  # type: ignore[call-arg]
+
+
 # ---------------------------------------------------------------------------
 # Adapter equivalence: OcoBracketRule -> ExitLegSpec list ties back to
 # resolve_bracket_attachments exactly.

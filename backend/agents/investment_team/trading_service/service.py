@@ -1524,8 +1524,9 @@ def _validated_stop_limit_offset(
     whose derived protective limit price is finite, strictly positive, and
     distinct from ``stop_price``.
     Raises:
-        ValueError: if ``limit_offset`` or the derived protective limit
-            price is non-finite, non-positive, or equal to ``stop_price``.
+        ValueError: if ``limit_offset`` is non-finite or non-positive, or if
+            the derived protective limit price is non-finite, non-positive,
+            or equal to ``stop_price``.
     """
     limit_offset = stop_price * leg.limit_offset_pct
     derived_limit_price = protective_limit_price(stop_price, limit_offset, closing_long=is_long)
