@@ -880,6 +880,25 @@ tasks. `workflow.patched` and this activity-level decoding are both required, ad
 different compatibility surfaces (workflow replay vs. activity worker invocation) — neither
 substitutes for the other.
 
+**Reshaping an existing activity's call is not the only rollout hazard — `document_production_pra_submit_activity`
+is a brand-new activity type, and a shape-compatibility decoder cannot help an old worker that has
+never registered it at all.** During a rolling deployment, multiple worker replicas at different
+code versions serve the same task queue simultaneously; Temporal does not route a given task to a
+same-version replica by default. A *new*-code `PlanningWorkflow` execution (patched,
+`use_product_analysis=True`) can schedule `document_production_pra_submit_activity`, and that task
+can land on an *old* replica that has not yet deployed this contract's code at all — the worker has
+no handler registered for that activity name, the task cannot start, and — being `NO_RETRY` — the
+activity (and per the backstop above, the workflow, terminally-recorded) fails immediately on a
+purely operational rollout race, not a real defect. The three-positional-arg compatibility decoder
+above does not help here: there is no old-shaped call for this activity to decode, because it did
+not exist before this contract. **Contract requirement:** #7445-B's rollout must use Temporal
+Worker Versioning (Build ID-based task queue versioning) so tasks for the new activity route only
+to workers that have it registered, or equivalently drain and fully upgrade every worker replica on
+this task queue before any workflow begins scheduling `document_production_pra_submit_activity` —
+accepting old call shapes in the new worker code (this section's existing requirement) addresses
+the reverse direction (old task, new worker) and does not by itself close this one (new task, old
+worker).
+
 ### 4.4 Explicit hitl.py / pause_cycle.py reuse statement
 
 This design reuses, unmodified in behavior:
@@ -1013,10 +1032,36 @@ The primitive #7445-B builds must satisfy:
   `save_checkpoint("planning_team", job_id, "document_production_pra", {"pra_job_id": ...})` as its
   own atomic write, then return.
 - *Invariants:* `run_pra` is called at most once per Planning `job_id`, ever, *when this activity
-  itself does not crash between the two steps*; a crash in that narrow window is the one residual
-  risk this spec cannot close without PRA-side idempotency (§5's open risks, below) — `NO_RETRY`
-  ensures that crash fails the workflow loudly rather than Temporal silently retrying into a
-  duplicate submission. A checkpoint is never persisted with a `None`/falsy `pra_job_id`.
+  itself does not crash between the two steps*; a crash in that narrow window is one residual risk
+  this spec cannot close without PRA-side idempotency (§5's open risks, below) — `NO_RETRY` ensures
+  that crash fails the *workflow* loudly rather than Temporal silently retrying into a duplicate
+  submission. A checkpoint is never persisted with a `None`/falsy `pra_job_id`.
+
+  **Correction — "fails the workflow loudly" is not the same as "the job record reflects
+  failure," and a hard worker-process crash defeats `_guarded` entirely, not just this checkpoint
+  window.** The `_guarded`-wrapping requirement above marks the job `FAILED` only when the activity
+  *raises a Python exception inside `_guarded`'s own `work` callable* — that is, when the process
+  is alive to run the `except` handler at all. A worker-process crash (OOM kill, pod eviction,
+  segfault) between `run_pra()` returning and the checkpoint write is not a Python exception:
+  `_guarded`'s `except` clause never executes, `mark_job_failed` is never called, and once
+  Temporal's `NO_RETRY` policy and this activity's timeouts expire, the *workflow* execution fails —
+  but `PlanningWorkflow.run` has no `except` around its `execute_activity` calls (confirmed above),
+  so nothing updates the job record. The status endpoint keeps reporting the job as running
+  indefinitely even though the workflow itself has already terminated — silent from the job
+  record's perspective, whatever "loudly" the Temporal Web UI shows. This is not unique to this one
+  checkpoint window: it is the same gap for *any* per-phase activity's hard process crash, since
+  every phase relies solely on `_guarded` running to completion and none has a workflow-level
+  backstop today. **Contract requirement, scoped to what this story adds:** because this activity
+  runs under `NO_RETRY`/`SINGLE_ATTEMPT` — zero retry cushion, unlike the `SAFE_RETRY` phases where
+  a crash on a non-final attempt still gets a further chance to run `_guarded` to completion — the
+  workflow must wrap its `execute_activity(document_production_pra_submit_activity, ...)` call in
+  a `try/except` that, on any exception surfacing to the workflow (including one from a crashed,
+  never-`_guarded`-completed attempt), performs a best-effort terminal job-store update
+  (`mark_job_failed`/`update_job(status="failed", ...)`) before re-raising to fail the workflow —
+  a workflow-level backstop specifically for the one activity in this contract with no retry
+  cushion at all. Extending the same backstop to the pre-existing per-phase activities is a
+  legitimate follow-up but out of this story's scope; it does not block this contract, since those
+  activities' existing behavior is unmodified by it.
 
 **`document_production_activity` (entry — every invocation, paused or not)**
 This contract's pause machinery (checkpoint-before-`run_pra`, the new `SAFE_RETRY` policy, the
@@ -1207,10 +1252,12 @@ this contract:
   `update_job(..., resolved_questions=...)` preserves rather than clobbers them, and the handoff
   package built from the same `merged` dict carries the actual human decisions instead of an empty
   list.
-- *Invariants:* A resume is applied at most once per `resume_token` — re-invocation with the same
-  already-consumed token must not re-apply answers or re-run already-completed work (idempotent
-  resume). No resume path may submit a second external PRA job for the same Planning job. A
-  resumed round's answer_callback never returns an answer belonging to a different `resume_token`.
+- *Invariants:* A resume is applied at most once per `resume_token` *as reflected in this
+  contract's own job record and workflow state* — re-invocation with an already-consumed token must
+  not re-apply answers or re-run already-completed work there (idempotent resume from this
+  contract's own perspective; see open risk 4 below for the external-delivery caveat this does not
+  cover). No resume path may submit a second external PRA job for the same Planning job. A resumed
+  round's answer_callback never returns an answer belonging to a different `resume_token`.
   Because this activity is retryable (§4.3.1), a retry that lands *after* step (1) but before step
   (2) must not resubmit the answers blindly — it must first reconcile against PRA's current
   `pending_questions` (a status GET). **This reconciliation must compare full question identity
@@ -1309,6 +1356,23 @@ no persisted pause to resume from, silently hanging the job.
    which is outside `planning_team`'s boundary. The `(id, question_text)` comparison reduces the
    collision surface (it catches every case where the two rounds' text actually differs) but is not
    a complete fix, and #7445-B inherits this residual risk knowingly.
+4. *New to this spec, cross-team:* the reconciliation check before step (1)'s submission (above) is
+   a read (a PRA status GET) followed by a decision, not a claim — it does not itself prevent two
+   overlapping attempts of the *same* resumed activity invocation (the same heartbeat-loss scenario
+   as the paused-return and consume-and-clear races above: a lost heartbeat during a `SAFE_RETRY`
+   resume attempt lets Temporal start a second attempt while the first keeps running, both carrying
+   the same `acknowledged_resume_token`) from both observing "round still pending" and both calling
+   `submit_product_analysis_answers` before either reaches the token-guarded clear in step (2). The
+   job-store guards elsewhere in this contract (the write-once answer slot in §4.4, the
+   resume-token-conditioned clear in this section) protect *this contract's own durable state*; they
+   do not protect the external PRA POST itself, which has no compare-and-set of its own. The
+   token-guarded clear happens *after* the duplicate side effect, not before it, so it cannot prevent
+   it — only prevent the duplicate from being recorded twice locally. This is the same class of gap
+   as risks 2 and 3: full closure requires PRA's own submission endpoint to accept an idempotency
+   key (e.g. `resume_token`) and de-duplicate identical resubmissions server-side, which is outside
+   `planning_team`'s boundary and this spec's stated scope. Until PRA offers that, #7445-B inherits
+   the residual risk that a heartbeat-loss race can deliver an answer batch to PRA twice, even though
+   this contract's own job record and workflow state stay consistent throughout.
 
 ---
 
