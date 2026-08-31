@@ -412,6 +412,12 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
     # Not cancelled by default — a test simulating cancellation flips this
     # (e.g. `job_state["status"] = "cancelled"`).
     job_state: dict[str, Any] = {"status": "running"}
+    # Comment-scoped child job records, keyed by `_child_job_id_for_comment(id)`
+    # (e.g. "address-comment:2") — a test simulating an already-published or
+    # still-active prior dispatch populates this; absent (the default), a
+    # lookup by a comment-scoped id returns None (not found), matching a real
+    # job service for a comment never dispatched before.
+    child_job_states: dict[str, dict[str, Any]] = {}
 
     monkeypatch.setattr(_main, "GitHubClient", lambda **_kw: fake)
     monkeypatch.setattr(_main, "update_job", lambda job_id, **kw: job_updates.append(kw))
@@ -425,8 +431,18 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
     # The real get_job also hits the job service — _job_cancelled checks it at
     # multiple points in the run now, so every test would otherwise pay a real
     # (and, against the deliberately-unreachable test JOB_SERVICE_URL, slow
-    # and retried) network call for each check.
-    monkeypatch.setattr(_main, "get_job", lambda job_id: dict(job_state))
+    # and retried) network call for each check. `_previously_published_fix`
+    # and `_dispatch_implementation`'s active-job guard also now call get_job,
+    # but with a comment-scoped id (see `child_job_states` above) rather than
+    # the parent run's own job_id `_job_cancelled` checks — route each id to
+    # its own fake store rather than conflating the two.
+    monkeypatch.setattr(
+        _main,
+        "get_job",
+        lambda job_id: dict(child_job_states[job_id]) if job_id in child_job_states else (
+            dict(job_state) if not job_id.startswith("address-comment:") else None
+        ),
+    )
 
     def _execute(*args, **kwargs):
         executions.append({"args": args, "kwargs": kwargs})
@@ -442,6 +458,7 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
         "child_jobs": child_jobs,
         "executions": executions,
         "job_state": job_state,
+        "child_job_states": child_job_states,
         "request": AddressCommentsRequest(owner="o", repo="r", repo_path="/tmp/x", pr_number=7),
     }
 
@@ -1023,13 +1040,11 @@ class TestHandleComment:
         fake.review_comments = [_comment(2)]
         fake.threads = [thread]
 
-        address_env["job_state"].update(
-            {
-                "status": "completed",
-                "chosen_plan": "Add the missing null check.",
-                "github_context": {"review_comment_id": 2},
-            }
-        )
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {
+            "status": "completed",
+            "chosen_plan": "Add the missing null check.",
+            "github_context": {"review_comment_id": 2},
+        }
         # If triage or planning were reached, this would raise and fail the test.
         monkeypatch.setattr(
             ac,
@@ -1070,13 +1085,11 @@ class TestHandleComment:
         fake.threads = [thread]
         fake.get_pull_request = lambda _o, _r, _n: replace(fake.pr, state="closed")  # type: ignore[assignment]
 
-        address_env["job_state"].update(
-            {
-                "status": "completed",
-                "chosen_plan": "Add the missing null check.",
-                "github_context": {"review_comment_id": 2},
-            }
-        )
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {
+            "status": "completed",
+            "chosen_plan": "Add the missing null check.",
+            "github_context": {"review_comment_id": 2},
+        }
 
         outcome = ac._handle_comment(
             fake,
@@ -1097,6 +1110,82 @@ class TestHandleComment:
         assert "no longer open" in outcome.detail
         assert fake.replies == []
         assert fake.resolved == []
+
+    def test_active_prior_job_for_same_comment_blocks_redispatch(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The child job id is now comment-scoped (stable across runs), so an
+        earlier run's job for this exact comment can still be ACTIVE (e.g. a
+        stale/orphaned "running" row left behind by a crashed worker) when
+        this run reaches dispatch — `_previously_published_fix` only skips
+        re-dispatch for a `"completed"` job, so anything else falls through
+        here. Dispatching anyway would call `create_job` with the SAME id and
+        silently reset that row, risking corruption of a genuinely still-
+        running implementation. This must be refused instead: no new job is
+        created, and the thread is left unresolved for the next run rather
+        than replied to or resolved."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {"status": "running"}
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert outcome.left_unpublished_work is True
+        assert address_env["child_jobs"] == []  # never called create_job
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_terminal_non_completed_prior_job_allows_redispatch(
+        self, address_env, monkeypatch
+    ) -> None:
+        """Unlike an ACTIVE prior job, one that already reached a TERMINAL
+        but non-"completed" status (failed, completed_with_failures,
+        cancelled) is safe to reset and retry — that is the ordinary case a
+        comment resurfaces for re-dispatch at all (its previous attempt
+        didn't succeed)."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {"status": "failed"}
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "resolved"
+        assert address_env["child_jobs"] and address_env["child_jobs"][0]["job_id"] == "address-comment:2"
+        assert fake.replies and fake.replies[0][0] == 2
+        assert fake.resolved == ["T2"]
 
     def test_new_reviewer_feedback_during_workflow_prevents_resolution(
         self, address_env, monkeypatch

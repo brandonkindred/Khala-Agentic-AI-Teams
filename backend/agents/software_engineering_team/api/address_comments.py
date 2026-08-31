@@ -103,6 +103,14 @@ def _parse_accounted_through(body: str) -> Optional[int]:
 # this), to bound prompt size regardless of the actual file's length.
 _MAX_CITED_CODE_CHARS = 20000
 
+# Non-terminal coding-team job statuses: a job in one of these states may still be
+# actively running (or was, until its worker crashed/restarted without terminalizing
+# it). Used by `_dispatch_implementation` to refuse overwriting an existing job for
+# the same comment-scoped id rather than blindly resetting possibly-live state.
+_ACTIVE_JOB_STATUSES = frozenset(
+    {JobStatus.PENDING.value, JobStatus.RUNNING.value, JobStatus.WAITING_FOR_USER.value}
+)
+
 # Named pieces of _unresolved_comments' return type, factored out so the function's
 # own signature doesn't carry one unreadable nested 4-tuple annotation.
 RetryResolveEntry = Tuple[str, int]
@@ -982,12 +990,47 @@ def _dispatch_implementation(
           row was created before that call, but whether the Temporal
           workflow itself was started depends on where inside
           ``execute_coding_team_workflow`` the raise happened.
+        - Raises ``RuntimeError`` (before creating/touching anything) instead
+          of dispatching when a job already exists for
+          :func:`_child_job_id_for_comment`\\ ``(comment.id)`` in an ACTIVE
+          state (``"pending"``, ``"running"``, or ``"waiting_for_user"``) —
+          because the child job id is now comment-scoped rather than
+          parent-job-scoped (see the ``parent_job_id`` precondition above),
+          the SAME id can otherwise be reused across two runs. The caller
+          (:func:`_handle_comment`) only reaches this function after
+          :func:`_previously_published_fix` found no ``"completed"`` job for
+          this comment, so any job found here is either a stale/orphaned
+          active job (e.g. its worker crashed or the server restarted
+          mid-run) or, in principle, a genuinely still-running one — either
+          way, blindly overwriting it via ``create_job``'s upsert could
+          corrupt or orphan real in-flight work. A job whose status is
+          already TERMINAL but not ``"completed"`` (``"failed"``,
+          ``"completed_with_failures"``, ``"cancelled"``) is safe to reset
+          and retry — that is the common, intended case a comment resurfaces
+          for re-dispatch at all.
     """
     if pr_remote is None:
         raise RuntimeError(
             f"cannot determine the head repository for {request.owner}/{request.repo}"
             f"#{request.pr_number}'s branch {pr_head!r} (its fork appears to have been "
             "deleted); the fix cannot be published"
+        )
+    child_job_id = _child_job_id_for_comment(comment.id)
+    try:
+        existing_job = _main.get_job(child_job_id)
+    except Exception as e:  # noqa: BLE001 - best-effort; a failed lookup must not block dispatch
+        logger.warning(
+            "address-comments: could not check for an existing job before dispatching "
+            "comment %s's implementation: %s",
+            comment.id,
+            scrub_token_from_text(str(e)),
+        )
+        existing_job = None
+    if existing_job and existing_job.get("status") in _ACTIVE_JOB_STATUSES:
+        raise RuntimeError(
+            f"a job already exists for comment {comment.id} (id {child_job_id!r}, status "
+            f"{existing_job.get('status')!r}); refusing to overwrite a possibly still-running "
+            "implementation"
         )
     requirements = "\n".join(f"- {r}" for r in plan.requirements) or "- (none stated)"
     description = (
@@ -1013,7 +1056,6 @@ def _dispatch_implementation(
         },
     )
     plan_input_dict = plan_input.model_dump()
-    child_job_id = _child_job_id_for_comment(comment.id)
     _main.create_job(
         job_id=child_job_id,
         repo_path=request.repo_path,
