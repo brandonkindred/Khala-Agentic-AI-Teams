@@ -642,6 +642,41 @@ def test_rule5_fixed_notional_worst_case_accounts_for_whole_lot_flooring() -> No
     assert not matches, matches
 
 
+def test_rule5_fixed_notional_worst_case_accounts_for_slippage() -> None:
+    """The fill simulator deducts cash at the *slipped* fill price
+    (entry_price = ref_price × (1 + slippage_bps/10_000) for a long entry),
+    not the reference-price notional — so a worst-case sum that lands
+    exactly at fundable_capital using reference prices alone would still
+    have its last concurrent entry rejected once slippage is applied.
+    4 fractional (crypto) positions at $25k notional each sum to exactly
+    $100k against the default $100k capital and default 2bps slippage —
+    must be flagged critical since actual cash draw is $100k × 1.0002."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=25_000.0),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "fixed_notional" in c and "slippage" in c]
+    assert matches, _critical(results)
+
+
+def test_rule5_fixed_notional_worst_case_fits_with_slippage_headroom() -> None:
+    """The same 4-position scenario with enough headroom below capital that
+    the slippage inflation still fits must NOT be flagged — the adjustment
+    should not be so conservative it blocks genuinely fundable specs."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=20_000.0),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "fixed_notional" in c]
+    assert not matches, matches
+
+
 def test_rule5_fixed_fraction_leverage_above_one_does_not_expand_cash_bound() -> None:
     """The runtime has no margin facility — entries are fully cash-funded,
     so a configured risk_limits.max_gross_leverage above 1.0 cannot expand

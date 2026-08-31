@@ -1024,6 +1024,18 @@ class SpecReadinessGate(GateResultsMixin):
         # filter would actually allow through.
         cash_bound_multiplier = min(1.0, float(ctx.spec.risk_limits.max_gross_leverage))
 
+        # The fill simulator deducts cash at the *slipped* fill price
+        # (``entry_price = ref_price * (1 + slippage_bps/10_000)`` for a long
+        # entry — see ``_slippage_multipliers``/``_fill_entry`` and
+        # ``Position.position_value``), not the reference-price notional this
+        # check otherwise sizes against. A worst-case sum computed from
+        # reference-price notionals alone can land exactly at
+        # ``fundable_capital`` and still have its last concurrent entry
+        # rejected with ``insufficient_capital`` once slippage is applied, so
+        # inflate the worst-case notional by the configured slippage before
+        # comparing.
+        slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
+
         # Notional is symbol-independent for both supported kinds, so resolve
         # it once.
         if kind == "fixed_fraction":
@@ -1112,12 +1124,29 @@ class SpecReadinessGate(GateResultsMixin):
         # Worst case across concurrency: the ``worst_case_concurrent``
         # symbols whose runtime-realizable notional (after whole-lot
         # flooring, where applicable) is largest, filling simultaneously.
+        # Slippage only matters here — a single order's allow/reject
+        # decision in ``_fill_entry`` compares the unslipped reference
+        # notional against capital, so it's unaffected — because multiple
+        # concurrent entries each deduct their *slipped* (inflated) cost
+        # from the same shared capital pool, so the aggregate actually
+        # drawn down can exceed a sum computed from reference prices alone.
         realizable_notionals.sort(reverse=True)
         worst_case_notional = sum(realizable_notionals[:worst_case_concurrent])
+        effective_worst_case_notional = (
+            worst_case_notional * slippage_multiplier
+            if worst_case_concurrent > 1
+            else worst_case_notional
+        )
         fundable_capital = capital * cash_bound_multiplier
-        if worst_case_notional > fundable_capital:
+        if effective_worst_case_notional > fundable_capital:
             if kind == "fixed_fraction":
-                worst_case_fraction = worst_case_notional / capital
+                worst_case_fraction = effective_worst_case_notional / capital
+                slippage_note = (
+                    f", inflated {(slippage_multiplier - 1) * 10_000:.1f}bps for "
+                    "configured slippage"
+                    if worst_case_concurrent > 1
+                    else ""
+                )
                 return (
                     self._critical(
                         f"Sizing realisability: fixed_fraction {fraction:.4f} × "
@@ -1125,7 +1154,7 @@ class SpecReadinessGate(GateResultsMixin):
                         f"{len(symbols)} target symbol(s) and risk_limits."
                         f"max_open_positions "
                         f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring where applicable) = "
+                        f"whole-lot share flooring where applicable{slippage_note}) = "
                         f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
                         f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
                         f"${capital:.0f}) if all concurrent positions filled "
@@ -1141,10 +1170,12 @@ class SpecReadinessGate(GateResultsMixin):
                         f"{len(symbols)} target symbol(s) and risk_limits."
                         f"max_open_positions "
                         f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring where applicable) = "
-                        f"${worst_case_notional:.0f}, which exceeds the cash-bound "
-                        f"fundable capital ${fundable_capital:.0f} if all concurrent "
-                        "positions filled simultaneously."
+                        f"whole-lot share flooring and "
+                        f"{(slippage_multiplier - 1) * 10_000:.1f}bps configured "
+                        f"slippage) = ${effective_worst_case_notional:.0f}, which "
+                        f"exceeds the cash-bound fundable capital "
+                        f"${fundable_capital:.0f} if all concurrent positions filled "
+                        "simultaneously."
                     ),
                 )
             if notional > capital:
