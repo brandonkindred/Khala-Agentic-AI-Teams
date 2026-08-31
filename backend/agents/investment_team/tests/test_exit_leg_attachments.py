@@ -99,6 +99,21 @@ def test_single_trailing_stop_leg_sets_trail_offset() -> None:
     assert att.stop_price == pytest.approx(100.0 - att.trail_offset)
 
 
+def test_single_trailing_stop_leg_sets_trail_offset_short() -> None:
+    """The short-side mirror of the long case above: stop sits above the
+    reference and the advertised stop_price matches entry_fill_price +
+    trail_offset."""
+    [att] = resolve_exit_leg_attachments(
+        [_leg(OrderType.TRAILING_STOP, pct=0.03)], OrderSide.SHORT, 100.0
+    )
+    assert isinstance(att, StopAttachment)
+    assert att.stop_price == pytest.approx(103.0)
+    assert att.trail_offset == pytest.approx(3.0)
+    assert att.trail_offset_kind == "abs"
+    assert att.limit_offset is None
+    assert att.stop_price == pytest.approx(100.0 + att.trail_offset)
+
+
 def test_single_limit_target_leg_long() -> None:
     """A lone LIMIT (target) leg resolves a LimitAttachment above the reference for
     a long."""
@@ -147,6 +162,55 @@ def test_multiple_legs_resolve_in_order() -> None:
 
     assert isinstance(target, LimitAttachment)
     assert target.limit_price == pytest.approx(106.0)
+
+
+def test_multiple_legs_resolve_in_order_short() -> None:
+    """The short-side mirror of the long case above: same four-leg list and
+    ordering, with every resolved price on the short side of the reference."""
+    legs = [
+        _leg(OrderType.STOP, pct=0.03),
+        _leg(OrderType.STOP_LIMIT, pct=0.04, limit_offset_pct=0.01),
+        _leg(OrderType.TRAILING_STOP, pct=0.05),
+        _leg(OrderType.LIMIT, pct=0.06),
+    ]
+    attachments = resolve_exit_leg_attachments(legs, OrderSide.SHORT, 100.0)
+    assert len(attachments) == 4
+    stop, stop_limit, trailing, target = attachments
+
+    assert isinstance(stop, StopAttachment)
+    assert stop.stop_price == pytest.approx(103.0)
+    assert stop.limit_offset is None
+    assert stop.trail_offset is None
+
+    assert isinstance(stop_limit, StopAttachment)
+    assert stop_limit.stop_price == pytest.approx(104.0)
+    assert stop_limit.limit_offset == pytest.approx(1.04)
+
+    assert isinstance(trailing, StopAttachment)
+    assert trailing.stop_price == pytest.approx(105.0)
+    assert trailing.trail_offset == pytest.approx(5.0)
+
+    assert isinstance(target, LimitAttachment)
+    assert target.limit_price == pytest.approx(94.0)
+
+
+# ---------------------------------------------------------------------------
+# resolve_exit_leg_attachments: defense-in-depth kind check
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_rejects_unsupported_leg_kind() -> None:
+    """The resolver's STOP-family branch explicitly rejects an unsupported
+    kind rather than silently treating it as a stop leg by implication.
+    ``ExitLegSpec``'s own validator already blocks this at construction, so
+    the only way to reach this defense-in-depth check is to bypass it via
+    ``model_construct`` (no validation) — exactly what a future caller
+    outside this module's control might do."""
+    leg = ExitLegSpec.model_construct(
+        kind=OrderType.MARKET, pct=0.03, limit_offset_pct=None, note=""
+    )
+    with pytest.raises(ValueError, match="unsupported kind"):
+        resolve_exit_leg_attachments([leg], OrderSide.LONG, 100.0)
 
 
 # ---------------------------------------------------------------------------

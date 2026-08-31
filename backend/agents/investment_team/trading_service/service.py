@@ -1561,6 +1561,13 @@ def resolve_exit_leg_attachments(
                 )
             attachments.append(LimitAttachment(limit_price=limit_price))
             continue
+        # Defense-in-depth: don't let a non-LIMIT kind fall through to the
+        # STOP-family math below by implication. ``ExitLegSpec`` already
+        # restricts ``kind`` to this set at construction, but the resolver
+        # shouldn't rely solely on that upstream guarantee — an unrecognized
+        # kind here must fail loudly, not be silently treated as a stop leg.
+        if leg.kind not in (OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP):
+            raise ValueError(f"exit leg has unsupported kind {leg.kind!r}")
         stop_price = ref_price * (1.0 - leg.pct) if is_long else ref_price * (1.0 + leg.pct)
         # Defense-in-depth postcondition: the resolved price must be finite and
         # strictly positive. The leg field bound (``pct < 1.0``) already
