@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -2449,11 +2450,11 @@ def _resolve_repo_path(
         - Raises ``HTTPException(400)`` when ``owner``/``repo`` are missing or
           carry a path separator, ``..`` segment, null byte, or leading/trailing
           whitespace, when ``issue_number`` or ``pr_number`` is non-positive, or
-          when both are
-          set — defense-in-depth so this path builder can't be coerced into
-          escaping the workspace root, building a degenerate ``issue-0``/``pr-0``
-          segment, or building an ambiguous path, even if a caller skipped
-          validation.
+          when both are set — defense-in-depth (applied on the auto-derived path
+          only; the operator-override branch above returns before these checks
+          run) so this path builder can't be coerced into escaping the workspace
+          root, building a degenerate ``issue-0``/``pr-0`` segment, or building
+          an ambiguous path, even if a caller skipped validation.
 
     Note:
         The auto-derived layout differs by source: a workspace-root env var gives
@@ -2838,7 +2839,10 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           admission pre-check, clone/fetch, and forward all run under ONE
           exclusive lock on the checkout (:func:`clone_lock_path`), same
           pattern and same lock file `address_github_pr_comments` uses, so
-          the two routes correctly serialize against each other too.
+          the two routes correctly serialize against each other too. For an
+          operator-pinned ``repo_path`` this serialization is best-effort
+          only: if the lock cannot be acquired, the request proceeds without
+          it (logged as a warning) rather than failing the run.
     """
     # Centralized validation (enabled + PAT + target repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".
@@ -2861,6 +2865,16 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     lock_path = clone_lock_path(repo_path)
     lock_cm = flock_lock(lock_path)
     lock_held = False
+    # Tracks whether lock_cm.__enter__ actually completed inside the executor
+    # thread, independent of whether this coroutine resumes to see it. If the
+    # awaiting task is cancelled (e.g. client disconnect) while __enter__ is
+    # in flight, the executor thread can still finish acquiring the flock
+    # after the coroutine has already stopped running -- lock_held would then
+    # never be set, and the finally below would skip __exit__, leaving the
+    # release to depend on GC of the abandoned context manager. Keying release
+    # off this event (set from inside the executor thread itself) instead
+    # guarantees a completed __enter__ is always paired with an __exit__.
+    entered_lock = threading.Event()
     try:
         # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
         # on an existing parent is a no-op needing no write permission, so this
@@ -2868,7 +2882,12 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         await loop.run_in_executor(
             None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
         )
-        await loop.run_in_executor(None, lock_cm.__enter__)
+
+        def _enter_lock() -> None:
+            lock_cm.__enter__()
+            entered_lock.set()
+
+        await loop.run_in_executor(None, _enter_lock)
         lock_held = True
     except OSError as e:
         if platform_owned:
@@ -2894,7 +2913,19 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             timeout_detail="Coding team service timed out while checking for a running job.",
             generic_failure_detail="Coding team service failed the admission pre-check.",
         )
-        running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
+        if isinstance(running, dict):
+            running_job_id = running.get("running_job_id")
+        else:
+            running_job_id = None
+            # This pre-check is the ONLY admission guard this route has (see the
+            # docstring above); a malformed response silently disables it, so
+            # make that observable rather than proceeding unblocked in silence.
+            logger.warning(
+                "github run-issue: admission pre-check returned unexpected payload %r for "
+                "%s; proceeding without admission check",
+                running,
+                repo_path,
+            )
         if running_job_id:
             raise HTTPException(
                 status_code=409,
@@ -2940,7 +2971,12 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             generic_failure_detail="Failed to start the coding job.",
         )
     finally:
-        if lock_held:
+        # entered_lock.is_set() catches the case where this task was cancelled
+        # while __enter__ was running in the executor thread: __enter__ still
+        # completed (acquiring the flock) even though lock_held never got set
+        # on this (abandoned) coroutine resumption, so release must not depend
+        # on lock_held alone.
+        if lock_held or entered_lock.is_set():
             # Pass the ACTIVE exception info (not a hardcoded None, None, None)
             # so a context manager that inspects it (e.g. to log what error was
             # in flight) sees the real one. This is NOT a full semantic
@@ -2949,6 +2985,10 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             # suppress the active exception, and this call discards that
             # return value — lock_cm.__exit__ returning True here would NOT
             # suppress anything, unlike a real `with`.
+            # flock releases are per open-file-description, not per-thread, so
+            # releasing from a different executor thread than the one that
+            # acquired it (or from a task that never itself observed the
+            # acquisition) is safe.
             exc_type, exc_val, exc_tb = sys.exc_info()
             await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
     try:
@@ -3129,6 +3169,11 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
     lock_path = clone_lock_path(repo_path)
     lock_cm = flock_lock(lock_path)
     lock_held = False
+    # See the identical pattern in post_run_from_github's admission lock:
+    # tracks whether lock_cm.__enter__ actually completed inside the executor
+    # thread, independent of whether this coroutine resumes to see it, so a
+    # cancellation mid-acquisition can't leave the flock released only by GC.
+    entered_lock = threading.Event()
     try:
         # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
         # on an existing parent is a no-op needing no write permission, so this
@@ -3150,7 +3195,12 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
                 e,
             )
         else:
-            await loop.run_in_executor(None, lock_cm.__enter__)
+
+            def _enter_lock() -> None:
+                lock_cm.__enter__()
+                entered_lock.set()
+
+            await loop.run_in_executor(None, _enter_lock)
             lock_held = True
     except OSError as e:
         if platform_owned:
@@ -3225,7 +3275,10 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
             generic_failure_detail="Failed to start addressing the PR comments.",
         )
     finally:
-        if lock_held:
+        # entered_lock.is_set() catches cancellation mid-acquisition: __enter__
+        # completed in the executor thread even though this coroutine never
+        # resumed to set lock_held, so release must not depend on lock_held alone.
+        if lock_held or entered_lock.is_set():
             # Pass the ACTIVE exception info (not a hardcoded None, None, None)
             # so a context manager that inspects it (e.g. to log what error was
             # in flight) sees the real one. This is NOT a full semantic
@@ -3234,6 +3287,9 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
             # suppress the active exception, and this call discards that
             # return value — lock_cm.__exit__ returning True here would NOT
             # suppress anything, unlike a real `with`.
+            # flock releases are per open-file-description, not per-thread, so
+            # releasing from a different executor thread than the one that
+            # acquired it is safe.
             exc_type, exc_val, exc_tb = sys.exc_info()
             await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
     try:

@@ -14,6 +14,15 @@ from software_engineering_team.temporal import coding_team_start_workflow as sw
 from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 
 
+@pytest.fixture(autouse=True)
+def _stub_execute_workflow_sync(monkeypatch):
+    """Safety net so the validation-only tests below never reach the real
+    Temporal call after their expected ValueError. A test that needs to
+    observe the call (e.g. to assert on its arguments) overrides this with
+    its own monkeypatch.setattr, which simply takes precedence."""
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
+
+
 def test_start_coding_team_workflow_forwards_run_payload_id_and_queue(monkeypatch):
     captured: dict = {}
 
@@ -118,13 +127,11 @@ def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
 
 
 def test_execute_coding_team_workflow_requires_job_id(monkeypatch):
-    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
     with pytest.raises(ValueError, match="non-empty job_id"):
         sw.execute_coding_team_workflow("", "/repo", {"x": 1}, {})
 
 
 def test_execute_coding_team_workflow_requires_repo_path(monkeypatch):
-    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
     with pytest.raises(ValueError, match="non-empty repo_path"):
         sw.execute_coding_team_workflow("job-7", "", {"x": 1}, {})
 
@@ -132,7 +139,6 @@ def test_execute_coding_team_workflow_requires_repo_path(monkeypatch):
 def test_execute_coding_team_workflow_rejects_plaintext_token(monkeypatch):
     # Preconditions must be enforced reliably (not via `assert`, which is
     # stripped under python -O) since this rejects a real secret-leak risk.
-    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
     with pytest.raises(ValueError, match="must not include a token"):
         sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {"token": "ghp_secret"})
 
@@ -141,7 +147,6 @@ def test_execute_coding_team_workflow_rejects_nested_plaintext_token(monkeypatch
     """P1 regression: a token buried under a sub-dict (e.g. `github["auth"]
     ["token"]`) must be rejected too — a top-level-only check would let it
     slip into the durable Temporal event history."""
-    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
     with pytest.raises(ValueError, match="must not include a token"):
         sw.execute_coding_team_workflow(
             "job-7", "/repo", {"x": 1}, {"auth": {"token": "ghp_secret"}}
@@ -149,7 +154,6 @@ def test_execute_coding_team_workflow_rejects_nested_plaintext_token(monkeypatch
 
 
 def test_execute_coding_team_workflow_rejects_token_nested_in_list(monkeypatch):
-    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
     with pytest.raises(ValueError, match="must not include a token"):
         sw.execute_coding_team_workflow(
             "job-7", "/repo", {"x": 1}, {"extra": [{"token": "ghp_secret"}]}
@@ -159,7 +163,6 @@ def test_execute_coding_team_workflow_rejects_token_nested_in_list(monkeypatch):
 def test_execute_coding_team_workflow_rejects_non_dict_github(monkeypatch):
     """A caller passing None (or any non-dict) for github must get a clear
     ValueError, not a raw TypeError from `"token" in github`."""
-    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
     with pytest.raises(ValueError, match="non-empty github dict"):
         sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, None)  # type: ignore[arg-type]
 
@@ -168,6 +171,5 @@ def test_execute_coding_team_workflow_rejects_empty_github_dict(monkeypatch):
     """An empty dict passes isinstance(github, dict) but carries no PR/comment
     context at all -- must fail fast rather than starting a durable workflow
     that can never reply to or resolve anything."""
-    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
     with pytest.raises(ValueError, match="non-empty github dict"):
         sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {})

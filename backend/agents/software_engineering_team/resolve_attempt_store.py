@@ -47,6 +47,7 @@ Design contract:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Optional
 
 from shared.postgres import get_conn, is_postgres_enabled
@@ -56,7 +57,16 @@ logger = logging.getLogger(__name__)
 _STORE = "coding_team"
 
 
-def _best_effort_write(op_name: str, write_fn) -> None:
+def _best_effort_write(op_name: str, write_fn: Callable[[], None]) -> None:
+    """Run ``write_fn``, swallowing and logging any exception.
+
+    Postconditions:
+        - ``write_fn`` either completed, or its exception was logged at
+          WARNING level tagged with ``op_name``. This function never raises —
+          persistence here is a safety net, never a prerequisite for the
+          resolve step itself (see the module's "writes are best-effort"
+          design contract).
+    """
     try:
         write_fn()
     except Exception:  # noqa: BLE001 - persistence must never break the run

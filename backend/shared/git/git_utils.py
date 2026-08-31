@@ -73,9 +73,11 @@ def remote_url_matches(
     # below — otherwise the colon inside "x-access-token:ghp_xxx@host/..."
     # gets converted to "/" first, splitting the token off into its own path
     # segment and making the host segment resolve to the username instead.
-    # Guarded on "no '/' in the head" so the scp form's "git@host:owner/repo"
-    # (whose pre-@ head is just "git", never containing "/") is left alone —
-    # only an actual userinfo prefix is dropped, never legitimate path content.
+    # Guarded on "no '/' in the head": the scp form's pre-@ head is just "git"
+    # (never containing "/"), so its "git@" prefix IS stripped here too — the
+    # remaining "host:owner/repo" is left intact for the colon normalization
+    # below. Only an "@" that is path content (a "/"-containing head, e.g.
+    # "acme/w@idget") skips this strip and is left untouched.
     if "@" in cleaned:
         head, _sep, tail = cleaned.partition("@")
         if "/" not in head:

@@ -847,6 +847,13 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
 
     Preconditions:
         - ``repo_path`` is a git checkout the caller can write to.
+        - ``remote`` is either the name of an already-configured git remote
+          (e.g. ``"origin"``) or an ``http(s)://`` URL. scp-style syntax
+          (``user@host:path``) and bare local paths contain no ``"://"``, so
+          they are NOT recognised as URLs here — they take the plain-name
+          branch below and are returned unregistered, unchanged. The only
+          current caller of the URL branch (``address_comments._pr_head_remote``)
+          always builds an ``https://`` value, so this is not reachable today.
     Postconditions:
         - When ``remote`` is already a plain name (no ``"://"``, e.g.
           ``"origin"``), returns ``(remote, None)`` unchanged — no git call is
@@ -973,9 +980,12 @@ def _prepare_issue_branch(
         - When ``expected_head_sha`` is provided and, after fetching, the
           remote's live ``integration_branch`` tip does not resolve to that
           exact SHA (a newer commit landed, or the branch is gone), returns
-          ``False`` with an explanatory message BEFORE any local branch is
-          touched (no checkout/reset yet at that point) — the caller's plan
-          was grounded on stale code and must not be applied to newer state.
+          ``False`` with an explanatory message BEFORE any checkout/reset of
+          ``integration_branch`` runs — dirty-tree recovery may already have
+          committed WIP to a rescue branch by this point (no work is lost,
+          per the failure postcondition above), but the seed/checkout that
+          would apply the caller's plan to the branch has not — the plan was
+          grounded on stale code and must not be applied to newer state.
         - When ``expected_base_sha`` is provided and the freshly-fetched
           ``default_branch`` HEAD no longer matches it, fails closed with an
           error naming both SHAs -- before any dirty-tree recovery, seed
@@ -1013,6 +1023,11 @@ def _prepare_issue_branch(
     # Every non-fork caller keeps its prior behaviour exactly: `remote` is
     # "origin" (or an operator's custom remote name) for both fetches, unchanged.
     default_branch_remote = base_remote if is_fork_remote else remote
+    # `resolve_remote_branch_sha`'s own precondition documents that it does not
+    # validate its `remote` argument itself -- defense-in-depth, matching the
+    # `_is_safe_ref` checks on `default_branch`/`integration_branch` above.
+    if not _is_safe_ref(default_branch_remote):
+        return False, f"unsafe base remote: {default_branch_remote!r}", notes
     # Resolve via the same consolidated primitive the route uses to capture
     # the triaged SHA (fetch + FETCH_HEAD rev-parse, credential-scrubbed) --
     # not a second inline copy of that sequence. Rebinding `base_ref` to the

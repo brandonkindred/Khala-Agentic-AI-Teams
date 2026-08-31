@@ -493,6 +493,10 @@ def test_github_branch_prep_forwards_expected_head_sha(monkeypatch: pytest.Monke
 
 
 def test_pr_comment_run_uses_existing_pr_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``publish_mode == "existing_pr"``, publishing routes to
+    ``github_pr_publish_activity`` (not ``github_publish_activity``), forwarding
+    ``pr_number``/``integration_branch`` and omitting issue-driven fields
+    (``issue_title``) and the token from the publish payload."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
         github_pr_publish_activity,
@@ -527,6 +531,7 @@ def test_pr_comment_run_uses_existing_pr_publisher(monkeypatch: pytest.MonkeyPat
     assert "issue_title" not in snapshots[2]
     assert "token" not in snapshots[2]
     assert result["status"] == "completed"
+    assert result["github_pr_url"] == github["pr_url"]
 
 
 def test_github_prep_failure_calls_failure_notice_skips_pipeline(
@@ -1001,8 +1006,10 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
     """A near-miss publish_mode (e.g. "existing-pr", "Existing_PR") must not
     silently fall through to issue-driven publishing -- which would fail later
     at github["issue_number"] with a bare, misleading KeyError -- but raise a
-    diagnostic naming the actual misconfiguration, same as any other publish
-    failure (best-effort notice, then re-raise)."""
+    diagnostic naming the actual misconfiguration. This is a caller-contract
+    violation (bad payload wiring), not an orchestrator/activity failure, so
+    (mirroring the resume_token ValueError above) it fails the workflow task
+    directly without a "publish failed" notice on the issue/PR."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
         github_failure_notice_activity,
@@ -1011,7 +1018,6 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
 
     workflow_obj = CodingTeamWorkflow()
     calls: list = []
-    notice_requests: list[dict] = []
 
     async def _fake_exec(fn, request, **_kw):
         calls.append(fn)
@@ -1020,8 +1026,7 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
         if fn is run_pipeline_activity:
             return {"job_id": "job-1", "status": "running", "phase": "publishing"}
         if fn is github_failure_notice_activity:
-            notice_requests.append(dict(request))
-            return {"job_id": "job-1", "status": "failed"}
+            raise AssertionError("no failure notice expected for a caller-contract violation")
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
@@ -1034,8 +1039,7 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
     with pytest.raises(ValueError, match="unsupported github.publish_mode"):
         asyncio.run(workflow_obj.run(_github_request(github=github)))
 
-    assert calls == [github_branch_prep_activity, run_pipeline_activity, github_failure_notice_activity]
-    assert "unsupported github.publish_mode" in notice_requests[0]["message"]
+    assert calls == [github_branch_prep_activity, run_pipeline_activity]
 
 
 def test_github_publish_exception_preserves_original_when_terminalize_fails(

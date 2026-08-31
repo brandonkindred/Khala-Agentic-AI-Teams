@@ -610,11 +610,17 @@ class CodingTeamWorkflow:
             status = result.get("status")
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
+            # A malformed publish_mode is a caller-contract violation (bad payload
+            # wiring), not an orchestrator/activity failure worth posting to the
+            # issue/PR as a "publish failed" notice -- same reasoning as the
+            # resume_token ValueError above. Validated before the try below so it
+            # fails the workflow task directly instead of being caught and
+            # reported as a publish failure.
+            publish_mode = github.get("publish_mode")
+            if publish_mode not in (None, "existing_pr"):
+                raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
+            is_existing_pr_publish = publish_mode == "existing_pr"
             try:
-                publish_mode = github.get("publish_mode")
-                if publish_mode not in (None, "existing_pr"):
-                    raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
-                is_existing_pr_publish = publish_mode == "existing_pr"
                 publish_activity = (
                     github_pr_publish_activity if is_existing_pr_publish else github_publish_activity
                 )

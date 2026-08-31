@@ -58,6 +58,7 @@ from software_engineering_team.github_source.review_submit import (
     _submit_review,
 )
 from software_engineering_team.job_store import (
+    NON_TERMINAL_STATUSES,
     heartbeat_job,
 )
 from software_engineering_team.models import JobStatus
@@ -217,6 +218,17 @@ def _running_sibling_on_checkout(
           logs a scrubbed warning and returns a synthetic sibling so the
           caller fail-closes instead of mutating a checkout whose liveness
           cannot be verified. Never raises.
+        - A candidate job carrying ``parent_job_id`` (an address-comments
+          child implementation job — see :func:`_running_review_for_pr`,
+          which excludes it from ITS OWN scan for the same reason) is only
+          reported as a sibling while its PARENT is still non-terminal. A
+          child whose parent has terminalized or no longer exists is
+          crash-orphaned — nothing will ever terminalize the child itself,
+          since only the parent runs a heartbeat — so treating it as a live
+          sibling would wedge this checkout's admission forever. Such an
+          orphan is skipped (best-effort marked ``failed`` first, mirroring
+          :func:`_running_review_for_pr`'s own zombie cleanup) rather than
+          reported.
     """
     target = os.path.realpath(repo_path)
     try:
@@ -238,8 +250,39 @@ def _running_sibling_on_checkout(
         if not j or j.get("job_id") == own_job_id:
             continue
         sibling_path = j.get("repo_path")
-        if sibling_path and os.path.realpath(sibling_path) == target:
-            return j
+        if not (sibling_path and os.path.realpath(sibling_path) == target):
+            continue
+        parent_job_id = j.get("parent_job_id")
+        if parent_job_id:
+            parent = _main.get_job(parent_job_id)
+            if parent is None or (parent.get("status") not in NON_TERMINAL_STATUSES):
+                # Crash-orphaned child: the parent that alone could terminalize
+                # it is gone or already done. Unblock the checkout and
+                # best-effort mark the child failed, same as the parent-side
+                # zombie cleanup in _running_review_for_pr.
+                child_job_id = j.get("job_id")
+                logger.warning(
+                    "child job %s on checkout %s has no live parent (parent_job_id=%s); "
+                    "treating as orphaned and marking failed",
+                    child_job_id,
+                    repo_path,
+                    parent_job_id,
+                )
+                if child_job_id:
+                    try:
+                        _main.update_job(
+                            child_job_id,
+                            status=JobStatus.FAILED.value,
+                            error="parent job terminalized or missing (orphaned child)",
+                        )
+                    except Exception as exc:  # noqa: BLE001 - unblocking admission must not depend on cleanup
+                        logger.warning(
+                            "could not mark orphaned child job %s failed: %s",
+                            child_job_id,
+                            scrub_token_from_text(str(exc)),
+                        )
+                continue
+        return j
     return None
 
 

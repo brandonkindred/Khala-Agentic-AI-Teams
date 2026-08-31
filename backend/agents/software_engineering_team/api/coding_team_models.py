@@ -263,7 +263,16 @@ class AddressCommentsRequest(BaseModel):
         default="",
         description="Local checkout path, accepted for parity with /review-pr.",
     )
-    pr_number: int = Field(..., description="Pull request number whose comments to address")
+    pr_number: int = Field(
+        ...,
+        gt=0,
+        description=(
+            "Pull request number whose comments to address. The route's path "
+            "pr_number is authoritative -- the route coerces this field to match "
+            "it via model_copy before use, so a divergent body value is silently "
+            "overridden rather than causing ambiguity."
+        ),
+    )
     github_token: Optional[str] = Field(
         default=None, description="Overrides GITHUB_TOKEN env var for this request."
     )

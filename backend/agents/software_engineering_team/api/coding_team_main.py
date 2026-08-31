@@ -250,6 +250,27 @@ def get_running_job_on_checkout(repo_path: str) -> dict[str, object] | None:
     return _running_sibling_on_checkout(repo_path)
 
 
+def get_running_review_for_pr(owner: str, repo: str, pr_number: int) -> str | None:
+    """Public service-layer seam for "is a review/address-comments job already
+    running for this PR?" — the PR-scoped counterpart to
+    :func:`get_running_job_on_checkout`.
+
+    Thin wrapper over the private :func:`_running_review_for_pr` (a
+    pr_review.py implementation detail this module re-exports for internal
+    use), so a route module can depend on a stable, documented public
+    function instead of reaching across module boundaries into another
+    module's underscore-prefixed helper — the same heartbeat-checked
+    definition the POST admission path uses.
+
+    Postconditions:
+        - Returns the job_id of a live, non-terminal review/address-comments
+          job for ``owner/repo#pr_number``, or ``None`` when none is running.
+          See :func:`_running_review_for_pr` for the full heartbeat/zombie-
+          cleanup contract.
+    """
+    return _running_review_for_pr(owner, repo, pr_number)
+
+
 app = create_team_app(
     service_name="coding-team",
     team_key="coding_team",

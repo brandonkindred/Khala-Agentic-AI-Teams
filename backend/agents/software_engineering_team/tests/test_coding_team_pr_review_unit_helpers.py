@@ -270,6 +270,46 @@ class TestRunningSiblingOnCheckoutUnit:
         assert sibling["job_id"] == "<job-scan-unavailable>"
         assert sibling["repo_path"] == "/tmp/repo"
 
+    def test_orphaned_child_with_terminal_parent_is_skipped_and_marked_failed(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A child job (parent_job_id set) whose parent has already terminalized
+        can never be terminalized itself -- only the parent runs a heartbeat --
+        so it must not be reported as a live sibling (that would wedge the
+        checkout's admission forever), and should be best-effort marked failed."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(main, "get_job", lambda job_id: {"job_id": "parent-1", "status": "completed"})
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+        assert updates == [("child-1", {"status": "failed", "error": updates[0][1]["error"]})]
+
+    def test_orphaned_child_with_missing_parent_is_skipped(self, monkeypatch, tmp_path) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(main, "get_job", lambda job_id: None)
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: None)
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+
+    def test_child_with_live_parent_is_still_reported_as_sibling(self, monkeypatch, tmp_path) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(main, "get_job", lambda job_id: {"job_id": "parent-1", "status": "running"})
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") == child
+        assert updates == []
+
 
 # ---------------------------------------------------------------------------
 # _infer_review_language

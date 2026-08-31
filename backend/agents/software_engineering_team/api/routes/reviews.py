@@ -306,7 +306,11 @@ def post_address_comments(
           jobs would otherwise race on the same working tree for each job's
           entire run, not just at admission. A 502 for a GitHub API error,
           including when the PR's review-thread state cannot be reliably retrieved
-          (the flow fails closed rather than acting on unknown state).
+          (the flow fails closed rather than acting on unknown state). A 500 is
+          returned when the job could not be started (job creation, review-record
+          creation, or worker-thread launch failed); any partially persisted
+          job/review record is terminalized as failed before the 500 is raised,
+          so it will not block future admissions.
     """
     # The path is authoritative; keep the body consistent so downstream code (which
     # reads request.pr_number) and the job's github_context agree with the URL.
@@ -514,9 +518,9 @@ def get_address_comments_running(
     Postconditions:
         - Returns the job_id of a live, non-terminal review or
           address-comments job for ``owner/repo#pr_number`` (heartbeat-checked,
-          same definition :func:`_running_review_for_pr` uses for the POST
-          route's own admission), or ``running_job_id=None`` when none is
-          running.
+          via :func:`_main.get_running_review_for_pr`, the public wrapper over
+          the same ``_running_review_for_pr`` the POST route's own admission
+          uses), or ``running_job_id=None`` when none is running.
         - When ``repo_path`` is given, ALSO checks for another active job (any
           PR) already using that SAME checkout (:func:`_main.get_running_job_on_checkout`,
           the public wrapper over the same ``_running_sibling_on_checkout`` the
@@ -532,7 +536,7 @@ def get_address_comments_running(
           must still rely on the POST route's own admission lock as the
           authority.
     """
-    running_job_id = _main._running_review_for_pr(owner, repo, pr_number)
+    running_job_id = _main.get_running_review_for_pr(owner, repo, pr_number)
     if running_job_id is None and repo_path:
         sibling = _main.get_running_job_on_checkout(repo_path)
         if sibling is not None:

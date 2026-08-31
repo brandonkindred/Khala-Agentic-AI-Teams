@@ -2503,9 +2503,16 @@ class TestPrepareIssueBranch:
     def test_expected_head_sha_none_skips_check(self, api, tmp_path) -> None:
         """The default (``None``, used by the plain issue-driven flow) must not
         perform the check at all -- prep succeeds regardless of the branch's
-        live tip, exactly as before this parameter existed."""
+        live tip, exactly as before this parameter existed.
+
+        Regression coverage: the branch is advanced a SECOND time after the
+        commit a caller might have observed, so a live-tip check that fired
+        despite the ``None`` default would see a moved tip and fail -- proving
+        the check is actually skipped, not just trivially unexercised because
+        the tip never moved."""
         repo = self._init_repo(tmp_path)
         _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
 
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg

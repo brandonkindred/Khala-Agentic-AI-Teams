@@ -92,8 +92,13 @@ def start_coding_team_workflow(
           team task queue (fire-and-forget; the caller polls
           ``GET /status/{job_id}``). When ``github`` is a non-empty dict it is
           included on the payload under ``"github"``; otherwise that key is
-          omitted. Raises ``RuntimeError`` if the worker's Temporal client never
-          becomes available within the wait window.
+          omitted.
+    Raises:
+        ValueError: ``job_id`` or ``repo_path`` is empty, or ``github``
+            contains a ``"token"``-like key at any nesting depth (see
+            :func:`_contains_token_key`).
+        RuntimeError: the worker's Temporal client never becomes available
+            within the wait window.
     """
     if not job_id:
         raise ValueError("start_coding_team_workflow requires a non-empty job_id")
