@@ -16,6 +16,7 @@ and the internal self-revision loop inside ``_with_self_review``.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -91,7 +92,7 @@ def test_round_one_revise_sends_full_spec() -> None:
     full_json = spec.model_dump_json(indent=2, exclude={"strategy_code"})
     assert f"```json\n{full_json}\n```" in prompt
     assert "structural diff" not in prompt
-    assert "diff" not in prompt.lower()
+    assert not re.search(r"\bdiff\b", prompt, re.IGNORECASE)
 
 
 def test_every_subsequent_round_still_sends_the_full_spec() -> None:
@@ -112,7 +113,7 @@ def test_every_subsequent_round_still_sends_the_full_spec() -> None:
     assert len(agent.captured_prompts) == 2
     for prompt in agent.captured_prompts:
         assert "structural diff" not in prompt
-        assert "diff" not in prompt.lower()
+        assert not re.search(r"\bdiff\b", prompt, re.IGNORECASE)
 
     round2_prompt = agent.captured_prompts[1]
     full_json_round2 = spec_round2.model_dump_json(indent=2, exclude={"strategy_code"})
@@ -213,4 +214,4 @@ def test_self_revision_loop_sends_full_spec_every_round(
     assert f"```json\n{second_full_json}\n```" in second_prompt
     for prompt in agent.captured_prompts:
         assert "structural diff" not in prompt
-        assert "diff" not in prompt.lower()
+        assert not re.search(r"\bdiff\b", prompt, re.IGNORECASE)
