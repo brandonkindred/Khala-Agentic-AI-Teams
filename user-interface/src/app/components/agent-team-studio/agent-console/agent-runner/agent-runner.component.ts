@@ -61,6 +61,20 @@ import {
 } from '../save-input-dialog/save-input-dialog.component';
 
 /**
+ * Type guard for `InvokeEnvelope`. Used to distinguish a 422 response whose
+ * `detail` is a wrapped invocation envelope (trace_id + logs_tail) from a
+ * plain validation-error string or array.
+ */
+export function isInvokeEnvelope(value: unknown): value is InvokeEnvelope {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>)['trace_id'] === 'string' &&
+    Array.isArray((value as Record<string, unknown>)['logs_tail'])
+  );
+}
+
+/**
  * Runner tab for the Agent Console.
  *
  * Phase 2: picks an agent, loads a sample, warms a sandbox, invokes, shows
@@ -548,13 +562,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           // if the detail actually has the InvokeEnvelope shape. A plain string
           // or validation-error array must go through extractErrorDetail.
           const detail = err.error.detail;
-          if (
-            typeof detail === 'object' &&
-            detail !== null &&
-            'trace_id' in detail &&
-            'logs_tail' in detail
-          ) {
-            this.lastResponse.set(detail as InvokeEnvelope);
+          if (isInvokeEnvelope(detail)) {
+            this.lastResponse.set(detail);
           } else {
             this.lastError.set(
               extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }),
