@@ -279,10 +279,20 @@ def _unresolved_comments(
           a stale root just because the thread once carried a Khala reply.
         - ``retry_resolve_threads`` lists ``(thread_id, khala_reply_comment_id)``
           for every UNRESOLVED thread whose LATEST message is a Khala-generated
-          reply — i.e. the reply landed, no reviewer has said anything since
-          (as of THIS snapshot), but the resolve mutation that should have
-          followed it failed (or hasn't run yet). The caller retries ONLY the
-          resolve step for these, never re-triage/re-implementation — but must
+          reply AND for which :func:`resolve_attempt_store.has_recorded_resolve_
+          failure` confirms Khala's OWN resolve mutation for THAT reply is on
+          record as having failed — i.e. the reply landed, no reviewer has said
+          anything since (as of THIS snapshot), and there is persisted evidence
+          the resolve call itself ran and failed (not merely "hasn't run yet" or
+          "unknown"). GitHub's read APIs cannot distinguish "our resolve failed"
+          from "a reviewer clicked Reopen conversation with no new comment" —
+          ``isResolved`` reports the same False in both cases — so without this
+          persisted evidence a Khala-marker-ending unresolved thread is treated
+          as AMBIGUOUS, not as a retry candidate: it is silently skipped (left
+          exactly as found, logged) rather than auto-resolved, which would
+          otherwise override a reviewer's deliberate reopen with no chance for
+          them to be heard. The caller retries ONLY the resolve step for
+          confirmed candidates, never re-triage/re-implementation — but must
           still re-check the thread's LIVE state immediately before resolving
           (:func:`_thread_has_new_reviewer_feedback` with ``khala_reply_comment_id``
           as ``since_comment_id``), since a reviewer can post a follow-up in the
@@ -412,21 +422,46 @@ def _unresolved_comments(
             )
         latest = messages[-1]
         if _is_khala_authored(latest, authenticated_login):
-            # Nothing has been said since Khala's reply — the fix already
-            # landed but GitHub still reports the thread unresolved, so the
-            # resolve mutation failed previously. Retry resolving it only;
-            # never re-triage a fix that already landed. The reply's own id
-            # travels with the thread id so the caller can re-verify
-            # freshness immediately before resolving. Also snapshot the
-            # thread's full history under the SAME dict retry threads share
-            # with genuinely-unresolved ones — keyed by `latest.id` (the
-            # reply's id) here — so the caller's freshness re-check can pass
-            # it as `since_history` and catch an EARLIER message being
-            # edited (not just a new one appearing), which an id-only ">"
-            # comparison against the reply's own id could never see: any
-            # message that predates the reply always has a lower id.
-            retry_resolve_threads.append((thread.id, latest.id))
-            thread_history_by_comment_id[latest.id] = messages
+            # Nothing has been said since Khala's reply — but GitHub reporting
+            # the thread unresolved is ambiguous on its own: it means EITHER
+            # "our resolve mutation failed previously" (safe to retry) OR "a
+            # reviewer clicked Reopen conversation with no new comment"
+            # (must NOT be silently auto-resolved — the reviewer never gets a
+            # chance to have their reopen looked at). `isResolved` reports the
+            # same False in both cases and GitHub exposes no history/audit
+            # trail to tell them apart, so only PERSISTED evidence that
+            # Khala's own resolve call for THIS reply actually ran and failed
+            # (`resolve_attempt_store`, written by the resolve step itself)
+            # authorizes the retry-resolve path.
+            if _main.has_recorded_resolve_failure(owner, repo, pr_number, thread.id, latest.id):
+                # The reply's own id travels with the thread id so the caller
+                # can re-verify freshness immediately before resolving. Also
+                # snapshot the thread's full history under the SAME dict
+                # retry threads share with genuinely-unresolved ones — keyed
+                # by `latest.id` (the reply's id) here — so the caller's
+                # freshness re-check can pass it as `since_history` and catch
+                # an EARLIER message being edited (not just a new one
+                # appearing), which an id-only ">" comparison against the
+                # reply's own id could never see: any message that predates
+                # the reply always has a lower id.
+                retry_resolve_threads.append((thread.id, latest.id))
+                thread_history_by_comment_id[latest.id] = messages
+            else:
+                # No persisted evidence either way — could be a genuine first
+                # failure whose own record-write also failed (rare double
+                # failure), or a reviewer's deliberate reopen. Never guess:
+                # leave the thread exactly as found rather than risk silently
+                # overriding a reviewer. It surfaces again on the next run,
+                # by which point either the evidence has landed (retried) or
+                # the reviewer has posted follow-up feedback (re-triaged via
+                # the branch below once that feedback becomes the latest
+                # message).
+                logger.info(
+                    "address-comments: thread %s is unresolved with Khala's own reply as its "
+                    "latest message but no recorded resolve-failure evidence — treating as an "
+                    "ambiguous reviewer reopen and skipping rather than auto-resolving",
+                    thread.id,
+                )
             continue
         # `latest` is either the thread's only message so far, or newer
         # feedback a reviewer posted after an earlier Khala reply in the same
@@ -1072,6 +1107,12 @@ def _reply_and_resolve(
           reply would close the thread with no explanatory comment ever
           posted, and since a resolved thread is never re-triaged, the
           reviewer's concern would be silently dropped.
+        - Whenever a resolve is attempted, best-effort updates the resolve-
+          attempt ledger (:mod:`resolve_attempt_store`): a failure records
+          ``(thread.id, reply's comment id)`` so a future run's
+          ``_unresolved_comments`` can positively confirm "our own resolve
+          failed" rather than treating the still-unresolved thread as an
+          ambiguous reviewer reopen; success clears any existing entry.
         - WHEN ``thread`` is known, checks the thread's LIVE state
           (:func:`_thread_has_new_reviewer_feedback`) BEFORE posting anything:
           a reviewer may have posted follow-up feedback on this thread while
@@ -1114,8 +1155,9 @@ def _reply_and_resolve(
 
     reply_target_id = thread.comment_ids[0] if thread is not None and thread.comment_ids else comment.id
     replied = False
+    reply_id: Optional[int] = None
     try:
-        client.reply_to_review_comment(
+        reply_payload = client.reply_to_review_comment(
             owner=request.owner,
             repo=request.repo,
             number=request.pr_number,
@@ -1123,6 +1165,12 @@ def _reply_and_resolve(
             body=scrub_token_from_text(reply_body),
         )
         replied = True
+        # Best-effort only: feeds the resolve-attempt ledger below so a
+        # subsequent failed resolve can be matched back to THIS reply on the
+        # next run's `has_recorded_resolve_failure` check. A missing/odd
+        # payload shape just means that ledger entry keys off `None` instead —
+        # never fails the reply itself, which already landed.
+        reply_id = reply_payload.get("id") if isinstance(reply_payload, dict) else None
     except Exception as e:  # noqa: BLE001 - reply is best-effort
         logger.warning(
             "address-comments: failed to reply to comment %s: %s",
@@ -1167,6 +1215,17 @@ def _reply_and_resolve(
                 scrub_token_from_text(str(e)),
             )
             resolved = False
+        # Record/clear the resolve-attempt ledger regardless of which branch
+        # set `resolved` above — this is the ONLY evidence `_unresolved_
+        # comments` will later trust to route this thread down the
+        # resolve-only retry path rather than treating a still-unresolved,
+        # Khala-marker-ending thread as an ambiguous reviewer reopen.
+        if resolved:
+            _main.clear_resolve_attempt(request.owner, request.repo, request.pr_number, thread.id)
+        else:
+            _main.record_resolve_failure(
+                request.owner, request.repo, request.pr_number, thread.id, reply_id
+            )
     elif thread is not None:
         # The reply failed: resolving now would close the thread with no
         # explanatory comment ever posted, and the next run would never
@@ -1735,6 +1794,10 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                         )
                         retry_resolve_ok = False
                         run_stopped_early = True
+                        # address-comments never revisits a closed PR, so any
+                        # rows this PR left in the resolve-attempt ledger
+                        # would otherwise never be cleared. Best-effort.
+                        _main.clear_resolve_attempts_for_pr(owner, repo, pr_number)
 
             if not run_stopped_early:
                 for thread_id, khala_reply_id in retry_resolve_threads:
@@ -1755,11 +1818,18 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                         )
                         retry_resolve_ok = False
                         continue
-                    if not client.resolve_review_thread(thread_id):
+                    if client.resolve_review_thread(thread_id):
+                        # The retry succeeded — clear the ledger entry so a
+                        # LATER, genuine reviewer reopen of this same thread
+                        # (a fresh, unrelated event) is never mistaken for
+                        # leftover evidence from this now-resolved attempt.
+                        _main.clear_resolve_attempt(owner, repo, pr_number, thread_id)
+                    else:
                         retry_resolve_ok = False
                         logger.warning(
                             "address-comments: retry-resolve failed for thread %s", thread_id
                         )
+                        _main.record_resolve_failure(owner, repo, pr_number, thread_id, khala_reply_id)
 
             outcomes: List[CommentOutcome] = []
             for comment in unresolved:
