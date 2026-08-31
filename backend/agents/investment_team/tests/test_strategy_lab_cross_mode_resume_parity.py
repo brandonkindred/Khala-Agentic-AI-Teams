@@ -41,6 +41,7 @@ from shared.temporal.testing import workflow_environment as _workflow_environmen
 from .strategy_lab_reentry_fixtures import (
     REENTRY_REVIEW_NOT_READY_ROUNDS,
     _review_loop_stubs,
+    record_synthesis_boundary_checkpoint,
     synthesis_boundary_spec_implementability_error,
 )
 from .strategy_lab_temporal_fixtures import build_strategy_lab_worker
@@ -105,9 +106,8 @@ async def _run_temporal_mode(monkeypatch: pytest.MonkeyPatch) -> str:
     charging is asserted.
     """
     from investment_team.models import StrategySpec
-    from investment_team.strategy_lab import orchestrator_api, phases, run_state
+    from investment_team.strategy_lab import orchestrator_api, run_state
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
-    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
     from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE, StrategyLabCycleWorkflow
 
@@ -149,30 +149,13 @@ async def _run_temporal_mode(monkeypatch: pytest.MonkeyPatch) -> str:
             # the "resume_spec is not None" one below.
             capture = kwargs["checkpoint_capture"]
             if capture is not None:
-                capture.record(
-                    ReviewCheckpoint(
-                        run_id=capture.run_id,
-                        cycle_scope=capture.cycle_scope,
-                        design_attempt=kwargs["design_attempt"],
-                        generation=capture.generation,
-                        spec_hash=phases.hash_spec(checkpointed_spec),
-                        code_hash=phases.hash_code(None),
-                        captured_at="2026-08-31T00:00:00Z",
-                        budget_calls=0,
-                        gate_results=[],
-                        spec_history=[],
-                        code_history=[],
-                        gate_timeline=[],
-                        spec=checkpointed_spec,
-                        rationale="r",
-                        design_context={
-                            "rounds": REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
-                            "critiques": [],
-                            "stop_reason": "converged",
-                            "loop_telemetry": {},
-                        },
-                        review_rounds_completed=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
-                    )
+                record_synthesis_boundary_checkpoint(
+                    capture,
+                    spec=checkpointed_spec,
+                    design_attempt=kwargs["design_attempt"],
+                    generation=capture.generation,
+                    review_rounds_completed=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
+                    budget_calls=0,
                 )
             raise synthesis_boundary_spec_implementability_error(
                 spec=checkpointed_spec, spec_implicated=False
@@ -214,6 +197,7 @@ async def _run_temporal_mode(monkeypatch: pytest.MonkeyPatch) -> str:
     return result["resume_stage_determinations"][-1]
 
 
+@pytest.mark.integration
 @pytest.mark.strategy_lab_integration
 @pytest.mark.asyncio
 async def test_thread_and_temporal_modes_resume_from_same_pipeline_stage(

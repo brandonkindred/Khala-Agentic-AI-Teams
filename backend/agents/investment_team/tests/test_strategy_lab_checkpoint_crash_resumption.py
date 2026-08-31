@@ -467,16 +467,16 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
     resumed portion.
     """
     from investment_team.models import StrategySpec
-    from investment_team.strategy_lab import orchestrator_api, phases, run_state
+    from investment_team.strategy_lab import orchestrator_api, run_state
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
     from investment_team.strategy_lab.agents._llm_budget import active_budget
-    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
     from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE, StrategyLabCycleWorkflow
 
     from .strategy_lab_reentry_fixtures import (
         REENTRY_REVIEW_NOT_READY_ROUNDS,
         design_attempt_llm_call_cost,
+        record_synthesis_boundary_checkpoint,
         synthesis_boundary_spec_implementability_error,
     )
     from .strategy_lab_temporal_fixtures import build_strategy_lab_worker
@@ -525,30 +525,13 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
             # the "resume_spec is not None" one below.
             capture = kwargs["checkpoint_capture"]
             if capture is not None:
-                capture.record(
-                    ReviewCheckpoint(
-                        run_id=capture.run_id,
-                        cycle_scope=capture.cycle_scope,
-                        design_attempt=kwargs["design_attempt"],
-                        generation=capture.generation,
-                        spec_hash=phases.hash_spec(checkpointed_spec),
-                        code_hash=phases.hash_code(None),
-                        captured_at="2026-08-31T00:00:00Z",
-                        budget_calls=phase1_calls,
-                        gate_results=[],
-                        spec_history=[],
-                        code_history=[],
-                        gate_timeline=[],
-                        spec=checkpointed_spec,
-                        rationale="r",
-                        design_context={
-                            "rounds": REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
-                            "critiques": [],
-                            "stop_reason": "converged",
-                            "loop_telemetry": {},
-                        },
-                        review_rounds_completed=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
-                    )
+                record_synthesis_boundary_checkpoint(
+                    capture,
+                    spec=checkpointed_spec,
+                    design_attempt=kwargs["design_attempt"],
+                    generation=capture.generation,
+                    review_rounds_completed=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
+                    budget_calls=phase1_calls,
                 )
             raise synthesis_boundary_spec_implementability_error(
                 spec=checkpointed_spec, spec_implicated=False
