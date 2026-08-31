@@ -894,8 +894,11 @@ class TestHandleComment:
         # The PR head SHA this run's triage/plan was grounded on (see the
         # pr_head_sha argument to _handle_comment above) must reach the child
         # workflow so branch prep can pin to it -- see
-        # test_stale_pr_head_sha_at_dispatch_blocks_child_workflow_branch_prep
-        # for the mismatch-detection path this enables.
+        # test_github_branch_prep_forwards_expected_head_sha
+        # (test_coding_team_temporal_workflow.py) and
+        # test_expected_head_sha_mismatch_blocks_prep_without_mutating_checkout
+        # (test_coding_team_github_source.py) for the mismatch-detection path
+        # this enables.
         assert github["expected_head_sha"] == "sha1"
         assert fake.replies and fake.replies[0][0] == 2
         assert fake.resolved == ["T2"]
