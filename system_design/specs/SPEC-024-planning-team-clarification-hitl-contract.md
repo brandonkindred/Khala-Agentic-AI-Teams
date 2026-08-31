@@ -1187,10 +1187,30 @@ The primitive #7445-B builds must satisfy:
   `save_checkpoint("planning_team", job_id, "document_production_pra", {"pra_job_id": ...})` as its
   own atomic write, then return.
 - *Invariants:* `run_pra` is called at most once per Planning `job_id`, ever, *when this activity
-  itself does not crash between the two steps*; a crash in that narrow window is one residual risk
-  this spec cannot close without PRA-side idempotency (§5's open risks, below) — `NO_RETRY` ensures
-  that crash fails the *workflow* loudly rather than Temporal silently retrying into a duplicate
-  submission. A checkpoint is never persisted with a `None`/falsy `pra_job_id`.
+  itself does not crash between the two steps, and when only one attempt of this activity is ever
+  entered concurrently* (a caveat this section corrects and broadens below); a crash in that narrow
+  window is one residual risk this spec cannot close without PRA-side idempotency (§5's open risks,
+  below) — `NO_RETRY` ensures that crash fails the *workflow* loudly rather than Temporal silently
+  retrying into a duplicate submission. A checkpoint is never persisted with a `None`/falsy
+  `pra_job_id`.
+
+  **Correction — the checkpoint-first read is a plain read, not a claim, and this activity's
+  concurrent-entry hazard is broader than "a crash between `run_pra` and the checkpoint write."**
+  Two concurrent entries of this activity — not necessarily from the heartbeat-loss/`SAFE_RETRY`
+  scenario this contract's other races share, since this activity is `NO_RETRY`, but equally from an
+  operator-triggered reset or an overlapping second workflow execution for the same job — can each
+  independently read `load_checkpoint(...)` as absent (nothing has raced ahead of either yet), and
+  both then call the non-idempotent `run_pra`, each submitting a real external PRA job, before either
+  writes its own checkpoint — with no crash required anywhere in the sequence for this to happen.
+  This is a distinct, broader hazard than the already-acknowledged "crash in the narrow window"
+  risk, and the checkpoint read alone does not serialize against it. **Contract requirement:** either
+  add a durable submission claim/lease this activity acquires *before* calling `run_pra` (understood
+  by whatever reset/recovery path can create overlapping entries, so a reset does not simply bypass
+  it), or — if no such primitive is added in #7445-B — this concurrent-entry hazard must be stated
+  explicitly as a further open risk (§5, alongside the crash-window risk it is distinct from), not
+  silently subsumed under the narrower "crash between the two steps" framing this invariant
+  originally used. This contract does not itself mandate which; it requires the gap be closed or
+  explicitly acknowledged, not left implied-closed by the checkpoint read's existence.
 
   **Correction — "fails the workflow loudly" is not the same as "the job record reflects
   failure," and a hard worker-process crash defeats `_guarded` entirely, not just this checkpoint
@@ -1442,6 +1462,24 @@ this contract:
   transient state by construction, not a fourth durable outcome this contract needs to define new
   persisted fields for.
 
+  **"Retry until the winner publishes" assumes the winner survives to publish — it might not.** The
+  attempt that won the clear (and is now polling `wait_pra` toward one of the two defined outcomes)
+  can itself crash or be cancelled before reaching either one, leaving the intermediate state
+  permanently unresolved — no amount of bounded-wait retrying by a losing attempt reaches a defined
+  outcome, because there is no longer anyone working toward one. Because this activity's retries are
+  finite (`SAFE_RETRY`, not unbounded), a losing attempt that keeps retrying this reload indefinitely
+  eventually exhausts its own attempt budget and fails a job that is, in fact, still recoverable —
+  nothing is structurally broken, the prior owner simply died mid-work. **Contract requirement:** a
+  losing attempt reloading into the intermediate state must retry only a small bounded number of
+  times (or for a short bounded wall-clock budget) before treating the winner as presumed dead and
+  taking over the work itself — re-entering the same `wait_pra` polling this reconciliation was
+  waiting on, which is safe to do redundantly since `wait_pra` is itself an idempotent read against
+  PRA's own job status, not a new submission. This does not require a new durable lease/ownership
+  primitive: the takeover attempt simply resumes the same poll-and-decide logic any attempt would
+  perform, and if the presumed-dead winner turns out to still be alive and completes first, the
+  takeover attempt's own next reload will find one of the two defined durable outcomes and converge
+  normally.
+
   **A fourth, genuinely durable reload outcome is still undefined: the job itself became terminal
   (cancelled, interrupted, or independently failed) while this claim was in flight.** The
   conditional claim's guard includes `status IN ('pending', 'running')`; if a cancellation or
@@ -1679,7 +1717,23 @@ this contract:
   difference (even a single question's id, text, or occurrence count changed, added, or missing)
   must be treated as advancement — proceed straight to step (2), submitting nothing — never as "the
   unchanged questions are still safe to resubmit." This still leaves the residual risk below when
-  the *entire* multiset is identical across rounds. **This is not a complete fix.** `question_text`
+  the *entire* multiset is identical across rounds.
+
+  **Multiset comparison only fixes reconciliation — it does not make a round with duplicate question
+  ids answerable at all, and duplicates should never reach a client as a pause round in the first
+  place.** Every validator downstream of this reconciliation keys by `question_id` alone, not by the
+  full `(id, question_text)` pair: required/answered-set membership checks (§4.1), the option lookup
+  used to validate a selected option, and PRA's own `apply_answers` (which builds a single
+  `submitted_by_id` dict, `user_communication.py`) all collapse two questions sharing an id into one
+  entry. A round exposing duplicate ids is therefore not just a reconciliation edge case — it is
+  structurally unanswerable: a single answer satisfies "the id" for both questions regardless of
+  which one the human actually meant, or the same answer content gets misapplied to both. **Contract
+  requirement:** reject duplicate question ids when parsing or publishing the round — at the point
+  `pending_questions` is assembled for a pause (whether by PRA's own parser or this contract's own
+  pause-creation step) — rather than merely detecting the collision later during multiset
+  reconciliation, which narrows the *retry-safety* problem but does nothing for the *answerability*
+  problem a duplicate-id round has regardless of retries. **This is not a complete fix.**
+  `question_text`
   has the identical fallback problem as `id`:
   `_require_string_field(q_data, "question_text", "")` (`question_processing.py:822`) defaults a
   missing `question_text` to `""`, exactly as `id` defaults to `q{index}` — so two consecutive
