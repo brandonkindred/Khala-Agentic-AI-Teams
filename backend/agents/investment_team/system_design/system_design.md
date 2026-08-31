@@ -225,6 +225,7 @@ classDiagram
       +exit_rules: List~ExitRule~
       +sizing: SizingRule
       +target_symbols: List~str~
+      +max_concurrent_positions: int
       +risk_limits: RiskLimits
       +speculative: bool
       +strategy_code?: str

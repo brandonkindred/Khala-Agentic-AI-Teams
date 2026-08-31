@@ -2,6 +2,7 @@ import json
 from typing import Any, Dict, List
 
 import pytest
+from pydantic import ValidationError
 
 from investment_team.agents import (
     AgentIdentity,
@@ -1164,9 +1165,6 @@ def test_strategy_spec_target_symbols_normalization() -> None:
 
 def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
     """Issue #523 — non-string entries (and non-list values) are rejected."""
-    import pytest
-    from pydantic import ValidationError
-
     with pytest.raises(ValidationError):
         StrategySpec(
             strategy_id="s-bad",
@@ -1187,6 +1185,88 @@ def test_strategy_spec_target_symbols_rejects_non_strings() -> None:
             signal_definition="s",
             timeframe="1d",
             target_symbols="AAPL",  # type: ignore[arg-type]
+        )
+
+
+def test_strategy_spec_max_concurrent_positions_defaults_to_one() -> None:
+    """Omitting the field preserves today's implicit one-position-per-symbol behavior."""
+    spec = StrategySpec(
+        strategy_id="s-mcp-default",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    assert spec.max_concurrent_positions == 1
+
+
+def test_strategy_spec_max_concurrent_positions_default_ignores_risk_limits() -> None:
+    """The default does not derive from risk_limits.max_open_positions, even when the latter is set explicitly."""
+    spec = StrategySpec(
+        strategy_id="s-mcp-default-with-risk-limits",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        risk_limits={"max_open_positions": 4},
+    )
+    assert spec.max_concurrent_positions == 1
+
+
+def test_strategy_spec_max_concurrent_positions_accepts_valid_value() -> None:
+    spec = StrategySpec(
+        strategy_id="s-mcp-valid",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        max_concurrent_positions=3,
+    )
+    assert spec.max_concurrent_positions == 3
+
+
+def test_strategy_spec_max_concurrent_positions_rejects_non_positive() -> None:
+    for bad_value in (0, -1):
+        with pytest.raises(ValidationError):
+            StrategySpec(
+                strategy_id="s-mcp-bad",
+                authored_by="test",
+                asset_class="stocks",
+                hypothesis="h",
+                signal_definition="s",
+                timeframe="1d",
+                max_concurrent_positions=bad_value,
+            )
+
+
+def test_strategy_spec_max_concurrent_positions_accepts_exact_ceiling() -> None:
+    """The documented ceiling (20) itself is accepted, not just values below it."""
+    spec = StrategySpec(
+        strategy_id="s-mcp-at-ceiling",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        max_concurrent_positions=20,
+    )
+    assert spec.max_concurrent_positions == 20
+
+
+def test_strategy_spec_max_concurrent_positions_rejects_above_ceiling() -> None:
+    with pytest.raises(ValidationError):
+        StrategySpec(
+            strategy_id="s-mcp-ceiling",
+            authored_by="test",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+            max_concurrent_positions=21,
         )
 
 
