@@ -196,6 +196,35 @@ def _activity():
     return github_publish_activity
 
 
+def _stub_push_paths(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str, str]]]:
+    """Stub ``api._fast_forward``/``api._push_branch`` to always succeed, recording each call.
+
+    Shared by the ``github_pr_publish_activity`` tests that assert on the
+    branch/push happy path: each just needs to see what it fast-forwarded
+    and pushed, not exercise a failure from either.
+
+    Postconditions:
+        - Returns the ``(fast_forwards, pushes)`` lists the stubs append to,
+          in call order, once the caller invokes the activity under test.
+    """
+    fast_forwards: list[tuple[str, str, str]] = []
+    pushes: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        api,
+        "_fast_forward",
+        lambda path, branch, source: fast_forwards.append((path, branch, source)) or (True, None),
+    )
+    monkeypatch.setattr(
+        api,
+        "_push_branch",
+        lambda path, remote, branch, token: pushes.append((path, remote, branch, token))
+        or (True, None),
+    )
+    return fast_forwards, pushes
+
+
 @pytest.mark.parametrize(
     "request_overrides,expected_fields,seed_job",
     [
@@ -583,19 +612,7 @@ def test_pr_publish_activity_pushes_existing_head_and_completes_child(
     )
 
     store, _ = _install(monkeypatch, api, "job-1")
-    fast_forwards: list[tuple[str, str, str]] = []
-    pushes: list[tuple[str, str, str, str]] = []
-    monkeypatch.setattr(
-        api,
-        "_fast_forward",
-        lambda path, branch, source: fast_forwards.append((path, branch, source)) or (True, None),
-    )
-    monkeypatch.setattr(
-        api,
-        "_push_branch",
-        lambda path, remote, branch, token: pushes.append((path, remote, branch, token))
-        or (True, None),
-    )
+    fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
 
     out = github_pr_publish_activity(
         {
@@ -637,19 +654,7 @@ def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
         "job-1",
         task_graph_snapshot=[{"id": "t1", "title": "x", "status": "failed"}],
     )
-    fast_forwards: list[tuple[str, str, str]] = []
-    pushes: list[tuple[str, str, str, str]] = []
-    monkeypatch.setattr(
-        api,
-        "_fast_forward",
-        lambda path, branch, source: fast_forwards.append((path, branch, source)) or (True, None),
-    )
-    monkeypatch.setattr(
-        api,
-        "_push_branch",
-        lambda path, remote, branch, token: pushes.append((path, remote, branch, token))
-        or (True, None),
-    )
+    fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
 
     out = github_pr_publish_activity(
         {
