@@ -611,7 +611,10 @@ class CodingTeamWorkflow:
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
             try:
-                is_existing_pr_publish = github.get("publish_mode") == "existing_pr"
+                publish_mode = github.get("publish_mode")
+                if publish_mode not in (None, "existing_pr"):
+                    raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
+                is_existing_pr_publish = publish_mode == "existing_pr"
                 publish_activity = (
                     github_pr_publish_activity if is_existing_pr_publish else github_publish_activity
                 )

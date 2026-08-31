@@ -995,6 +995,49 @@ def test_github_publish_exception_notices_and_reraises(
     assert "push rejected" in notice_requests[0]["message"]
 
 
+def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A near-miss publish_mode (e.g. "existing-pr", "Existing_PR") must not
+    silently fall through to issue-driven publishing -- which would fail later
+    at github["issue_number"] with a bare, misleading KeyError -- but raise a
+    diagnostic naming the actual misconfiguration, same as any other publish
+    failure (best-effort notice, then re-raise)."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+    notice_requests: list[dict] = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            return {"job_id": "job-1", "status": "running", "phase": "publishing"}
+        if fn is github_failure_notice_activity:
+            notice_requests.append(dict(request))
+            return {"job_id": "job-1", "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    github = {**_GITHUB, "publish_mode": "existing-pr"}
+    with pytest.raises(ValueError, match="unsupported github.publish_mode"):
+        asyncio.run(workflow_obj.run(_github_request(github=github)))
+
+    assert calls == [github_branch_prep_activity, run_pipeline_activity, github_failure_notice_activity]
+    assert "unsupported github.publish_mode" in notice_requests[0]["message"]
+
+
 def test_github_publish_exception_preserves_original_when_terminalize_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

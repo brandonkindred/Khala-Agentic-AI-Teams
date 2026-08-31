@@ -38,13 +38,13 @@ def test_start_coding_team_workflow_forwards_run_payload_id_and_queue(monkeypatc
 
 def test_start_coding_team_workflow_requires_job_id(monkeypatch):
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
-    with pytest.raises(AssertionError, match="non-empty job_id"):
+    with pytest.raises(ValueError, match="non-empty job_id"):
         sw.start_coding_team_workflow("", "/repo", {"objective": "x"})
 
 
 def test_start_coding_team_workflow_requires_repo_path(monkeypatch):
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
-    with pytest.raises(AssertionError, match="non-empty repo_path"):
+    with pytest.raises(ValueError, match="non-empty repo_path"):
         sw.start_coding_team_workflow("job-7", "", {"objective": "x"})
 
 
@@ -160,5 +160,14 @@ def test_execute_coding_team_workflow_rejects_non_dict_github(monkeypatch):
     """A caller passing None (or any non-dict) for github must get a clear
     ValueError, not a raw TypeError from `"token" in github`."""
     monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
-    with pytest.raises(ValueError, match="github to be a dict"):
+    with pytest.raises(ValueError, match="non-empty github dict"):
         sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, None)  # type: ignore[arg-type]
+
+
+def test_execute_coding_team_workflow_rejects_empty_github_dict(monkeypatch):
+    """An empty dict passes isinstance(github, dict) but carries no PR/comment
+    context at all -- must fail fast rather than starting a durable workflow
+    that can never reply to or resolve anything."""
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
+    with pytest.raises(ValueError, match="non-empty github dict"):
+        sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {})

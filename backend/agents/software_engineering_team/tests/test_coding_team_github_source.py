@@ -368,11 +368,13 @@ class TestClientLifecycle:
 
 
 class TestClientWebHost:
-    def test_default_api_host_maps_to_github_com(self) -> None:
+    def test_default_api_host_maps_to_github_com(self, monkeypatch) -> None:
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
         client = GitHubClient(token="t", sleep=lambda _s: None)
         assert client.web_host == "github.com"
 
-    def test_ghes_api_host_is_returned_unchanged(self) -> None:
+    def test_ghes_api_host_is_returned_unchanged(self, monkeypatch) -> None:
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
         client = GitHubClient(token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None)
         assert client.web_host == "ghes.example.com"
 
@@ -669,10 +671,11 @@ class TestAbsoluteUrl:
         client = _client_with(lambda _req: httpx.Response(200, json={}))
         assert client._absolute_url("repos/o/r") == f"{client._base_url}/repos/o/r"  # type: ignore[attr-defined]
 
-    def test_graphql_url_unchanged_for_github_cloud(self) -> None:
+    def test_graphql_url_unchanged_for_github_cloud(self, monkeypatch) -> None:
         """github.com Cloud's REST base (api.github.com, no "/api/v3" suffix)
         already joins "/graphql" onto the same host correctly — no special
         case needed there."""
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
         client = GitHubClient(token="t", sleep=lambda _s: None)
         assert client._absolute_url("/graphql") == "https://api.github.com/graphql"  # type: ignore[attr-defined]
 
@@ -1628,6 +1631,35 @@ class TestEndpointHappyPath:
         job = patched_app["jobs"].get_job(jobs[0]["job_id"])
         assert job["status"] == "failed"
         assert "fetch failed" in job["error"]
+
+    def test_run_from_github_returns_500_and_fails_job_when_base_branch_unresolvable(
+        self, patched_app
+    ) -> None:
+        """When neither request.base_branch nor the repo's default_branch is
+        available, the job row created just above must be marked failed rather
+        than left 'pending' -- an orphaned pending job is non-terminal, so it
+        would wedge this checkout's admission lock for every later
+        run-from-github/address-comments request until manually cleaned up."""
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch=""),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+
+        assert resp.status_code == 500
+        assert "unable to resolve base branch" in resp.json()["detail"]
+
+        jobs = patched_app["jobs"].list_jobs()
+        assert len(jobs) == 1
+        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
+        assert job["status"] == "failed"
+        assert "unable to resolve base branch" in job["error"]
 
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(

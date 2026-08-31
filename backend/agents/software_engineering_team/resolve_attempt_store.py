@@ -11,12 +11,20 @@ tell "we know this failed" (safe to retry) from "no evidence either way"
 (ambiguous — treat as a possible reviewer reopen, never auto-resolve).
 
 One row per thread with a known-failed resolve lives in
-``address_comments_resolve_attempts`` (see ``coding_team.postgres``), keyed by
+``address_comments_resolve_attempts`` (see
+``software_engineering_team.postgres``), keyed by
 ``(owner, repo, pr_number, thread_id)``.
 
 Design contract:
-  * **Writes are best-effort.** ``record_resolve_failure`` / ``clear_resolve_
-    attempt`` / ``clear_resolve_attempts_for_pr`` never raise: persistence here
+  * **Keyed on raw ``owner``/``repo`` casing.** Unlike ``idx_code_review_runs_pr_ci``'s
+    ``lower(owner), lower(repo)`` normalization, every function here matches on
+    the exact strings given. All current callers (``address_comments``) pass
+    the casing GitHub's REST/GraphQL responses return for a given PR
+    consistently within a run, so this is safe today; a caller that mixed
+    casing for the same repo across calls would degrade to "no evidence"
+    (never crash — see the read contract below), not corrupt data.
+  * **Writes are best-effort.** ``record_resolve_failure``,
+    ``clear_resolve_attempt``, and ``clear_resolve_attempts_for_pr`` never raise: persistence here
     is a safety net, not a prerequisite for the resolve step itself, so a
     missing/unreachable Postgres degrades to "no evidence" rather than failing
     the run. No-ops when ``POSTGRES_HOST`` is unset.

@@ -289,7 +289,8 @@ def post_address_comments(
           hook — all while holding the admission lock, so a persisted job can never be
           left without a running worker (which would otherwise block future requests
           for the PR). Returns the job id, PR URL, and the count of unresolved comments
-          the job will work through. Poll ``GET /status/{job_id}`` for progress.
+          at admission time (the background worker re-snapshots when it starts, so the
+          actual set processed may differ). Poll ``GET /status/{job_id}`` for progress.
         - A 400 is returned when the PR is not open, when ``request.repo_path`` is
           blank or not an existing git checkout (a real-issue fix — even one from
           feedback posted after this admission-time snapshot — needs a checkout

@@ -308,8 +308,15 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
     # path resolves without raising; passing the already-resolved path to is_within
     # keeps its internal resolve idempotent. Conditions 2–4 are the shared
-    # content gate (see ``_is_deletable_ephemeral_checkout``).
-    if not _is_deletable_ephemeral_checkout(resolved):
+    # content gate (see ``_is_deletable_ephemeral_checkout``), whose own
+    # docstring warns it can raise OSError on a filesystem read failure (e.g. a
+    # permission error) — caught here so this function's own "None on any
+    # resolution error" postcondition holds for that failure mode too.
+    try:
+        deletable = _is_deletable_ephemeral_checkout(resolved)
+    except OSError:
+        return None
+    if not deletable:
         return None
     return resolved
 
@@ -332,7 +339,7 @@ def _is_ephemeral_checkout_path(repo_path: str) -> bool:
 
 
 def _locked_rmtree(target: Path, repo_path: str) -> None:
-    """Delete a resolved per-issue checkout while holding the shared clone flock.
+    """Delete a resolved per-issue or per-PR checkout while holding the shared clone flock.
 
     Holds the SAME sibling ``flock`` that unified_api's ``_ensure_repo_clone``
     takes around clone/fetch, keyed on the RESOLVED checkout path (not the raw
@@ -345,12 +352,12 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
     fresh one, so two runs would each think they hold "the" lock).
 
     Preconditions:
-        - ``target`` is the resolved, non-symlink per-issue checkout returned by
-          ``_ephemeral_checkout_target``; ``repo_path`` is the original request
-          string (used only for the failure log line).
+        - ``target`` is the resolved, non-symlink per-issue or per-PR checkout
+          returned by ``_ephemeral_checkout_target``; ``repo_path`` is the
+          original request string (used only for the failure log line).
     Postconditions:
         - Best-effort: ``target`` is removed only if the lock is acquired and it
-          still resolves as a deletable per-issue checkout under the lock. Never
+          still resolves as a deletable per-issue or per-PR checkout under the lock. Never
           raises — any lock/rmtree failure is caught and logged so a successful
           job is not turned into a failure. The success line is logged only after
           ``rmtree`` returns.
@@ -384,9 +391,19 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
         # Re-validate under the lock on the fixed resolved ``target`` (see the
         # docstring): rmtree does not follow symlinks *inside* the tree, and the
         # resolved root is never a symlink, so a symlink planted in the checkout
-        # can't redirect the delete.
-        if not _is_deletable_ephemeral_checkout(target):
-            logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
+        # can't redirect the delete. Guarded the same way
+        # ``_ephemeral_checkout_target`` guards its own call: the gate's
+        # docstring warns it can raise OSError on a filesystem read failure,
+        # which must not escape this "never raises" cleanup path.
+        try:
+            deletable = _is_deletable_ephemeral_checkout(target)
+        except OSError as e:
+            logger.warning("Skipping checkout cleanup; could not validate %s: %s", target, e)
+            return
+        if not deletable:
+            logger.warning(
+                "Checkout no longer a deletable per-issue or per-PR path under lock: %s", target
+            )
             return
         try:
             shutil.rmtree(target)
@@ -429,14 +446,15 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         deliberately NOT unlinked: unlinking a flock'd file lets a waiter keep the
         old (now-orphaned) inode while a later run creates a fresh lock file and
         locks the new inode, so two runs would each think they hold "the" lock.
-        Leaving it makes a stable per-issue lock both clone and cleanup share; the
-        files are tiny and bounded by the number of distinct issues per repo.
+        Leaving it makes a stable per-issue/per-PR lock both clone and cleanup share;
+        the files are tiny and bounded by the number of distinct issues and PRs
+        per repo.
 
     Postconditions:
         - Best-effort: the checkout is removed only when
           ``_ephemeral_checkout_target`` resolves ``repo_path`` to a
-          platform-owned, non-shallow per-issue git checkout under an ephemeral
-          root, and the resolved (symlink-collapsed) path it returns is the one
+          platform-owned, non-shallow per-issue OR per-PR git checkout under an
+          ephemeral root, and the resolved (symlink-collapsed) path it returns is the one
           deleted; an unsafe path is refused (logged, left in place). Never
           raises — a cleanup failure (permissions, lock unavailable, race with a
           concurrent reader) must not turn a successful job into a failure; it is

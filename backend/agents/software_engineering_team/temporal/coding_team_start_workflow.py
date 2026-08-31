@@ -32,10 +32,14 @@ def _contains_token_key(value: Any) -> bool:
 
     Postconditions:
         - Returns True iff any dict reachable from ``value`` (through nested
-          dicts, lists, or tuples) has a key literally equal to ``"token"``.
+          dicts, lists, or tuples) has a key that is, or case-insensitively
+          contains, the substring ``"token"`` (e.g. ``"token"``,
+          ``"github_token"``, ``"auth_token"``, ``"TOKEN"``).
     """
     if isinstance(value, dict):
-        return any(k == "token" or _contains_token_key(v) for k, v in value.items())
+        return any(
+            "token" in str(k).lower() or _contains_token_key(v) for k, v in value.items()
+        )
     if isinstance(value, (list, tuple)):
         return any(_contains_token_key(v) for v in value)
     return False
@@ -91,10 +95,12 @@ def start_coding_team_workflow(
           omitted. Raises ``RuntimeError`` if the worker's Temporal client never
           becomes available within the wait window.
     """
-    assert job_id, "start_coding_team_workflow requires a non-empty job_id"
-    assert repo_path, "start_coding_team_workflow requires a non-empty repo_path"
-    if github:
-        assert not _contains_token_key(github), "github workflow payload must not include a token"
+    if not job_id:
+        raise ValueError("start_coding_team_workflow requires a non-empty job_id")
+    if not repo_path:
+        raise ValueError("start_coding_team_workflow requires a non-empty repo_path")
+    if github and _contains_token_key(github):
+        raise ValueError("github workflow payload must not include a token")
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
     workflow_id = _workflow_id(job_id)
     start_workflow_sync(
@@ -141,8 +147,8 @@ def execute_coding_team_workflow(
           keep blocking — there is no request deadline to respect here.
     Raises:
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
-            dict, or ``github`` contains a ``"token"`` key at any nesting
-            depth (see :func:`_contains_token_key`).
+            non-empty dict, or ``github`` contains a ``"token"``-like key at
+            any nesting depth (see :func:`_contains_token_key`).
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result.
         Exception: Any other exception ``execute_workflow_sync`` itself raises
             (a Temporal RPC error, the workflow's own failure exception, a
@@ -155,8 +161,8 @@ def execute_coding_team_workflow(
         raise ValueError("execute_coding_team_workflow requires a non-empty job_id")
     if not repo_path:
         raise ValueError("execute_coding_team_workflow requires a non-empty repo_path")
-    if not isinstance(github, dict):
-        raise ValueError("execute_coding_team_workflow requires github to be a dict")
+    if not isinstance(github, dict) or not github:
+        raise ValueError("execute_coding_team_workflow requires a non-empty github dict")
     if _contains_token_key(github):
         raise ValueError("github workflow payload must not include a token")
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)

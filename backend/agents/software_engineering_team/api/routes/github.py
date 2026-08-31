@@ -160,6 +160,18 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
 
         base = request.base_branch or default_branch
         if not base:
+            # The job row already exists (created above) and _running_job_for_issue
+            # treats a pending job as active, so leaving it pending here would make
+            # every retry for this issue 409 forever with nothing left to
+            # terminalize it, and would also wedge the checkout admission lock
+            # this route just took above. Mark it failed, same as the base-sha
+            # and Temporal-dispatch failure handlers below.
+            _main.update_job(
+                job_id,
+                status=JobStatus.FAILED.value,
+                error="unable to resolve base branch for GitHub-issue run",
+                current_activity=None,
+            )
             raise HTTPException(
                 status_code=500,
                 detail="unable to resolve base branch for GitHub-issue run",

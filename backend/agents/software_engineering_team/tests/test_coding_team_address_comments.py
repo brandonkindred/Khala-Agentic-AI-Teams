@@ -76,12 +76,18 @@ class TestListReviewThreads:
                         {
                             "id": "T_resolved",
                             "isResolved": True,
-                            "comments": {"nodes": [{"databaseId": 1}]},
+                            "comments": {
+                                "nodes": [{"databaseId": 1}],
+                                "pageInfo": {"hasNextPage": False},
+                            },
                         },
                         {
                             "id": "T_open",
                             "isResolved": False,
-                            "comments": {"nodes": [{"databaseId": 2}, {"databaseId": 3}]},
+                            "comments": {
+                                "nodes": [{"databaseId": 2}, {"databaseId": 3}],
+                                "pageInfo": {"hasNextPage": False},
+                            },
                         },
                     ]
                 ),
@@ -120,13 +126,25 @@ class TestListReviewThreads:
                     json=_threads_response(
                         has_next_page=True,
                         end_cursor="c1",
-                        nodes=[{"id": "T1", "isResolved": False, "comments": {"nodes": []}}],
+                        nodes=[
+                            {
+                                "id": "T1",
+                                "isResolved": False,
+                                "comments": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                            }
+                        ],
                     ),
                 )
             return httpx.Response(
                 200,
                 json=_threads_response(
-                    nodes=[{"id": "T2", "isResolved": True, "comments": {"nodes": []}}]
+                    nodes=[
+                        {
+                            "id": "T2",
+                            "isResolved": True,
+                            "comments": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                        }
+                    ]
                 ),
             )
 

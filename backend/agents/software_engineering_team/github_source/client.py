@@ -1140,7 +1140,12 @@ class GitHubClient(_GitHubHttpMixin):
                         raise ReviewThreadsUnavailableError(
                             owner, repo, number, "invalid review-thread comments payload"
                         )
-                    if (comments.get("pageInfo") or {}).get("hasNextPage"):
+                    comments_page_info = comments.get("pageInfo")
+                    if not isinstance(comments_page_info, dict):
+                        raise ReviewThreadsUnavailableError(
+                            owner, repo, number, "invalid review-thread comments pageInfo"
+                        )
+                    if comments_page_info.get("hasNextPage"):
                         raise ReviewThreadsUnavailableError(
                             owner,
                             repo,
