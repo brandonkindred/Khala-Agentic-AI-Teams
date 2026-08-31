@@ -1112,6 +1112,13 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return this.selectedRunKind === 'pr' ? 'pull request' : 'issue';
   }
 
+  /** "owner/repo" for the run-detail header, or '' when either half is unknown. */
+  get selectedRunOwnerRepo(): string {
+    return this.selectedRunOwner && this.selectedRunRepo
+      ? `${this.selectedRunOwner}/${this.selectedRunRepo}`
+      : '';
+  }
+
   /** Issue/PR number for the run-detail header, preferring the freshest known source. */
   get selectedRunDisplayNumber(): number | null {
     const ctx = this.jobStatus?.github_context ?? this.selectedRun?.github_context;

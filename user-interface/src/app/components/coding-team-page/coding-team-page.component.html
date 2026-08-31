@@ -453,9 +453,9 @@
             <h3>
               Working on {{ selectedRunKindLabel }}
               @if (selectedIssueUrl) {
-                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">{{ selectedRunOwner && selectedRunRepo ? selectedRunOwner + '/' + selectedRunRepo : '' }}#{{ selectedRunDisplayNumber }}</a>
+                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">{{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}</a>
               } @else {
-                {{ selectedRunOwner && selectedRunRepo ? selectedRunOwner + '/' + selectedRunRepo : '' }}#{{ selectedRunDisplayNumber }}
+                {{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}
               }
             </h3>
             @if (jobStatus.waiting_for_answers) {
