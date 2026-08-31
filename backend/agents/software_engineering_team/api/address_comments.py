@@ -298,27 +298,35 @@ def _unresolved_comments(
     # The marker is a public literal string in `body` — anyone who can comment
     # on the PR could include it, accidentally or deliberately — so it is only
     # trusted as proof of Khala's own authorship when it ALSO carries Khala's
-    # authenticated identity. Resolved once per call; best-effort (matching
-    # pr_review._fetch_pr_metadata's _get_login): a failure degrades to "",
-    # which _is_khala_authored never matches, failing closed to "not Khala's"
-    # rather than trusting an unauthenticated marker. The worst case differs
-    # by whether the comment has a discoverable thread: for one that does,
-    # it's a redundant re-triage of an already-fixed comment; for an ORPHANED
-    # Khala reply (no thread — see the loop below), it's worse — no longer
-    # recognized as Khala's own, it falls through to the "no discoverable
-    # thread" fail-closed branch and aborts the whole run, not just that one
-    # comment.
+    # authenticated identity. Resolved once per call. Unlike pr_review._fetch_
+    # pr_metadata's _get_login (a display-only best-effort read), a failure
+    # here must NOT degrade to "" and continue: an empty login makes
+    # _is_khala_authored reject even Khala's own genuine prior reply on a
+    # thread that DOES have a discoverable thread, so that reply would be fed
+    # back into triage as if it were fresh reviewer feedback — risking a
+    # duplicate implementation dispatch for an already-fixed comment, or a
+    # misclassification that leaves the thread unresolved forever. Fail
+    # closed instead, exactly like the other unverifiable-state cases in this
+    # function (no discoverable thread, incomplete GraphQL/REST listings).
     try:
         authenticated_login = client.get_authenticated_login()
-    except Exception as e:  # noqa: BLE001 - best-effort; never blocks the run
-        logger.warning(
-            "address-comments: could not resolve authenticated login for %s/%s#%s: %s",
+    except Exception as e:  # noqa: BLE001 - re-raised as a fail-closed error below
+        raise ReviewThreadsUnavailableError(
             owner,
             repo,
             pr_number,
-            scrub_token_from_text(str(e)),
+            f"could not resolve authenticated login: {scrub_token_from_text(str(e))}",
+        ) from e
+    if not authenticated_login:
+        # get_authenticated_login()'s own contract degrades to "" on a
+        # best-effort failure rather than raising (see its docstring) — that
+        # must still fail closed here, just via a different signal.
+        raise ReviewThreadsUnavailableError(
+            owner,
+            repo,
+            pr_number,
+            "could not resolve authenticated login (empty)",
         )
-        authenticated_login = ""
 
     thread_by_comment_id: Dict[int, ReviewThread] = {}
     for thread in threads:
@@ -857,7 +865,17 @@ def _thread_has_new_reviewer_feedback(
             if cid <= since_comment_id:
                 continue
             newer = comments_by_id.get(cid)
-            if newer is not None and not _is_khala_authored(newer, authenticated_login):
+            if newer is None:
+                # GraphQL reports a comment id newer than since_comment_id that
+                # the REST listing didn't return (e.g. list_review_comments'
+                # MAX_REVIEW_COMMENTS_TRAVERSED cap truncated before reaching
+                # it). Its content — and therefore whether it's genuine
+                # reviewer feedback — is unverifiable; fail closed rather than
+                # silently treating an unfetched comment as if it doesn't
+                # exist, which would let stale work proceed over feedback that
+                # was never actually seen.
+                return True
+            if not _is_khala_authored(newer, authenticated_login):
                 return True
         return False
     except Exception as e:  # noqa: BLE001 - fail open: never resolve on unverifiable state
@@ -1477,6 +1495,36 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     token,
                 )
                 outcomes.append(outcome)
+
+            if unresolved and not pr_closed_mid_run:
+                # The per-iteration state check above catches the PR closing
+                # BETWEEN comments, but not while the FINAL (or only)
+                # comment's own `_handle_comment` call was still running —
+                # that call can itself block for a long implementation
+                # dispatch, and there is no next loop iteration to observe a
+                # closure that happens during it. Re-check once more here,
+                # after the loop, before this run's outcome is judged
+                # successful and the label/cleanup actions below are allowed
+                # to run against what may now be a closed PR.
+                try:
+                    final_pr = client.get_pull_request(owner, repo, pr_number)
+                except Exception as e:  # noqa: BLE001 - best-effort; a failed check must not block
+                    logger.warning(
+                        "address-comments: could not re-check PR state after the comment "
+                        "loop finished: %s",
+                        scrub_token_from_text(str(e)),
+                    )
+                else:
+                    if final_pr.state != "open":
+                        logger.info(
+                            "address-comments: PR %s/%s#%s closed (state=%s) while the final "
+                            "comment was being processed",
+                            owner,
+                            repo,
+                            pr_number,
+                            final_pr.state,
+                        )
+                        pr_closed_mid_run = True
 
             # Every comment handled without failure AND every retry-resolve
             # succeeded: nothing is still owed to the reviewer, AS FAR AS THIS

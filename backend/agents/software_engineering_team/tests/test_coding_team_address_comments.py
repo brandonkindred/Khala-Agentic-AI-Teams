@@ -674,11 +674,13 @@ class TestUnresolvedCommentsMarkerAuthentication:
         assert [c.id for c in unresolved] == [2]
         assert retry_resolve == []
 
-    def test_login_resolution_failure_degrades_to_untrusted_not_re_triage_skip(
-        self, address_env
-    ) -> None:
-        """A best-effort failure to resolve the authenticated login must not
-        crash the run; it just means no marker is trusted this run."""
+    def test_login_resolution_failure_fails_closed(self, address_env) -> None:
+        """A failure to resolve the authenticated login must abort the run
+        rather than degrade to treating every marker as untrusted: on a
+        thread that DOES have a discoverable thread, an empty login would
+        make Khala's own genuine prior reply look like fresh reviewer
+        feedback, risking a duplicate implementation dispatch for an
+        already-fixed comment."""
         ac, fake = address_env["ac"], address_env["fake"]
 
         def _boom() -> str:
@@ -690,10 +692,22 @@ class TestUnresolvedCommentsMarkerAuthentication:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        with pytest.raises(ReviewThreadsUnavailableError):
+            ac.unresolved_comments(fake, "o", "r", 7)
 
-        assert [c.id for c in unresolved] == [2]
-        assert retry_resolve == []
+    def test_login_resolution_returning_empty_fails_closed(self, address_env) -> None:
+        """get_authenticated_login()'s own contract degrades to "" on a
+        best-effort failure rather than raising — that must still fail
+        closed here, via the empty-string check."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.authenticated_login = ""
+        fake.review_comments = [
+            _comment(2, body="Addressed. <!-- khala-generated -->", author="khala-bot"),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+
+        with pytest.raises(ReviewThreadsUnavailableError):
+            ac.unresolved_comments(fake, "o", "r", 7)
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1260,46 @@ class TestRunAddressComments:
         # The run must not be mistaken for fully successful — no waiting-for-review label.
         assert fake.labels_set == []
 
+    def test_does_not_mark_waiting_for_review_when_pr_closes_during_last_comment(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The per-iteration PR-state check (see
+        test_stops_processing_when_pr_closes_mid_run) only catches a closure
+        BETWEEN comments — it can't see the PR close WHILE the final (or, as
+        here, only) comment's own `_handle_comment` call is still running,
+        since there's no next iteration to observe it. A post-loop re-check
+        must catch this too, or a run whose last comment happened to succeed
+        would still get labelled waiting-for-review on an already-closed
+        PR."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=False, is_false_positive=False)
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+
+        calls = {"n": 0}
+        real_pr = fake.pr
+
+        def _get_pull_request(_o, _r, _n):
+            calls["n"] += 1
+            # Pre-loop fetch, _clear_waiting_for_review's fetch, and the only
+            # comment's own per-iteration refresh all see it open — the PR
+            # closes only while that comment's _handle_comment is "running",
+            # discovered by the post-loop re-check (the 4th call).
+            if calls["n"] <= 3:
+                return real_pr
+            return replace(real_pr, state="closed")
+
+        fake.get_pull_request = _get_pull_request  # type: ignore[assignment]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
+        assert final
+        # The comment itself was handled normally...
+        assert final[-1]["review_summary"]["counts"].get("not_an_issue") == 1
+        # ...but the run must not be mistaken for fully successful.
+        assert fake.labels_set == []
+
     def test_cleans_up_checkout_on_full_success_when_flagged(
         self, address_env, monkeypatch
     ) -> None:
@@ -1718,6 +1772,43 @@ class TestRunAddressComments:
 
         assert outcome.outcome == "failed"
         assert "superseded" in outcome.detail
+        assert address_env["child_jobs"] == []  # implementation never dispatched
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_dispatch_time_freshness_check_blocks_unfetched_newer_comment(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The thread's live `comment_ids` can report a comment id newer than
+        the triaged snapshot that the REST listing didn't return (e.g.
+        list_review_comments' traversal cap truncated before reaching it).
+        Its content is unverifiable — this must fail closed (block dispatch)
+        rather than silently treat an unfetched comment as if it doesn't
+        exist."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        # The live thread now has a newer comment (id 6) that never showed up
+        # in fake.review_comments — simulating a REST-listing truncation.
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
         assert address_env["child_jobs"] == []  # implementation never dispatched
         assert fake.replies == []
         assert fake.resolved == []
