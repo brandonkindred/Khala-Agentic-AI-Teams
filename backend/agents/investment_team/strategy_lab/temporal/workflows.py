@@ -532,10 +532,10 @@ class StrategyLabCycleWorkflow:
             # discipline and ``activities.py``'s own local-import convention
             # for ``investment_team.models`` types.
             from investment_team.strategy_lab.checkpoints import (
-                PipelineStage,
                 determine_resume_stage,
                 find_latest_checkpoint_for_attempt,
                 parse_checkpoint,
+                resolve_cross_attempt_resume,
             )
 
             attempt_checkpoints = [
@@ -583,39 +583,44 @@ class StrategyLabCycleWorkflow:
                 parent_drift["spec_history"].extend(child_drift["spec_history"])
                 parent_drift["code_history"].extend(child_drift["code_history"])
                 parent_drift["gate_timeline"].extend(child_drift["gate_timeline"])
-            # Default: full restart, unchanged from today's behavior. Only
-            # overridden below when the raising exception itself declares
-            # the checkpointed spec is not implicated in the failure AND the
-            # determination is the one stage the activity actually knows how
-            # to resume into. A checkpoint that converged through SYNTHESIS
-            # (or further) is deliberately never used to resume, even when
-            # ``spec_implicated`` is ``False``: that would reuse the
-            # checkpoint's *code*, and a spec-not-implicated exception makes
-            # no claim about the code's soundness -- see ``checkpoints.py``.
+            # The soundness gate itself -- shared with thread mode's
+            # ``run_cycle`` via ``checkpoints.resolve_cross_attempt_resume``
+            # so the two modes' resume conditions can't independently drift
+            # out of sync. Default: full restart, unchanged from today's
+            # behavior, unless the gate activates a checkpoint. A checkpoint
+            # that converged through SYNTHESIS (or further) is deliberately
+            # never used to resume, even when ``spec_implicated`` is
+            # ``False``: that would reuse the checkpoint's *code*, and a
+            # spec-not-implicated exception makes no claim about the code's
+            # soundness -- see ``checkpoints.py`` for the full contract.
             spec_implicated = outcome.get("spec_implicated", True)
             pending_resume_spec = None
             pending_resume_rationale = None
             pending_resume_design_context = None
             pending_resume_drift_seed = None
-            if not spec_implicated and resume_stage is PipelineStage.SYNTHESIS:
-                # ``resume_checkpoint`` is necessarily a ``ReviewCheckpoint``
-                # here: ``determine_resume_stage`` only returns
-                # ``PipelineStage.SYNTHESIS`` when ``resume_checkpoint.stage``
-                # is REVIEW. The exception has already declared this
-                # converged state didn't cause the failure, so it's safe to
-                # hand to the next attempt as-is.
-                pending_resume_spec = resume_checkpoint.spec.model_dump(mode="json")
-                pending_resume_rationale = resume_checkpoint.rationale
-                pending_resume_design_context = resume_checkpoint.design_context
+            activated_checkpoint = resolve_cross_attempt_resume(
+                resume_checkpoint, spec_implicated=spec_implicated
+            )
+            if activated_checkpoint is not None:
+                # ``activated_checkpoint`` is necessarily a
+                # ``ReviewCheckpoint`` here: ``resolve_cross_attempt_resume``
+                # only returns non-``None`` when ``determine_resume_stage``
+                # is ``PipelineStage.SYNTHESIS``, which only happens for a
+                # REVIEW-stage checkpoint. The exception has already declared
+                # this converged state didn't cause the failure, so it's safe
+                # to hand to the next attempt as-is.
+                pending_resume_spec = activated_checkpoint.spec.model_dump(mode="json")
+                pending_resume_rationale = activated_checkpoint.rationale
+                pending_resume_design_context = activated_checkpoint.design_context
                 pending_resume_drift_seed = {
                     "spec_history": [
-                        r.model_dump(mode="json") for r in resume_checkpoint.spec_history
+                        r.model_dump(mode="json") for r in activated_checkpoint.spec_history
                     ],
                     "code_history": [
-                        r.model_dump(mode="json") for r in resume_checkpoint.code_history
+                        r.model_dump(mode="json") for r in activated_checkpoint.code_history
                     ],
                     "gate_timeline": [
-                        r.model_dump(mode="json") for r in resume_checkpoint.gate_timeline
+                        r.model_dump(mode="json") for r in activated_checkpoint.gate_timeline
                     ],
                 }
             if design_attempt >= max_reentries:

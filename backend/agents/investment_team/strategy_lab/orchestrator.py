@@ -116,7 +116,12 @@ from .agents.refinement import (
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
 from .budget_config import StrategyLabBudgetConfig
-from .checkpoints import PipelineStage, determine_resume_stage, find_latest_checkpoint_for_attempt
+from .checkpoints import (
+    PipelineStage,
+    determine_resume_stage,
+    find_latest_checkpoint_for_attempt,
+    resolve_cross_attempt_resume,
+)
 from .cycle_control import gather_convergence_directives, require_short_circuit_inputs
 from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
@@ -770,20 +775,24 @@ class StrategyLabOrchestrator(
                     pending_resume_rationale = None
                     pending_resume_design_context = None
                     pending_resume_drift_seed = None
-                    if (
-                        not exc.spec_implicated
-                        and self.last_resume_determination is PipelineStage.SYNTHESIS
-                    ):
-                        # ``resume_checkpoint`` is necessarily a
-                        # ``ReviewCheckpoint`` here: ``determine_resume_stage``
-                        # only returns ``PipelineStage.SYNTHESIS`` when
-                        # ``resume_checkpoint.stage`` is REVIEW. The exception
-                        # has already declared this converged state didn't
-                        # cause the failure, so it's safe to hand to the next
-                        # attempt as-is.
+                    # The soundness gate itself -- shared with Temporal mode's
+                    # ``StrategyLabCycleWorkflow.run`` via
+                    # ``checkpoints.resolve_cross_attempt_resume`` so the two
+                    # modes' resume conditions can't independently drift out
+                    # of sync. A non-``None`` result is necessarily a
+                    # ``ReviewCheckpoint``: ``determine_resume_stage`` only
+                    # returns ``PipelineStage.SYNTHESIS`` when
+                    # ``resume_checkpoint.stage`` is REVIEW.
+                    activated_checkpoint = resolve_cross_attempt_resume(
+                        resume_checkpoint, spec_implicated=exc.spec_implicated
+                    )
+                    if activated_checkpoint is not None:
+                        # The exception has already declared this converged
+                        # state didn't cause the failure, so it's safe to hand
+                        # to the next attempt as-is.
                         try:
                             reconstructed_context = _design_context_from_checkpoint(
-                                resume_checkpoint.design_context
+                                activated_checkpoint.design_context
                             )
                         except (ValueError, TypeError) as context_exc:
                             # Fail open to full restart on any malformed
@@ -792,18 +801,18 @@ class StrategyLabOrchestrator(
                             logger.warning(
                                 "Discarding unusable %s checkpoint for design_attempt=%d "
                                 "resume (design_context reconstruction failed): %s",
-                                resume_checkpoint.stage.value,
+                                activated_checkpoint.stage.value,
                                 design_attempt,
                                 context_exc,
                             )
                         else:
-                            pending_resume_spec = resume_checkpoint.spec
-                            pending_resume_rationale = resume_checkpoint.rationale
+                            pending_resume_spec = activated_checkpoint.spec
+                            pending_resume_rationale = activated_checkpoint.rationale
                             pending_resume_design_context = reconstructed_context
                             pending_resume_drift_seed = _DriftCollector(
-                                spec_history=list(resume_checkpoint.spec_history),
-                                code_history=list(resume_checkpoint.code_history),
-                                gate_timeline=list(resume_checkpoint.gate_timeline),
+                                spec_history=list(activated_checkpoint.spec_history),
+                                code_history=list(activated_checkpoint.code_history),
+                                gate_timeline=list(activated_checkpoint.gate_timeline),
                             )
                     if design_attempt >= MAX_DESIGN_REENTRIES:
                         break

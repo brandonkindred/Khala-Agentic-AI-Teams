@@ -29,6 +29,7 @@ from investment_team.strategy_lab.checkpoints import (
     determine_resume_stage,
     find_latest_checkpoint_for_attempt,
     parse_checkpoint,
+    resolve_cross_attempt_resume,
 )
 
 _EMPTY_CODE_HASH = phases.hash_code(None)
@@ -511,6 +512,54 @@ def test_determine_resume_stage_from_each_stage(
 
 def test_determine_resume_stage_with_no_checkpoint_signals_full_restart() -> None:
     assert determine_resume_stage(None) is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_cross_attempt_resume: the soundness gate shared by thread mode's
+# ``orchestrator.py::run_cycle`` and Temporal mode's
+# ``temporal/workflows.py::StrategyLabCycleWorkflow.run``.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cross_attempt_resume_activates_on_review_checkpoint_when_not_spec_implicated() -> (
+    None
+):
+    cp = _build_review_checkpoint()
+    assert resolve_cross_attempt_resume(cp, spec_implicated=False) is cp
+
+
+def test_resolve_cross_attempt_resume_declines_when_spec_implicated() -> None:
+    """Even a checkpoint that converged through REVIEW must not activate
+    resume when the raising exception says the spec itself is implicated."""
+    cp = _build_review_checkpoint()
+    assert resolve_cross_attempt_resume(cp, spec_implicated=True) is None
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        _build_design_checkpoint,
+        _build_synthesis_checkpoint,
+        _build_refinement_checkpoint,
+        _build_alignment_checkpoint,
+    ],
+    ids=["design", "synthesis", "refinement", "alignment"],
+)
+def test_resolve_cross_attempt_resume_declines_for_every_non_review_stage(
+    build: Callable[..., PipelineCheckpoint],
+) -> None:
+    """Only a REVIEW-stage checkpoint (``determine_resume_stage`` ->
+    ``PipelineStage.SYNTHESIS``) has a resume boundary at all -- not even a
+    ``spec_implicated=False`` exception can activate resume from any other
+    stage, since resuming past code synthesis would need its own
+    code-soundness signal that ``spec_implicated`` doesn't provide."""
+    cp = build()
+    assert resolve_cross_attempt_resume(cp, spec_implicated=False) is None
+
+
+def test_resolve_cross_attempt_resume_declines_when_no_checkpoint_exists() -> None:
+    assert resolve_cross_attempt_resume(None, spec_implicated=False) is None
+    assert resolve_cross_attempt_resume(None, spec_implicated=True) is None
 
 
 @pytest.mark.parametrize(
