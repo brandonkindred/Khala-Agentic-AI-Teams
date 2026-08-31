@@ -617,3 +617,29 @@ def test_remote_url_matches_accepts_custom_expected_host() -> None:
         )
         is True
     )
+
+
+def test_remote_url_matches_accepts_https_with_userinfo_credentials() -> None:
+    """P1 regression: a token-based HTTPS clone (the form produced by CI /
+    _git_auth_env-style credentials) embeds `user:token@` in the URL. The
+    userinfo colon must not be mistaken for the scp-form's host separator —
+    that would split the token into its own path segment and read the
+    username as the host, always failing to match a perfectly valid remote."""
+    assert (
+        remote_url_matches(
+            "https://x-access-token:ghp_xxx@github.com/acme/widget.git", "acme", "widget"
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_accepts_https_with_username_only_credentials() -> None:
+    assert remote_url_matches("https://ghp_xxx@github.com/acme/widget.git", "acme", "widget") is True
+
+
+def test_remote_url_matches_rejects_at_sign_inside_repo_name() -> None:
+    """An "@" that is part of the path (not userinfo) must not be silently
+    swallowed by the userinfo-stripping guard — it has no preceding "/"-free
+    head here that looks like a userinfo section ending exactly at the host,
+    so this should simply fail to match cleanly rather than false-match."""
+    assert remote_url_matches("https://github.com/acme/w@idget", "acme", "widget") is False

@@ -846,11 +846,21 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
     # value from GitHub's own API response, which can never start with `-`, but
     # this stays consistent with the option-injection guard already used for
     # the `fetch` calls below rather than relying on that invariant alone.
-    rc, msg = _main._git(repo_path, "remote", "add", "--", _FORK_REMOTE_NAME, remote)
+    rc, add_msg = _main._git(repo_path, "remote", "add", "--", _FORK_REMOTE_NAME, remote)
     if rc != 0:
-        rc, msg = _main._git(repo_path, "remote", "set-url", "--", _FORK_REMOTE_NAME, remote)
+        rc, set_url_msg = _main._git(repo_path, "remote", "set-url", "--", _FORK_REMOTE_NAME, remote)
         if rc != 0:
-            return remote, f"could not register fork remote {_FORK_REMOTE_NAME!r}: {msg}"
+            # `add` can fail for reasons OTHER than "already exists" (a
+            # corrupted .git dir, a config permission error, an invalid
+            # remote name) — `set-url` then fails too, for its own reason.
+            # Keep both messages: reporting only the set-url failure would
+            # hide the original add failure from an operator triaging a
+            # non-idempotency-related problem.
+            return (
+                remote,
+                f"could not register fork remote {_FORK_REMOTE_NAME!r}: "
+                f"add failed ({add_msg}); set-url failed ({set_url_msg})",
+            )
     return _FORK_REMOTE_NAME, None
 
 
@@ -1005,13 +1015,22 @@ def _prepare_issue_branch(
         # nothing here guarantees the caller's expected_head_sha and git's own
         # rev-parse output agree on letter case -- a same-commit comparison
         # must not fail merely because of that.
-        if live_head_sha is None or live_head_sha.casefold() != expected_head_sha.casefold():
+        if live_head_sha is None:
             return (
                 False,
-                f"integration_branch {integration_branch!r} head is "
-                f"{live_head_sha or '<unresolved>'}, expected {expected_head_sha!r}; "
-                "the branch moved after this run's plan was grounded, so branch prep "
-                "was aborted rather than applying it to newer code",
+                f"integration_branch {integration_branch!r} head could not be resolved "
+                f"from {remote_issue_ref!r}; the branch may have been deleted or is not "
+                f"fetchable. Expected {expected_head_sha!r}, so branch prep was aborted "
+                "rather than applying the plan to an unknown head",
+                notes,
+            )
+        if live_head_sha.casefold() != expected_head_sha.casefold():
+            return (
+                False,
+                f"integration_branch {integration_branch!r} head is {live_head_sha}, "
+                f"expected {expected_head_sha!r}; the branch moved after this run's plan "
+                "was grounded, so branch prep was aborted rather than applying it to "
+                "newer code",
                 notes,
             )
 

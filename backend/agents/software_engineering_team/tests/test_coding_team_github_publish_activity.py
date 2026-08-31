@@ -637,8 +637,19 @@ def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
         "job-1",
         task_graph_snapshot=[{"id": "t1", "title": "x", "status": "failed"}],
     )
-    monkeypatch.setattr(api, "_fast_forward", lambda path, branch, source: (True, None))
-    monkeypatch.setattr(api, "_push_branch", lambda path, remote, branch, token: (True, None))
+    fast_forwards: list[tuple[str, str, str]] = []
+    pushes: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        api,
+        "_fast_forward",
+        lambda path, branch, source: fast_forwards.append((path, branch, source)) or (True, None),
+    )
+    monkeypatch.setattr(
+        api,
+        "_push_branch",
+        lambda path, remote, branch, token: pushes.append((path, remote, branch, token))
+        or (True, None),
+    )
 
     out = github_pr_publish_activity(
         {
@@ -655,3 +666,7 @@ def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
 
     assert out["status"] == "completed_with_failures"
     assert store.cleared_markers == [("/repo", 7)]
+    # "still pushes the branch (partial progress lands)" is the whole point of
+    # this test — pin that it actually happened, not just the terminal status.
+    assert fast_forwards == [("/repo", "feature/pr-7", api.DEVELOPMENT_BRANCH)]
+    assert pushes == [("/repo", "origin", "feature/pr-7", "tok-123")]

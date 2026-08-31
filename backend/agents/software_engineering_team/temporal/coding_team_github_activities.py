@@ -277,6 +277,10 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
           terminal status below).
         - ``repo_path`` is a git checkout containing both ``integration_branch``
           and ``_main.DEVELOPMENT_BRANCH``.
+        - Must NOT include a ``token`` field — the activity resolves the
+          GitHub token from the job's ``github_token_encrypted`` or
+          ``GITHUB_TOKEN`` (via ``_require_activity_github_token``), which
+          runs before the required-fields check below.
     Postconditions:
         - The job's terminal status is ``JobStatus.COMPLETED.value`` only when
           every task in ``task_graph_snapshot`` landed; a run with any
@@ -335,14 +339,18 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
     # The branch is now durable on the existing PR. Clear the prep marker and
     # make the child job terminal before the parent resolves the review thread.
     _main._clear_active_issue_if_matches(repo_path, request["pr_number"])
-    _main.update_job(
-        job_id,
-        status=status,
-        phase="completed",
-        status_text=status_text,
-        github_pr_url=request.get("pr_url"),
-        integration_branch=branch,
-    )
+    update_fields: dict[str, Any] = {
+        "status": status,
+        "phase": "completed",
+        "status_text": status_text,
+        "integration_branch": branch,
+    }
+    # pr_url is documented optional (see Preconditions) — only pass github_pr_url
+    # when a value is actually present, so an omitted pr_url can never be read as
+    # "explicitly clear this job's previously-stored PR URL" by update_job.
+    if request.get("pr_url"):
+        update_fields["github_pr_url"] = request["pr_url"]
+    _main.update_job(job_id, **update_fields)
     return _main.get_job(job_id) or {"job_id": job_id, "status": status, "status_text": status_text}
 
 

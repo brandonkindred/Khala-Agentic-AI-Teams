@@ -2339,6 +2339,26 @@ class TestPrepareIssueBranch:
         live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
         assert stale_sha != live_sha
 
+        import subprocess
+
+        def _local_branches() -> str:
+            return subprocess.run(
+                ["git", "-C", repo, "for-each-ref", "refs/heads", "--format=%(refname:short)"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        def _status() -> str:
+            return subprocess.run(
+                ["git", "-C", repo, "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        branches_before = _local_branches()
+
         ok, msg, _notes = api._prepare_issue_branch(
             repo, "origin", "main", "khala/issue-9", expected_head_sha=stale_sha
         )
@@ -2346,10 +2366,10 @@ class TestPrepareIssueBranch:
         assert ok is False
         assert stale_sha in (msg or "")
         assert live_sha in (msg or "")
-        import subprocess
 
         # The checkout must be left exactly where _init_repo put it -- no
-        # branch switch, no local integration branch created.
+        # branch switch, no local integration/rescue branch created, no
+        # uncommitted changes left behind.
         head = subprocess.run(
             ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
             check=True,
@@ -2357,6 +2377,8 @@ class TestPrepareIssueBranch:
             text=True,
         ).stdout.strip()
         assert head == "main"
+        assert _local_branches() == branches_before
+        assert _status() == ""
 
     def test_expected_head_sha_none_skips_check(self, api, tmp_path) -> None:
         """The default (``None``, used by the plain issue-driven flow) must not

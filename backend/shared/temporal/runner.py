@@ -199,9 +199,13 @@ def execute_workflow_sync(
           conflated with "the workflow failed" (e.g. a long-running
           implementation or a HITL pause that outlives one wait window). The
           initial ``execute_workflow`` waiter is cancelled before reattaching
-          so exactly one coroutine ever long-polls Temporal for this workflow
-          at a time — never both the abandoned initial wait and the new
-          reattach waiter.
+          so it does not keep polling alongside the reattach waiter for the
+          workflow's remaining lifetime — cancellation is delivered
+          asynchronously (``Task.cancel()`` takes effect at the cancelled
+          coroutine's next suspension point), so a brief overlap between the
+          cancel and the reattach waiter starting is possible during
+          teardown, but the abandoned wait is reliably torn down rather than
+          left running indefinitely.
 
     Invariants:
         - Runs the coroutine on the worker's shared event loop via
@@ -264,9 +268,12 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
     Postconditions:
         - Returns the workflow's result once it reaches a terminal state.
         - Blocks in further ``poll_timeout_s``-sized windows for as long as the
-          workflow keeps running, logging once per window — this function only
-          returns (or raises the workflow's own failure) once Temporal reports
-          a terminal state; it never itself times out.
+          workflow keeps running, logging once per window at INFO (this is the
+          expected shape for a long HITL pause or implementation — a WARNING
+          per window would turn a multi-hour/day wait into a continuous stream
+          of warnings that masks genuinely actionable ones) — this function
+          only returns (or raises the workflow's own failure) once Temporal
+          reports a terminal state; it never itself times out.
         - Schedules exactly ONE ``handle.result()`` coroutine on ``loop`` for
           the whole wait, re-polling that SAME future's ``.result(timeout=...)``
           on every window. Scheduling a fresh coroutine per window (via a new
@@ -283,7 +290,7 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
         try:
             return future.result(timeout=poll_timeout_s)
         except futures.TimeoutError:
-            logger.warning(
+            logger.info(
                 "execute_workflow_sync: still waiting on workflow id=%s after another "
                 "%ss; reattaching again",
                 workflow_id,

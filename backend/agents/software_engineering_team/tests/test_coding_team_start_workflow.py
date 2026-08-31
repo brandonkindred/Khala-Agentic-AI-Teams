@@ -137,6 +137,25 @@ def test_execute_coding_team_workflow_rejects_plaintext_token(monkeypatch):
         sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {"token": "ghp_secret"})
 
 
+def test_execute_coding_team_workflow_rejects_nested_plaintext_token(monkeypatch):
+    """P1 regression: a token buried under a sub-dict (e.g. `github["auth"]
+    ["token"]`) must be rejected too — a top-level-only check would let it
+    slip into the durable Temporal event history."""
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
+    with pytest.raises(ValueError, match="must not include a token"):
+        sw.execute_coding_team_workflow(
+            "job-7", "/repo", {"x": 1}, {"auth": {"token": "ghp_secret"}}
+        )
+
+
+def test_execute_coding_team_workflow_rejects_token_nested_in_list(monkeypatch):
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
+    with pytest.raises(ValueError, match="must not include a token"):
+        sw.execute_coding_team_workflow(
+            "job-7", "/repo", {"x": 1}, {"extra": [{"token": "ghp_secret"}]}
+        )
+
+
 def test_execute_coding_team_workflow_rejects_non_dict_github(monkeypatch):
     """A caller passing None (or any non-dict) for github must get a clear
     ValueError, not a raw TypeError from `"token" in github`."""

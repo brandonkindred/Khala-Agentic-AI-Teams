@@ -151,6 +151,17 @@ def test_branch_prep_activity_expected_head_sha_match_succeeds(api, monkeypatch,
     )
 
     assert out["ok"] is True, out["error"]
+    # An `ok=True` alone can't distinguish "expected_head_sha was honored and
+    # prep actually ran" from "the parameter was silently ignored" — both
+    # produce True. Pin the observable postcondition: prep actually checked
+    # out the integration branch.
+    head = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == "khala/issue-9"
 
 
 def test_branch_prep_activity_expected_head_sha_mismatch_fails_closed(

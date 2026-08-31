@@ -325,6 +325,10 @@ def post_address_comments(
                         "only open PRs can be addressed."
                     ),
                 )
+            # This route only needs the unresolved-comment COUNT for its response
+            # (see the return below); the other three return values exist for the
+            # background worker's own retry-resolve/re-triage logic
+            # (address_comments._run_address_comments), not this admission check.
             unresolved, _threads, _retry_resolve, _history = _address.unresolved_comments(
                 client, request.owner, request.repo, pr_number
             )
@@ -417,37 +421,44 @@ def post_address_comments(
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        f"job {sibling.get('job_id')} (PR #{sib_ctx.get('pr_number', '?')}) is still "
+                        f"job {sibling.get('job_id', '?')} (PR #{sib_ctx.get('pr_number', '?')}) is still "
                         f"running on checkout {request.repo_path}; retry after it finishes"
                     ),
                 )
 
             job_id = str(uuid.uuid4())
-            _main.create_job(job_id=job_id, repo_path=request.repo_path)
-            job_fields: dict[str, Any] = {
-                "github_context": {
-                    "owner": request.owner,
-                    "repo": request.repo,
-                    "pr_number": pr_number,
-                    "pr_url": pr.html_url,
-                },
-            }
-            # Temporal GitHub activities run outside this request and resolve their
-            # credential from the durable job record. Persist ciphertext only, matching
-            # /run-from-github; never put the plaintext PAT in a workflow payload.
-            encrypted = _main.encrypt_token(token)
-            if encrypted:
-                job_fields["github_token_encrypted"] = encrypted
-            _main.update_job(job_id, **job_fields)
             try:
+                _main.create_job(job_id=job_id, repo_path=request.repo_path)
+                job_fields: dict[str, Any] = {
+                    "github_context": {
+                        "owner": request.owner,
+                        "repo": request.repo,
+                        "pr_number": pr_number,
+                        "pr_url": pr.html_url,
+                    },
+                }
+                # Temporal GitHub activities run outside this request and resolve their
+                # credential from the durable job record. Persist ciphertext only, matching
+                # /run-from-github; never put the plaintext PAT in a workflow payload.
+                encrypted = _main.encrypt_token(token)
+                if encrypted:
+                    job_fields["github_token_encrypted"] = encrypted
+                _main.update_job(job_id, **job_fields)
                 created_at = _main.record_review_start(
                     job_id, request.owner, request.repo, pr_number, pr.html_url, _main._review_author()
                 )
                 _address.start_address_comments_thread(job_id, request, token)
             except Exception as e:
                 # Creation is not transactional across the job service, review store,
-                # and Python thread launcher. Terminalize whatever was persisted so a
-                # half-started job cannot block the PR admission guard indefinitely.
+                # and Python thread launcher — and now covers create_job/update_job too
+                # (not just record_review_start/thread launch): a failure at ANY point
+                # in this create -> record -> launch sequence must still terminalize
+                # whatever was persisted, or an orphaned non-terminal job (missing its
+                # github_context/token) would block the PR admission guard indefinitely
+                # while giving downstream Temporal activities none of the context they
+                # need. update_job is itself best-effort here: if create_job never
+                # actually wrote a row, this call harmlessly targets a job_id the job
+                # service has never seen.
                 error = f"Could not start address-comments worker: {scrub_token_from_text(str(e))}"
                 try:
                     _main.update_job(

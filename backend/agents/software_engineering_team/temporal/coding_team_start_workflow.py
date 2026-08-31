@@ -21,6 +21,51 @@ logger = logging.getLogger(__name__)
 _COMMENT_WORKFLOW_TIMEOUT_S = 4 * 60 * 60
 
 
+def _contains_token_key(value: Any) -> bool:
+    """True iff ``value`` (recursively) contains a dict with a ``"token"`` key.
+
+    A plain top-level ``"token" in github`` check only catches a token stored
+    directly on the ``github`` dict — one nested under a sub-dict (e.g.
+    ``github["auth"]["token"]``) would pass that check and get serialized into
+    the Temporal workflow's durable event history, exactly the leakage the
+    no-token contract exists to prevent.
+
+    Postconditions:
+        - Returns True iff any dict reachable from ``value`` (through nested
+          dicts, lists, or tuples) has a key literally equal to ``"token"``.
+    """
+    if isinstance(value, dict):
+        return any(k == "token" or _contains_token_key(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_token_key(v) for v in value)
+    return False
+
+
+def _workflow_id(job_id: str) -> str:
+    """The Temporal workflow id for ``job_id`` — one shared spelling for both dispatchers."""
+    return f"{WORKFLOW_ID_PREFIX}{job_id}"
+
+
+def _build_workflow_payload(
+    job_id: str, repo_path: str, plan_input: Optional[Dict[str, Any]], github: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Build the ``CodingTeamWorkflow.run`` argument dict shared by both dispatchers.
+
+    Postconditions:
+        - Returns ``{"job_id", "repo_path", "plan_input"}`` plus ``"github"``
+          when ``github`` is truthy (omitted entirely when falsy/``None``, so a
+          caller with no GitHub context doesn't send a spurious empty dict).
+    """
+    payload: Dict[str, Any] = {
+        "job_id": job_id,
+        "repo_path": repo_path,
+        "plan_input": plan_input,
+    }
+    if github:
+        payload["github"] = github
+    return payload
+
+
 def start_coding_team_workflow(
     job_id: str,
     repo_path: str,
@@ -47,15 +92,10 @@ def start_coding_team_workflow(
     """
     assert job_id, "start_coding_team_workflow requires a non-empty job_id"
     assert repo_path, "start_coding_team_workflow requires a non-empty repo_path"
-    payload: Dict[str, Any] = {
-        "job_id": job_id,
-        "repo_path": repo_path,
-        "plan_input": plan_input,
-    }
     if github:
-        assert "token" not in github, "github workflow payload must not include a token"
-        payload["github"] = github
-    workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
+        assert not _contains_token_key(github), "github workflow payload must not include a token"
+    payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
+    workflow_id = _workflow_id(job_id)
     start_workflow_sync(
         CodingTeamWorkflow.run,
         payload,
@@ -100,7 +140,8 @@ def execute_coding_team_workflow(
           keep blocking — there is no request deadline to respect here.
     Raises:
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
-            dict, or ``github`` contains a ``"token"`` key.
+            dict, or ``github`` contains a ``"token"`` key at any nesting
+            depth (see :func:`_contains_token_key`).
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result.
         Exception: Any other exception ``execute_workflow_sync`` itself raises
             (a Temporal RPC error, the workflow's own failure exception, a
@@ -115,22 +156,22 @@ def execute_coding_team_workflow(
         raise ValueError("execute_coding_team_workflow requires a non-empty repo_path")
     if not isinstance(github, dict):
         raise ValueError("execute_coding_team_workflow requires github to be a dict")
-    if "token" in github:
+    if _contains_token_key(github):
         raise ValueError("github workflow payload must not include a token")
-    payload: Dict[str, Any] = {
-        "job_id": job_id,
-        "repo_path": repo_path,
-        "plan_input": plan_input,
-        "github": github,
-    }
+    payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
+    workflow_id = _workflow_id(job_id)
+    logger.info(
+        "Executing CodingTeamWorkflow id=%s (timeout_s=%s)", workflow_id, _COMMENT_WORKFLOW_TIMEOUT_S
+    )
     result = execute_workflow_sync(
         CodingTeamWorkflow.run,
         payload,
-        workflow_id=f"{WORKFLOW_ID_PREFIX}{job_id}",
+        workflow_id=workflow_id,
         task_queue=TASK_QUEUE,
         execute_timeout_s=_COMMENT_WORKFLOW_TIMEOUT_S,
         reattach_on_timeout=True,
     )
+    logger.info("CodingTeamWorkflow id=%s reached terminal result", workflow_id)
     if not isinstance(result, dict):
         raise RuntimeError("CodingTeamWorkflow returned a non-object result")
     return result

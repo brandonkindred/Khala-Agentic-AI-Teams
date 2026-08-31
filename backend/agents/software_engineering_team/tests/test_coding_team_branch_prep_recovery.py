@@ -1241,6 +1241,16 @@ class TestPrepareIssueBranchFromFork:
         fork_url = f"file://{fork}"
         fork_feature_tip = _must(fork, "rev-parse", "feature")
         origin_main_tip = _must(remote, "rev-parse", "main")
+        # Diverge the fork's own `main` from origin's — `feature` (the PR
+        # head, already checked out by fork_pair) keeps its original parent,
+        # so this doesn't touch fork_feature_tip. Without this, the fork's
+        # `main` stays byte-identical to origin's, and the `origin/main`
+        # assertion below would pass even if the implementation wrongly
+        # resolved the base from the fork instead of origin.
+        _must(fork, "checkout", "-q", "main")
+        _commit_file(fork, "fork_main.txt", "stale main\n", "fork-only main commit")
+        fork_main_tip = _must(fork, "rev-parse", "main")
+        _must(fork, "checkout", "-q", "feature")
 
         ok, err, _notes = api._prepare_issue_branch(
             clone, fork_url, "main", "feature", token=None, issue_number=None
@@ -1251,6 +1261,27 @@ class TestPrepareIssueBranchFromFork:
         assert "fork_only.txt" in _must(
             clone, "ls-tree", "-r", "--name-only", "khala-pr-head/feature"
         )
+        assert _must(clone, "rev-parse", "origin/main") == origin_main_tip
+        assert _must(clone, "rev-parse", "origin/main") != fork_main_tip
+
+    def test_integration_branch_still_prepared_when_fork_main_is_absent(
+        self, api, fork_pair
+    ) -> None:
+        """The other half of the decoupling invariant: the fork's `main` need
+        not even exist — prep must still succeed, taking the base from
+        `origin` alone, never from the fork."""
+        remote, clone, fork = fork_pair
+        fork_url = f"file://{fork}"
+        origin_main_tip = _must(remote, "rev-parse", "main")
+        # `feature` is already checked out (fork_pair's own setup), so `main`
+        # can be deleted from the fork without touching the checked-out ref.
+        _must(fork, "branch", "-D", "main")
+
+        ok, err, _notes = api._prepare_issue_branch(
+            clone, fork_url, "main", "feature", token=None, issue_number=None
+        )
+
+        assert ok is True, err
         assert _must(clone, "rev-parse", "origin/main") == origin_main_tip
 
 

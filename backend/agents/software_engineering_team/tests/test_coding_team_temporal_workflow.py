@@ -523,6 +523,7 @@ def test_pr_comment_run_uses_existing_pr_publisher(monkeypatch: pytest.MonkeyPat
     assert snapshots[2]["pr_number"] == 7
     assert snapshots[2]["integration_branch"] == "feature/pr-7"
     assert "issue_title" not in snapshots[2]
+    assert "token" not in snapshots[2]
     assert result["status"] == "completed"
 
 

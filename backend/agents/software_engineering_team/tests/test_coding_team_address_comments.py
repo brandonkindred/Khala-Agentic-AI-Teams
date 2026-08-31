@@ -3314,6 +3314,37 @@ class TestAddressCommentsRoute:
         jobs = route_env["jobs"].list_jobs()
         assert jobs[-1]["status"] == "failed"
 
+    def test_context_update_failure_terminalizes_created_job(self, route_env, monkeypatch) -> None:
+        """P1 regression: a failure in the FIRST `update_job` call (persisting
+        github_context/github_token_encrypted, which sits before
+        record_review_start/thread-launch) must still terminalize the job —
+        not just a failure in record_review_start or the thread launch. Before
+        the fix, create_job/update_job sat outside the try/except, so a job
+        row could be created with no github_context and never marked failed,
+        orphaning it in a non-terminal state forever."""
+        from software_engineering_team.api import coding_team_main as _main
+
+        calls = {"n": 0}
+        real_update_job = _main.update_job
+
+        def _flaky_update_job(job_id, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("job service unavailable")
+            return real_update_job(job_id, **kwargs)
+
+        monkeypatch.setattr(_main, "update_job", _flaky_update_job)
+
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": route_env["repo_path"], "pr_number": 7},
+        )
+
+        assert resp.status_code == 500
+        jobs = route_env["jobs"].list_jobs()
+        assert jobs[-1]["status"] == "failed"
+        assert route_env["started"] == []  # never reached the thread launch
+
 
 # ---------------------------------------------------------------------------
 # Route: GET /pulls/{pr_number}/address-comments/running

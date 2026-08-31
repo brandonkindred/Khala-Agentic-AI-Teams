@@ -137,6 +137,12 @@ SCHEMA = TeamSchema(
         # ever attempted and failed for this thread) — rows are written only on
         # failure and deleted on success or once the owning PR closes (see
         # `resolve_attempt_store`).
+        # No separate (owner, repo, pr_number) index: the PRIMARY KEY below
+        # already creates a btree over (owner, repo, pr_number, thread_id),
+        # and Postgres btrees serve equality lookups on any leftmost prefix —
+        # so the 3-column delete in `clear_resolve_attempts_for_pr` is already
+        # fully served by the PK index. A separate index here would only add
+        # write amplification on every upsert/delete for no read benefit.
         """CREATE TABLE IF NOT EXISTS address_comments_resolve_attempts (
             owner                   TEXT NOT NULL,
             repo                    TEXT NOT NULL,
@@ -146,8 +152,6 @@ SCHEMA = TeamSchema(
             failed_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (owner, repo, pr_number, thread_id)
         )""",
-        """CREATE INDEX IF NOT EXISTS idx_address_comments_resolve_attempts_pr
-            ON address_comments_resolve_attempts(owner, repo, pr_number)""",
     ],
     table_names=[
         "se_agent_traces",

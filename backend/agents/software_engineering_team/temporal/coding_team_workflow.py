@@ -444,7 +444,11 @@ class CodingTeamWorkflow:
               An optional ``expected_head_sha`` is forwarded to
               ``github_branch_prep_activity`` (see its contract) so branch
               prep fails closed if the branch moved since the caller's plan
-              was grounded, rather than silently checking out newer code.
+              was grounded, rather than silently checking out newer code. An
+              optional ``pr_url`` is forwarded to ``github_pr_publish_activity``
+              in ``existing_pr`` mode, and an optional
+              ``cleanup_checkout_on_success`` flag is forwarded to whichever
+              publish activity runs.
             - Any GitHub token or credential stays outside workflow activity
               arguments. This workflow passes only repository coordinates and
               issue metadata to GitHub activities; a ``"token"`` key must

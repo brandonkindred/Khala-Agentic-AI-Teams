@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 # (and its error message) can never drift from the query's actual `first:` value.
 _REVIEW_THREAD_COMMENTS_PAGE_SIZE = 100
 
+# GitHub's GraphQL page-size maximum; both review-thread queries below page at
+# this rate so a future change to it can't miss one of the two bare literals.
+_REVIEW_THREADS_PAGE_SIZE = 100
+
 # GraphQL query for review-thread resolution state: GitHub's REST API has no
 # "resolved" field on a review comment, so thread resolution (the "Resolve
 # conversation" button on GitHub) can only be read via GraphQL's `isResolved`.
@@ -47,7 +51,7 @@ _REVIEW_THREADS_QUERY = f"""
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
   repository(owner: $owner, name: $repo) {{
     pullRequest(number: $number) {{
-      reviewThreads(first: 100, after: $after) {{
+      reviewThreads(first: {_REVIEW_THREADS_PAGE_SIZE}, after: $after) {{
         pageInfo {{ hasNextPage endCursor }}
         nodes {{
           isResolved
@@ -78,7 +82,7 @@ _REVIEW_THREADS_FULL_QUERY = f"""
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
   repository(owner: $owner, name: $repo) {{
     pullRequest(number: $number) {{
-      reviewThreads(first: 100, after: $after) {{
+      reviewThreads(first: {_REVIEW_THREADS_PAGE_SIZE}, after: $after) {{
         pageInfo {{ hasNextPage endCursor }}
         nodes {{
           id
@@ -477,9 +481,10 @@ class GitHubClient(_GitHubHttpMixin):
             - For any other host (a GitHub Enterprise Server instance, whose API
               and web UI share one host, typically at an ``/api/v3`` path),
               returns that host unchanged — GHES's clone URLs use the bare host,
-              not the API path. Falls back to the input host on any parse error
-              rather than raising, since this only feeds a display/clone-URL
-              convenience, never an auth-relevant decision.
+              not the API path. Falls back to the raw base URL on any parse
+              error OR an empty parsed ``netloc`` (e.g. a relative-path base
+              URL) rather than raising, since this only feeds a display/
+              clone-URL convenience, never an auth-relevant decision.
         """
         try:
             host = urlsplit(self._base_url).netloc or self._base_url
