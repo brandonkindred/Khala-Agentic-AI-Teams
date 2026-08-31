@@ -607,6 +607,24 @@ so a later round's callback never sees it again. This is the same token-scoping 
 already requires of the workflow's signal handler, applied here to the job-record answer store the
 activity reads from.
 
+**This scoping discipline protects only Planning's own local answer store — it does not, and
+cannot, scope PRA's own internal `submitted_answers` history by round.** `submit_answers`
+(`job_service_client.py:811-823`, the SE team's own PRA-side primitive) `append_to`s every posted
+batch onto one flat, unscoped `submitted_answers` list on PRA's job record — there is no per-round
+key, and nothing ever clears or partitions it. PRA's `apply_answers` (§4.1's own citation,
+`user_communication.py:210-219`) resolves each question against that entire accumulated history by
+`question_id`, not against only the most recent POST. So even though this contract's own filtering
+above guarantees Planning only ever *sends* the current round's batch, if a later round's question
+reuses an id from an earlier round and that question is optional and left unanswered in the current
+round's POST, PRA's own `apply_answers` can still resolve it from the *earlier* round's stale entry
+still sitting in that flat history — a mismatch between what Planning intended (no answer for this
+round's instance of that id) and what PRA actually applies (the earlier round's answer), entirely
+independent of any concurrency race. **This is out of `planning_team`'s boundary to fix on its own:**
+full closure requires PRA's own submission/resolution path to be round-scoped or cleared between
+rounds, the same class of PRA-side gap as this contract's other open risks (§5). #7445-B must not
+claim "a later round's callback never sees a consumed round's answer" as proof that PRA itself is
+protected from the same staleness — that claim covers only Planning's local filtering.
+
 **Recommended shape (decision for #7445-B, not mandated here):** store `submitted_answers` keyed
 by `resume_token` — `{"<resume_token>": [AnswerSubmission, ...]}` — rather than one flat list, so
 "only this round's answers" is a single dict lookup, with no id-based filtering step to get wrong.
@@ -1038,10 +1056,22 @@ The primitive #7445-B builds must satisfy:
   deriving it from the same raw inputs). Either shape is acceptable; two independent
   re-derivations of the same fallback logic is not. The `"planning_team"`-namespaced job record is
   readable; scheduled by the workflow with `retry_policy=NO_RETRY`.
-- *Postconditions:* Checks `load_checkpoint("planning_team", job_id, "document_production_pra")`
-  first. If present, returns immediately (no-op — a prior successful run already submitted). **Also
-  checks the job record's own `status` is still active (`pending`/`running`) before calling
-  `run_pra` — not merely "readable" as the precondition above states.** A cancellation or
+- *Postconditions:* **Checks the job record's own `status` is still active (`pending`/`running`)
+  first, before either checkpoint branch — not merely "readable" as the precondition above states,
+  and not only on the checkpoint-absent path.** A checkpoint-present re-invocation is not
+  automatically safe to fast-path: an operator reset/restart, or any other re-entry after the
+  checkpoint was written, can invoke this activity again for a job that has *since* become cancelled
+  or interrupted. If the active-status check only guarded the checkpoint-absent branch, a
+  checkpoint-present re-invocation against a now-terminal job would return the ordinary
+  checkpoint-bearing success shape (not `skipped_terminal`), and the workflow would proceed into
+  `document_production_activity` for a job that should have stopped — silently reintroducing the
+  exact class of bug this whole terminal-status-checking requirement exists to prevent, just via the
+  other branch. **Contract requirement:** perform the active-status check before branching on
+  checkpoint presence at all; on either branch (present or absent), a job whose `status` is not
+  `pending`/`running` returns `{"outcome": "skipped_terminal"}` and does nothing else. Only once
+  status is confirmed active does the activity check
+  `load_checkpoint("planning_team", job_id, "document_production_pra")`: if present, returns
+  immediately (no-op — a prior successful run already submitted). A cancellation or
   interruption can land on the job record while this `NO_RETRY` activity is still queued, waiting
   to be dispatched; `_guarded`'s initial progress update does not itself reject a terminal row (per
   its own comment, only intake ever writes `status`, later phases "leave it untouched so they never
@@ -1131,7 +1161,23 @@ The primitive #7445-B builds must satisfy:
   primitive the workflow-level backstop activity uses — bound in place of the unconditional
   `mark_job_failed`, so this activity's own final-attempt failure handling preserves a terminal
   state exactly as the workflow-level backstop now does, rather than protecting only the
-  hard-crash path and leaving the ordinary-exception path still clobbering terminal states. A raised
+  hard-crash path and leaving the ordinary-exception path still clobbering terminal states.
+
+  **`guarded`'s *progress* writer, not just its failure writer, is also unconditional — and this
+  activity's own active-status check (above) runs too late to prevent it.** `guarded`
+  (`shared/temporal/activity_helpers.py:100-130`) takes a separate `update_job` callable for its
+  *initial* progress write (`current_phase`/`progress`/`status_text`, written before `work` ever
+  runs) — conditioning only `mark_job_failed` leaves this first write untouched. Because this
+  activity's active-status check happens *inside* `work` (the callable `guarded` invokes only after
+  that initial progress write already landed), a queued invocation against an already-cancelled or
+  -interrupted job would still mutate that job's progress metadata via `guarded`'s own entry step,
+  even though `work` then correctly returns `skipped_terminal` moments later — contradicting the
+  "treat it as a no-op" requirement above, which this progress write is not. **Contract
+  requirement:** either bind an active-status-guarded `update_job` (not just `mark_job_failed`) into
+  this same `guarded` call, or perform the active-status check *before* calling `guarded` at all and
+  return `skipped_terminal` directly without entering it — either shape prevents the progress write
+  from reaching an already-terminal row, consistent with treating a terminal job as a true no-op
+  rather than a no-op only for its main side effect. A raised
   exception here fails
   this `NO_RETRY` activity and the workflow loudly and visibly, which is the correct outcome:
   `document_production_activity`'s precondition requires a checkpoint carrying a *usable*
@@ -1670,12 +1716,25 @@ no persisted pause to resume from, silently hanging the job.
   during a run that completes without ever pausing — every such signal buffers as a new entry, and
   none of them are ever cleared (no pause ever arms to clear them), growing this durable
   workflow-state field without bound for the life of that execution. **Contract requirement:** cap
-  `self._buffered_signals` at a small fixed size (e.g. a handful of entries) — since at most one
-  buffered token can ever legitimately matter (the *next* pause this workflow arms), evicting the
-  oldest entry when the cap is reached, or discarding a new signal outright once the cap is reached,
-  is a bounded and safe policy; the same reload/re-emit correction pattern used elsewhere in this
-  contract does not apply here since no client-visible durability guarantee for an early signal
-  (received before any matching pause exists) is being made in the first place.
+  `self._buffered_signals` at a small fixed size (e.g. a handful of entries), evicting the oldest
+  entry when the cap is reached, or discarding a new signal outright once the cap is reached.
+
+  **Correction — evicting is not safe on its own: it can silently drop the one legitimate signal
+  among a flood of junk, and there *is* a client-visible durability guarantee to reconcile against.**
+  This contract's own persist-then-signal ordering (§4.3) means the answer-submission HTTP route
+  durably wrote the answer to the job record *before* sending the signal — by the time a client
+  receives a successful response, its answer is already durable and the signal delivery already
+  succeeded, so that client has no reason to ever retry. If eviction later discards that specific
+  signal's buffered entry (oldest-eviction drops a real signal followed by junk; discard-on-full
+  drops a real signal preceded by junk), and the workflow subsequently arms the matching pause, it
+  finds no buffered entry for that token and waits — indefinitely, for a signal that already
+  arrived and will never be resent. **Contract requirement:** arming a new pause must not rely on
+  `_buffered_signals` alone — it must also check the job record's own durable `submitted_answers`
+  for an entry matching the newly-armed `resume_token` (the same durable store step (2)'s
+  clear-and-consume already reads from) and treat a match there exactly as a buffered-signal match,
+  before concluding no early submission exists. This closes the gap the eviction cap opens: a
+  legitimately durable answer is never lost even if its in-memory buffered signal was evicted, since
+  the job record itself is the authoritative source `_buffered_signals` was only ever ballast for.
 
   **This cap must be version-gated for `CodingTeamWorkflow`, whose existing histories this
   contract's mandatory extraction (§4.4) requires migrating onto the same shared state machine.**
