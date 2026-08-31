@@ -67,7 +67,7 @@ and for folding a legacy fat row's persona into the target manifest during migra
 | `skills` | `tags` | marker tags (`"generated"`, team key) stripped |
 | `tools` | `cognition.tools` | empty when the manifest has no `cognition` block |
 | `expertise` | `[team]` | single-element list: the manifest's home team |
-| `capabilities` | *(none)* | not part of the `AgentManifest` schema; always `[]` by design |
+| `capabilities` | `tags` (folded with `skills`) | legacy migrate / LLM roster save merge fat `capabilities` labels into the same manifest tags as `skills` (`persona_tags_from_fat_raw`); the separate read-time `capabilities` projection stays `[]` always — there's no manifest field it reads back from |
 
 ## Pipeline test runs (execution)
 
