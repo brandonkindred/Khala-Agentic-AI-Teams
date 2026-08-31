@@ -1108,13 +1108,41 @@ this contract:
   return value once a later attempt has already completed, so the workflow never arms a
   `wait_condition` on this orphaned token — the job record is left claiming `waiting_for_answers:
   True` for a pause nothing will ever resume, silently hanging the job (or, worse, resurrecting an
-  already-answered round if a client still holds a stale status response naming it). **Contract
-  requirement:** the conditional write's guard must also be fenced by a monotonic value scoped to
-  this job's document-production execution — e.g. `activity.info().attempt` (Temporal's own
-  per-invocation attempt counter, available inside the activity) recorded alongside the pause
-  envelope and required to be strictly greater than whatever attempt number (if any) the job
-  record already carries for this phase — so a write from an attempt number the job record has
-  already moved past can never succeed, regardless of what `waiting_for_answers` currently reads.
+  already-answered round if a client still holds a stale status response naming it).
+
+  **Contract requirement — fence with a durable, job-scoped `pause_generation` counter, not
+  `activity.info().attempt`.** An earlier draft of this requirement proposed fencing on Temporal's
+  own per-invocation attempt counter; that is wrong, because `activity.info().attempt` resets to 1
+  on *every new activity invocation* — and each pass through the §4.3 retry/continuation loop
+  (paused → signaled → re-invoked) is a fresh `workflow.execute_activity` call, hence a fresh
+  invocation whose attempt counter restarts. A strict-greater-than-recorded-attempt guard would
+  therefore reject the second, legitimate PRA question round outright (its first attempt is itself
+  attempt 1, not greater than whatever attempt number round one recorded), and separate activity
+  invocations can independently reuse the same attempt number regardless. The correct fence is a
+  small integer field on the job record itself — `pause_generation`, starting at `0`, durable across
+  every invocation of this job — read by the activity *before* it calls PRA (call this
+  `observed_generation`), and used as an optimistic-concurrency version check in the same atomic
+  write: **succeed only if `waiting_for_answers` is currently falsy AND the job record's current
+  `pause_generation` still equals `observed_generation`** (nothing else progressed this job's pause
+  state since this attempt last read it), and on success set `pause_generation =
+  observed_generation + 1` together with the rest of the pause envelope. A stale attempt whose
+  `observed_generation` a later attempt has since advanced past fails this guard unconditionally,
+  regardless of what `waiting_for_answers` happens to read at that moment.
+
+  **This requires a new job-store primitive — it cannot be expressed with `update_job_if_not_cancelled`
+  or the `resume_token`-guarded primitive from §4.4, and implementing it as a client-side
+  read-then-write reintroduces the exact TOCTOU race this section exists to close.**
+  **Contract requirement:** #7445-B MUST add a second narrowly-scoped conditional-write primitive —
+  e.g. `create_pause_if_generation_matches(job_id, observed_generation, **pause_fields)` —
+  mirroring `update_job_if_not_cancelled`'s single server-side `UPDATE ... WHERE` shape and
+  `True`/`False`/`None` return convention, with the guard `(data->>'waiting_for_answers' IS NULL OR
+  data->>'waiting_for_answers' = 'false') AND COALESCE((data->>'pause_generation')::int, 0) =
+  %(observed_generation)s`, and the write setting `pause_generation = observed_generation + 1`
+  alongside `waiting_for_answers`/`resume_token`/`pause_kind`/`pause_context`/`pending_questions`.
+  This is a third instance of the same proven conditional-`UPDATE` pattern established by
+  `update_job_if_not_cancelled` and extended by `update_job_if_resume_token_matches` (§4.4) — not a
+  generic optimistic-locking framework to design from scratch.
+
   A losing (stale-fenced) attempt follows the same reload-and-re-emit rule above, but reloads
   whatever the job record's *current* state actually is (paused on a newer round, or already
   completed) rather than assuming its own now-invalid pending-questions snapshot is still current.
@@ -1143,6 +1171,20 @@ this contract:
   job-record update; (3) `wait_pra` resumes polling against the checkpointed external PRA job id —
   `run_pra` is not called again; the activity proceeds to its normal terminal return shape (or
   pauses again, for the next round, per the paused-return path above).
+  **Contract requirement — step (2)'s clear must itself be conditioned on the resumed token, not
+  unconditional.** Overlapping attempts resuming the *same* `resume_token` A (the same heartbeat-loss
+  scenario as the paused-return path above) can otherwise race past each other: one attempt clears
+  A's envelope and, per the paused-return path, publishes the *next* round's pause under a new token
+  B; the slower attempt, still executing step (2) for A, then performs its own unconditional
+  clear-and-consume write — which clears B's freshly-published envelope and can discard an answer a
+  client has already submitted and had accepted for B, stranding that submission. **The clear-and-consume
+  write must be a conditional `UPDATE` guarded on `resume_token == acknowledged_resume_token`
+  (the same `update_job_if_resume_token_matches` primitive from §4.4, reused for this write rather
+  than a bespoke second guard) — never a blind multi-field `update_job`.** A failed match (the
+  guard fires because a different round is now active) is not an error to raise: it is proof this
+  attempt is stale, and the activity must treat it exactly like a losing paused-return attempt —
+  reload the job record's current state and proceed from whatever round is actually active rather
+  than re-attempting its own now-invalid clear.
   **Contract requirement — the consumed batch must survive this activity's own terminal write, not
   just step (2)'s job-record update.** Moving the consumed batch into the job record's
   `resolved_questions` field at step (2) is not sufficient by itself: once `wait_pra` finally
