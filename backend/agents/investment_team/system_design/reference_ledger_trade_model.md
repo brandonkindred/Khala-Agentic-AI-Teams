@@ -39,21 +39,15 @@ It is **not** a fill-cost engine. Explicitly out of scope:
 - **Slippage and transaction costs.** Reference prices are exact bar-derived
   levels (a resting order's authored price, or worse-of-open-and-level on a
   gap), not slippage-adjusted fills. See §3 for exactly which production
-  field this corresponds to. `entry_slippage_bps` has exactly two uses,
-  both internal — it never appears in, or adjusts, any `ReferenceTrade`
-  field value: (1) anchoring `basis="entry_price"` levels where production's
-  real engine actually places them (§5's `stop_loss` subsection, via the
-  internal `entry_price_basis`), and (2) the internal **capital** (cash)
-  ledger's post-slippage entry/exit accounting (§5's "Entries" subsection,
-  "Fill-time capital sufficiency"), which is deliberately **separate** from
-  the no-slippage **equity** figure sizing is computed against below — the
-  two track different things (cash vs. mark-to-market net worth) at
-  different bases (post-slippage vs. no-slippage) on purpose, mirroring
-  production's own `Portfolio.capital` vs. `Portfolio.mark_to_market()`
-  split, not an inconsistency to reconcile toward one basis. Capital can
-  gate whether a *later* entry is admitted (§5's capital-sufficiency check),
-  so `entry_slippage_bps` does influence which trades this module emits,
-  even though it never touches an emitted trade's own field values.
+  field this corresponds to. `entry_slippage_bps` has exactly two internal
+  uses — anchoring `basis="entry_price"` levels (and the trailing-stop
+  watermark seed) via `entry_price_basis`, and the post-slippage **capital**
+  (cash) ledger, which is deliberately separate from the no-slippage
+  **equity** figure sizing is computed against — detailed in full, as the
+  single authoritative enumeration, in §2's `entry_slippage_bps` parameter
+  description. It never appears in, or adjusts, any `ReferenceTrade` field
+  value, though it can still gate whether a *later* entry is admitted via
+  the capital check.
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
   at a single price. This is a real, deliberate simplification, not an
@@ -184,8 +178,12 @@ This module must not import, directly or transitively:
 
 - `trading_service/service.py` (the live dispatchers and their engine-exit
   reason-string constant),
-- `trading_service/engine/fill_simulator.py` (the order book, pending-order
-  state machine, trailing-stop and stop-limit mechanics),
+- `trading_service/engine/fill_simulator.py` (the fill-money-math and
+  scale-out sequencing engine that consumes the order book below),
+- `trading_service/engine/order_book.py` (`PendingOrder`/`OrderBook` — the
+  pending-order state machine itself: `FILL_QTY_REL_TOL`, the per-symbol
+  FIFO walk, trailing-stop watermark state, the stop-limit arm/latch flag,
+  bracket-child materialization, and OCO sibling cancellation),
 - `trading_service/engine/execution_model.py` (slippage/reference-price
   derivation),
 - `trading_service/engine/portfolio.py` (the live position/portfolio state
@@ -260,10 +258,11 @@ implementation is left for Step 2 to pick.
 **Invariants:**
 - `simulate` has no side effects: it does not mutate `spec` or `bars`, and
   performs no I/O.
-- `simulate` is deterministic — identical `(spec, bars, starting_equity,
-  entry_slippage_bps)` inputs always produce an identical output list. This
-  is required for it to function as a reference oracle; a non-deterministic
-  simulator cannot be diffed meaningfully against a single production run.
+- `simulate` is deterministic — identical
+  `(spec, bars, starting_equity, entry_slippage_bps)` inputs always produce
+  an identical output list. This is required for it to function as a
+  reference oracle; a non-deterministic simulator cannot be diffed
+  meaningfully against a single production run.
 
 ## 3. `ReferenceTrade` schema
 
@@ -288,7 +287,7 @@ inconsistent record silently.
 | `entry_price` | `float` | `entry_bid_price` | Pre-slippage reference level — **not** `entry_fill_price` or the legacy `entry_price` alias (both are post-slippage in production). See rationale below. |
 | `exit_price` | `float` | `exit_bid_price` | Pre-slippage reference level. For a position closed in one shot this is that close's reference price; for a position that passed through one or more `scaled_take_profit` rungs first, this is the quantity-weighted average across every partial exit and the final close (§5's "Exit aggregation" subsection), mirroring `pos.weighted_avg_exit_price`. |
 | `qty` | `float` | `shares` | Equals the position's entry quantity (`original_qty`), **not** the remaining size after any partial rungs — mirrors production's `TradeRecord.shares = pos.original_qty`. Entry quantity resolution is specified in §5's "Entries" subsection. |
-| `exit_rule_kind` | `str` | *(none — derived from `exit_reason` today)* | One of the values in §4's vocabulary table, always populated — every closed position in this model closes via some exit rule (there is no strategy-emitted arbitrary close path here). Describes only the position's final closing event (§5's "Exit aggregation"), not any earlier partial rung. |
+| `exit_rule_kind` | `Literal["stop_loss", "take_profit", "scaled_take_profit", "signal_exit", "bracket_stop_loss", "bracket_take_profit"]` | *(none — derived from `exit_reason` today)* | The exact §4 vocabulary as a `Literal` — same stricter-typing rationale as `side` above, and validated against this same set in `__post_init__` alongside the other invariants. Always populated — every closed position in this model closes via some exit rule (there is no strategy-emitted arbitrary close path here). Describes only the position's final closing event (§5's "Exit aggregation"), not any earlier partial rung. |
 | `exit_rule_index` | `int` | *(none)* | Which `spec.exit_rules[i]` fired the final close — mirrors `ExitIntent.rule_index`. |
 | `level_index` | `Optional[int]` | *(none)* | Set only when the position's final closing event was itself a `scaled_take_profit` rung, identifying which rung — mirrors `ExitIntent.level_index`. `None` whenever some other rule kind performed the final close, even if earlier rungs fired first. |
 
@@ -303,8 +302,8 @@ production's `entry_bid_price`/`exit_bid_price`, not the fill prices.
 
 **Rounding.** Production rounds `entry_bid_price`/`exit_bid_price` — 4
 decimal places when the price is below $10, 2 decimal places otherwise
-(`dp = 4 if ref_price < 10 else 2`) — before storing them. `ReferenceTrade.
-entry_price`/`exit_price` must be rounded the same way, or a raw
+(`dp = 4 if ref_price < 10 else 2`) — before storing them.
+`ReferenceTrade.entry_price`/`exit_price` must be rounded the same way, or a raw
 percentage-derived level (which commonly carries more decimal places than
 either rounding bucket allows) will show as a spurious mismatch against
 production's own rounded fields for every single trade. For an aggregated
@@ -348,7 +347,11 @@ field above, `exit_reason` superseded by the structured
 - `exit_rule_kind` and `exit_rule_index` are always populated (every emitted
   `ReferenceTrade` represents a fully closed position, and full closure
   always happens via some exit rule firing).
-- `level_index is not None` implies `exit_rule_kind == "scaled_take_profit"`.
+- `level_index is not None` **if and only if**
+  `exit_rule_kind == "scaled_take_profit"` — the converse is enforced by
+  §5's `scaled_take_profit` fill semantics, which set `level_index` to the
+  fired rung on every such close, so a `scaled_take_profit` exit can never
+  leave the fired level unidentified.
 
 ## 4. `exit_rule_kind` vocabulary
 
@@ -448,8 +451,8 @@ never divide by it or produce a negative/undefined quantity.
 **Nonpositive fill-bar open.** This guard is distinct from, and does not
 subsume, the one above: `_compute_qty`'s `close <= 0` check only covers the
 *trigger* bar's close used for sizing, not the separate *fill* bar
-(`entry_bar = trigger_bar + 1`) whose `open` becomes `ReferenceTrade
-.entry_price`. Production has no corresponding guard on that fill-bar open
+(`entry_bar = trigger_bar + 1`) whose `open` becomes
+`ReferenceTrade.entry_price`. Production has no corresponding guard on that fill-bar open
 either. Since `ReferenceTrade.entry_price > 0` is a value-object invariant
 (§3), this module must check `bars[symbol][entry_bar].open <= 0` itself and,
 if true, skip opening a position for that trigger — the same no-position
