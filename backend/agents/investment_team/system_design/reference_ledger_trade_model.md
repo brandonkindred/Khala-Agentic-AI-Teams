@@ -367,6 +367,32 @@ position for that trigger (the same end-of-data handling as `signal_exit`).
 `ReferenceTrade.entry_rule_index` (§3) directly, no separate derivation
 needed.
 
+**Preconditions:**
+- `evaluate_entry_rules` has matched a rule for this symbol at the trigger
+  bar (the bar-close predicate decision described above).
+- The symbol is a member of `spec.target_symbols`, whenever that set is
+  non-empty (Target-symbol gating, below).
+- The symbol has no already-open position and no already-queued, not-yet-
+  filled entry from a prior trigger (Suppression, below).
+- `entry_bar = trigger_bar + 1` exists — the trigger bar is not the final
+  bar of `bars[symbol]`.
+
+**Postconditions:**
+- If every gate below (nonpositive trigger close, nonpositive fill-bar
+  open, the position-cap clamp driving quantity to zero, an admission
+  gate, fill-time capital sufficiency) passes: exactly one position opens
+  at `entry_bar`, priced at `bars[symbol][entry_bar].open`
+  (`ReferenceTrade.entry_price`), sized per the sizing/clamp/whole-share
+  rules below, with `entry_rule_index` equal to `evaluate_entry_rules`'s
+  `rule_idx`.
+- If any gate below fails: no position opens and no `ReferenceTrade` is
+  emitted for that trigger — the trigger is simply dropped, not retried on
+  a later bar.
+
+The remaining paragraphs in this subsection detail how each of those gates
+and the fill price/quantity are computed; they elaborate the postconditions
+above rather than adding new contract surface.
+
 **Suppression while a position is open or pending.** An entry rule that
 keeps matching on later bars while the symbol already has an open position,
 or already has an entry queued from a prior bar's trigger not yet filled,
@@ -502,11 +528,25 @@ the trigger bar's close, or another symbol's entry consuming cash first in
 the same merged walk). This requires tracking a **second** running figure
 alongside equity: available **capital** (cash), separate from equity (cash
 plus unrealized position value) — mirroring `Portfolio.capital` vs.
-`Portfolio.mark_to_market()`. Capital decreases by each entry's filled
-notional and increases by each exit's proceeds; if `capital <
+`Portfolio.mark_to_market()`.
+
+The check and the decrement deliberately use **different** bases, mirroring
+production exactly rather than an inconsistency to reconcile: the
+admission check reads `capital < qty * entry_price` (the pre-slippage
+`ReferenceTrade` field — production's `reference_price` is `ref_price`,
+computed before `fill_price` even exists, since `_fill_entry` runs this
+check ahead of applying slippage), but once the entry is admitted, capital
+actually decreases by the **post-slippage** fill notional
+(`qty * entry_price_basis`, mirroring `Portfolio.open`'s
+`capital -= position.position_value` where `position_value` is
+`Position.entry_price * qty` and `Position.entry_price` is itself
+post-slippage) — never by `qty * entry_price`. Exits increase capital by
+their own post-slippage proceeds the same way. If `capital <
 qty * entry_price` at the entry's actual fill bar, the entry does not open
 (no position, no `ReferenceTrade`), even though the sizing-bar checks above
-already passed.
+already passed; production's own affordability check is this
+slightly-optimistic pre-slippage estimate, not a false-safety gap this
+module should "fix" by checking the post-slippage figure instead.
 
 **Fractionality source.** Whether an asset class trades in fractional units
 is a single flag derived from `spec.asset_class` (not a per-symbol
@@ -665,11 +705,16 @@ below).
 
 **Anchor price is post-slippage, not `ReferenceTrade.entry_price`.**
 Production's engine computes these levels against `Position.entry_price`,
-which is the **post-slippage** fill (`entry_bid_price × (1 ± slippage_bps /
-10_000)`, sign `+` for a long entry, `-` for a short — the same formula
-`trade_record_schema.md` documents for `entry_fill_price`, with no
-order-type adverse-selection add-on since every entry here is a market
-fill). This module's own `ReferenceTrade.entry_price` output field is the
+which is the **post-slippage** fill — `round(raw_open × (1 ± slippage_bps /
+10_000), dp)`, sign `+` for a long entry, `-` for a short, computed from the
+**raw, unrounded** `bars[symbol][entry_bar].open` (the same order of
+operations `trade_record_schema.md` documents for `entry_fill_price`, with
+no order-type adverse-selection add-on since every entry here is a market
+fill) — **never** derived by taking the already-rounded `entry_bid_price`
+field and multiplying that by the slippage factor; see the
+`entry_price_basis` definition below for why the two roundings must stay
+independent. This module's own `ReferenceTrade.entry_price` output field is
+the
 **pre-slippage** bid (§3, by design, for direct comparability against
 production's `entry_bid_price`) — so the two must not be conflated. This
 module needs an internal-only `entry_price_basis = round(raw_open × (1 ±
