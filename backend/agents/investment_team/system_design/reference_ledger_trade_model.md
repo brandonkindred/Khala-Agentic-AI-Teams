@@ -46,7 +46,15 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   field.
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
-  at a single price.
+  at a single price. This is a real, deliberate simplification, not an
+  oversight: production's default execution model **does** clip an
+  over-sized order to a participation-cap fraction of the bar's dollar
+  volume and can requeue the remainder across later bars — this module
+  does not model that. Consequently, a divergence this reference ledger
+  reports for a low-liquidity symbol or an outsized order (relative to bar
+  volume) should be read as "outside this module's modeled execution
+  mechanics," not a rule-evaluation bug the later matching module should
+  flag the same way it would a genuine spec/engine mismatch.
 - **Cost-aware position sizing.** Entry quantity is resolved from
   `spec.sizing` against a running equity figure this module tracks itself
   (seeded from the `starting_equity` input, marked to market from this
@@ -245,6 +253,7 @@ inconsistent record silently.
 | `symbol` | `str` | `symbol` | Verbatim. |
 | `side` | `Literal["long", "short"]` | `side` | Verbatim (production stores a plain `str`; this is the stricter reference form). |
 | `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Primary key for this module's own bookkeeping (ladder rungs, per-position running state). |
+| `entry_rule_index` | `int` | *(none — derived from `entry_reason` today)* | Which `spec.entry_rules[i]` matched — mirrors production's `entry_reason = f"engine_entry:entry[{rule_idx}]"`, which (unlike `exit_reason`) passes through to `TradeRecord.entry_reason` unmodified, with no reconciliation step. Lets the later matching module detect a same-looking trade opened by a *different* entry rule when a spec has multiple same-side entry predicates. |
 | `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position's **final** closing event occurred. For a position that passed through one or more `scaled_take_profit` rungs before closing, this is the bar of the final close only — never an earlier rung's bar — since the reference model emits one aggregated row per fully closed position (§5's "Exit aggregation" subsection). |
 | `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp[:10]` — truncated to the date portion exactly as production does (`pos.entry_timestamp[:10]`), so an intraday `Bar.timestamp` still matches production's date-only comparison key. |
 | `exit_date` | `str` | `exit_date` | `bars[symbol][exit_bar].timestamp[:10]`, truncated the same way (`bar.timestamp[:10]` in `_fill_exit`). |
@@ -270,7 +279,15 @@ decimal places when the price is below $10, 2 decimal places otherwise
 entry_price`/`exit_price` must be rounded the same way, or a raw
 percentage-derived level (which commonly carries more decimal places than
 either rounding bucket allows) will show as a spurious mismatch against
-production's own rounded fields for every single trade.
+production's own rounded fields for every single trade. For an aggregated
+`exit_price` (§5's "Exit aggregation" subsection — a position closed via
+one or more `scaled_take_profit` rungs before its final close), the
+rounding bucket is chosen from the **final closing slice's own** reference
+price, not from the weighted average itself — production computes `dp`
+from the terminal slice's `ref_price`, then rounds the weighted-average
+value using that `dp`, so a ladder whose earlier rungs filled below $10 and
+whose final close fills above it still rounds to 2 decimal places overall
+(and vice versa), never re-deriving `dp` from the blended value.
 
 **Why both a bar index and a date string:** `entry_bar`/`exit_bar` are this
 module's own primary keys — needed internally to track ladder-rung
@@ -288,8 +305,9 @@ out of scope per §1): `position_value`, `gross_pnl`, `net_pnl`, `return_pct`,
 `entry_order_type`, `exit_order_type`, `participation_clipped`,
 `partial_fill_count`, `total_unfilled_qty`, `hold_days` (trivially derivable
 by the matching module from the two dates), `entry_reason`/`exit_reason`
-free text (superseded by the structured `exit_rule_kind`/`exit_rule_index`/
-`level_index` triple).
+free text — `entry_reason` superseded by the structured `entry_rule_index`
+field above, `exit_reason` superseded by the structured
+`exit_rule_kind`/`exit_rule_index`/`level_index` triple below.
 
 ### Invariants (as a value object)
 
@@ -297,6 +315,8 @@ free text (superseded by the structured `exit_rule_kind`/`exit_rule_index`/
 - `qty > 0`.
 - `entry_price > 0` and `exit_price > 0`.
 - `side in ("long", "short")`.
+- `entry_rule_index` is always populated (every emitted `ReferenceTrade`
+  represents a position that actually opened via some matched entry rule).
 - `exit_rule_kind` and `exit_rule_index` are always populated (every emitted
   `ReferenceTrade` represents a fully closed position, and full closure
   always happens via some exit rule firing).
@@ -343,6 +363,9 @@ a resting order: it fills at the **next** bar's open —
 bars[symbol][entry_bar].open`. If the predicate matches on the final bar of
 `bars[symbol]`, there is no next bar to fill on and this module opens no
 position for that trigger (the same end-of-data handling as `signal_exit`).
+`evaluate_entry_rules` already returns `(rule, rule_idx)` — `rule_idx` is
+`ReferenceTrade.entry_rule_index` (§3) directly, no separate derivation
+needed.
 
 **Suppression while a position is open or pending.** An entry rule that
 keeps matching on later bars while the symbol already has an open position,
@@ -367,6 +390,17 @@ positive, so a trigger bar with `close <= 0` is not excluded by this
 document's own preconditions. Mirror `_compute_qty`'s own guard: if
 `trigger_bar.close <= 0`, the entry sizes to zero and no position opens —
 never divide by it or produce a negative/undefined quantity.
+
+**Nonpositive fill-bar open.** This guard is distinct from, and does not
+subsume, the one above: `_compute_qty`'s `close <= 0` check only covers the
+*trigger* bar's close used for sizing, not the separate *fill* bar
+(`entry_bar = trigger_bar + 1`) whose `open` becomes `ReferenceTrade
+.entry_price`. Production has no corresponding guard on that fill-bar open
+either. Since `ReferenceTrade.entry_price > 0` is a value-object invariant
+(§3), this module must check `bars[symbol][entry_bar].open <= 0` itself and,
+if true, skip opening a position for that trigger — the same no-position
+outcome as a nonpositive trigger-bar close, just guarding the other price
+this module reads before a `ReferenceTrade` can be constructed.
 
 **Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
 against a running equity figure it tracks itself — seeded at
@@ -437,29 +471,37 @@ fixed-notional, volatility-target) — a `FixedNotionalSizing`
 or `VolatilityTargetSizing` result above the cap must be reduced, not passed
 through uncapped.
 
-**Additional admission gates beyond the position-size cap.** `max_position_pct`
-is not the only limit a real entry must clear. `spec.risk_limits` (the same
-model this module already reads `max_position_pct` from) also carries
+**Additional admission gates beyond the position-size cap — checked at the
+fill bar, not the sizing/trigger bar.** `max_position_pct` is not the only
+limit a real entry must clear. `spec.risk_limits` (the same model this
+module already reads `max_position_pct` from) also carries
 `max_open_positions`, `max_gross_leverage`, and `max_symbol_concentration_pct`
-— production applies all of these at fill time via `RiskFilter.can_enter`,
-independently of the sizing-time clamp above. This module must apply the
-same gates before opening an entry, using its own tracked state (currently
-open reference positions, and the running equity figure already tracked for
-sizing): reject the entry (open no position for that trigger) if it would
-push the count of open positions past `max_open_positions`, gross notional
-exposure (`sum(|qty * price|)` across all open positions plus this
-candidate) past `max_gross_leverage * equity`, or this single symbol's
-notional past `max_symbol_concentration_pct` of `equity`.
+— production applies all of these via `RiskFilter.can_enter`, called from
+`_fill_entry` at the **fill bar** (`entry_bar`), not at sizing time
+(`trigger_bar`) alongside the position-cap clamp above. This module must
+apply the same gates at the same point — `entry_bar`, together with the
+capital check below — using its own tracked state: reject the entry (open
+no position for that trigger) if it would push the count of open positions
+past `max_open_positions`, gross notional exposure past
+`max_gross_leverage * equity`, or this single symbol's notional past
+`max_symbol_concentration_pct` of `equity`. The notional basis is **not**
+uniform across the two sides of this check, mirroring production's
+`Position.position_value = entry_price × qty` (post-slippage) vs. the
+candidate's own pre-slippage fill notional: sum each **existing** open
+reference position's `qty * entry_price_basis` (the internal post-slippage
+anchor, §5's `stop_loss` subsection) for the numerator's existing-exposure
+term, but use the **candidate's** own `qty * entry_price` (the pre-slippage
+`ReferenceTrade` field) for its own contribution — the same asymmetry
+`RiskFilter.can_enter` itself has, not an arbitrary simplification.
 
-**Fill-time capital sufficiency.** Beyond sizing and risk-gate checks at the
-trigger bar, production re-checks affordability at the fill bar itself:
-`FillSimulator._fill_entry` rejects an entry when `portfolio.capital <
-filled_qty * reference_price` — the sized notional may no longer be
-affordable by the time the entry actually fills (a gap up from the trigger
-bar's close, or another symbol's entry consuming cash first in the same
-merged walk). This requires tracking a **second** running figure alongside
-equity: available **capital** (cash), separate from equity (cash plus
-unrealized position value) — mirroring `Portfolio.capital` vs.
+**Fill-time capital sufficiency.** At that same fill bar, production also
+re-checks affordability: `FillSimulator._fill_entry` rejects an entry when
+`portfolio.capital < filled_qty * reference_price` — the sized notional may
+no longer be affordable by the time the entry actually fills (a gap up from
+the trigger bar's close, or another symbol's entry consuming cash first in
+the same merged walk). This requires tracking a **second** running figure
+alongside equity: available **capital** (cash), separate from equity (cash
+plus unrealized position value) — mirroring `Portfolio.capital` vs.
 `Portfolio.mark_to_market()`. Capital decreases by each entry's filled
 notional and increases by each exit's proceeds; if `capital <
 qty * entry_price` at the entry's actual fill bar, the entry does not open
@@ -502,7 +544,18 @@ full-position close; only `scaled_take_profit` rungs are partial.
 closed** — mirroring `FillSimulator._fill_exit`, which returns
 `trade_record=None` for every partial close and builds exactly one
 `TradeRecord` only once `pos.is_closed`, using `pos.original_qty` and
-`pos.weighted_avg_exit_price`. Concretely, for that one emitted record:
+`pos.weighted_avg_exit_price`. "Fully closed" is a **relative**, not exact,
+tolerance test — production's `Position.is_closed` considers the position
+closed once `cumulative_exit_qty + original_qty * FILL_QTY_REL_TOL >=
+original_qty` (`FILL_QTY_REL_TOL = 1e-12`), not exact floating-point
+equality to zero remaining. This module must apply the same relative test
+for both a ladder rung's own closure check and the position's overall
+final-closure check — a ladder whose `qty_fraction`s sum to something like
+`0.999999999999997` instead of exactly `1.0` due to floating-point
+accumulation must still be treated as fully closed and emit its
+`ReferenceTrade`, not left open with no row (per this module's own
+end-of-data handling for a genuinely still-open position). Concretely, for
+that one emitted record:
 
 - `qty` is the position's entry quantity (`original_qty`), unreduced by any
   earlier partial rungs.
@@ -619,12 +672,19 @@ order-type adverse-selection add-on since every entry here is a market
 fill). This module's own `ReferenceTrade.entry_price` output field is the
 **pre-slippage** bid (§3, by design, for direct comparability against
 production's `entry_bid_price`) — so the two must not be conflated. This
-module needs an internal-only `entry_price_basis = entry_bid_price × (1 ±
-entry_slippage_bps / 10_000)` (using the `entry_slippage_bps` parameter,
-§2, applied to the same pre-slippage bid `ReferenceTrade.entry_price`
-itself reports — never re-derived from the emitted field in a way that
-would suggest they're the same thing), and must anchor every
-`basis="entry_price"` level, `take_profit`/
+module needs an internal-only `entry_price_basis = round(raw_open × (1 ±
+entry_slippage_bps / 10_000), dp)` (using the `entry_slippage_bps`
+parameter, §2), computed from the **raw, unrounded**
+`bars[symbol][entry_bar].open` and its own `dp` (`4` if that raw value is
+below `10` else `2`) — mirroring `fill_price = round(ref_price *
+slip_multiplier, dp)`'s exact order of operations (multiply the raw
+reference price by the slippage multiplier, *then* round once). Do
+**not** compute it by taking the already-rounded `ReferenceTrade.entry_price`
+output value and multiplying that by the slippage factor — production
+derives `entry_bid_price` and the slipped fill as two independent roundings
+of the same raw reference price, not one from the other, and a value near a
+rounding-bucket boundary can genuinely differ between the two orders of
+operation. Anchor every `basis="entry_price"` level, `take_profit`/
 `scaled_take_profit` target, and the trailing-stop watermark seed below
 against `entry_price_basis` — **never** against the emitted
 `ReferenceTrade.entry_price` value directly. Anchoring against the
@@ -803,6 +863,24 @@ confirm the two ledgers agree on *why* each trade closed, not just its price.
 That module owns the `engine_exit:` string construction/parsing (§4) and any
 tolerance banding for price comparison; neither concern belongs in this
 schema or in the `simulate()` function this doc specifies.
+
+**What production's `exit_reason` can and cannot confirm.** Production's
+persisted `TradeRecord.exit_reason` is only `f"engine_exit:{kind}"` for
+`stop_loss`/`take_profit`/`scaled_take_profit` — no `exit_rule_index` or
+`level_index` suffix, unlike `signal_exit`'s
+`f"engine_exit:signal_exit[{idx}]"`, and `TradeRecord` has no `level_index`
+field at all. So the
+matching module can only verify `exit_rule_kind` itself against production
+for those three kinds — confirming *which specific* `spec.exit_rules[i]`
+fired, or which ladder rung, is only possible when the production kind is
+`signal_exit`. A spec with two `stop_loss` rules (an unusual but legal
+shape) or a multi-rung ladder is therefore only partially checkable against
+real production output on those two fields; this is a limit of what
+production stores today, not a gap in this schema — `ReferenceTrade` still
+carries `exit_rule_index`/`level_index` in full, so the matching module
+loses nothing it could otherwise have, and gains full attribution the
+moment production's own persistence is extended (which is not this
+document's concern).
 
 **A `(symbol, entry_date, exit_date, side)` key is not always unique.** On an
 intraday timeframe, one symbol can complete more than one same-side round
