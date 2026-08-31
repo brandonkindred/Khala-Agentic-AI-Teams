@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ``runtime_window`` is a top-level module in the flat sandbox (copied in by
 # ``StreamingHarness``, same as ``indicators``/``_streaming_indicators``), or
@@ -100,6 +100,35 @@ class InvalidTWAPOrderError(UnsupportedOrderFeatureError, ValueError):
     """
 
 
+BPS_DIVISOR = 10_000.0
+"""Basis-point scale for a ``"bps"``-kind :class:`StopAttachment` offset
+(``trail_offset``/``limit_offset`` when their ``*_kind`` is ``"bps"``):
+``value_bps / BPS_DIVISOR`` recovers the fraction a resolver such as
+``resolve_exit_leg_attachments`` derived it from.
+"""
+
+
+def apply_bps_offset(base_price: float, offset_bps: float) -> float:
+    """Convert a ``"bps"``-kind offset to an absolute distance anchored at ``base_price``.
+
+    The single source of the ``base_price * (offset_bps / BPS_DIVISOR)``
+    conversion, shared by every ``"bps"`` consumer of a
+    :class:`StopAttachment` offset — ``trading_service.service``'s
+    trailing-offset resolve-time preview and ``trading_service.engine.
+    fill_simulator``'s bar-by-bar trailing ratchet, bps-mode stop-limit
+    derivation, and entry-fill trailing seed — so the preview and the
+    actual materialization can never independently drift from each other,
+    the same role :func:`strategy_lab.spec_dsl.protective_limit_price`
+    plays for the stop-limit sign convention.
+
+    Preconditions: ``base_price`` and ``offset_bps`` are plain floats (no
+    finiteness/sign constraint here — callers validate the result against
+    their own contract, e.g. finite/positive/distinct-from-reference).
+    Postconditions: returns ``base_price * (offset_bps / BPS_DIVISOR)``.
+    """
+    return base_price * (offset_bps / BPS_DIVISOR)
+
+
 class StopAttachment(BaseModel):
     """Stop-loss leg attached to an entry order; materialized into an OCO child on entry fill.
 
@@ -124,6 +153,94 @@ class LimitAttachment(BaseModel):
 
     limit_price: float
     client_order_id: Optional[str] = None
+
+
+class ExitLegSpec(BaseModel):
+    """A single protective or target leg to attach to an entry order at fill time.
+
+    Rule-agnostic input to ``resolve_exit_leg_attachments`` — decoupled from
+    any specific DSL rule's field shape (e.g. an ``OcoBracketRule``'s
+    ``BracketStopLeg``/``BracketTakeProfitLeg``), so any exit-rule kind can be
+    translated into a list of these and resolved through one shared API.
+
+    ``kind`` selects the resolved attachment shape: ``STOP``/``STOP_LIMIT``/
+    ``TRAILING_STOP`` resolve to a :class:`StopAttachment`; ``LIMIT`` (a
+    target leg) resolves to a :class:`LimitAttachment`. ``pct`` is the leg's
+    distance off the entry reference price, as a positive fraction in
+    ``(0, 1)`` (direction implied by side — the same convention as
+    ``BracketStopLeg``/``BracketTakeProfitLeg``). For ``TRAILING_STOP``,
+    ``pct`` is *also* the trailing distance, resolved as a ``"bps"``
+    (basis-point) :class:`StopAttachment.trail_offset` rather than an
+    absolute one — NOT from a second, independently-settable fraction:
+    trailing-stop materialization seeds the live child's initial stop from
+    the *actual* entry fill price rather than any separately-resolved
+    ``stop_price``, and re-derives the offset from whatever price it is
+    combined with each time it is applied (including on its bar-by-bar
+    ratchet) — so a ``"bps"`` offset preserves the requested percentage
+    distance regardless of where the entry actually fills (e.g. a gap),
+    whereas a stale ``ref_price``-anchored absolute offset would not (and
+    could even go non-positive on a large gap).
+    ``limit_offset_pct`` is the ``STOP_LIMIT`` leg's secondary
+    offset (a fraction of the resolved stop level, unaffected by the
+    trailing case since ``limit_offset``/``trail_offset`` are mutually
+    exclusive on :class:`StopAttachment`); required iff ``kind ==
+    STOP_LIMIT``, the same coupling as ``BracketStopLeg._validate_limit_style``.
+    ``note`` is a free-form, optional annotation for callers/maintainers
+    (e.g. which DSL rule this leg was translated from); it plays no part in
+    resolution or validation and is not carried onto the resolved
+    ``StopAttachment``/``LimitAttachment``.
+
+    Preconditions: ``pct`` in ``(0, 1)``; ``kind`` in ``{STOP, STOP_LIMIT,
+    TRAILING_STOP, LIMIT}``; ``limit_offset_pct`` set iff ``kind ==
+    STOP_LIMIT``.
+    Postconditions: a validated, immutable leg spec ready for
+    ``resolve_exit_leg_attachments``.
+    """
+
+    # Frozen so the "validated, immutable leg spec" postcondition below is
+    # actually enforced — without this a caller could mutate ``kind`` or
+    # ``limit_offset_pct`` after construction and silently break the
+    # kind/offset coupling ``_validate_kind_fields`` exists to guarantee
+    # (Pydantic validators run on construction, not on attribute assignment).
+    # ``extra="forbid"`` (Pydantic's default is "ignore") so a misspelled or
+    # unexpected keyword (e.g. ``limit_offset`` instead of
+    # ``limit_offset_pct``) raises at construction instead of being silently
+    # dropped and surfacing later as a confusing "requires limit_offset_pct"
+    # error from ``_validate_kind_fields``.
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: OrderType
+    pct: float = Field(gt=0, lt=1.0)
+    limit_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _validate_kind_fields(self) -> "ExitLegSpec":
+        """Tie ``limit_offset_pct`` to ``kind``.
+
+        Preconditions: ``kind`` is a valid ``OrderType`` (Pydantic-enforced).
+        Postconditions: returns ``self`` when consistent; raises
+        ``ValueError`` when ``kind`` is not a supported leg kind, when
+        ``kind == STOP_LIMIT`` and ``limit_offset_pct`` is missing, or when
+        ``limit_offset_pct`` is set on a non-``STOP_LIMIT`` leg — the same
+        coupling, and the same two distinct messages for the missing-vs-
+        extraneous cases, as ``BracketStopLeg._validate_limit_style``.
+        """
+        if self.kind not in (
+            OrderType.STOP,
+            OrderType.STOP_LIMIT,
+            OrderType.TRAILING_STOP,
+            OrderType.LIMIT,
+        ):
+            raise ValueError(
+                f"ExitLegSpec.kind must be one of STOP/STOP_LIMIT/TRAILING_STOP/LIMIT, got {self.kind!r}"
+            )
+        if self.kind == OrderType.STOP_LIMIT:
+            if self.limit_offset_pct is None:
+                raise ValueError("ExitLegSpec.kind=STOP_LIMIT requires limit_offset_pct")
+        elif self.limit_offset_pct is not None:
+            raise ValueError("ExitLegSpec.limit_offset_pct is only valid when kind == STOP_LIMIT")
+        return self
 
 
 class Bar(BaseModel):
