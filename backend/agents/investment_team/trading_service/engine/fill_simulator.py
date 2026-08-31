@@ -26,7 +26,6 @@ from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
 from ...strategy_lab.spec_dsl import protective_limit_price
 from ..strategy.contract import (
-    BPS_DIVISOR,
     Bar,
     Fill,
     FillKind,
@@ -35,6 +34,7 @@ from ..strategy.contract import (
     OrderType,
     TimeInForce,
     UnfilledPolicy,
+    apply_bps_offset,
 )
 from .execution_model import (
     ExecutionModel,
@@ -1490,7 +1490,7 @@ class FillSimulator:
         if req.trail_offset_kind == "abs":
             offset = req.trail_offset
         else:  # "bps"
-            offset = water * (req.trail_offset / BPS_DIVISOR)
+            offset = apply_bps_offset(water, req.trail_offset)
 
         eff_stop = (water - offset) if req.side == OrderSide.SHORT else (water + offset)
 
@@ -1583,7 +1583,7 @@ class FillSimulator:
                 if sl.limit_offset_kind == "abs":
                     limit_off = sl.limit_offset
                 else:  # "bps"
-                    limit_off = sl.stop_price * (sl.limit_offset / BPS_DIVISOR)
+                    limit_off = apply_bps_offset(sl.stop_price, sl.limit_offset)
                 # Limit sits on the protective side of the stop: below it for a
                 # SHORT child (sell-stop-limit closing a long parent), above it
                 # for a LONG child (buy-stop-limit closing a short parent).
@@ -1635,7 +1635,7 @@ class FillSimulator:
                 if sl.trail_offset_kind == "abs":
                     offset = sl.trail_offset
                 else:  # "bps"
-                    offset = entry_fill_price * (sl.trail_offset / BPS_DIVISOR)
+                    offset = apply_bps_offset(entry_fill_price, sl.trail_offset)
                 sl_child.effective_stop_price = (
                     entry_fill_price - offset
                     if req.side == OrderSide.LONG

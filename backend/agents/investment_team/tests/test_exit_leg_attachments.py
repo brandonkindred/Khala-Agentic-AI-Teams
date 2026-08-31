@@ -480,7 +480,7 @@ def test_rejects_side_that_is_not_a_valid_order_side() -> None:
     treated as SHORT by the == comparison, which would invert every leg's
     placement without raising."""
     with pytest.raises(ValueError, match="side must be OrderSide.LONG or OrderSide.SHORT"):
-        resolve_exit_leg_attachments([_leg()], "not-a-side", 100.0)
+        resolve_exit_leg_attachments([_leg()], "not-a-side", 100.0)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

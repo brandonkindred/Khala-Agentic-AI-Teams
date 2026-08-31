@@ -108,6 +108,27 @@ BPS_DIVISOR = 10_000.0
 """
 
 
+def apply_bps_offset(base_price: float, offset_bps: float) -> float:
+    """Convert a ``"bps"``-kind offset to an absolute distance anchored at ``base_price``.
+
+    The single source of the ``base_price * (offset_bps / BPS_DIVISOR)``
+    conversion, shared by every ``"bps"`` consumer of a
+    :class:`StopAttachment` offset — ``trading_service.service``'s
+    trailing-offset resolve-time preview and ``trading_service.engine.
+    fill_simulator``'s bar-by-bar trailing ratchet, bps-mode stop-limit
+    derivation, and entry-fill trailing seed — so the preview and the
+    actual materialization can never independently drift from each other,
+    the same role :func:`strategy_lab.spec_dsl.protective_limit_price`
+    plays for the stop-limit sign convention.
+
+    Preconditions: ``base_price`` and ``offset_bps`` are plain floats (no
+    finiteness/sign constraint here — callers validate the result against
+    their own contract, e.g. finite/positive/distinct-from-reference).
+    Postconditions: returns ``base_price * (offset_bps / BPS_DIVISOR)``.
+    """
+    return base_price * (offset_bps / BPS_DIVISOR)
+
+
 class StopAttachment(BaseModel):
     """Stop-loss leg attached to an entry order; materialized into an OCO child on entry fill.
 

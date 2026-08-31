@@ -97,6 +97,7 @@ from .strategy.contract import (
     TimeInForce,
     UnfilledPolicy,
     UnsupportedOrderFeatureError,
+    apply_bps_offset,
 )
 from .strategy.streaming_harness import StrategyRuntimeError, StreamingHarness
 
@@ -1559,11 +1560,14 @@ def _validated_trail_offset(leg: ExitLegSpec, i: int, ref_price: float, is_long:
     bit-for-bit, so the trailing child would start at (not off) the entry
     fill despite the requested positive distance. The actual entry fill
     price isn't known here (that's the reason this is "bps" and not "abs"
-    in the first place), so this previews the same round-trip at
-    ``ref_price`` as the best available proxy — catching the failure mode
-    even though a large enough gap between ``ref_price`` and the real fill
-    could still reintroduce it, since materialization has no better input
-    to validate against ahead of the actual fill.
+    in the first place), so this previews the same round-trip — via
+    :func:`apply_bps_offset`, the single source of that conversion shared
+    with every ``fill_simulator`` application site, so this preview can
+    never independently drift from what materialization actually computes
+    — at ``ref_price`` as the best available proxy. Even so, a large
+    enough gap between ``ref_price`` and the real fill could still
+    reintroduce the failure mode, since materialization has no better
+    input to validate against ahead of the actual fill.
 
     Preconditions: ``leg.kind == OrderType.TRAILING_STOP``; ``ref_price``
     is the finite, positive reference price already validated by the
@@ -1576,7 +1580,7 @@ def _validated_trail_offset(leg: ExitLegSpec, i: int, ref_price: float, is_long:
             is non-finite, non-positive, or equal to ``ref_price``.
     """
     trail_offset = leg.pct * BPS_DIVISOR
-    preview_offset = ref_price * (trail_offset / BPS_DIVISOR)
+    preview_offset = apply_bps_offset(ref_price, trail_offset)
     preview_stop = ref_price - preview_offset if is_long else ref_price + preview_offset
     if (
         not math.isfinite(preview_offset)
