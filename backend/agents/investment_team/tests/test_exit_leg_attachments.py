@@ -272,6 +272,20 @@ def test_rejects_stop_price_rounded_to_reference() -> None:
         resolve_exit_leg_attachments([_leg(OrderType.STOP, pct=1e-20)], OrderSide.LONG, 100.0)
 
 
+def test_rejects_negligible_limit_offset() -> None:
+    """A vanishingly small (but valid, limit_offset_pct > 0) STOP_LIMIT
+    secondary offset resolves to a genuinely nonzero limit_offset, but one
+    too small to survive being added to or subtracted from stop_price —
+    ``protective_limit_price`` at materialization would compute a limit
+    equal to the stop itself, losing the requested protective distance
+    entirely, so the resolver must reject it rather than accept a
+    "positive but negligible" offset."""
+    with pytest.raises(ValueError, match="non-finite/non-positive/negligible limit_offset"):
+        resolve_exit_leg_attachments(
+            [_leg(OrderType.STOP_LIMIT, pct=0.03, limit_offset_pct=1e-20)], OrderSide.LONG, 100.0
+        )
+
+
 # ---------------------------------------------------------------------------
 # ExitLegSpec: kind / secondary-offset coupling validation
 # ---------------------------------------------------------------------------

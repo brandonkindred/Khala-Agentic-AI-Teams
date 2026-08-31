@@ -1527,16 +1527,20 @@ def resolve_exit_leg_attachments(
     each element is a :class:`StopAttachment` (``STOP``/``STOP_LIMIT``/
     ``TRAILING_STOP`` legs) or :class:`LimitAttachment` (``LIMIT`` legs) whose
     absolute price is finite, strictly positive, and strictly on the correct
-    side of ``ref_price``; empty ``legs`` yields ``[]``.
+    side of ``ref_price``; a ``STOP_LIMIT`` leg's ``limit_offset`` is finite,
+    strictly positive, and large enough to survive being added to or
+    subtracted from ``stop_price``; empty ``legs`` yields ``[]``.
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
-            ``<= 0``, or if a resolved price is non-finite, non-positive, or
-            not strictly on the correct side of ``ref_price`` — a defensive
-            guard that would only trip if a leg field bound were loosened
-            without updating this math, an extreme ``ref_price`` overflowed
-            the resolved price to ``inf``, or a vanishingly small ``pct``
-            rounded away to nothing in float64 (``ref_price * (1 ± pct) ==
-            ref_price`` bit-for-bit).
+            ``<= 0``, or if a resolved price (or a ``STOP_LIMIT`` leg's
+            ``limit_offset``) is non-finite, non-positive, or too small to
+            survive its downstream arithmetic — a defensive guard that would
+            only trip if a leg field bound were loosened without updating
+            this math, an extreme ``ref_price`` overflowed the resolved
+            price to ``inf``, or a vanishingly small ``pct``/
+            ``limit_offset_pct`` rounded away to nothing in float64
+            (``ref_price * (1 ± pct) == ref_price``, or
+            ``stop_price ± limit_offset == stop_price``, bit-for-bit).
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
     # contract stays enforced in optimized production runs. ``ref_price`` is a
@@ -1605,6 +1609,31 @@ def resolve_exit_leg_attachments(
         limit_offset = (
             stop_price * leg.limit_offset_pct if leg.kind == OrderType.STOP_LIMIT else None
         )
+        if limit_offset is not None:
+            # A vanishingly small (but valid, ``limit_offset_pct > 0``)
+            # fraction can produce a ``limit_offset`` that is itself
+            # nonzero (unlike the ref_price-relative checks above, this
+            # value is derived from ``stop_price``, not checked against
+            # it directly) but still too small to survive being combined
+            # with ``stop_price`` at materialization time —
+            # ``protective_limit_price`` adds/subtracts it from
+            # ``stop_price`` (``fill_simulator._materialize_bracket_children``),
+            # and float64 has only ~15-17 significant digits, so
+            # ``stop_price ± limit_offset == stop_price`` bit-for-bit when
+            # ``limit_offset`` is many orders of magnitude smaller. Check
+            # both directions since this resolver doesn't know which sign
+            # materialization will apply (``closing_long``).
+            if (
+                not math.isfinite(limit_offset)
+                or limit_offset <= 0
+                or stop_price + limit_offset == stop_price
+                or stop_price - limit_offset == stop_price
+            ):
+                raise ValueError(
+                    f"exit leg resolved non-finite/non-positive/negligible "
+                    f"limit_offset={limit_offset!r} from stop_price={stop_price!r}, "
+                    f"limit_offset_pct={leg.limit_offset_pct!r}"
+                )
         # ``trail_offset`` is derived from ``ref_price`` (not ``stop_price``):
         # ``ref_price - stop_price == ref_price * pct`` by construction above,
         # so seeding the child from ``entry_fill_price ∓ trail_offset`` (see
@@ -1664,11 +1693,14 @@ def resolve_bracket_attachments(
     Postconditions: returns a ``(StopAttachment, LimitAttachment)`` pair whose
     absolute prices are finite, strictly positive, and strictly on the
     correct side of ``ref_price``; a ``limit``-style stop leg additionally
-    carries a positive ``limit_offset``.
+    carries a ``limit_offset`` that is finite, strictly positive, and large
+    enough to survive being added to or subtracted from ``stop_price``.
     Raises:
         ValueError: if ``ref_price`` is non-finite or ``<= 0``, or if a
-            resolved ``stop_price``/``limit_price`` is non-finite,
-            non-positive, or not strictly on the correct side of ``ref_price``.
+            resolved ``stop_price``/``limit_price``/``limit_offset`` is
+            non-finite, non-positive, not strictly on the correct side of
+            ``ref_price``, or (for ``limit_offset``) too small to survive
+            its downstream arithmetic.
     """
     stop_attachment, limit_attachment = resolve_exit_leg_attachments(
         _bracket_to_leg_specs(bracket), side, ref_price
