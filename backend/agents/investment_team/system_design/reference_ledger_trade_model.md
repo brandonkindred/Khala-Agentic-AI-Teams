@@ -280,7 +280,7 @@ inconsistent record silently.
 | `trade_num` | `int` | `trade_num` | 1-based, assigned in emission order. |
 | `symbol` | `str` | `symbol` | Verbatim. |
 | `side` | `Literal["long", "short"]` | `side` | Verbatim (production stores a plain `str`; this is the stricter reference form). |
-| `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Unique only **within a symbol**, not globally — together with `symbol`, the key for this module's per-position bookkeeping (ladder-rung state, running aggregates); `trade_num` (below) remains the record's globally unique identifier. |
+| `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Unique only **within a symbol**, not globally — together with `symbol`, the key for this module's per-position bookkeeping (ladder-rung state, running aggregates); `trade_num` (above) remains the record's globally unique identifier. |
 | `entry_rule_index` | `int` | *(none — derived from `entry_reason` today)* | Which `spec.entry_rules[i]` matched — mirrors production's `entry_reason = f"engine_entry:entry[{rule_idx}]"`, which (unlike `exit_reason`) passes through to `TradeRecord.entry_reason` unmodified, with no reconciliation step. Lets the later matching module detect a same-looking trade opened by a *different* entry rule when a spec has multiple same-side entry predicates. |
 | `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position's **final** closing event occurred. For a position that passed through one or more `scaled_take_profit` rungs before closing, this is the bar of the final close only — never an earlier rung's bar — since the reference model emits one aggregated row per fully closed position (§5's "Exit aggregation" subsection). |
 | `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp[:10]` — truncated to the date portion exactly as production does (`pos.entry_timestamp[:10]`), so an intraday `Bar.timestamp` still matches production's date-only comparison key. |
@@ -335,7 +335,7 @@ out of scope per §1): `position_value`, `gross_pnl`, `net_pnl`, `return_pct`,
 by the matching module from the two dates), `entry_reason`/`exit_reason`
 free text — `entry_reason` superseded by the structured `entry_rule_index`
 field above, `exit_reason` superseded by the structured
-`exit_rule_kind`/`exit_rule_index`/`level_index` triple below.
+`exit_rule_kind`/`exit_rule_index`/`level_index` triple above.
 
 ### Invariants (as a value object)
 
@@ -494,8 +494,8 @@ reference fill itself resolves one bar later, at `entry_bar.open`, per the
 
 - `FixedFractionSizing`: `equity * fraction / trigger_bar.close`.
 - `FixedNotionalSizing`: `notional_usd / trigger_bar.close`.
-- `VolatilityTargetSizing`: `equity * target_annual_vol / (trigger_bar.close
-  * atr)`, where `atr` comes from the same indicator view this module
+- `VolatilityTargetSizing`: `equity * target_annual_vol / (trigger_bar.close * atr)`,
+  where `atr` comes from the same indicator view this module
   already needs for `signal_exit` predicates (see §2's `PandasHistoryView`
   dependency note) — reinforcing that dependency rather than introducing a
   new one. Which ATR — "first" is fully determined, not left to the
@@ -521,8 +521,15 @@ reference fill itself resolves one bar later, at `entry_bar.open`, per the
 `FixedFractionSizing.fraction`/`VolatilityTargetSizing.target_annual_vol`'s
 own field bounds); `max_position_pct` in the clamp below is a whole-number
 percentage (`6.0` = 6%, matching its own `le=100` field bound and the `/
-100` in `_cap_qty_to_position`). Treating one as the other silently over- or
-under-sizes every position by a factor of 100.
+100` in `_cap_qty_to_position`). `max_symbol_concentration_pct` (used
+below, in "Additional admission gates") is the same whole-number
+convention as `max_position_pct` — `Field(default=20.0, ge=0, le=100)` on
+`RiskLimits`, and `RiskFilter.can_enter` itself computes `concentration =
+notional / current_equity * 100` before comparing it against the raw field
+value, so the field is compared directly against a percentage, not a
+fraction. Treating any of these as the other silently over- or
+under-sizes every position (or mis-evaluates every gate) by a factor of
+100.
 
 **Position-cap clamp, applied first.** Before any whole-share handling, the
 raw quantity from every sizing kind above — not just a sub-1 result — is
@@ -558,7 +565,11 @@ capital check below — using its own tracked state, **and in this order**:
 2. Reject the entry (open no position for that trigger) if it would push the
    count of open positions past `max_open_positions`, gross notional
    exposure past `max_gross_leverage * equity`, or this single symbol's
-   notional past `max_symbol_concentration_pct` of `equity`.
+   notional past `max_symbol_concentration_pct / 100 * equity` — the `/
+   100` is required (see the "Percentage fields are not uniformly scaled"
+   note above): `max_symbol_concentration_pct` is a whole-number
+   percentage field, the same convention as `max_position_pct`, not a
+   decimal fraction.
 
 For gate 2's ratio checks, the notional basis is **not** uniform across the
 two sides, mirroring production's `Position.position_value = entry_price ×
