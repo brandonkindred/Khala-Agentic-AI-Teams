@@ -149,7 +149,10 @@ no import chain back into the excluded modules above before relying on it.
 **Preconditions:**
 - `spec` is a validated `StrategySpec` (Pydantic's own validators already
   enforce its internal invariants — e.g. at most one `OcoBracketRule`,
-  strictly increasing ladder `pct` values).
+  strictly increasing ladder `pct` values, and `sum(qty_fraction) <= 1.0`
+  across a `ScaledTakeProfitRule`'s levels — `simulate` may assume every
+  ladder's rungs never over-close a position and does not need its own
+  defensive check for this).
 - For every symbol `spec` references, `bars[symbol]` is non-empty and
   strictly increasing by `timestamp`.
 - `starting_equity > 0`.
@@ -317,13 +320,27 @@ reference fill's next-bar-open resolution one bar later):
   * atr)`, where `atr` comes from the same indicator view this module
   already needs for `signal_exit` predicates (see §2's `PandasHistoryView`
   dependency note) — reinforcing that dependency rather than introducing a
-  new one. Which ATR: scan the entry rules' own predicates first, then the
-  signal-exit rules' predicates, for the first ATR indicator reference (so a
-  spec-configured ATR period is honored); fall back to a default ATR(14)
-  reference when no rule references one. Warmup fallback: if the resolved
-  ATR is unavailable or non-positive at the trigger bar (not enough history
-  yet), fall back to a one-share probe instead of failing, then still run it
-  through the whole-share/`max_position_pct` handling below.
+  new one. Which ATR — "first" is fully determined, not left to the
+  implementer's choice: scan the entry rules' own predicates first (in
+  `spec.entry_rules` list order), then the signal-exit rules' predicates (in
+  `spec.exit_rules` list order); within one rule's predicate tree, take the
+  first `IndicatorRef` named `"atr"` in leaf order (each leaf predicate's
+  left side before its right side, leaves visited in the tree's own
+  traversal order) — mirrors `iter_tree_indicator_refs`'s yield order
+  exactly, so a predicate with several differently-configured ATR refs still
+  resolves to one determinate choice. Fall back to a default ATR(14)
+  reference when no rule references one at all. Warmup fallback: if the
+  resolved ATR is unavailable or non-positive at the trigger bar (not enough
+  history yet), fall back to a one-share probe instead of failing, then
+  still run it through the whole-share/`max_position_pct` handling below.
+
+**Percentage fields are not uniformly scaled.** `fraction` and
+`target_annual_vol` above are decimal fractions (`0.10` = 10%, matching
+`FixedFractionSizing.fraction`/`VolatilityTargetSizing.target_annual_vol`'s
+own field bounds); `max_position_pct` in the clamp below is a whole-number
+percentage (`6.0` = 6%, matching its own `le=100` field bound and the `/
+100` in `_cap_qty_to_position`). Treating one as the other silently over- or
+under-sizes every position by a factor of 100.
 
 **Position-cap clamp, applied first.** Before any whole-share handling, the
 raw quantity from every sizing kind above — not just a sub-1 result — is
@@ -471,14 +488,19 @@ on a gap through the target. Fill bar is the trigger bar.
 ### `scaled_take_profit`
 
 A ladder of resting limit orders, one per `TakeProfitLevel`, each at
-`entry_price * (1 ± level.pct)`. Each rung's quantity is
-`level.qty_fraction * original_qty`, fixed at entry — not a fraction of the
-live (already-reduced) position size. Sequencing mirrors the production
-ladder cursor's per-rule-index "next un-fired rung" counter: only the
-lowest un-fired rung is eligible to trigger on a given bar, and a single bar
-advances the cursor by exactly one rung even if the bar's range would have
-cleared several rungs at once — this module must maintain that same
-one-rung-per-position-per-bar advancement rule, matching the counter's
+`entry_price * (1 ± level.pct)` — `level.pct` is a positive magnitude,
+strictly increasing across `levels` by construction (Pydantic-enforced), so
+rung 0 is always the target closest to entry and the last rung the target
+farthest away, on **either** side (a short's targets sit below entry, but
+"closest" still means smallest `pct`, not most negative price). Each rung's
+quantity is `level.qty_fraction * original_qty`, fixed at entry — not a
+fraction of the live (already-reduced) position size. Sequencing mirrors the
+production ladder cursor's per-rule-index "next un-fired rung" counter: only
+the **un-fired rung closest to entry** — i.e. the next rung in configured
+ladder order, advancing outward — is eligible to trigger on a given bar, and
+a single bar advances the cursor by exactly one rung even if the bar's range
+would have cleared several rungs at once — this module must maintain that
+same one-rung-per-position-per-bar advancement rule, matching the counter's
 semantics rather than firing every technically-reachable rung in one step.
 Fill price for a firing rung follows the same exact-price rule as
 standalone `take_profit`; fill bar is the trigger bar. A fired rung does
