@@ -36,6 +36,7 @@ import type {
   AgentDetail,
   AgentSummary,
 } from '../../../../models/agent-catalog.model';
+import { isInvokeEnvelope } from '../../../../models/agent-runner.model';
 import type {
   InvokeEnvelope,
   SandboxHandle,
@@ -548,13 +549,8 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
           // if the detail actually has the InvokeEnvelope shape. A plain string
           // or validation-error array must go through extractErrorDetail.
           const detail = err.error.detail;
-          if (
-            typeof detail === 'object' &&
-            detail !== null &&
-            'trace_id' in detail &&
-            'logs_tail' in detail
-          ) {
-            this.lastResponse.set(detail as InvokeEnvelope);
+          if (isInvokeEnvelope(detail)) {
+            this.lastResponse.set(detail);
           } else {
             this.lastError.set(
               extractErrorDetail(err, 'Invocation failed.', { joinValidationArray: true }),
