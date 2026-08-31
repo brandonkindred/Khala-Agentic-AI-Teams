@@ -110,9 +110,6 @@ def _design_context_to_checkpoint(context: _DesignPersistContext) -> Dict[str, A
     }
 
 
-_DESIGN_CONTEXT_CHECKPOINT_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
-
-
 def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistContext:
     """Inverse of :func:`_design_context_to_checkpoint` -- rebuilds real ``SpecCritique`` objects.
 
@@ -125,9 +122,14 @@ def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistConte
     instances, or record assembly's ``design_context.critiques[i].model_dump()``
     calls raise ``AttributeError`` deep inside a resumed attempt.
 
-    Mirrors ``temporal.activities._design_context_from_wire``'s validation
-    shape (a separate, Temporal-only wire pair with its own scope); this is
-    a new, independent function scoped to thread-mode's in-process resume.
+    Shape check delegates to ``checkpoints.design_context_wire_shape_is_valid``
+    -- the single source of truth for this check, shared with
+    ``temporal.activities._design_context_from_wire`` (a separate,
+    Temporal-only reconstruction with its own scope) and
+    ``temporal.dto.design_context_wire_shape_is_valid`` (the sandbox-safe
+    pre-check inside ``StrategyLabCycleWorkflow.run``) -- so the three can
+    never drift out of sync on what counts as a well-formed
+    ``design_context`` payload.
 
     Preconditions:
       - ``data`` is a non-empty dict containing every key
@@ -137,36 +139,21 @@ def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistConte
       - Returns a ``_DesignPersistContext`` with ``critiques`` rebuilt as
         real ``SpecCritique`` instances.
     Raises:
-      - ``ValueError`` if a required key is missing.
-      - ``TypeError`` if a present key has the wrong shape.
-      Both signal to the caller that the checkpoint payload is unusable for
-      resume -- the caller is expected to fail open to a full restart rather
-      than propagate either exception.
+      - ``ValueError`` if the payload fails the shared shape check (a
+        missing key or a wrong-typed field). Signals to the caller that the
+        checkpoint payload is unusable for resume -- the caller is expected
+        to fail open to a full restart rather than propagate it.
     """
     from .agents.design_review import SpecCritique
+    from .checkpoints import design_context_wire_shape_is_valid
 
-    missing = [key for key in _DESIGN_CONTEXT_CHECKPOINT_KEYS if key not in data]
-    if missing:
-        raise ValueError(f"design_context missing checkpoint fields: {missing}")
-    rounds = data["rounds"]
-    critiques = data["critiques"]
-    stop_reason = data["stop_reason"]
-    loop_telemetry = data["loop_telemetry"]
-    if isinstance(rounds, bool) or not isinstance(rounds, int):
-        raise TypeError(f"design_context.rounds must be int, got {type(rounds).__name__}")
-    if not isinstance(critiques, list):
-        raise TypeError(f"design_context.critiques must be list, got {type(critiques).__name__}")
-    if not isinstance(stop_reason, str):
-        raise TypeError(f"design_context.stop_reason must be str, got {type(stop_reason).__name__}")
-    if not isinstance(loop_telemetry, dict):
-        raise TypeError(
-            f"design_context.loop_telemetry must be dict, got {type(loop_telemetry).__name__}"
-        )
+    if not design_context_wire_shape_is_valid(data):
+        raise ValueError(f"design_context has an invalid checkpoint shape: {data!r}")
     return _DesignPersistContext(
-        rounds=rounds,
-        critiques=[SpecCritique.model_validate(c) for c in critiques],
-        stop_reason=stop_reason,
-        loop_telemetry=dict(loop_telemetry),
+        rounds=data["rounds"],
+        critiques=[SpecCritique.model_validate(c) for c in data["critiques"]],
+        stop_reason=data["stop_reason"],
+        loop_telemetry=dict(data["loop_telemetry"]),
     )
 
 

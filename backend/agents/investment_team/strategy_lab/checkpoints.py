@@ -585,3 +585,42 @@ def resolve_cross_attempt_resume(
     if determine_resume_stage(checkpoint) is not PipelineStage.SYNTHESIS:
         return None
     return checkpoint
+
+
+DESIGN_CONTEXT_WIRE_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
+
+
+def design_context_wire_shape_is_valid(data: Any) -> bool:
+    """Shape-only validation of a ``design_context`` wire/checkpoint dict.
+
+    The single source of truth for what counts as a well-formed
+    ``design_context`` payload -- shared by every reconstruction site that
+    needs this same shape check:
+    ``orchestrator_record_assembly._design_context_from_checkpoint``
+    (thread-mode cross-attempt resume) and
+    ``temporal.activities._design_context_from_wire`` (Temporal-mode
+    reconstruction, both same-attempt ADR-012 and cross-attempt resume).
+    Before this function existed, both duplicated the same key tuple and
+    primitive-type rules independently, risking silent drift between them.
+
+    Preconditions:
+        None -- ``data`` may be any value, not just a dict.
+    Postconditions:
+        Returns ``True`` iff ``data`` is a non-empty dict containing all of
+        ``rounds``/``critiques``/``stop_reason``/``loop_telemetry`` with the
+        matching primitive types (``rounds`` ``int`` and not ``bool``,
+        ``critiques`` ``list``, ``stop_reason`` ``str``, ``loop_telemetry``
+        ``dict``). Returns ``False`` otherwise. Never raises.
+    """
+    if not data or not isinstance(data, dict):
+        return False
+    if any(key not in data for key in DESIGN_CONTEXT_WIRE_KEYS):
+        return False
+    rounds = data["rounds"]
+    if isinstance(rounds, bool) or not isinstance(rounds, int):
+        return False
+    if not isinstance(data["critiques"], list):
+        return False
+    if not isinstance(data["stop_reason"], str):
+        return False
+    return isinstance(data["loop_telemetry"], dict)

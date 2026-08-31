@@ -1886,6 +1886,73 @@ def test_run_design_attempt_activity_cross_attempt_resume_fails_open_on_malforme
     assert captured["resume_design_context"] is None
 
 
+def test_run_design_attempt_activity_clears_seeded_drift_when_cross_attempt_resume_fails_open(
+    monkeypatch,
+):
+    """The workflow speculatively seeds ``params["drift"]`` with the
+    checkpoint's own spec/code/gate history before knowing whether this
+    activity's cross-attempt reconstruction will succeed -- a shape check
+    alone can't catch a deeper problem, like an invalid critique entry, that
+    only surfaces during ``SpecCritique`` reconstruction here. When
+    ``_cross_attempt_resume_from_params`` fails open for that reason, this
+    attempt falls back to a from-scratch Phase 1 re-run and must not carry
+    the discarded checkpoint's history forward as if it were this attempt's
+    own provenance."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    seeded_spec_history = [
+        {
+            "phase": "design",
+            "agent": "DesignAgent",
+            "timestamp": "2023-01-01T00:00:00Z",
+            "before_hash": "a" * 64,
+            "after_hash": "b" * 64,
+            "diff": "- old\n+ new",
+            "reason": "checkpointed revision",
+        }
+    ]
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(
+            drift={
+                "spec_history": seeded_spec_history,
+                "code_history": [],
+                "gate_timeline": [],
+            },
+            resume_spec=_spec_dict(strategy_id="strat-resumed"),
+            resume_rationale="carried forward from checkpoint",
+            # All four top-level keys present and correctly typed -- passes
+            # shape validation -- but the one critique entry is missing its
+            # required "ready" field, so SpecCritique reconstruction fails.
+            resume_design_context={
+                "rounds": 1,
+                "critiques": [{"rationale": "missing ready field"}],
+                "stop_reason": "x",
+                "loop_telemetry": {},
+            },
+        )
+    )
+
+    assert out["kind"] == "record"
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+    # The seeded checkpoint history must not leak into a scratch attempt's
+    # drift collector -- it was never actually resumed from.
+    assert captured["drift_collector"].spec_history == []
+
+
 def test_run_design_attempt_activity_malformed_checkpoint_gate_results_falls_back_to_scratch(
     monkeypatch,
 ):

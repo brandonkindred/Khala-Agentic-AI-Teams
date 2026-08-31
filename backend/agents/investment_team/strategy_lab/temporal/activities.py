@@ -715,9 +715,6 @@ def delete_design_attempt_checkpoint(run_id: str, cycle_scope: str, generation: 
     )
 
 
-_DESIGN_CONTEXT_WIRE_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
-
-
 def _design_context_to_wire(
     design_context: Optional["_DesignPersistContext"],
 ) -> Optional[Dict[str, Any]]:
@@ -755,38 +752,24 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
         ``SpecCritique`` instances -- not left as plain dicts, which would
         raise ``AttributeError`` deep inside record assembly
         (``orchestrator_record_assembly.py`` calls ``.model_dump()`` on each
-        ``design_context.critiques`` element). Raises ``ValueError`` /
-        ``TypeError`` when a nonempty payload is missing keys or has the
-        wrong shape, so checkpoint resume can fail open instead of
-        fabricating default audit fields.
+        ``design_context.critiques`` element). Raises ``ValueError`` when a
+        nonempty payload fails ``checkpoints.design_context_wire_shape_is_valid``
+        (missing keys or a wrong-typed field), so checkpoint resume can fail
+        open instead of fabricating default audit fields.
     """
     if not data:
         return None
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
     from investment_team.strategy_lab.agents.design_review import SpecCritique
+    from investment_team.strategy_lab.checkpoints import design_context_wire_shape_is_valid
 
-    missing = [key for key in _DESIGN_CONTEXT_WIRE_KEYS if key not in data]
-    if missing:
-        raise ValueError(f"design_context missing wire fields: {missing}")
-    rounds = data["rounds"]
-    critiques = data["critiques"]
-    stop_reason = data["stop_reason"]
-    loop_telemetry = data["loop_telemetry"]
-    if isinstance(rounds, bool) or not isinstance(rounds, int):
-        raise TypeError(f"design_context.rounds must be int, got {type(rounds).__name__}")
-    if not isinstance(critiques, list):
-        raise TypeError(f"design_context.critiques must be list, got {type(critiques).__name__}")
-    if not isinstance(stop_reason, str):
-        raise TypeError(f"design_context.stop_reason must be str, got {type(stop_reason).__name__}")
-    if not isinstance(loop_telemetry, dict):
-        raise TypeError(
-            f"design_context.loop_telemetry must be dict, got {type(loop_telemetry).__name__}"
-        )
+    if not design_context_wire_shape_is_valid(data):
+        raise ValueError(f"design_context has an invalid wire shape: {data!r}")
     return _DesignPersistContext(
-        rounds=rounds,
-        critiques=[SpecCritique.model_validate(c) for c in critiques],
-        stop_reason=stop_reason,
-        loop_telemetry=dict(loop_telemetry),
+        rounds=data["rounds"],
+        critiques=[SpecCritique.model_validate(c) for c in data["critiques"]],
+        stop_reason=data["stop_reason"],
+        loop_telemetry=dict(data["loop_telemetry"]),
     )
 
 
@@ -1358,6 +1341,18 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         resume_spec, resume_rationale, resume_design_context = _cross_attempt_resume_from_params(
             params, run_id=run_id, design_attempt_index=design_attempt_index
         )
+        if resume_spec is None:
+            # The workflow speculatively seeded ``drift_collector`` (built
+            # above, from ``params["drift"]``) with the checkpoint's own
+            # spec/code/gate history before knowing whether this
+            # reconstruction would succeed -- it only checks the checkpoint's
+            # shape, not deeper validity (e.g. a malformed critique entry
+            # inside ``design_context["critiques"]``). Reconstruction just
+            # failed, so this attempt is falling back to a from-scratch
+            # Phase 1 re-run: it cannot claim provenance from a checkpoint it
+            # never actually resumed from. Discard the seed so the eventual
+            # record's drift reflects only this attempt's own (scratch) work.
+            drift_collector = _DriftCollector()
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
         """``checkpoint_hook`` passed into ``_run_design_attempt`` (``PhaseCallback`` shape).
