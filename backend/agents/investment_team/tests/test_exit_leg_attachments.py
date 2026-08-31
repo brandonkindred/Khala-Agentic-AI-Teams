@@ -451,3 +451,13 @@ def test_as_bracket_attachment_pair_rejects_wrong_shape() -> None:
     limit = LimitAttachment(limit_price=106.0)
     with pytest.raises(TypeError, match="must produce \\(StopAttachment, LimitAttachment\\)"):
         _as_bracket_attachment_pair([limit, stop])  # type: ignore[list-item]
+
+
+def test_as_bracket_attachment_pair_rejects_wrong_length() -> None:
+    """A wrong-length list is also rejected with TypeError (not the ValueError
+    plain tuple/list unpacking would raise) — this function's contract is
+    "wrong shape is always a TypeError", covering both wrong length and
+    wrong element types with one exception type."""
+    stop = StopAttachment(stop_price=97.0)
+    with pytest.raises(TypeError, match="must produce exactly 2 attachments, got 1"):
+        _as_bracket_attachment_pair([stop])

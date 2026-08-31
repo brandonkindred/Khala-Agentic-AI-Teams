@@ -72,6 +72,7 @@ from ..strategy_lab.spec_dsl import (
     VolatilityTargetSizing,
     first_side_stop_factor,
     is_bracket_exit,
+    protective_limit_price,
 )
 from ..strategy_lab_context import is_fractional_asset_class
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
@@ -1639,15 +1640,14 @@ def resolve_exit_leg_attachments(
             # misbehaves, e.g. a subnormal ``stop_price`` where ``limit_offset``
             # rounds to exactly ``stop_price``, making the derived limit
             # exactly ``0.0``). So compute the actual side-specific derived
-            # limit price here (mirroring ``protective_limit_price``) and
-            # validate it directly, on top of validating ``limit_offset``
-            # itself. Only the direction materialization will actually use is
-            # checked — checking both would reject legs where only the
-            # *unused* direction misbehaves (float spacing is asymmetric
-            # around a power of two, so addition and subtraction can behave
-            # differently at the same magnitude).
-            derived_limit_price = (
-                stop_price - limit_offset if is_long else stop_price + limit_offset
+            # limit price via the single shared sign-convention helper
+            # (``protective_limit_price`` — also used by ``rule_compiler``
+            # and ``fill_simulator._materialize_bracket_children``, so this
+            # can never drift from what materialization actually computes)
+            # and validate it directly, on top of validating ``limit_offset``
+            # itself.
+            derived_limit_price = protective_limit_price(
+                stop_price, limit_offset, closing_long=is_long
             )
             if (
                 not math.isfinite(limit_offset)
@@ -1714,8 +1714,17 @@ def _as_bracket_attachment_pair(
     ``(StopAttachment, LimitAttachment)``.
     Raises:
         TypeError: if ``attachments`` is not exactly a two-element
-            ``(StopAttachment, LimitAttachment)`` pair.
+            ``(StopAttachment, LimitAttachment)`` pair. Checked explicitly
+            (rather than relying on tuple/list unpacking's own arity check)
+            because unpacking a wrong-length sequence raises ``ValueError``,
+            not ``TypeError`` — this function's contract is "wrong shape is
+            always a ``TypeError``", covering both wrong length and wrong
+            element types with one exception type.
     """
+    if len(attachments) != 2:
+        raise TypeError(
+            f"bracket attachment resolution must produce exactly 2 attachments, got {len(attachments)}"
+        )
     stop_attachment, limit_attachment = attachments
     if not isinstance(stop_attachment, StopAttachment) or not isinstance(
         limit_attachment, LimitAttachment
