@@ -1047,28 +1047,24 @@ class SpecReadinessGate(GateResultsMixin):
         # comparing.
         slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
 
-        # Notional is symbol-independent for all three supported kinds, so
-        # resolve it once.
-        vol_target_fraction: Optional[float] = None
+        # Notional is symbol-independent for ``fixed_fraction``/``fixed_notional``,
+        # so resolve it once. ``volatility_target`` is NOT symbol-independent —
+        # its worst-case bound is derived from ``atr_val_floor = price *
+        # _MIN_PLAUSIBLE_ATR_PCT``, and price varies per symbol — so its
+        # ``notional`` is instead resolved inside the per-symbol loop below,
+        # once each symbol's price sample is known.
+        is_fixed_fraction = kind == "fixed_fraction"
+        is_fixed_notional = kind == "fixed_notional"
         max_position_fraction: Optional[float] = None
-        if kind == "fixed_fraction":
+        if is_fixed_fraction:
             fraction = float(ctx.spec.sizing.fraction)
             notional = capital * fraction
-        elif kind == "fixed_notional":
+        elif is_fixed_notional:
             notional = float(ctx.spec.sizing.notional_usd)
-        elif kind == "volatility_target":
-            # Worst-case notional bound: assume the smallest plausible ATR
-            # (see ``_MIN_PLAUSIBLE_ATR_PCT``), which maximises
-            # ``equity * target_annual_vol / atr_val``, expressed as a
-            # fraction of capital. But the engine ALSO unconditionally clamps
-            # every ``volatility_target`` order to ``risk_limits.
-            # max_position_pct`` of equity before it is placed
-            # (``_compute_qty``'s ``_cap_position`` path) — an ATR-independent
-            # ceiling — so the true worst case is the tighter of the two.
+        elif is_vol_target:
             tav = float(ctx.spec.sizing.target_annual_vol)
-            vol_target_fraction = tav / _MIN_PLAUSIBLE_ATR_PCT
             max_position_fraction = float(ctx.spec.risk_limits.max_position_pct) / 100.0
-            notional = capital * min(vol_target_fraction, max_position_fraction)
+            notional = None  # resolved per symbol below
         else:
             # Unknown sizing kind — covered by spec_dsl validation, but be
             # defensive: nothing further to evaluate.
@@ -1110,6 +1106,29 @@ class SpecReadinessGate(GateResultsMixin):
                 price = float(self._market_sample_provider(sym, ctx.spec.asset_class))
             except Exception:
                 price = float("nan")
+
+            if is_vol_target:
+                if math.isfinite(price) and price > 0:
+                    # Worst-case per-symbol notional: the engine's sizing
+                    # formula is ``notional = equity * target_annual_vol /
+                    # atr_val`` (reference price cancels out of that ratio),
+                    # and the conservative floor substitutes ``atr_val_floor
+                    # = price * _MIN_PLAUSIBLE_ATR_PCT`` — so price re-enters
+                    # here, in the denominator: a lower-priced symbol implies
+                    # a smaller absolute-dollar ATR floor at the same
+                    # percentage, hence a larger worst-case notional. Still
+                    # clamped by the engine's unconditional, price-independent
+                    # max_position_pct clamp.
+                    atr_floor_fraction = tav / (price * _MIN_PLAUSIBLE_ATR_PCT)
+                    notional = capital * min(atr_floor_fraction, max_position_fraction)
+                else:
+                    # No usable price to derive the ATR-relative bound; the
+                    # max_position_pct clamp is price-independent and always
+                    # applies, so fall back to it alone. This is exactly what
+                    # the ATR-derived term collapses to as price → 0, so it
+                    # stays a valid (if coarser) worst-case bound rather than
+                    # an unbounded or zero one.
+                    notional = capital * max_position_fraction
 
             if math.isfinite(price):
                 if price <= 0:
@@ -1187,7 +1206,7 @@ class SpecReadinessGate(GateResultsMixin):
                         "simultaneously."
                     ),
                 )
-            if kind == "volatility_target":
+            if is_vol_target:
                 worst_case_fraction = effective_worst_case_notional / capital
                 slippage_note = (
                     f", inflated {(slippage_multiplier - 1) * 10_000:.1f}bps for "
@@ -1195,24 +1214,17 @@ class SpecReadinessGate(GateResultsMixin):
                     if worst_case_concurrent > 1
                     else ""
                 )
-                binding_term = (
-                    f"target_annual_vol {tav:.4f} ÷ conservative ATR floor "
-                    f"{_MIN_PLAUSIBLE_ATR_PCT:.4f} ({vol_target_fraction:.2f}x equity)"
-                    if vol_target_fraction <= max_position_fraction
-                    else (
-                        f"risk_limits.max_position_pct "
-                        f"{ctx.spec.risk_limits.max_position_pct:.2f}% "
-                        f"({max_position_fraction:.2f}x equity)"
-                    )
-                )
                 return (
                     self._critical(
-                        f"Sizing realisability: volatility_target worst-case notional, "
-                        f"bounded by {binding_term} (the tighter of a conservative "
-                        f"ATR-floor bound on target_annual_vol and the engine's "
-                        f"unconditional max_position_pct clamp), × worst-case "
-                        f"concurrency {worst_case_concurrent} (min of {len(symbols)} "
-                        f"target symbol(s) and risk_limits.max_open_positions "
+                        f"Sizing realisability: volatility_target worst-case notional "
+                        f"— each symbol's target is the tighter of a conservative "
+                        f"ATR-floor bound (target_annual_vol {tav:.4f} ÷ [sample price "
+                        f"× conservative ATR floor {_MIN_PLAUSIBLE_ATR_PCT:.4f}]) and the "
+                        f"engine's unconditional risk_limits.max_position_pct "
+                        f"{ctx.spec.risk_limits.max_position_pct:.2f}% clamp — summed "
+                        f"across worst-case concurrency {worst_case_concurrent} (min of "
+                        f"{len(symbols)} target symbol(s) and risk_limits."
+                        f"max_open_positions "
                         f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
                         f"whole-lot share flooring where applicable{slippage_note}) = "
                         f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
