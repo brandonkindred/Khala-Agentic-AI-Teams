@@ -89,8 +89,9 @@ def simulate(
     """
 ```
 
-- `spec` is the existing `StrategySpec` Pydantic model (`models.py`) — reused
-  verbatim, no translation layer.
+- `spec` is the existing `StrategySpec` Pydantic model
+  (`backend/agents/investment_team/models.py`) — reused verbatim, no
+  translation layer.
 - `bars` is keyed by symbol, each value an existing `Bar` sequence
   (`trading_service/strategy/contract.py`) — keyed because `StrategySpec`
   can target more than one symbol and every existing decision structure
@@ -459,9 +460,10 @@ entry) to be marked at all. This is why the "Cross-symbol processing order"
 note above matters: computing this equity figure correctly for a
 multi-symbol spec requires walking every symbol's bars in one merged
 chronological order, not resolving one symbol's trades in isolation. The
-per-sizing-kind formula mirrors production's (evaluated against the trigger
-bar's close, the same reference price used for the reference fill's
-next-bar-open resolution one bar later):
+per-sizing-kind formula mirrors production's, evaluated against the trigger
+bar's close (the same anchor price production uses for sizing; the
+reference fill itself resolves one bar later, at `entry_bar.open`, per the
+"Entries" subsection above — sizing and fill price are not the same price):
 
 - `FixedFractionSizing`: `equity * fraction / trigger_bar.close`.
 - `FixedNotionalSizing`: `notional_usd / trigger_bar.close`.
@@ -688,14 +690,16 @@ identical to production, not just directionally similar:
 
 Before evaluating any exit rule, this module must reproduce one
 preprocessing step production applies to the spec: for any spec that permits
-short exposure — `spec.entry_rules is None` (the `requires_custom_code`
-signal — excluded from this module's scope per §2's precondition, so in
-practice this means any `EntryRule.side == "short"`) — and that has no
-already-effective short-side stop among its existing exit rules, production
-**appends** a synthetic `StopLossRule(pct=1.0, basis="entry_price")` to the
-working `exit_rules` list, mirroring the same "no effective short stop"
-check production uses (`first_side_stop_factor(exit_rules, "short") is
-None`). This is a **real, indexable** rule once injected — not a
+short exposure and has no already-effective short-side stop among its
+existing exit rules, production **appends** a synthetic
+`StopLossRule(pct=1.0, basis="entry_price")` to the working `exit_rules`
+list, mirroring the same "no effective short stop" check production uses
+(`first_side_stop_factor(exit_rules, "short") is None`). The general trigger
+for "permits short exposure" is `spec.entry_rules is None` (the
+`requires_custom_code` signal), but that case is already excluded from this
+module's scope per §2's precondition — so in practice the condition this
+module must check reduces to any `EntryRule.side == "short"`. This is a
+**real, indexable** rule once injected — not a
 side-channel default — so a short position that runs to double its entry
 price closes via this synthetic rule in production, with a genuine
 `rule_index` one past the last authored rule
@@ -808,8 +812,9 @@ trivial divergence this reference ledger exists to avoid.
 ### `take_profit`
 
 Modeled as a resting limit at the exact target price
-(`entry_price_basis * (1 ± pct)` — the post-slippage anchor `stop_loss`
-defines above, not `ReferenceTrade.entry_price`). Always fills at
+(`entry_price_basis * (1 + pct)` for a long, `entry_price_basis * (1 - pct)`
+for a short — the post-slippage anchor `stop_loss` defines above, not
+`ReferenceTrade.entry_price`). Always fills at
 **exactly** the target — never better, never worse, even on a gap through
 it — which is a deliberate
 production design choice, not merely "a limit never fills worse than its
@@ -830,8 +835,9 @@ Fill bar is the trigger bar.
 ### `scaled_take_profit`
 
 A ladder of resting limit orders, one per `TakeProfitLevel`, each at
-`entry_price_basis * (1 ± level.pct)` (same post-slippage anchor as
-`take_profit`, not `ReferenceTrade.entry_price`) — `level.pct` is a positive
+`entry_price_basis * (1 + level.pct)` for a long, `entry_price_basis * (1 -
+level.pct)` for a short (same post-slippage anchor as `take_profit`, not
+`ReferenceTrade.entry_price`) — `level.pct` is a positive
 magnitude, strictly increasing across `levels` by construction
 (Pydantic-enforced), so
 rung 0 is always the target closest to entry and the last rung the target
