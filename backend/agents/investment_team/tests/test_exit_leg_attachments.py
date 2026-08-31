@@ -286,6 +286,36 @@ def test_rejects_negligible_limit_offset() -> None:
         )
 
 
+def test_accepts_limit_offset_that_only_rounds_away_in_the_unused_direction() -> None:
+    """A limit_offset that rounds away under addition but survives under
+    subtraction must NOT be rejected for a long leg, since materialization
+    (``protective_limit_price``) only ever applies subtraction on the long
+    side (``closing_long``) — checking both directions would wrongly reject
+    a leg whose actual downstream arithmetic is fine. ref_price=2.0,
+    pct=0.5 -> stop_price=1.0; limit_offset_pct=2**-53 -> limit_offset
+    rounds 1.0 + limit_offset back to 1.0 but 1.0 - limit_offset stays a
+    distinct 0.9999999999999999."""
+    [att] = resolve_exit_leg_attachments(
+        [_leg(OrderType.STOP_LIMIT, pct=0.5, limit_offset_pct=2**-53)], OrderSide.LONG, 2.0
+    )
+    assert isinstance(att, StopAttachment)
+    assert att.stop_price == pytest.approx(1.0)
+    assert att.limit_offset == pytest.approx(2**-53)
+
+
+def test_rejects_underflowed_trail_offset() -> None:
+    """trail_offset is computed independently from stop_price (its own
+    multiplication, rounded separately), so it can underflow to a
+    negligible or literal-zero value even when stop_price is a valid,
+    distinct, nonzero price -- e.g. at a subnormal-scale ref_price, where
+    ref_price * pct underflows to exactly 0.0 while ref_price * (1 + pct)
+    does not."""
+    with pytest.raises(ValueError, match="non-finite/non-positive/negligible trail_offset"):
+        resolve_exit_leg_attachments(
+            [_leg(OrderType.TRAILING_STOP, pct=0.5)], OrderSide.SHORT, 5e-324
+        )
+
+
 # ---------------------------------------------------------------------------
 # ExitLegSpec: kind / secondary-offset coupling validation
 # ---------------------------------------------------------------------------

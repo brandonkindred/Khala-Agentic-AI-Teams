@@ -1527,20 +1527,24 @@ def resolve_exit_leg_attachments(
     each element is a :class:`StopAttachment` (``STOP``/``STOP_LIMIT``/
     ``TRAILING_STOP`` legs) or :class:`LimitAttachment` (``LIMIT`` legs) whose
     absolute price is finite, strictly positive, and strictly on the correct
-    side of ``ref_price``; a ``STOP_LIMIT`` leg's ``limit_offset`` is finite,
-    strictly positive, and large enough to survive being added to or
-    subtracted from ``stop_price``; empty ``legs`` yields ``[]``.
+    side of ``ref_price``; a ``STOP_LIMIT`` leg's ``limit_offset`` and a
+    ``TRAILING_STOP`` leg's ``trail_offset`` are each finite, strictly
+    positive, and large enough to survive the side-specific addition/
+    subtraction materialization actually applies (``stop_price``/
+    ``ref_price`` respectively); empty ``legs`` yields ``[]``.
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
-            ``<= 0``, or if a resolved price (or a ``STOP_LIMIT`` leg's
-            ``limit_offset``) is non-finite, non-positive, or too small to
-            survive its downstream arithmetic — a defensive guard that would
-            only trip if a leg field bound were loosened without updating
-            this math, an extreme ``ref_price`` overflowed the resolved
-            price to ``inf``, or a vanishingly small ``pct``/
-            ``limit_offset_pct`` rounded away to nothing in float64
-            (``ref_price * (1 ± pct) == ref_price``, or
-            ``stop_price ± limit_offset == stop_price``, bit-for-bit).
+            ``<= 0``, or if a resolved price (or a ``STOP_LIMIT``/
+            ``TRAILING_STOP`` leg's secondary offset) is non-finite,
+            non-positive, or too small to survive its downstream
+            arithmetic — a defensive guard that would only trip if a leg
+            field bound were loosened without updating this math, an
+            extreme ``ref_price`` overflowed the resolved price to ``inf``,
+            or a vanishingly small ``pct``/``limit_offset_pct`` rounded away
+            to nothing in float64 on the side-specific direction
+            materialization applies (``ref_price ∓ price_delta ==
+            ref_price``, ``stop_price ∓ limit_offset == stop_price``, or
+            ``ref_price ∓ trail_offset == ref_price``, bit-for-bit).
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
     # contract stays enforced in optimized production runs. ``ref_price`` is a
@@ -1616,30 +1620,50 @@ def resolve_exit_leg_attachments(
             # value is derived from ``stop_price``, not checked against
             # it directly) but still too small to survive being combined
             # with ``stop_price`` at materialization time —
-            # ``protective_limit_price`` adds/subtracts it from
-            # ``stop_price`` (``fill_simulator._materialize_bracket_children``),
-            # and float64 has only ~15-17 significant digits, so
-            # ``stop_price ± limit_offset == stop_price`` bit-for-bit when
-            # ``limit_offset`` is many orders of magnitude smaller. Check
-            # both directions since this resolver doesn't know which sign
-            # materialization will apply (``closing_long``).
-            if (
-                not math.isfinite(limit_offset)
-                or limit_offset <= 0
-                or stop_price + limit_offset == stop_price
-                or stop_price - limit_offset == stop_price
-            ):
+            # ``protective_limit_price`` (``stop_price - offset`` when
+            # ``closing_long`` — i.e. ``is_long`` here, since
+            # ``closing_long == (req.side == OrderSide.LONG)`` at the
+            # ``fill_simulator._materialize_bracket_children`` call site —
+            # else ``stop_price + offset``) combines it with ``stop_price``,
+            # and float64 has only ~15-17 significant digits, so the result
+            # can equal ``stop_price`` bit-for-bit. Check only the direction
+            # materialization will actually use — checking both would reject
+            # legs where only the *unused* direction rounds away (float
+            # spacing is asymmetric around a power of two, so addition and
+            # subtraction can behave differently at the same magnitude).
+            negligible_offset = (
+                stop_price - limit_offset == stop_price
+                if is_long
+                else stop_price + limit_offset == stop_price
+            )
+            if not math.isfinite(limit_offset) or limit_offset <= 0 or negligible_offset:
                 raise ValueError(
                     f"exit leg resolved non-finite/non-positive/negligible "
                     f"limit_offset={limit_offset!r} from stop_price={stop_price!r}, "
                     f"limit_offset_pct={leg.limit_offset_pct!r}"
                 )
-        # ``trail_offset`` is derived from ``ref_price`` (not ``stop_price``):
-        # ``ref_price - stop_price == ref_price * pct`` by construction above,
-        # so seeding the child from ``entry_fill_price ∓ trail_offset`` (see
-        # ``_materialize_bracket_children``) reproduces this same ``stop_price``
-        # when ``entry_fill_price == ref_price`` — see the docstring.
+        # ``trail_offset`` is derived from ``ref_price`` (not ``stop_price``)
+        # via its own multiplication, independently rounded from
+        # ``stop_price``'s — so it is not guaranteed to equal
+        # ``ref_price - stop_price`` bit-for-bit, and can itself underflow
+        # to a negligible (or literal zero) value even when ``stop_price``
+        # is a valid, distinct, nonzero price (e.g. at subnormal-scale
+        # ``ref_price``). Checked below, on the same side-specific
+        # direction ``_materialize_bracket_children`` actually applies
+        # (``entry_fill_price - offset`` when ``req.side == LONG`` — i.e.
+        # ``is_long`` here — else ``entry_fill_price + offset``).
         trail_offset = ref_price * leg.pct if leg.kind == OrderType.TRAILING_STOP else None
+        if trail_offset is not None:
+            negligible_trail = (
+                ref_price - trail_offset == ref_price
+                if is_long
+                else ref_price + trail_offset == ref_price
+            )
+            if not math.isfinite(trail_offset) or trail_offset <= 0 or negligible_trail:
+                raise ValueError(
+                    f"exit leg resolved non-finite/non-positive/negligible "
+                    f"trail_offset={trail_offset!r} from ref={ref_price!r}, pct={leg.pct!r}"
+                )
         attachments.append(
             StopAttachment(
                 stop_price=stop_price,
