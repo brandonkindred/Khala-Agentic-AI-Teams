@@ -1365,7 +1365,16 @@ def test_run_review_tool_agents_run_concurrently(tmp_path: Path) -> None:
         **_noop_runners(),
     )
 
-    assert result is not None  # the barrier releasing (not timing out) is the real assertion
+    assert result is not None
+    # Each agent's review() is wrapped in its own try/except, so a regression to
+    # sequential dispatch would not raise here -- agent 1 would block until the
+    # barrier times out, break, and every agent's resulting BrokenBarrierError
+    # would be caught and logged rather than propagating. Asserting the barrier
+    # actually cleared is what makes this test fail on sequential dispatch, an
+    # undersized worker pool, or a skipped agent.
+    assert not barrier.broken, (
+        "tool agents did not all clear the barrier -- dispatch is not fully concurrent"
+    )
 
 
 def test_run_review_tool_agents_concurrent_output_matches_sequential(tmp_path: Path) -> None:
