@@ -1289,10 +1289,12 @@ class TestRunAddressComments:
 
         def _get_pull_request(_o, _r, _n):
             calls["n"] += 1
-            # The pre-loop fetch, _clear_waiting_for_review's own fetch, and
-            # comment 2's own refresh all see it open; comment 5's refresh
-            # discovers it was closed in the meantime.
-            if calls["n"] <= 3:
+            # The pre-loop fetch, _clear_waiting_for_review's own fetch,
+            # comment 2's own per-iteration refresh, and comment 2's own
+            # post-triage staleness re-check (inside _handle_comment) all
+            # see it open, so comment 2 succeeds normally; comment 5's
+            # per-iteration refresh discovers it was closed in the meantime.
+            if calls["n"] <= 4:
                 return real_pr
             return replace(real_pr, state="closed")
 
@@ -1329,11 +1331,13 @@ class TestRunAddressComments:
 
         def _get_pull_request(_o, _r, _n):
             calls["n"] += 1
-            # Pre-loop fetch, _clear_waiting_for_review's fetch, and the only
-            # comment's own per-iteration refresh all see it open — the PR
-            # closes only while that comment's _handle_comment is "running",
-            # discovered by the post-loop re-check (the 4th call).
-            if calls["n"] <= 3:
+            # Pre-loop fetch, _clear_waiting_for_review's fetch, the only
+            # comment's own per-iteration refresh, and its post-triage
+            # staleness re-check (inside _handle_comment) all see it open
+            # — the PR closes only while that comment's _handle_comment is
+            # "running" beyond that point, discovered by the post-loop
+            # re-check (the 5th call).
+            if calls["n"] <= 4:
                 return real_pr
             return replace(real_pr, state="closed")
 
@@ -1972,6 +1976,43 @@ class TestRunAddressComments:
 
         assert outcome.outcome == "failed"
         assert "sha1" in outcome.detail and "sha2" in outcome.detail
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_pr_closed_after_triage_without_head_change_blocks_false_positive_resolve(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A PR can be merged (as-is) or closed without any new commit
+        landing — the head SHA GitHub reports never changes. A staleness
+        check that only compares head SHA would miss this entirely and let
+        the false-positive path reply to and resolve a conversation on a
+        PR no longer open. Live `state` must be checked too, not just
+        `head_sha`."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        # Closed, but the SAME head_sha as what was passed in (sha1) — no new commit.
+        fake.pr = replace(fake.pr, state="closed", head_sha="sha1")
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "no longer open" in outcome.detail
         assert fake.replies == []
         assert fake.resolved == []
 

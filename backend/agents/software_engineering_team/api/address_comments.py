@@ -1109,37 +1109,54 @@ def _clear_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int
 # ---------------------------------------------------------------------------
 
 
-def _pr_head_moved(
+def _pr_became_stale(
     client: Any,
     request: AddressCommentsRequest,
     comment_id: int,
     pr_head_sha: str,
     stage: str,
 ) -> Optional[str]:
-    """Re-check whether the PR's head SHA has moved past ``pr_head_sha``.
+    """Re-check whether the PR moved on (a new head, or closed/merged) since ``pr_head_sha``.
 
     Preconditions:
         - ``pr_head_sha`` is the head SHA captured before the LLM round-trip
-          (triage or planning) named by ``stage`` (used only in log lines).
+          (triage or planning) named by ``stage`` (used only in log/detail text).
     Postconditions:
-        - Returns the new head SHA if a live re-fetch succeeds and differs
-          from ``pr_head_sha``. Returns ``None`` both when the head is
-          unchanged and when the re-fetch itself fails — a failed check is
-          best-effort and must not block the run, so it degrades to
-          proceeding on the original snapshot rather than raising.
+        - Returns a ready-to-use ``base.detail`` message when a live re-fetch
+          succeeds and finds EITHER the head SHA changed OR the PR is no
+          longer open — either one means the verdict/plan this comment is
+          about to act on was grounded on state that's no longer current. A
+          head-SHA-only check would miss the "closed with no new commit"
+          case (e.g. merged as-is, or closed without merging): the SHA
+          reported by GitHub for a merged PR does not change, but false-
+          positive replies/resolves and real-issue implementation dispatch
+          must not proceed against a PR no longer accepting either.
+        - Returns ``None`` when neither happened, or when the re-fetch
+          itself fails — a failed check is best-effort and must not block
+          the run, so it degrades to proceeding on the original snapshot
+          rather than raising.
     """
     try:
         current_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
     except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block the run
         logger.warning(
-            "address-comments: could not re-check PR head after comment %s was %s: %s",
+            "address-comments: could not re-check PR state after comment %s was %s: %s",
             comment_id,
             stage,
             scrub_token_from_text(str(e)),
         )
         return None
+    if current_pr.state != "open":
+        return (
+            f"PR {request.owner}/{request.repo}#{request.pr_number} is no longer open "
+            f"(state={current_pr.state}) after this comment was {stage}; skipped so nothing "
+            "is replied to, resolved, or published against a closed PR."
+        )
     if current_pr.head_sha != pr_head_sha:
-        return current_pr.head_sha
+        return (
+            f"PR head moved from {pr_head_sha} to {current_pr.head_sha} while this comment "
+            f"was being {stage}; skipped so the next run re-triages against the current code."
+        )
     return None
 
 
@@ -1204,12 +1221,9 @@ def _handle_comment(
         # redundant with what the newer commit did. Best-effort: a failed
         # re-fetch degrades to proceeding on the original verdict rather than
         # blocking indefinitely on a transient API issue.
-        moved_sha = _pr_head_moved(client, request, comment.id, pr_head_sha, "triaged")
-        if moved_sha is not None:
-            base.detail = (
-                f"PR head moved from {pr_head_sha} to {moved_sha} while this comment "
-                "was being triaged; skipped so the next run re-triages against the current code."
-            )
+        stale_detail = _pr_became_stale(client, request, comment.id, pr_head_sha, "triaged")
+        if stale_detail is not None:
+            base.detail = stale_detail
             return base
 
         if not triage.raises_issue:
@@ -1242,12 +1256,9 @@ def _handle_comment(
         # this window too, not just during triage. Without this second check,
         # a plan built for pre-triage code could still be dispatched even
         # though the post-triage check above already passed.
-        moved_sha = _pr_head_moved(client, request, comment.id, pr_head_sha, "planned")
-        if moved_sha is not None:
-            base.detail = (
-                f"PR head moved from {pr_head_sha} to {moved_sha} while a resolution "
-                "was being planned; skipped so the next run re-triages against the current code."
-            )
+        stale_detail = _pr_became_stale(client, request, comment.id, pr_head_sha, "planned")
+        if stale_detail is not None:
+            base.detail = stale_detail
             return base
 
         # Re-check the thread's LIVE state right before dispatching the
