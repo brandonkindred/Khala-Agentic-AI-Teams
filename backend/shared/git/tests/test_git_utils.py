@@ -633,6 +633,32 @@ def test_resolve_remote_branch_sha_threads_env_through_both_git_calls(repo: Path
     assert all(env == sentinel_env for env in seen_envs)
 
 
+def test_resolve_remote_branch_sha_gives_the_fetch_120s_not_the_30s_default(
+    repo: Path, monkeypatch
+) -> None:
+    """The fetch is the same network operation api/git_ops.py's own _git
+    (120s default) previously ran it through; it must not regress to this
+    module's 30s default and start timing out large/slow fetches that
+    previously succeeded."""
+    import shared.git.git_utils as git_utils_mod
+
+    _self_alias_origin(repo)
+    seen_timeouts = []
+    real_run_git = git_utils_mod._run_git
+
+    def _spy(path, cmd, timeout=30, **kw):
+        seen_timeouts.append((cmd[1], timeout))
+        return real_run_git(path, cmd, timeout, **kw)
+
+    monkeypatch.setattr(git_utils_mod, "_run_git", _spy)
+
+    ok, _sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+
+    assert ok is True
+    fetch_timeouts = [t for cmd, t in seen_timeouts if cmd == "fetch"]
+    assert fetch_timeouts == [120]
+
+
 def test_resolve_remote_branch_sha_deletes_private_ref_after_use(repo: Path) -> None:
     """The private ref used to resolve the SHA must not leak into the
     checkout's normal ref namespace afterward."""

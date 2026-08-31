@@ -503,7 +503,13 @@ def resolve_remote_branch_sha(
     if not (path / ".git").exists():
         return False, "Not a git repository"
     private_ref = f"refs/khala/resolve-remote-branch-sha/{uuid.uuid4().hex}"
-    code, out = _run_git(path, ["git", "fetch", "--", remote, f"{branch}:{private_ref}"], env=env)
+    # 120s, not this module's 30s default: this is the same network fetch
+    # _prepare_issue_branch previously ran through api/git_ops.py's own
+    # _git (120s default) -- a large repo or slow private remote that
+    # fetched fine before must not now start timing out at 30s.
+    code, out = _run_git(
+        path, ["git", "fetch", "--", remote, f"{branch}:{private_ref}"], 120, env=env
+    )
     if code != 0:
         return False, out
     code, sha_out = _run_git(path, ["git", "rev-parse", private_ref], merge_stderr=False, env=env)
