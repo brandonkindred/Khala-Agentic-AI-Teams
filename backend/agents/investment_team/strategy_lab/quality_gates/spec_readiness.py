@@ -94,6 +94,21 @@ _FULL_TIMEFRAME_ASSET_CLASSES: frozenset[str] = frozenset({"stocks", "crypto"})
 # drift apart.
 MAX_POSITION_PCT_CEILING: float = 25.0
 
+# Conservative floor on ATR expressed as a fraction of price, used by Rule 5
+# to upper-bound ``volatility_target`` sizing's worst-case notional at
+# readiness time. The engine's vol-target sizing formula
+# (``_compute_qty`` in ``trading_service/service.py``) is
+# ``notional = equity * target_annual_vol / atr_val`` — the reference price
+# cancels out, so notional depends only on ``target_annual_vol`` and the
+# absolute-dollar ATR. A smaller ``atr_val`` yields a larger notional, so the
+# worst case is the smallest plausible ATR. ATR's dollar magnitude scales
+# with price, so the floor must be expressed as a fraction of price rather
+# than a fixed dollar amount: ``atr_val_floor = price * _MIN_PLAUSIBLE_ATR_PCT``.
+# 0.10% is below the typical ATR of a liquid daily-bar instrument (roughly
+# 0.5%-3% of price), so it is deliberately conservative — it should over-,
+# never under-, estimate worst-case deployed notional.
+_MIN_PLAUSIBLE_ATR_PCT: float = 0.001
+
 # Relative tolerance for Rule 9's prose-vs-spec position-size comparison. A
 # prose-stated deployment percentage within this band of the spec's actual
 # sizing is treated as agreement (no warning) so rounding / loose wording
@@ -956,20 +971,16 @@ class SpecReadinessGate(GateResultsMixin):
         kind = getattr(ctx.spec.sizing, "kind", None)
 
         # Volatility-target sizing depends on realised volatility, which we
-        # cannot estimate at design time. Emit a warning so the operator
-        # notices that Rule 5 abstained — a silent skip would let an
-        # implausibly low ``target_annual_vol`` (e.g. 0.001) bypass the
-        # implementability check entirely.
-        if kind == "volatility_target":
-            tav = getattr(ctx.spec.sizing, "target_annual_vol", None)
-            return (
-                self._warning(
-                    "Sizing realisability: volatility_target sizing requires "
-                    "realised vol and cannot be evaluated at readiness time. "
-                    f"Confirm target_annual_vol={tav!r} is sensible "
-                    "(typical range: 0.05–0.30)."
-                ),
-            )
+        # cannot know exactly at design time. Unlike the two static sizing
+        # kinds this doesn't let Rule 5 abstain entirely, though: the
+        # concurrency invariant is still checkable against a documented
+        # conservative bound (see ``_MIN_PLAUSIBLE_ATR_PCT``), so
+        # ``volatility_target`` specs still flow through the worst-case
+        # notional arithmetic below like the other two kinds. This flag only
+        # controls the informational plausibility warning appended at the end
+        # when no critical fires — the check can't confirm the *actual*
+        # deployed vol is sensible, only that the worst-case bound fits.
+        is_vol_target = kind == "volatility_target"
 
         # Resolve the universe to size against. ``_default_universe_for`` now
         # raises on unknown asset classes (previously it silently fell back to
@@ -1036,13 +1047,28 @@ class SpecReadinessGate(GateResultsMixin):
         # comparing.
         slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
 
-        # Notional is symbol-independent for both supported kinds, so resolve
-        # it once.
+        # Notional is symbol-independent for all three supported kinds, so
+        # resolve it once.
+        vol_target_fraction: Optional[float] = None
+        max_position_fraction: Optional[float] = None
         if kind == "fixed_fraction":
             fraction = float(ctx.spec.sizing.fraction)
             notional = capital * fraction
         elif kind == "fixed_notional":
             notional = float(ctx.spec.sizing.notional_usd)
+        elif kind == "volatility_target":
+            # Worst-case notional bound: assume the smallest plausible ATR
+            # (see ``_MIN_PLAUSIBLE_ATR_PCT``), which maximises
+            # ``equity * target_annual_vol / atr_val``, expressed as a
+            # fraction of capital. But the engine ALSO unconditionally clamps
+            # every ``volatility_target`` order to ``risk_limits.
+            # max_position_pct`` of equity before it is placed
+            # (``_compute_qty``'s ``_cap_position`` path) — an ATR-independent
+            # ceiling — so the true worst case is the tighter of the two.
+            tav = float(ctx.spec.sizing.target_annual_vol)
+            vol_target_fraction = tav / _MIN_PLAUSIBLE_ATR_PCT
+            max_position_fraction = float(ctx.spec.risk_limits.max_position_pct) / 100.0
+            notional = capital * min(vol_target_fraction, max_position_fraction)
         else:
             # Unknown sizing kind — covered by spec_dsl validation, but be
             # defensive: nothing further to evaluate.
@@ -1161,6 +1187,40 @@ class SpecReadinessGate(GateResultsMixin):
                         "simultaneously."
                     ),
                 )
+            if kind == "volatility_target":
+                worst_case_fraction = effective_worst_case_notional / capital
+                slippage_note = (
+                    f", inflated {(slippage_multiplier - 1) * 10_000:.1f}bps for "
+                    "configured slippage"
+                    if worst_case_concurrent > 1
+                    else ""
+                )
+                binding_term = (
+                    f"target_annual_vol {tav:.4f} ÷ conservative ATR floor "
+                    f"{_MIN_PLAUSIBLE_ATR_PCT:.4f} ({vol_target_fraction:.2f}x equity)"
+                    if vol_target_fraction <= max_position_fraction
+                    else (
+                        f"risk_limits.max_position_pct "
+                        f"{ctx.spec.risk_limits.max_position_pct:.2f}% "
+                        f"({max_position_fraction:.2f}x equity)"
+                    )
+                )
+                return (
+                    self._critical(
+                        f"Sizing realisability: volatility_target worst-case notional, "
+                        f"bounded by {binding_term} (the tighter of a conservative "
+                        f"ATR-floor bound on target_annual_vol and the engine's "
+                        f"unconditional max_position_pct clamp), × worst-case "
+                        f"concurrency {worst_case_concurrent} (min of {len(symbols)} "
+                        f"target symbol(s) and risk_limits.max_open_positions "
+                        f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
+                        f"whole-lot share flooring where applicable{slippage_note}) = "
+                        f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
+                        f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
+                        f"${capital:.0f}) if all concurrent positions filled "
+                        "simultaneously."
+                    ),
+                )
             # fixed_notional
             if worst_case_concurrent > 1:
                 return (
@@ -1214,6 +1274,23 @@ class SpecReadinessGate(GateResultsMixin):
                     f"Sizing realisability: no usable price sample for any of {nan_symbols} "
                     f"({ctx.spec.asset_class}); market-data provider may be down. Proceeding "
                     "since fractional sizing stays implementable once data returns."
+                ),
+            )
+
+        # The worst-case concurrency bound fits, but volatility_target's
+        # *actual* deployed size still depends on realised vol, which cannot
+        # be known at readiness time — surface a warning so the operator
+        # notices the plausibility of target_annual_vol itself was never
+        # confirmed, only that the conservative worst-case bound is fundable.
+        if is_vol_target:
+            return (
+                self._warning(
+                    "Sizing realisability: volatility_target sizing requires "
+                    "realised vol and cannot be evaluated exactly at readiness "
+                    f"time. Confirm target_annual_vol={ctx.spec.sizing.target_annual_vol!r} "
+                    "is sensible (typical range: 0.05–0.30); the worst-case "
+                    "concurrency bound (conservative ATR floor vs. "
+                    "max_position_pct) fits within initial_capital."
                 ),
             )
         return ()

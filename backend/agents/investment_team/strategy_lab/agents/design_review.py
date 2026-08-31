@@ -153,10 +153,14 @@ _MAX_DRAWDOWN_LIMIT_RE = re.compile(
 
 # Sizing kinds whose realisability/coherence the deterministic gate FULLY owns
 # (Rule 5 realisability + Rule 9 deployed-vs-cap). ``volatility_target`` is
-# deliberately absent: ``SpecReadinessGate._check_sizing_realisable`` abstains on
-# it and only emits a *warning* (e.g. an implausible ``target_annual_vol``),
-# which the orchestrator treats as ready — so for vol-target the LLM reviewer's
-# sizing objection is the ONLY substantive check and must keep blocking.
+# deliberately absent: ``SpecReadinessGate._check_sizing_realisable`` now
+# validates volatility_target's worst-case-concurrency invariant against a
+# documented conservative ATR-floor bound (and can emit a genuine critical for
+# it), but that is only a *partial* realisability check — it says nothing
+# about whether the declared ``target_annual_vol`` itself is plausible, which
+# only the LLM reviewer's sizing critique evaluates. So for vol-target the LLM
+# reviewer's sizing objection remains a necessary, non-duplicative check and
+# must keep blocking.
 _GATE_OWNED_SIZING_KINDS: frozenset[str] = frozenset({"fixed_fraction", "fixed_notional"})
 
 
@@ -165,8 +169,10 @@ def _sizing_owned_by_gate(sizing_kind: object) -> bool:
 
     Pre: ``sizing_kind`` is the spec's ``sizing.kind`` (str) or None.
     Post: True iff ``sizing_kind`` is a gate-owned static kind; False for
-    ``volatility_target`` (gate abstains) and for unknown/missing kinds (fail
-    safe — keep a sizing objection blocking when we cannot confirm ownership).
+    ``volatility_target`` (gate only partially owns it — worst-case
+    concurrency, not target_annual_vol plausibility) and for unknown/missing
+    kinds (fail safe — keep a sizing objection blocking when we cannot
+    confirm ownership).
     """
     return sizing_kind in _GATE_OWNED_SIZING_KINDS
 
