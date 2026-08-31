@@ -158,11 +158,17 @@ no import chain back into the excluded modules above before relying on it.
 - `starting_equity > 0`.
 
 **Postconditions:**
-- The returned list is in **global emission order** — chronological by the
-  merged `(timestamp, symbol)` timeline (§2's "Cross-symbol processing
-  order"), not grouped by symbol. Consequently, the subsequence of trades
-  belonging to any single symbol is ordered by non-decreasing `entry_bar`,
-  but trades from different symbols can interleave in the overall list.
+- The returned list is in **global emission order**: a `ReferenceTrade` is
+  appended to the output at the point its position's *final closing event*
+  is reached while walking the merged `(timestamp, symbol)` timeline (§2's
+  "Cross-symbol processing order") — not at the point it opened. Trades
+  from different symbols interleave in the overall list according to when
+  each one's position actually closes, not grouped by symbol. Consequently,
+  the subsequence of trades belonging to any single symbol is ordered by
+  non-decreasing `entry_bar` (equivalently `exit_bar`): the entry-suppression
+  rule in §5's "Entries" subsection means one symbol never holds two
+  overlapping positions, so that symbol's trades close in the same relative
+  order they opened.
 - Every `ReferenceTrade` satisfies `0 <= entry_bar <= exit_bar <
   len(bars[symbol])`.
 - Each fully closed position produces exactly one `ReferenceTrade` — a
@@ -328,8 +334,12 @@ reference fill's next-bar-open resolution one bar later):
   left side before its right side, leaves visited in the tree's own
   traversal order) — mirrors `iter_tree_indicator_refs`'s yield order
   exactly, so a predicate with several differently-configured ATR refs still
-  resolves to one determinate choice. Fall back to a default ATR(14)
-  reference when no rule references one at all. Warmup fallback: if the
+  resolves to one determinate choice. Fall back to `IndicatorRef(name="atr",
+  params={"period": 14})` when no rule references an ATR at all — this
+  indicator has no smoothing-method or source-field parameters to specify
+  (`allow_source=False` in its registry entry): it is the unweighted mean of
+  true range (`max(high-low, |high-prev_close|, |low-prev_close|)`) over the
+  trailing 14 bars, not a Wilder-smoothed average. Warmup fallback: if the
   resolved ATR is unavailable or non-positive at the trigger bar (not enough
   history yet), fall back to a one-share probe instead of failing, then
   still run it through the whole-share/`max_position_pct` handling below.
@@ -351,6 +361,16 @@ unconditionally to all three sizing kinds this module models (fixed-fraction,
 fixed-notional, volatility-target) — a `FixedNotionalSizing`
 or `VolatilityTargetSizing` result above the cap must be reduced, not passed
 through uncapped.
+
+**Fractionality source.** Whether an asset class trades in fractional units
+is a single flag derived from `spec.asset_class` (not a per-symbol
+setting) via the same predicate production uses: crypto/forex normalize to
+fractional-capable, every other canonical class (stocks, options, futures,
+commodities) normalizes to whole-lot — mirrors `is_fractional_asset_class`,
+which checks the spec's normalized asset class against a fixed whole-lot
+set. This one flag applies uniformly to every symbol `bars` covers, since
+`StrategySpec.asset_class` is a single spec-wide field, not indexed by
+symbol.
 
 Whole-share handling, applied after the clamp above, mirrors production's
 cap-aware floor rather than a blanket skip: a clamped quantity `>= 1` floors
