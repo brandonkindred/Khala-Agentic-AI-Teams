@@ -997,7 +997,11 @@ def _prepare_issue_branch(
             repo_path, "rev-parse", "--verify", "--quiet", remote_issue_ref
         )
         live_head_sha = live_head.strip() if rc_live_head == 0 else None
-        if live_head_sha != expected_head_sha:
+        # casefold, not a plain ==: git SHAs are hex and case-insensitive, and
+        # nothing here guarantees the caller's expected_head_sha and git's own
+        # rev-parse output agree on letter case -- a same-commit comparison
+        # must not fail merely because of that.
+        if live_head_sha is None or live_head_sha.casefold() != expected_head_sha.casefold():
             return (
                 False,
                 f"integration_branch {integration_branch!r} head is "

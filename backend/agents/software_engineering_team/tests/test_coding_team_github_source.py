@@ -43,7 +43,7 @@ from software_engineering_team.github_source.client_http import (
     _parse_next_link,
 )
 from software_engineering_team.models import CodingTeamPlanInput
-from software_engineering_team.tests.conftest import _expected_basic_header
+from software_engineering_team.tests.conftest import _commit_on_branch, _expected_basic_header
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2305,28 +2305,12 @@ class TestPrepareIssueBranch:
         assert ok is False
         assert "unsafe" in (msg or "")
 
-    def _commit_on_branch(self, repo: str, branch: str, filename: str, contents: str) -> str:
-        """Commit ``contents`` to ``filename`` on ``branch`` (created if needed) and
-        return the resulting commit SHA, leaving the checkout back on ``main``."""
-        import subprocess
-
-        self._git(repo, "checkout", "-q", "-B", branch)
-        with open(f"{repo}/{filename}", "w") as fh:
-            fh.write(contents)
-        self._git(repo, "add", filename)
-        self._git(repo, "commit", "-q", "--no-gpg-sign", "-m", f"{branch}: {filename}")
-        sha = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-        ).stdout.strip()
-        self._git(repo, "checkout", "-q", "main")
-        return sha
-
     def test_expected_head_sha_matching_live_remote_tip_succeeds(self, api, tmp_path) -> None:
         """When the caller's ``expected_head_sha`` matches what a fresh fetch
         reports as the branch's live tip, prep proceeds exactly as without the
         check (proving the check does not misfire on the ordinary case)."""
         repo = self._init_repo(tmp_path)
-        live_sha = self._commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
 
         ok, msg, _notes = api._prepare_issue_branch(
             repo, "origin", "main", "khala/issue-9", expected_head_sha=live_sha
@@ -2351,8 +2335,8 @@ class TestPrepareIssueBranch:
         apply the caller's plan to code newer than what it was grounded on --
         and must not touch the checkout on its way to failing."""
         repo = self._init_repo(tmp_path)
-        stale_sha = self._commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
-        live_sha = self._commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+        stale_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
         assert stale_sha != live_sha
 
         ok, msg, _notes = api._prepare_issue_branch(
@@ -2379,7 +2363,7 @@ class TestPrepareIssueBranch:
         perform the check at all -- prep succeeds regardless of the branch's
         live tip, exactly as before this parameter existed."""
         repo = self._init_repo(tmp_path)
-        self._commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
 
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg

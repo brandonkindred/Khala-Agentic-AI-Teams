@@ -20,6 +20,7 @@ from typing import Any, Optional
 import pytest
 
 from software_engineering_team.tests.conftest import (
+    _commit_on_branch,
     _ensure_real_modules,
     _expected_basic_header,
     _stub_orchestrator_only,
@@ -125,21 +126,6 @@ def test_branch_prep_activity_clean_checkout_returns_ok_true(api, monkeypatch, t
         text=True,
     ).stdout.strip()
     assert head == "khala/issue-9"
-
-
-def _commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> str:
-    """Commit ``contents`` to ``filename`` on ``branch`` (created if needed) and
-    return the resulting commit SHA, leaving the checkout back on ``main``."""
-    _git(repo, "checkout", "-q", "-B", branch)
-    with open(f"{repo}/{filename}", "w") as fh:
-        fh.write(contents)
-    _git(repo, "add", filename)
-    _git(repo, "commit", "-q", "--no-gpg-sign", "-m", f"{branch}: {filename}")
-    sha = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
-    _git(repo, "checkout", "-q", "main")
-    return sha
 
 
 def test_branch_prep_activity_expected_head_sha_match_succeeds(api, monkeypatch, tmp_path) -> None:
