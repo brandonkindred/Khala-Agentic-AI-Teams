@@ -487,8 +487,16 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
     monkeypatch.setattr(run_state, "get_run_generation_strict", fake_generation)
 
     checkpointed_spec = StrategySpec.parse_persisted(_spec_dict())
+    # Production's design_context.rounds/review_rounds_completed count every
+    # review round including the final ready one (critique_history.append()
+    # runs unconditionally each round, orchestrator_design.py), so the known
+    # not-ready-round count needs +1 to match what a real converged attempt
+    # would record.
     checkpointed_context = _DesignPersistContext(
-        rounds=1, critiques=[], stop_reason="converged", loop_telemetry={}
+        rounds=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
+        critiques=[],
+        stop_reason="converged",
+        loop_telemetry={},
     )
     phase1_calls = design_attempt_llm_call_cost(REENTRY_REVIEW_NOT_READY_ROUNDS)
     phase2_calls = 2
@@ -534,12 +542,12 @@ async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost
                         spec=checkpointed_spec,
                         rationale="r",
                         design_context={
-                            "rounds": 1,
+                            "rounds": REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
                             "critiques": [],
                             "stop_reason": "converged",
                             "loop_telemetry": {},
                         },
-                        review_rounds_completed=REENTRY_REVIEW_NOT_READY_ROUNDS,
+                        review_rounds_completed=REENTRY_REVIEW_NOT_READY_ROUNDS + 1,
                     )
                 )
             raise synthesis_boundary_spec_implementability_error(
