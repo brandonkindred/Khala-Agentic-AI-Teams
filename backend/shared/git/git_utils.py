@@ -470,14 +470,21 @@ def resolve_remote_branch_sha(
     remote -- pass ``env`` (e.g. augmented with a transient auth header) when
     one is needed; this function has no opinion on its contents.
 
+    Resolves ``FETCH_HEAD`` rather than ``<remote>/<branch>``: an explicit
+    ``fetch <remote> <branch>`` always updates ``FETCH_HEAD``, but only
+    updates the ``<remote>/<branch>`` tracking ref when it matches the
+    checkout's configured refspec -- a restricted/nonstandard refspec could
+    otherwise leave that tracking ref stale while this call still reports
+    success.
+
     Preconditions:
         - ``repo_path`` is a git checkout; ``remote``/``branch`` are
           ref-shaped names the caller trusts enough to fetch -- this helper
           does not itself validate them, so a caller accepting these from an
           untrusted source must validate first.
     Postconditions:
-        - On success returns ``(True, <full sha>)`` for ``<remote>/<branch>``
-          exactly as fetched.
+        - On success returns ``(True, <full sha>)`` -- the commit ``branch``
+          on ``remote`` resolved to as of this fetch (via ``FETCH_HEAD``).
         - On failure (not a repo, or a fetch/rev-parse error) returns
           ``(False, message)`` and never a partial/garbage SHA.
     """
@@ -487,9 +494,7 @@ def resolve_remote_branch_sha(
     code, out = _run_git(path, ["git", "fetch", "--", remote, branch], env=env)
     if code != 0:
         return False, out
-    code, out = _run_git(
-        path, ["git", "rev-parse", f"{remote}/{branch}"], merge_stderr=False, env=env
-    )
+    code, out = _run_git(path, ["git", "rev-parse", "FETCH_HEAD"], merge_stderr=False, env=env)
     if code != 0:
         return False, out
     return True, out.strip()

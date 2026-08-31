@@ -2361,6 +2361,88 @@ class TestPrepareIssueBranch:
         ).stdout.strip()
         assert "README.md" in status
 
+    def test_base_ref_pinned_immune_to_concurrent_tracking_ref_mutation(
+        self, api, tmp_path, monkeypatch
+    ) -> None:
+        """A concurrent fetch against the same shared checkout (e.g. another
+        job's own base-SHA resolution, as the newly-added route-side call
+        does) can move the local `origin/main` tracking ref again after this
+        call's own fetch resolves it. Seed selection and checkout must still
+        use the commit resolved at fetch time, not whatever the tracking ref
+        points to by the time they run -- otherwise a validated base can be
+        silently swapped out from under the job."""
+        import subprocess
+
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        original_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        # Mint a second commit object standing in for "what a concurrent
+        # fetch would have moved the tracking ref to" -- never checked out,
+        # never actually the content of "origin", just a distinct valid SHA.
+        tree = subprocess.run(
+            ["git", "-C", repo, "rev-parse", f"{original_sha}^{{tree}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        concurrent_sha = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo,
+                "commit-tree",
+                tree,
+                "-p",
+                original_sha,
+                "-m",
+                "concurrent advance",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert concurrent_sha != original_sha
+
+        real_git = api._git
+
+        def _spy(repo_path, *args, **kw):
+            rc, out = real_git(repo_path, *args, **kw)
+            if rc == 0 and args == ("fetch", "--", "origin", "main"):
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        repo_path,
+                        "update-ref",
+                        "refs/remotes/origin/main",
+                        concurrent_sha,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            return rc, out
+
+        monkeypatch.setattr(api, "_git", _spy)
+
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is True, msg
+
+        final_dev_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "development"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert final_dev_sha == original_sha
+        assert final_dev_sha != concurrent_sha
+
 
 class TestGitCredentialThreading:
     """The token must reach the network git ops (fetch/push) transiently.
