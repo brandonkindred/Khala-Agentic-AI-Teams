@@ -753,6 +753,36 @@ def _merge_recovered_wip(
     )
 
 
+def resolve_remote_branch_sha(
+    repo_path: str,
+    remote: str,
+    branch: str,
+    token: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Fetch ``branch`` from ``remote`` and resolve its current HEAD SHA.
+
+    Preconditions:
+        - repo_path is a git checkout; remote/branch are ref-shaped names
+          the caller trusts enough to fetch (this helper does not itself
+          validate them via ``_is_safe_ref`` -- callers that accept these
+          names from an untrusted source must validate first).
+    Postconditions:
+        - On success returns ``(True, <full sha>)`` for ``<remote>/<branch>``
+          exactly as fetched -- callers use this as a freshness anchor to
+          compare against a later re-fetch of the same branch.
+        - On failure (fetch or rev-parse error) returns ``(False, message)``,
+          scrubbed of any credential exactly as ``_git``'s other callers get.
+    """
+    auth_env = _git_auth_env(token) if token else None
+    rc, msg = _main._git(repo_path, "fetch", "--", remote, branch, env=auth_env)
+    if rc != 0:
+        return False, msg
+    rc, out = _main._git(repo_path, "rev-parse", f"{remote}/{branch}")
+    if rc != 0:
+        return False, out
+    return True, out.strip()
+
+
 def _prepare_issue_branch(
     repo_path: str,
     remote: str,
@@ -760,6 +790,7 @@ def _prepare_issue_branch(
     integration_branch: str,
     token: Optional[str] = None,
     issue_number: Optional[int] = None,
+    expected_base_sha: Optional[str] = None,
 ) -> Tuple[bool, Optional[str], List[str]]:
     """Prepare development + integration branches, recovering interrupted state.
 
@@ -770,6 +801,9 @@ def _prepare_issue_branch(
 
     Preconditions:
         - repo_path is a git checkout; ref arguments may be untrusted.
+        - expected_base_sha, when provided, is the default_branch HEAD SHA
+          observed at triage time (before this activity ran) -- used only as
+          a freshness check, never passed to git as a ref.
     Postconditions (success):
         - integration_branch is checked out with a clean working tree;
           khala.active-issue records issue_number when provided; every commit
@@ -779,6 +813,12 @@ def _prepare_issue_branch(
     Postconditions (failure):
         - No uncommitted work has been deleted and no commit that was
           reachable on entry has become unreachable.
+        - When expected_base_sha is provided and the freshly-fetched
+          default_branch HEAD no longer matches it, fails closed with an
+          error naming both SHAs -- before any dirty-tree recovery, seed
+          selection, or checkout runs -- since the plan this job carries was
+          grounded on the expected SHA and must not be silently applied to
+          different code.
     """
     notes: List[str] = []
 
@@ -825,9 +865,21 @@ def _prepare_issue_branch(
     rc, msg = _main._git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
     if rc != 0:
         return False, msg, notes
+    base_ref = f"{remote}/{default_branch}"
+    if expected_base_sha:
+        rc, fetched_sha_or_err = _main._git(repo_path, "rev-parse", base_ref)
+        if rc != 0:
+            return False, fetched_sha_or_err, notes
+        fetched_sha = fetched_sha_or_err.strip()
+        if fetched_sha != expected_base_sha:
+            return (
+                False,
+                f"base branch `{default_branch}` moved from `{expected_base_sha}` to "
+                f"`{fetched_sha}` since triage; plan is stale, re-triage required",
+                notes,
+            )
     # The issue branch may exist remotely from a previous job that pushed
     # before dying; fetch it as a continuation candidate (absence is fine).
-    base_ref = f"{remote}/{default_branch}"
     remote_issue_ref = f"{remote}/{integration_branch}"
     rc_issue_fetch, issue_fetch_msg = _main._git(
         repo_path, "fetch", "--", remote, integration_branch, env=auth_env

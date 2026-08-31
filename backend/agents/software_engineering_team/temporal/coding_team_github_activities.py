@@ -87,7 +87,11 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
           ``remote``, ``default_branch``, and ``integration_branch``. Must NOT
           include a ``token`` field -- the activity resolves the GitHub token
           from the job's ``github_token_encrypted`` or ``GITHUB_TOKEN``.
-        - May also carry ``issue_number`` (Optional[int]).
+        - May also carry ``issue_number`` (Optional[int]) and
+          ``expected_base_sha`` (Optional[str]) -- the ``default_branch`` HEAD
+          SHA observed at triage time; when present, branch prep fails closed
+          if the freshly-fetched ``default_branch`` no longer matches it
+          (the base moved between triage and this activity running).
         - ``repo_path`` names a git checkout the calling process can write
           to; ``remote``/``default_branch``/``integration_branch`` may be
           untrusted ref-shaped strings -- ``_prepare_issue_branch`` rejects
@@ -126,6 +130,7 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
         request["integration_branch"],
         token,
         issue_number=request.get("issue_number"),
+        expected_base_sha=request.get("expected_base_sha"),
     )
     return {"ok": ok, "error": err, "notes": notes}
 

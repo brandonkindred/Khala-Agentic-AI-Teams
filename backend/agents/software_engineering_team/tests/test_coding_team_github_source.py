@@ -1326,6 +1326,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(api_main, "_prepare_issue_branch", lambda *a, **kw: (True, None, []))
     monkeypatch.setattr(api_main, "_fast_forward", lambda *a, **kw: (True, None))
     monkeypatch.setattr(api_main, "_push_branch", lambda *a, **kw: (True, None))
+    monkeypatch.setattr(api_main, "resolve_remote_branch_sha", lambda *a, **kw: (True, "deadbeef"))
 
     # Orchestrator no-op: mark a merged task on the job.
     def _fake_orchestrator(job_id: str, _repo_path, _plan, **kw):
@@ -1458,6 +1459,7 @@ class TestEndpointHappyPath:
             "remote": "upstream",
             "base": "trunk",
             "integration_branch": "khala/issue-1",
+            "expected_base_sha": "deadbeef",
             "cleanup_checkout_on_success": True,
         }
         assert "token" not in started["github"]
@@ -1526,6 +1528,32 @@ class TestEndpointHappyPath:
         assert job is not None
         assert job["status"] == "failed"
         assert "Temporal dispatch failed" in job["error"]
+
+    def test_run_from_github_returns_502_when_base_sha_unresolvable(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """When the base branch's HEAD SHA can't be resolved, fail before dispatch
+        rather than starting a workflow with no freshness anchor."""
+        import software_engineering_team.api.coding_team_main as api_main
+
+        monkeypatch.setattr(
+            api_main, "resolve_remote_branch_sha", lambda *a, **kw: (False, "fetch failed")
+        )
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+
+        assert resp.status_code == 502
+        assert "fetch failed" in resp.json()["detail"]
 
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
@@ -2239,6 +2267,57 @@ class TestPrepareIssueBranch:
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
         assert ok is False
         assert "unsafe" in (msg or "")
+
+    def test_matching_expected_base_sha_succeeds(self, api, tmp_path) -> None:
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        import subprocess
+
+        head_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha=head_sha
+        )
+        assert ok is True, msg
+
+    def test_stale_expected_base_sha_rejected_before_any_checkout(self, api, tmp_path) -> None:
+        """The base moved since triage: fail closed, before touching the checkout."""
+        import subprocess
+
+        repo = self._init_repo(tmp_path)
+        # Advance origin/main past the SHA the (fake) triage step observed.
+        with open(f"{repo}/README.md", "a") as fh:
+            fh.write("more\n")
+        self._git(repo, "add", "README.md")
+        self._git(repo, "commit", "-q", "--no-gpg-sign", "-m", "advance")
+
+        original_head_on_disk = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha="0" * 40
+        )
+        assert ok is False
+        assert "moved" in (msg or "")
+        assert "0" * 40 in (msg or "")
+
+        # No checkout switch happened -- HEAD is exactly where the test left it.
+        head_after = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head_after == original_head_on_disk
 
 
 class TestGitCredentialThreading:
