@@ -2045,6 +2045,28 @@ no persisted pause to resume from, silently hanging the job.
   durable batch is the answer-submission route's persist-then-signal ordering, which this rogue
   signal bypassed.
 
+  **"Continues waiting" is not achievable without explicitly clearing the signal-handler's own
+  latch — as specified, the state that satisfies `wait_condition` is never reset.** The signal
+  handler's postcondition (above) sets `self._submitted_answers` on the *first* payload matching the
+  active token and silently ignores every subsequent one for that same token as a duplicate.
+  `wait_condition`'s predicate is `self._submitted_answers is not None`; once the rogue signal sets it,
+  the predicate is already satisfied and stays satisfied — there is no "continue waiting" state to
+  fall back into unless something explicitly clears it back to `None`. Worse, the first-match rule
+  means a *later, genuine* HTTP submission for this same token — the one whose signal was always
+  going to arrive and actually carry a durable batch — would itself be silently ignored as a
+  duplicate the moment it arrives, because the rogue signal already occupied the "first match" slot.
+  Left as originally worded, "continue waiting" either does not happen at all (the workflow proceeds
+  on the stale non-`None` state regardless) or, if the workflow re-enters `wait_condition` on the
+  same predicate, returns immediately again with nothing new to act on — and the legitimate
+  submission that follows is dropped. **Contract requirement, superseding "continues waiting" above:**
+  on a failed durable check, the workflow must explicitly reset `self._submitted_answers` back to
+  `None` — re-arming the latch — before re-entering (or remaining in) `wait_condition`. This makes the
+  next signal matching this `resume_token` a fresh first-match rather than a discarded duplicate, so a
+  genuine subsequent HTTP submission (which this contract's persist-then-signal ordering guarantees
+  will itself carry a durable batch and pass the same check) resumes the workflow correctly. No
+  additional polling primitive is required: re-arming relies on the genuine submission's own signal
+  arriving later, exactly as it would have if the rogue signal had never preempted it.
+
   **This cap must be version-gated for `CodingTeamWorkflow`, whose existing histories this
   contract's mandatory extraction (§4.4) requires migrating onto the same shared state machine.**
   Unlike this contract's other behavior changes (all new, on a workflow type with no pre-existing
@@ -2080,13 +2102,30 @@ no persisted pause to resume from, silently hanging the job.
   correction was written to prevent, just on the one workflow type this section otherwise leaves out.
   **Contract requirement:** extend the token-scoped reconciliation requirement to
   `CodingTeamWorkflow` as part of the same version-gated migration (behind the same patch marker
-  above) — either by adding a Coding-side reconciliation activity that filters its existing flat
-  `submitted_answers` history the same way `hitl.py:372-377`'s own reentry logic already does (by
-  membership against the currently-pending question ids, not a `resume_token` field — Coding's store
-  has none today, so this filtering approach requires no schema change), or by scoping Coding's own
-  store the same way this contract scopes Planning's (§4.3's `resume_token` tagging). Either shape is
-  acceptable; leaving Coding's capped buffer without any reconciliation path is not, since this
-  contract is what first introduces the cap that makes eviction possible on that workflow.
+  above) — by tagging each Coding batch with its `resume_token` (or another durable round identity)
+  at persist time, the same way this contract scopes Planning's own store (§4.3's `resume_token`
+  tagging), and pointing a Coding-side `check_submitted_answers_activity` at that scoped storage.
+
+  **Correction — filtering the existing flat history by current-question-id membership, as
+  `hitl.py:372-377`'s own reentry logic already does, is not an equivalent, safe alternative to
+  token-tagging here.** That id-membership filter is safe in its *original* use (resolving the
+  answers belonging to the round PRA/Tech-Lead is currently re-presenting, immediately after a
+  resume) precisely because it is checked against the round's own currently-pending ids at that
+  moment. Reused as a *reconciliation* check — "does a durable answer already exist for this
+  newly-armed token" — it loses that safety: `submitted_answers` accumulates across every round for
+  the job's lifetime, explicit question ids are not guaranteed unique across rounds (the same
+  `q{index}`-fallback and LLM-coincidence collision this contract already documents for Planning's
+  own reconciliation, §4.3), and an id-membership filter has no way to distinguish "this batch
+  answers the *current* round" from "this batch answered an *earlier* round that happened to reuse
+  the same id." A stale batch from an earlier round can therefore satisfy the filter for a newly-armed
+  token it never actually answered — and because the signal-handler correction above requires
+  treating a signal as a mere wake-up hint confirmed against exactly this lookup, a rogue or
+  coincidental signal matching the new token would find a (wrong) "durable batch" and proceed to
+  resume with stale, misapplied answers, rather than correctly finding no match. **Contract
+  requirement, superseding the id-membership alternative above:** Coding's own persist path must tag
+  each batch with `resume_token` at write time — no schema-change-avoidance shortcut — so its
+  reconciliation activity can look up "the batch for this token" exactly as Planning's does, not
+  merely "a batch that happens to still mention these ids."
 
 **Open risks, not resolved by this spec:**
 1. *Carried over from `hitl_pause_resume_contract.md` §4:* `workflow.wait_condition` here is
