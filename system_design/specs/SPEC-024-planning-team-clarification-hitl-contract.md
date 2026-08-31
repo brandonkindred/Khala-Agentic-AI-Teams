@@ -524,6 +524,23 @@ consumes. This is one extra `WHERE`-clause condition on the same `UPDATE ... WHE
 storage shape below), not a second round-trip or a separate primitive — the resume-token guard and
 the write-once guard are enforced by the same atomic server-side write.
 
+**This write-once slot condition is specific to the answer-submission route's call — it is an
+optional extra guard clause this one call site supplies, not a permanent, universal part of every
+invocation of `update_job_if_resume_token_matches`.** §4.3's resume-path clear-and-consume write
+(below) also calls this same primitive, guarded on `resume_token`, but it *legitimately changes*
+`submitted_answers` for that token as part of consuming it (clearing it, or moving its content into
+`resolved_questions`) — the incoming value is deliberately *not* identical to what is currently
+stored. If the write-once slot-equality condition above applied unconditionally to every call, the
+resume path's own consume write would fail its own guard every time (the slot's new value is never
+"absent or identical" to its old one), leaving the pause permanently un-clearable even after PRA
+has accepted the answers. **Contract requirement:** implement
+`update_job_if_resume_token_matches(job_id, expected_resume_token, **fields)` with the
+`resume_token` equality (and the job-status-active predicate above) as its only mandatory guard,
+and add the `submitted_answers`-slot condition as an *additional*, opt-in `WHERE` clause the
+answer-submission route's call supplies (e.g. an `expected_answers_absent_or_equal` parameter),
+never applied to the resume path's clear-and-consume call, which supplies no such parameter and is
+free to overwrite that slot as part of its own atomic write.
+
 **The persist step must be first-write-wins, not last-write-wins.** Two clients can race to submit
 answers for the same `resume_token` (a stale UI retry, a double-click, a legitimate second
 attempt). The workflow's signal handler already commits to "first submission wins, everything else
@@ -1105,11 +1122,19 @@ The primitive #7445-B builds must satisfy:
   cancel racing the same no-retry submission that is timing out or crashing), this backstop would
   overwrite that `cancelled` status with `failed` — the same class of race
   `update_job_if_not_cancelled` (`db.py:320-366`) already exists to prevent for every other
-  terminalizing write in this codebase. **Contract requirement:** `mark_planning_job_failed_activity`
-  must perform its write through that same conditional pattern (a `planning_team`-side equivalent of
-  `update_job_if_not_cancelled`, guarding on the real `jobs.status` column exactly as corrected
-  above — not the existing unconditional `mark_job_failed`), so a job already cancelled stays
-  cancelled rather than being reclassified as failed. **Contract requirement:** the workflow's
+  terminalizing write in this codebase. **Guarding on `status != 'cancelled'` alone (mirroring
+  `update_job_if_not_cancelled` verbatim) is not enough either — `interrupted` is a second terminal
+  status this same backstop can just as easily clobber.** `mark_all_active_jobs_interrupted`
+  (`job_service/db.py:634-...`, driven by the job service's own shutdown/startup recovery path)
+  marks every active job `interrupted` on service shutdown; if that recovery sweep runs while this
+  contract's no-retry submission activity is mid-crash or mid-timeout, and a surviving worker later
+  executes this backstop activity, an unconditional-except-cancelled guard would overwrite the
+  recovery path's `interrupted` status with `failed`, defeating that recovery signal. **Contract
+  requirement:** `mark_planning_job_failed_activity` must condition its write on the job still being
+  *active* — `status IN ('pending', 'running')`, the same allowlist (and the same real-SQL-column
+  correction) as the pause-creation and answer-write primitives above — not merely "not cancelled,"
+  so a job that reached *any* other terminal status first (`cancelled`, `interrupted`, `completed`,
+  or a prior `failed`) is left exactly as it was. **Contract requirement:** the workflow's
   `except` block must wrap this `execute_activity` call in its own nested `try/except` (or
   `try/finally`) so that if the backstop activity itself exhausts its bounded retries — plausible
   during the very same job-service outage that caused the original failure — that secondary
@@ -1279,6 +1304,28 @@ this contract:
   A losing (stale-fenced) attempt follows the same reload-and-re-emit rule above, but reloads
   whatever the job record's *current* state actually is (paused on a newer round, or already
   completed) rather than assuming its own now-invalid pending-questions snapshot is still current.
+
+  **The terminal-status guard alone leaves one more race: a stale attempt's pause-creation write can
+  still land in the narrow window *before* the job's status actually flips to terminal.** Two
+  overlapping attempts (the same heartbeat-loss scenario throughout this section) can each be
+  mid-flight when `wait_pra` reports `"completed"` (no more questions): one attempt takes that
+  success path and is about to return; the other, stale attempt is still executing the paused-return
+  path and can successfully pass the `pause_generation`/status guard an instant *before*
+  `finalize_planning_activity`'s status write actually lands — the job record is still `running` at
+  that exact moment, so the terminal-status predicate above does not yet block it. Temporal then
+  accepts whichever attempt's *result* the workflow was actually awaiting (ordinarily the successful
+  completion), the workflow proceeds to finalize, and the orphan pause envelope the stale attempt
+  just wrote is never cleared by anything — the same silent-hang outcome this whole fencing scheme
+  exists to prevent, just relocated to a narrower timing window instead of eliminated. **Contract
+  requirement:** the success path (`wait_pra` reporting `"completed"`, no pause) must *also* advance
+  `pause_generation` as part of its own terminal job-record write — the same field, the same
+  optimistic-concurrency mechanism already established above, not a new one — so that "claim
+  completion" and "create a pause" become mutually exclusive on the *same* guarded field regardless
+  of their exact ordering relative to the separate `status` column flip: a stale attempt's
+  `create_pause_if_generation_matches(observed_generation, ...)` fails the moment *either* guard
+  condition no longer holds, and advancing `pause_generation` on the success path guarantees at
+  least one of them changes before any stale write could land, even in the single-tick window where
+  `status` has not yet been updated.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
@@ -1337,9 +1384,23 @@ this contract:
   into `context`/`context_update`'s `resolved_questions` before the terminal write** — e.g. by
   reading them back from the job record (the durable store step (2) already wrote them to) and
   merging into `context_update` ahead of the `_merge_context` call — so the terminal
-  `update_job(..., resolved_questions=...)` preserves rather than clobbers them, and the handoff
-  package built from the same `merged` dict carries the actual human decisions instead of an empty
-  list.
+  `update_job(..., resolved_questions=...)` preserves rather than clobbers them.
+
+  **Hydrating `context`/`context_update` is not sufficient on its own to fix the handoff package —
+  the `handoff.setdefault` call is a no-op against an already-populated key.** `DocumentProductionAgent.run`
+  constructs `HandoffPackage` without ever setting `resolved_questions` explicitly (`agent.py:147-157`),
+  so it takes the Pydantic model's own default — an empty list — meaning the serialized
+  `handoff_package` dict already *has* a `resolved_questions` key (populated with `[]`) by the time
+  `document_production_activity` reaches `handoff.setdefault("resolved_questions",
+  list(merged.get("resolved_questions") or []))` (`temporal/activities.py:346`). `dict.setdefault`
+  only sets a key when it is *absent*; here it is present (as `[]`), so this call is a permanent
+  no-op regardless of what `merged["resolved_questions"]` now hydrates to — the top-level job field
+  can end up correctly preserved while the handoff package itself stays empty. **Contract
+  requirement:** this activity must explicitly assign or merge the hydrated batch into
+  `handoff["resolved_questions"]` (e.g. `handoff["resolved_questions"] =
+  list(merged.get("resolved_questions") or [])`, an unconditional assignment, not a `setdefault`)
+  before persisting, so the handoff package built from the same `merged` dict carries the actual
+  human decisions instead of an empty list.
 - *Invariants:* A resume is applied at most once per `resume_token` *as reflected in this
   contract's own job record and workflow state* — re-invocation with an already-consumed token must
   not re-apply answers or re-run already-completed work there (idempotent resume from this
