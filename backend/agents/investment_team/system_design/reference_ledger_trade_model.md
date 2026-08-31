@@ -94,7 +94,7 @@ def simulate(
 ```
 
 - `spec` is the existing `StrategySpec` Pydantic model
-  (`backend/agents/investment_team/models.py`) — reused verbatim, no
+  (`agents/investment_team/models.py`) — reused verbatim, no
   translation layer.
 - `bars` is keyed by symbol, each value an existing `Bar` sequence
   (`trading_service/strategy/contract.py`) — keyed because `StrategySpec`
@@ -252,8 +252,12 @@ implementation is left for Step 2 to pick.
   per rung.
 - A position still open at `bars[symbol]`'s last bar produces no
   `ReferenceTrade` for that position.
-- No forbidden import (§2 Exclusions) occurs as a result of calling
-  `simulate`.
+- The module implementing `simulate` imports no module listed in §2
+  Exclusions, directly or transitively — the same scope as §2's own "must
+  not import" rule (module-level, not merely "as a result of calling
+  `simulate`": a top-level `import` of an excluded module at the top of the
+  implementing file would violate this even though it technically executes
+  before any call to `simulate`).
 
 **Invariants:**
 - `simulate` has no side effects: it does not mutate `spec` or `bars`, and
@@ -348,10 +352,14 @@ field above, `exit_reason` superseded by the structured
   `ReferenceTrade` represents a fully closed position, and full closure
   always happens via some exit rule firing).
 - `level_index is not None` **if and only if**
-  `exit_rule_kind == "scaled_take_profit"` — the converse is enforced by
+  `exit_rule_kind == "scaled_take_profit"`. The forward direction (every
+  `scaled_take_profit` close identifies its fired level) is enforced by
   §5's `scaled_take_profit` fill semantics, which set `level_index` to the
-  fired rung on every such close, so a `scaled_take_profit` exit can never
-  leave the fired level unidentified.
+  fired rung on every such close. The converse (no other exit kind ever
+  populates `level_index`) holds because every other §5 fill semantics
+  subsection leaves `level_index` unset — so a `scaled_take_profit` exit
+  can never leave the fired level unidentified, and no other exit kind can
+  populate one.
 
 ## 4. `exit_rule_kind` vocabulary
 
@@ -501,7 +509,17 @@ reference fill itself resolves one bar later, at `entry_bar.open`, per the
   where `atr` comes from the same indicator view this module
   already needs for `signal_exit` predicates (see §2's `PandasHistoryView`
   dependency note) — reinforcing that dependency rather than introducing a
-  new one. Which ATR — "first" is fully determined, not left to the
+  new one. **This formula is dimensionally odd and must be used exactly as
+  written, not "fixed."** `atr` (below) is dollar-denominated (a mean true
+  range, not a normalized fraction), so `equity * target_annual_vol /
+  (close * atr)` does not reduce to a clean shares-unit analysis — but it is
+  production's own `_compute_qty` expression, verified character-for-character
+  (`raw_qty = equity * float(sizing.target_annual_vol) / (close *
+  atr_val)`). An implementer who "corrects" this to divide by a normalized
+  `atr / trigger_bar.close` instead would produce a reference ledger that
+  systematically diverges from production's real sizing by a factor of
+  `trigger_bar.close` — reproducing production's actual computation is this
+  module's entire purpose, dimensional oddity included. Which ATR — "first" is fully determined, not left to the
   implementer's choice: scan the entry rules' own predicates first (in
   `spec.entry_rules` list order), then the signal-exit rules' predicates (in
   `spec.exit_rules` list order); within one rule's predicate tree, take the
