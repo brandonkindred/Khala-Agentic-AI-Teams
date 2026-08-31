@@ -53,9 +53,21 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   "Entries" subsection — so it inherits capital's post-slippage basis
   rather than being a separate no-slippage figure) — detailed in full, as the
   single authoritative enumeration, in §2's `entry_slippage_bps` parameter
-  description. It never appears in, or adjusts, any `ReferenceTrade` field
-  value, though it can still gate whether a *later* entry is admitted via
-  the capital check.
+  description. `ReferenceTrade.entry_price` itself is always the
+  pre-slippage bid, unaffected by this parameter — but it does reach
+  `ReferenceTrade.exit_price`/`exit_bar` *indirectly* for any
+  `basis="entry_price"` `stop_loss`/`take_profit`/`scaled_take_profit`
+  target: those targets are computed as `entry_price_basis * (1 ± pct)`
+  (§5's `stop_loss` subsection), and the resulting level is the exact price
+  the position fills at, which becomes `ReferenceTrade.exit_price` directly
+  — so changing `entry_slippage_bps` changes `entry_price_basis`, which
+  changes those targets, which changes both the emitted `exit_price` and
+  potentially which bar crosses it (`exit_bar`). It never appears in an
+  output field as a raw slippage adjustment applied post hoc to an
+  otherwise-fixed price — the "pre-slippage bid" character of every
+  emitted price/level holds — but it is not causally inert with respect
+  to `exit_price`/`exit_bar` the way it is for `entry_price`. It can also
+  still gate whether a *later* entry is admitted via the capital check.
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
   at a single price. This is a real, deliberate simplification, not an
@@ -124,8 +136,12 @@ def simulate(
           bars[key] has bar.symbol == key (the mapping key is the sole
           source of symbol identity this module gates and attributes
           output against; see §2's Contract for the full statement).
-        - starting_equity > 0.
-        - entry_slippage_bps >= 0.
+        - starting_equity is finite and > 0 (math.isfinite; excludes inf
+          and NaN, which would let an infinite or undefined quantity pass
+          the ReferenceTrade qty > 0 invariant undetected).
+        - entry_slippage_bps is finite and >= 0 (math.isfinite; an infinite
+          value would make entry_price_basis infinite or -infinite and
+          propagate NaN into downstream capital arithmetic).
 
     Returns:
         One ReferenceTrade per fully closed position, in global emission
@@ -149,24 +165,28 @@ def simulate(
   `StrategySpec` itself. A caller reproducing a specific backtest run passes
   that run's `BacktestConfig.initial_capital` through as `starting_equity`.
 - `entry_slippage_bps` — likewise not read off `spec`: it mirrors the
-  separate `BacktestConfig.slippage_bps`. It has exactly two internal uses,
-  neither of which reintroduces slippage into this module's own output
-  fields — `ReferenceTrade.entry_price`/`exit_price` stay the pre-slippage
-  bid values (§3) no matter what this parameter is: (1) computing an
-  internal entry-price *basis* (`entry_price_basis`) for anchoring
-  `basis="entry_price"` stop-loss/take-profit/scaled-take-profit levels and
-  the trailing-stop watermark seed (§5's `stop_loss` subsection) —
-  production's real engine anchors those against `Position.entry_price`,
-  which is the **post-slippage** fill, not the pre-slippage bid
-  `ReferenceTrade.entry_price` reports (§3); and (2) the internal **capital**
-  (cash) ledger's post-slippage entry/exit accounting (§5's "Entries"
-  subsection, "Fill-time capital sufficiency"), which uses the same
-  `entry_price_basis` and its exit-side counterpart to debit/credit cash —
-  capital can in turn gate whether a *later* entry is admitted, so this
-  parameter does affect which trades this module emits even though it never
-  touches an emitted trade's own field values. A caller reproducing a
-  specific backtest run passes that run's `BacktestConfig.slippage_bps`
-  through.
+  separate `BacktestConfig.slippage_bps`. It has exactly two internal uses:
+  (1) computing an internal entry-price *basis* (`entry_price_basis`) for
+  anchoring `basis="entry_price"` stop-loss/take-profit/scaled-take-profit
+  levels and the trailing-stop watermark seed (§5's `stop_loss`
+  subsection) — production's real engine anchors those against
+  `Position.entry_price`, which is the **post-slippage** fill, not the
+  pre-slippage bid `ReferenceTrade.entry_price` reports (§3); and (2) the
+  internal **capital** (cash) ledger's post-slippage entry/exit accounting
+  (§5's "Entries" subsection, "Fill-time capital sufficiency"), which uses
+  the same `entry_price_basis` and its exit-side counterpart to debit/credit
+  cash. `ReferenceTrade.entry_price` itself always stays the pre-slippage
+  bid regardless of this parameter, but `exit_price`/`exit_bar` are **not**
+  fully insulated from it: a `basis="entry_price"` exit's level is
+  `entry_price_basis * (1 ± pct)`, and that computed level is the exact
+  price the position fills at — becoming `ReferenceTrade.exit_price`
+  directly — so changing `entry_slippage_bps` can change which price (and
+  which bar) such an exit records, even though the *character* of every
+  emitted price (a bar-derived reference level, never a slippage-adjusted
+  fill) never changes. Capital can also gate whether a *later* entry is
+  admitted, so this parameter affects which trades this module emits
+  through that channel too. A caller reproducing a specific backtest run
+  passes that run's `BacktestConfig.slippage_bps` through.
 - Return value: one `ReferenceTrade` per **fully closed** position, in
   emission order — never one row per partial exit. A position reduced by one
   or more `scaled_take_profit` rungs before its final closing event
@@ -302,8 +322,12 @@ resolve unilaterally.
   against (§5's "Target-symbol gating") and attributes `ReferenceTrade`
   output to; a mismatched `bar.symbol` would make that attribution
   ambiguous and is out of scope for this module to detect or reconcile.
-- `starting_equity > 0`.
-- `entry_slippage_bps >= 0`.
+- `starting_equity` is finite and `> 0` (`math.isfinite` — `inf`/`NaN`
+  would let an infinite or undefined quantity slip past the
+  `ReferenceTrade.qty > 0` invariant undetected).
+- `entry_slippage_bps` is finite and `>= 0` (`math.isfinite` — an infinite
+  value would make `entry_price_basis` infinite/`-inf` and propagate `NaN`
+  into downstream capital arithmetic).
 
 **Postconditions:**
 - The returned list is in **global emission order**: a `ReferenceTrade` is
