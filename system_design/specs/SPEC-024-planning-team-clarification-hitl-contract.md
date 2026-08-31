@@ -427,6 +427,26 @@ signal; this is a required part of the contract, not an implementation detail #7
 skip. Without it, `resolve_pra_answers(..., answer_callback=<from job record>)` on resume has
 nothing to read and the resume path silently regresses to auto-answering.
 
+**The signal's destination workflow id must be stated explicitly — it is not the same prefix the
+cited coding-team call uses.** `coding_team_hitl.py`'s own `signal_workflow_sync` call targets
+`f"{WORKFLOW_ID_PREFIX}{job_id}"` using *its own team's* `WORKFLOW_ID_PREFIX`
+(`software_engineering_team.temporal.coding_team_constants.WORKFLOW_ID_PREFIX`) — a different
+constant, with a different value, than Planning's own
+`planning_team.temporal.constants.WORKFLOW_ID_PREFIX = "planning-"` (used by
+`planning_team/temporal/start_workflow.py:53`, `workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"`, to
+start the workflow this signal must reach). This contract's "mirror the coding team's route exactly"
+framing above is correct for the persist-then-signal *ordering* but must not be read as "reuse the
+coding team's literal destination construction" — an implementation that signals the bare `job_id`,
+or copies Coding's prefix instead of Planning's own, durably persists the answer batch but
+`signal_workflow_sync` targets a workflow id `PlanningWorkflow` was never started under, so the
+signal is silently undeliverable (or, worse, delivered to an unrelated `CodingTeamWorkflow`
+execution if a coding-team job happens to share the same bare `job_id`) and the workflow never
+wakes. **Contract requirement:** Planning's answer-submission route must construct the signal target
+as `f"{planning_team.temporal.constants.WORKFLOW_ID_PREFIX}{job_id}"` (i.e. `f"planning-{job_id}"`)
+— the exact same construction `start_workflow.py` already uses to start the workflow this route must
+signal — stated here as part of this interface contract, not left to be inferred (or
+miscopied) from the coding-team citation above.
+
 **Reject a stale or mismatched `resume_token` before persisting, not after.** The route must also
 mirror the coding team's own request-level check
 (`api/routes/coding_team_hitl.py:56-62`: `if request.resume_token != resume_token: raise
@@ -1866,6 +1886,32 @@ this contract:
   unchanged questions are still safe to resubmit." This still leaves the residual risk below when
   the *entire* multiset is identical across rounds.
 
+  **Comparing only `(id, question_text)` misses a round change that keeps both identical but alters
+  the question's options or multiplicity — PRA's status response exposes exactly that metadata, and
+  this reconciliation must use it.** A later PRA round can reuse the same `id` and `question_text`
+  (a plausible LLM re-ask, not only the fallback-collision case above) while changing the offered
+  `options` list or the question's `allow_multiple` flag — both fields are already present in
+  `get_product_analysis_status`'s response (the same `pending_questions` shape this contract
+  persists and reconciles against elsewhere, §4.1). Under an `(id, question_text)`-only comparison
+  this counts as "unchanged," so the retry resubmits the persisted round's stale
+  `selected_option_id`/`selected_option_ids` against the *new* round's options. Two ways that goes
+  wrong, both real given this contract's own strengthened validation (§4.1): if an option id is
+  reused with a different label, the stale selection is a *structurally valid* id for the new round
+  and the strengthened validator accepts it — silently applying the human's decision to a visually
+  different choice than the one they actually saw and picked; if the old option id no longer exists
+  in the new round's options, the strengthened validator correctly rejects the POST as an unknown
+  option id, and — because `wait_for_product_analysis_completion`'s poll loop has no failure branch
+  for a rejected submission (already established above) — polling simply stalls until `MAX_POLL_WAIT`
+  expires rather than surfacing a clean error. **Contract requirement:** the reconciliation equality
+  check must compare a canonical form of the *complete* question shape — `id`, `question_text`,
+  *and* the full `options` list (each option's `id` and `label`, in a canonicalized/sorted order so
+  option ordering isn't itself treated as a difference — mirroring this contract's own canonicalization
+  requirement for answer batches, §4.3), and `allow_multiple` — not only the `(id, question_text)`
+  pair. Any difference in any of these fields, for any question in the round, must be treated as
+  advancement exactly like an id/text change is treated above: proceed straight to step (2),
+  submitting nothing, rather than resubmitting a selection that may no longer correspond to what the
+  new round actually offers.
+
   **Multiset comparison only fixes reconciliation — it does not make a round with duplicate question
   ids answerable at all, and duplicates should never reach a client as a pause round in the first
   place.** Every validator downstream of this reconciliation keys by `question_id` alone, not by the
@@ -2063,8 +2109,35 @@ no persisted pause to resume from, silently hanging the job.
   `None` — re-arming the latch — before re-entering (or remaining in) `wait_condition`. This makes the
   next signal matching this `resume_token` a fresh first-match rather than a discarded duplicate, so a
   genuine subsequent HTTP submission (which this contract's persist-then-signal ordering guarantees
-  will itself carry a durable batch and pass the same check) resumes the workflow correctly. No
-  additional polling primitive is required: re-arming relies on the genuine submission's own signal
+  will itself carry a durable batch and pass the same check) resumes the workflow correctly.
+
+  **Re-arming alone still drops a genuine submission that lands during the check itself — "the next
+  signal will arrive later" is false for any submission that arrived *while
+  `check_submitted_answers_activity` was in flight*.** The rogue signal's `_submitted_answers` slot
+  is occupied for the entire duration of that `await workflow.execute_activity(...)` call, not just
+  until the check starts. A genuine client can persist its answer and send its own matching
+  `submit_answers` signal at any point during that window — before the check activity returns — and
+  the signal handler's first-match rule silently ignores it as a duplicate, exactly as it does for
+  every other duplicate-token signal. When the in-flight check then completes and reports "no batch"
+  (it read the job record *before* the genuine write landed, or the genuine write raced past it),
+  re-arming the latch clears `_submitted_answers` — but the one signal that would have woken the
+  workflow already arrived and was already dropped; nothing will resend it, since that client already
+  received a successful response and has no reason to retry. The workflow then waits indefinitely on
+  a `wait_condition` that no future signal will ever satisfy, even though the durable answer batch it
+  needs has been sitting in the job record the entire time. **Contract requirement, closing this
+  window:** immediately after re-arming the latch (resetting `_submitted_answers` to `None`), the
+  workflow must perform *one more* `check_submitted_answers_activity` call before returning to
+  `wait_condition` — not rely solely on a future signal. This second check catches exactly the case
+  above: a genuine batch that was persisted (and whose signal was dropped as a duplicate) during the
+  first check's flight. Only if this immediate recheck also finds no matching batch does the workflow
+  actually block on `wait_condition` for a subsequent signal — at which point no submission has
+  raced past this checkpoint unnoticed, so relying on the next signal to arrive is finally safe.
+
+  No further polling loop is required beyond this one extra recheck: any submission that could have
+  raced past the *first* check either lands before the second check (caught by it) or after the
+  second check has already returned to `wait_condition` genuinely re-armed (caught by its own signal,
+  no rogue signal blocking it this time). No additional polling primitive is required beyond this;
+  re-arming otherwise relies on the genuine submission's own signal
   arriving later, exactly as it would have if the rogue signal had never preempted it.
 
   **This cap must be version-gated for `CodingTeamWorkflow`, whose existing histories this
@@ -2197,6 +2270,17 @@ no persisted pause to resume from, silently hanging the job.
    risks 2-4: full closure requires PRA to expose a distinct applied/round receipt separate from
    pause-envelope clearing, which is outside `planning_team`'s boundary. #7445-B inherits this
    residual risk knowingly.
+7. *New to this spec, planning-internal:* `document_production_pra_submit_activity`'s own
+   active-status check (§4.3.1) is a plain read, not a claim — a cancellation or interruption can
+   land in the narrow window between that read and the `run_pra()` POST that follows it, since
+   nothing holds the row across that gap the way a conditional `UPDATE` would. The check narrows this
+   (it catches every case where the job was already terminal *before* the activity ran, the common
+   case) but does not close it: a job that becomes terminal in that specific window can still get a
+   real external PRA job submitted for it — an orphaned PRA job for a Planning run nothing will ever
+   resume. Full closure requires coordinating submission with a durable active-state claim PRA itself
+   understands, the same class of gap as risk 2 above; that is outside `planning_team`'s boundary.
+   #7445-B inherits this residual risk knowingly; this spec does not claim the plain read eliminates
+   the race, only narrows it.
 
 ---
 
