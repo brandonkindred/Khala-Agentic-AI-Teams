@@ -54,7 +54,9 @@ def _driver(handlers: dict[str, Any], calls: list):
 
 def test_run_team_workflow_v2_generates_one_trace_id_shared_by_all_three_activities():
     calls: list = []
-    with _driver({}, calls):
+    # plan_project_activity must return a dict (never None, as the driver's untouched
+    # default does) — the workflow's Phase 2 pause loop calls `.get("outcome")` on it.
+    with _driver({"plan_project_activity": lambda a: {}}, calls):
         asyncio.run(wfmod.RunTeamWorkflowV2().run("job-1", "/repo"))
 
     names = [c[0] for c in calls]
@@ -78,7 +80,7 @@ def test_run_team_workflow_v2_generates_one_trace_id_shared_by_all_three_activit
 
 def test_run_team_workflow_v2_planning_only_still_shares_the_trace_id():
     calls: list = []
-    with _driver({}, calls):
+    with _driver({"plan_project_activity": lambda a: {}}, calls):
         asyncio.run(wfmod.RunTeamWorkflowV2().run("job-2", "/repo", planning_only=True))
 
     names = [c[0] for c in calls]
@@ -90,11 +92,59 @@ def test_run_team_workflow_v2_planning_only_still_shares_the_trace_id():
 
 def test_run_team_workflow_v2_forwards_sprint_id_to_parse_spec_activity():
     calls: list = []
-    with _driver({}, calls):
+    with _driver({"plan_project_activity": lambda a: {}}, calls):
         asyncio.run(wfmod.RunTeamWorkflowV2().run("job-6", "/repo", sprint_id="sprint-456"))
 
     assert calls[0][0] == "parse_spec_activity"
     assert calls[0][1][-1] == "sprint-456"
+
+
+def test_run_team_workflow_v2_pauses_and_resumes_on_planning_answer_signal():
+    """Phase 2 durably waits for a ``submit_planning_answers`` signal instead of
+    proceeding to Phase 3 with no answer, when ``plan_project_activity`` reports a
+    pause -- the workflow-side half of issue #7446's wiring (the activity-side half,
+    catching ``PlanningAnswerPauseSignal``, is covered in ``test_temporal_activities.py``).
+    Mirrors ``CodingTeamWorkflow``'s equivalent pause-loop test but through
+    ``PlanningAnswerSignalMixin``'s ``submit_planning_answers``/``wait_for_planning_answers``
+    instead of hand-rolled signal state.
+    """
+    calls: list = []
+    plan_calls = {"n": 0}
+
+    def _fake_plan(args):
+        plan_calls["n"] += 1
+        if plan_calls["n"] == 1:
+            return {"outcome": "paused", "resume_token": "job-7:tok1"}
+        return {"outcome": "completed", "requirements_title": "Widget"}
+
+    workflow_obj = wfmod.RunTeamWorkflowV2()
+
+    async def _fake_wait_condition(pred, timeout=None):
+        workflow_obj.submit_planning_answers(
+            {
+                "resume_token": "job-7:tok1",
+                "answers": [{"question_id": "q1", "selected_option_id": "a"}],
+            }
+        )
+        assert pred()  # the predicate must observe the signal we just delivered
+
+    with _driver({"plan_project_activity": _fake_plan}, calls):
+        with mock.patch.object(_wf, "wait_condition", _fake_wait_condition):
+            asyncio.run(workflow_obj.run("job-7", "/repo"))
+
+    names = [c[0] for c in calls]
+    assert names == [
+        "parse_spec_activity",
+        "plan_project_activity",
+        "plan_project_activity",
+        "execute_coding_team_activity",
+    ]
+    # The re-invocation carries the same resume_token and the resolved answers.
+    _, _, second_plan_args = (c[1] for c in calls[:3])
+    assert second_plan_args[-2:] == [
+        "job-7:tok1",
+        [{"question_id": "q1", "selected_option_id": "a"}],
+    ]
 
 
 def test_retry_failed_workflow_generates_and_forwards_a_trace_id():

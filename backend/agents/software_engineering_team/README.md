@@ -16,12 +16,9 @@ A multi-agent system that simulates a real software engineering team with a mix 
 | **QA Expert** | Quality | Quality assurance | Reviews for bugs; produces integration/unit tests and README content (persisted to repo) |
 | **Cybersecurity Expert** | Quality | Security specialist | Reviews code for security flaws per task (backend and frontend); remediates vulnerabilities |
 | **Accessibility Expert** | Quality | A11y specialist | Reviews frontend for WCAG 2.2 compliance |
-| **Acceptance Verifier** | Quality | Criteria checker | Verifies each task acceptance criterion is satisfied with evidence |
 | **Linting Tool Agent** | Quality | Linting specialist | Detects project linters, runs them, produces code fixes to pass lint |
 | **DbC Comments Agent** | Quality | Design by Contract | Adds pre/postconditions and invariants to code |
-| **Integration Agent** | Integration/release | Full-stack validator | Validates backend-frontend API contract alignment after workers complete |
 | **DevOps Team** (via DevOps Engineering Team) | Integration/release | DevOps sub-orchestration | Team Lead, Task Clarifier, IaC, CI/CD, Deployment Strategy, DevSecOps Review, Test Validation, Change Review, Documentation & Runbook – contract-first pipeline with hard gates |
-| **Documentation Agent** | Integration/release | Technical writer | Updates README and project docs |
 
 ## Coding Standards
 
@@ -84,7 +81,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Implementation** | codegen_team (`stack="frontend"`) | Frontend v2 worker (Angular/React/TypeScript, CSS/SCSS, UI/UX, accessibility, state); same phase pipeline and shared, config-driven implementation with frontend tool agents. Driven by the coding-team engine's Tech Lead |
 | **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert |
-| **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
+| **Integration / release** | top-level | DevOps Team (sub-orchestrator); per-task documentation review happens earlier, inside the quality gates (self-review loop, see § Per-Task Workflow Gates) |
 
 **Coding Team:** the coding-team execution engine (Tech Lead + Task Graph, living as direct children of `software_engineering_team/`) is the **Software Engineering sub-team** responsible for task-graph execution (see [§ Coding Team](#coding-team) below). The SE orchestrator calls `run_coding_team_orchestrator` in-process after planning; the same engine's routers are also mounted on this app for direct/standalone runs at `/api/coding-team`.
 
@@ -92,7 +89,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 **Accessibility:** The top-level `accessibility_agent/` package is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
 
-**Sub-team shapes (deliberate, not drift):** the implementation sub-teams follow different layouts on purpose. The **v2 phase-pipeline team** (`codegen_team`) is a single config-driven implementation parametrized by `stack: Literal["backend", "frontend"]`, not two independently coded teams: `CodegenTeamLead`/`CodegenDevelopmentAgent` (`orchestrator.py`) resolve a `StackWiring` and `V2TeamConfig` by stack and bind the shared, generic phase implementations — `shared/v2_orchestrator.py`'s `ConfigDrivenV2DevelopmentAgent`, `shared/v2_phase_bindings.py` (documentation/planning/output-templates), `shared/v2_execution_bindings.py`, and `shared/v2_review_bindings.py` (with `V2TeamConfig.extra_review_clause` injecting frontend's accessibility clause) — plus `shared/phases/{setup,execution,review,documentation,planning,deliver,problem_solving}.py`. Only `stacks/{backend,frontend}/profile.py` (config/bindings), `stacks/{backend,frontend}/prompts.py` (prompt content), and `stacks/{backend,frontend}/problem_solving.py` remain as real per-stack files, and even `problem_solving.py` is a thin wrapper: its formatting, batch-fix, single-issue-loop, and top-level orchestration logic — including the phase-specific fix functions (`run_code_review_fixes`, `run_qa_fixes`, `run_security_fixes`, `run_documentation_fixes`) both stacks now call via `shared/phases/problem_solving.py`'s `make_phase_fix_functions` — live in `shared/phases/problem_solving.py`, with each stack's module wiring in only its own models/prompts/profile. `documentation.py`, `planning.py`, `output_templates.py`, `setup.py`, `execution.py`, and `review.py` were deleted from both stacks once their logic moved to the shared, config-driven seam. A digest-locked test (`test_prompt_constants_are_byte_stable` in `tests/test_v2_shared_phases.py`) guards each stack's built prompt constants against silent drift now that both stacks render from the same shared builders. The **coding-team execution engine** is independently routable (`/api/coding-team`), so its own request/response models, run-thread state, and Temporal definitions live as `coding_team_*`-prefixed siblings inside SE's `api/` and `temporal/` packages (and `github_source/`/`tech_lead_agent/` as their own top-level directories) rather than nested under a separate sub-package. The **devops_team** uses one directory per role agent plus LangGraph graphs, matching its contract-first gate pipeline. `ai_agent_development_team` is a complete but currently dormant v2-style team with no production consumer; it is intentionally left in its own shape rather than being force-fitted onto `BaseTeamLead`.
+**Sub-team shapes (deliberate, not drift):** the implementation sub-teams follow different layouts on purpose. The **v2 phase-pipeline team** (`codegen_team`) is a single config-driven implementation parametrized by `stack: Literal["backend", "frontend"]`, not two independently coded teams: `CodegenTeamLead`/`CodegenDevelopmentAgent` (`orchestrator.py`) resolve a `StackWiring` and `V2TeamConfig` by stack and bind the shared, generic phase implementations — `shared/v2_orchestrator.py`'s `ConfigDrivenV2DevelopmentAgent`, `shared/v2_phase_bindings.py` (documentation/planning/output-templates), `shared/v2_execution_bindings.py`, and `shared/v2_review_bindings.py` (with `V2TeamConfig.extra_review_clause` injecting frontend's accessibility clause) — plus `shared/phases/{setup,execution,review,documentation,planning,deliver,problem_solving}.py`. Only `stacks/{backend,frontend}/profile.py` (config/bindings), `stacks/{backend,frontend}/prompts.py` (prompt content), and `stacks/{backend,frontend}/problem_solving.py` remain as real per-stack files, and even `problem_solving.py` is a thin wrapper: its formatting, batch-fix, single-issue-loop, and top-level orchestration logic — including the phase-specific fix functions (`run_code_review_fixes`, `run_qa_fixes`, `run_security_fixes`, `run_documentation_fixes`) both stacks now call via `shared/phases/problem_solving.py`'s `make_phase_fix_functions` — live in `shared/phases/problem_solving.py`, with each stack's module wiring in only its own models/prompts/profile. `documentation.py`, `planning.py`, `output_templates.py`, `setup.py`, `execution.py`, and `review.py` were deleted from both stacks once their logic moved to the shared, config-driven seam. A digest-locked test (`test_prompt_constants_are_byte_stable` in `tests/test_v2_shared_phases.py`) guards each stack's built prompt constants against silent drift now that both stacks render from the same shared builders. The **coding-team execution engine** is independently routable (`/api/coding-team`), so its own request/response models, run-thread state, and Temporal definitions live as `coding_team_*`-prefixed siblings inside SE's `api/` and `temporal/` packages (and `github_source/`/`tech_lead_agent/` as their own top-level directories) rather than nested under a separate sub-package. The **devops_team** uses one directory per role agent, fanning out design and validation steps via `shared.concurrency.parallel_map` (`phase2_graph.py`, `phases/quality_gate.py`), matching its contract-first gate pipeline. `ai_agent_development_team` is a complete but currently dormant v2-style team with no production consumer; it is intentionally left in its own shape rather than being force-fitted onto `BaseTeamLead`.
 
 ### SDLC Flow Diagram
 
@@ -125,9 +122,7 @@ flowchart LR
   end
 
   subgraph integration [Integration and release]
-    IntegrationAgent
     DevOps
-    Documentation
   end
 
   discovery --> Adapter --> design
@@ -150,7 +145,7 @@ These are the gates run by the default v2 execution path (`codegen_team`, for bo
 Build verification (lint + build) is a single CI-owned gate that runs once, before
 Code Review; the Code Review phase itself does not re-run lint or build checks.
 
-There is no separate acceptance-verifier or DbC gate inside this per-microtask loop; `AcceptanceVerifierAgent`/`DbcCommentsAgent` have no production caller anywhere in the pipeline today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
+There is no separate DbC gate inside this per-microtask loop; `DbcCommentsAgent` has no production caller anywhere in the pipeline today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
 
 Data and control-flow dependencies among the build/code-review/security/QA
 gates specifically, and which of them are safe to parallelize vs. require a
@@ -187,9 +182,8 @@ All planning artifacts are written to a `plan/` folder at the project root (work
    - **QA review + Security review** (run in parallel over the same post-Code-Review snapshot; backend QA covers bugs + persisted integration/unit tests and README)
    - **Documentation** (self-review loop)
    - Merge to development, Tech Lead review
-9. **Integration phase** – After workers complete, Integration Agent validates backend-frontend API contract alignment.
-10. **Final security** (full codebase) and **documentation** pass when Tech Lead requests.
-11. **Retry path** – Failed tasks are retried through the same full workflow (build verification, code review, QA + security in parallel, documentation).
+9. **Final security** (full codebase) pass when Tech Lead requests.
+10. **Retry path** – Failed tasks are retried through the same full workflow (build verification, code review, QA + security in parallel, documentation).
 
 ## Requirements
 
@@ -235,7 +229,7 @@ Defaults (`AGENT_DEFAULT_MODELS` in `llm_service/config.py`) when no overrides a
 |-------|--------|
 | `kimi-k2.7-code:cloud` | backend, frontend, code_review |
 | `deepseek-v4-flash:cloud` | code_review_verify |
-| `deepseek-v4-pro:cloud` | repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility (also the fallback for any agent key not listed above) |
+| `deepseek-v4-pro:cloud` | repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, documentation, qa, security, accessibility (also the fallback for any agent key not listed above) |
 
 Example: `export LLM_MODEL_tech_lead=<model-id>` overrides only the Tech Lead; other agents use their defaults or `LLM_MODEL`.
 
@@ -357,11 +351,9 @@ Spec → Project Planning → Architecture + Tech Lead (alignment loop)
          ↓
     [Backend Worker]     [Frontend Worker]
     (run_workflow)       (run_workflow)
-    Build → CodeReview → AcceptanceVerifier → Security → QA → DBC → Merge
+    Build → CodeReview → Security → QA → DBC → Merge
          ↓                      ↓
-    Integration Agent (backend + frontend contract alignment)
-         ↓
-    Final Security + Documentation
+    Final Security
 ```
 
 ## Project Layout
@@ -430,24 +422,18 @@ software_engineering_team/
 │   ├── doc_runbook_agent/          # Runbooks and handoff
 │   ├── infra_debug_agent/          # Diagnoses infrastructure/deploy failures
 │   ├── infra_patch_agent/          # Applies infrastructure fixes
-│   ├── graphs/                     # LangGraph flow definitions
 │   └── tool_agents/       # Stateless subprocess wrappers (repo nav, IaC validate, policy, CI/CD lint, dry-run)
 │
 │  # --- Quality gates (cross-cutting; invoked inside per-task workflows) ---
-├── quality_gates/         # Protocols + re-exports for the cross-cutting review agents
 ├── code_review_agent/     # Chunk Reviewer + Coordinator for large code; single-call for small
 ├── qa_agent/
 ├── security_agent/
 ├── accessibility_agent/   # WCAG 2.2 review of frontend code
-├── acceptance_verifier_agent/
 ├── linting_tool_agent/    # Detects/runs project linters, produces fixes
 ├── build_fix_specialist/  # Resolves build failures
-├── problem_solver_agent/  # Generic error-resolution agent used by worker workflows
 │
 │  # --- Integration / release ---
-├── integration_team/      # Integration Agent (backend/frontend API-contract alignment)
-├── technical_writers/     # Documentation, DbC comments, and release-notes agents
-│   ├── documentation_agent/
+├── technical_writers/     # DbC comments and release-notes agents
 │   ├── dbc_comments_agent/
 │   └── release_notes_agent/
 │

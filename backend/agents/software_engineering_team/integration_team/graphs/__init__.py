@@ -1,1 +1,0 @@
-"""Integration team graphs."""

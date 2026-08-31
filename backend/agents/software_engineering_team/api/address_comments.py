@@ -32,6 +32,7 @@ Contract summary (see per-function docstrings for detail):
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 
@@ -62,9 +63,53 @@ WAITING_FOR_REVIEW_LABEL = "waiting for review"
 # are also skipped so the flow never chases its own replies.
 _KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
 
+# Embedded in every reply this flow posts (in addition to `_KHALA_COMMENT_MARKER`,
+# which only proves authorship): records the highest comment id in the thread's
+# history that was actually shown to the LLM when this specific reply was
+# generated. Comment ids are assigned at creation and don't necessarily match a
+# thread's GitHub-response chronological order under a race — a reviewer's
+# follow-up (H) can end up with a LOWER id than Khala's own reply (R) even though
+# H predates R chronologically. `_unresolved_comments` classifies a thread by its
+# chronologically-latest message, so id order alone can't tell a thread where R
+# genuinely accounted for everything before it apart from one where H slipped in
+# too late to be reflected in R's content but too "early" (by id) to trip an
+# id-only "is there anything newer than R" check. Embedding the boundary in the
+# reply itself — on GitHub, which already persists it durably per-thread — answers
+# that without a new datastore: any non-Khala message with an id greater than this
+# value was NOT part of what generated the reply, regardless of chronological
+# position relative to the reply itself.
+_KHALA_ACCOUNTED_THROUGH_RE = re.compile(r"<!--\s*khala-accounted-through:(\d+)\s*-->")
+
+
+def _accounted_through_marker(comment_id: int) -> str:
+    """Hidden HTML-comment marker recording the id a Khala reply accounted through."""
+    return f"<!-- khala-accounted-through:{comment_id} -->"
+
+
+def _parse_accounted_through(body: str) -> Optional[int]:
+    """Extract the id embedded by :func:`_accounted_through_marker`, if present.
+
+    Postconditions:
+        - Returns the embedded integer id when ``body`` carries the marker.
+        - Returns None when the marker is absent or malformed — notably for
+          any reply this flow posted BEFORE this marker existed, so callers
+          must treat None as "unknown provenance", not "accounted for nothing".
+    """
+    match = _KHALA_ACCOUNTED_THROUGH_RE.search(body or "")
+    return int(match.group(1)) if match else None
+
+
 # Cap on cited file content included in an LLM prompt (triage and planning both use
 # this), to bound prompt size regardless of the actual file's length.
 _MAX_CITED_CODE_CHARS = 20000
+
+# Non-terminal coding-team job statuses: a job in one of these states may still be
+# actively running (or was, until its worker crashed/restarted without terminalizing
+# it). Used by `_dispatch_implementation` to refuse overwriting an existing job for
+# the same comment-scoped id rather than blindly resetting possibly-live state.
+_ACTIVE_JOB_STATUSES = frozenset(
+    {JobStatus.PENDING.value, JobStatus.RUNNING.value, JobStatus.WAITING_FOR_USER.value}
+)
 
 # Named pieces of _unresolved_comments' return type, factored out so the function's
 # own signature doesn't carry one unreadable nested 4-tuple annotation.
@@ -279,14 +324,39 @@ def _unresolved_comments(
           a stale root just because the thread once carried a Khala reply.
         - ``retry_resolve_threads`` lists ``(thread_id, khala_reply_comment_id)``
           for every UNRESOLVED thread whose LATEST message is a Khala-generated
-          reply — i.e. the reply landed, no reviewer has said anything since
-          (as of THIS snapshot), but the resolve mutation that should have
-          followed it failed (or hasn't run yet). The caller retries ONLY the
-          resolve step for these, never re-triage/re-implementation — but must
+          reply AND for which :func:`resolve_attempt_store.has_recorded_resolve_
+          failure` confirms Khala's OWN resolve mutation for THAT reply is on
+          record as having failed — i.e. the reply landed, no reviewer has said
+          anything since (as of THIS snapshot), and there is persisted evidence
+          the resolve call itself ran and failed (not merely "hasn't run yet" or
+          "unknown"). GitHub's read APIs cannot distinguish "our resolve failed"
+          from "a reviewer clicked Reopen conversation with no new comment" —
+          ``isResolved`` reports the same False in both cases — so without this
+          persisted evidence a Khala-marker-ending unresolved thread is treated
+          as AMBIGUOUS, not as a retry candidate: it is silently skipped (left
+          exactly as found, logged) rather than auto-resolved, which would
+          otherwise override a reviewer's deliberate reopen with no chance for
+          them to be heard. The caller retries ONLY the resolve step for
+          confirmed candidates, never re-triage/re-implementation — but must
           still re-check the thread's LIVE state immediately before resolving
           (:func:`_thread_has_new_reviewer_feedback` with ``khala_reply_comment_id``
           as ``since_comment_id``), since a reviewer can post a follow-up in the
           window between this snapshot and the retry loop actually running.
+          "LATEST message is Khala's own reply" alone is NOT sufficient to
+          reach this list: a thread only qualifies once every OTHER message
+          in it is either Khala's own or at-or-before the id embedded by
+          :func:`_accounted_through_marker` in that reply's body — the
+          highest comment id the reply was actually generated from. A
+          reviewer's follow-up that predates the reply chronologically but
+          was assigned a HIGHER id than the boundary the reply was generated
+          from (whether or not that id also happens to be lower than the
+          reply's own id — GitHub id assignment doesn't strictly track
+          response order under a race) was never accounted for and is routed
+          to ``comments`` instead, using that follow-up as the representative
+          message, exactly like ordinary new-feedback-after-reply handling.
+          A reply posted before this marker existed carries no boundary
+          (``_parse_accounted_through`` returns None) and is treated under
+          the prior, order-only rule.
         - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
           GitHub returned (resolved threads included) to its owning
           :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
@@ -413,20 +483,81 @@ def _unresolved_comments(
         latest = messages[-1]
         if _is_khala_authored(latest, authenticated_login):
             # Nothing has been said since Khala's reply — the fix already
-            # landed but GitHub still reports the thread unresolved, so the
-            # resolve mutation failed previously. Retry resolving it only;
-            # never re-triage a fix that already landed. The reply's own id
-            # travels with the thread id so the caller can re-verify
-            # freshness immediately before resolving. Also snapshot the
-            # thread's full history under the SAME dict retry threads share
-            # with genuinely-unresolved ones — keyed by `latest.id` (the
-            # reply's id) here — so the caller's freshness re-check can pass
-            # it as `since_history` and catch an EARLIER message being
-            # edited (not just a new one appearing), which an id-only ">"
-            # comparison against the reply's own id could never see: any
-            # message that predates the reply always has a lower id.
-            retry_resolve_threads.append((thread.id, latest.id))
-            thread_history_by_comment_id[latest.id] = messages
+            # landed but GitHub still reports the thread unresolved. The
+            # reply's own id travels with the thread id so the caller can
+            # re-verify freshness immediately before resolving. Also
+            # snapshot the thread's full history under the SAME dict retry
+            # threads share with genuinely-unresolved ones — keyed by
+            # `latest.id` (the reply's id) here — so the caller's freshness
+            # re-check can pass it as `since_history` and catch an EARLIER
+            # message being edited (not just a new one appearing), which an
+            # id-only ">" comparison against the reply's own id could never
+            # see: any message that predates the reply always has a lower id
+            # — UNLESS a reviewer's follow-up (H) was created before `latest`
+            # (R) chose to post but happened to be assigned a lower comment
+            # id than R (a GitHub id-vs-creation-order race). `_reply_and_
+            # resolve`'s own freshness checks catch H at the time R was
+            # generated/resolved (they compare against the much older
+            # representative comment's id, not R's), so THIS run never
+            # resolves over it — but H still predates R in "chronological
+            # response order", so a NEXT run naively picking `messages[-1]`
+            # as "latest" would see R here and misclassify the thread as a
+            # clean resolve-only retry, silently burying H forever the
+            # moment the retry succeeds. Use R's own embedded
+            # `_accounted_through_marker` (the highest id R was actually
+            # generated from) instead of message order to settle this: any
+            # non-Khala message with an id greater than that boundary —
+            # REGARDLESS of its position in `messages` — was never accounted
+            # for and still needs triage. A reply posted before this marker
+            # existed has no boundary to check (`accounted_through` is None)
+            # and falls back to the prior, order-only behavior.
+            accounted_through = _parse_accounted_through(latest.body or "")
+            unaddressed = (
+                [
+                    m
+                    for m in messages
+                    if m.id != latest.id
+                    and m.id > accounted_through
+                    and not _is_khala_authored(m, authenticated_login)
+                ]
+                if accounted_through is not None
+                else []
+            )
+            if unaddressed:
+                representative = max(unaddressed, key=lambda m: m.id)
+                unresolved.append(representative)
+                thread_history_by_comment_id[representative.id] = messages
+                continue
+            # No unaddressed follow-up found — but GitHub reporting the
+            # thread unresolved is STILL ambiguous on its own: it means
+            # EITHER "our resolve mutation failed previously" (safe to
+            # retry) OR "a reviewer clicked Reopen conversation with no new
+            # comment" (must NOT be silently auto-resolved — the reviewer
+            # never gets a chance to have their reopen looked at).
+            # `isResolved` reports the same False in both cases and GitHub
+            # exposes no history/audit trail to tell them apart, so only
+            # PERSISTED evidence that Khala's own resolve call for THIS
+            # reply actually ran and failed (`resolve_attempt_store`,
+            # written by the resolve step itself) authorizes the
+            # retry-resolve path.
+            if _main.has_recorded_resolve_failure(owner, repo, pr_number, thread.id, latest.id):
+                retry_resolve_threads.append((thread.id, latest.id))
+                thread_history_by_comment_id[latest.id] = messages
+            else:
+                # No persisted evidence either way — could be a genuine first
+                # failure whose own record-write also failed (rare double
+                # failure), or a reviewer's deliberate reopen. Never guess:
+                # leave the thread exactly as found rather than risk silently
+                # overriding a reviewer. It surfaces again on the next run,
+                # by which point either the evidence has landed (retried) or
+                # the reviewer has posted follow-up feedback (re-triaged via
+                # the branch above once that feedback becomes visible).
+                logger.info(
+                    "address-comments: thread %s is unresolved with Khala's own reply as its "
+                    "latest message but no recorded resolve-failure evidence — treating as an "
+                    "ambiguous reviewer reopen and skipping rather than auto-resolving",
+                    thread.id,
+                )
             continue
         # `latest` is either the thread's only message so far, or newer
         # feedback a reviewer posted after an earlier Khala reply in the same
@@ -772,6 +903,73 @@ def _pr_head_remote(owner: str, repo: str, pr: Any, web_host: str = "github.com"
     return f"https://{web_host}/{head_repo_full_name}.git"
 
 
+def _child_job_id_for_comment(comment_id: int) -> str:
+    """Return the deterministic child-implementation job id for a review comment.
+
+    Postconditions:
+        - Returns ``f"address-comment:{comment_id}"`` — keyed on the GitHub
+          review comment's own globally-unique id, NOT on any per-run
+          address-comments parent job id, so the SAME id is produced on
+          every run that handles this comment. This is what lets
+          :func:`_previously_published_fix` recognize, on a later run, that
+          a fix for this exact comment was already implemented and
+          published — see its docstring for why a parent-job-scoped id
+          cannot do that.
+    """
+    return f"address-comment:{comment_id}"
+
+
+def _previously_published_fix(comment_id: int) -> Optional[Tuple[str, str]]:
+    """Best-effort check: was a fix for this comment already implemented and published?
+
+    A run can dispatch ``_dispatch_implementation`` successfully (the fix lands
+    on the PR branch) and then fail at the reply/resolve step that follows it
+    (see ``_handle_comment``) — e.g. the reply POST itself errors. GitHub then
+    still reports the thread unresolved with no Khala-authored reply on it, so
+    a later run's ``_unresolved_comments`` re-surfaces the SAME original
+    comment (its id unchanged, since nothing new was ever posted) and would
+    otherwise re-triage and re-dispatch a brand new implementation for a fix
+    that may already be on the branch. This is only possible to catch across
+    runs because the child job id is derived from ``comment_id`` alone (see
+    :func:`_child_job_id_for_comment`) rather than from the per-run parent job
+    id: a parent-scoped id (the old ``f"{parent_job_id}:comment:{comment_id}"``
+    scheme) is a fresh, different string on every new address-comments run, so
+    a later run could never look up an earlier run's child job by id.
+
+    Postconditions:
+        - Returns ``(child_job_id, chosen_plan)`` when a child job already
+          exists for ``comment_id``, its status is exactly ``"completed"``
+          (an exact terminal success — see ``_dispatch_implementation``'s own
+          postcondition for why partial results don't count), its
+          ``github_context.review_comment_id`` matches ``comment_id`` (defends
+          against a hypothetical id collision or corrupted record), and it
+          carries a non-empty ``chosen_plan`` field.
+        - Returns ``None`` otherwise, including on a lookup failure — this is
+          advisory; a failed check must not block the run, it just means the
+          comment is triaged fresh as if no prior attempt existed.
+    """
+    child_job_id = _child_job_id_for_comment(comment_id)
+    try:
+        job = _main.get_job(child_job_id)
+    except Exception as e:  # noqa: BLE001 - best-effort; a failed lookup must not block
+        logger.warning(
+            "address-comments: could not check for a previously-published fix for "
+            "comment %s: %s",
+            comment_id,
+            scrub_token_from_text(str(e)),
+        )
+        return None
+    if not job or job.get("status") != JobStatus.COMPLETED.value:
+        return None
+    github_context = job.get("github_context") or {}
+    if github_context.get("review_comment_id") != comment_id:
+        return None
+    chosen_plan = job.get("chosen_plan")
+    if not chosen_plan:
+        return None
+    return child_job_id, chosen_plan
+
+
 def _dispatch_implementation(
     parent_job_id: str,
     request: AddressCommentsRequest,
@@ -793,9 +991,13 @@ def _dispatch_implementation(
     the review thread open.
 
     Preconditions:
-        - ``parent_job_id`` is the address-comments run's own job id (used to
-          derive the deterministic child job id ``f"{parent_job_id}:comment:
-          {comment.id}"``).
+        - ``parent_job_id`` is the address-comments run's own job id, stored on
+          the child job's ``parent_job_id`` field for traceability and PR-review
+          admission exclusion (see ``pr_review._running_review_for_pr``) — it is
+          NOT used to derive the child job id itself; that comes from
+          :func:`_child_job_id_for_comment` (comment-scoped, stable across runs)
+          so a later run can recognize this exact dispatch as already done (see
+          :func:`_previously_published_fix`).
         - ``pr_head``/``pr_base`` are the PR's head/base branch SHORT names
           (not SHAs) — passed straight through to the child workflow's branch
           preparation.
@@ -820,31 +1022,68 @@ def _dispatch_implementation(
         - ``token`` is a valid GitHub token for ``request.owner``/``request.repo``.
     Postconditions:
         - On success, returns the child job id
-          (``f"{parent_job_id}:comment:{comment.id}"``) after
+          (:func:`_child_job_id_for_comment`\\ ``(comment.id)``) after
           ``execute_coding_team_workflow`` reports an exact ``"completed"``
           status; any other terminal status (including
           ``"completed_with_failures"``) raises ``RuntimeError`` instead of
           returning, so the caller never replies to or resolves the thread
           over a partially-failed implementation. In that case the child job
           row and its Temporal workflow were both created (the workflow ran;
-          only its result was unsuccessful) — this is also how an
-          ``expected_head_sha`` mismatch surfaces: branch prep reports
-          ``ok=False``, the workflow terminalizes as a GitHub failure notice
-          rather than ``"completed"``, and this function raises the same as
-          any other non-success result, leaving the thread open for the next
-          run to re-triage against the branch's current head.
+          only its result was unsuccessful) but its status is not
+          ``"completed"``, so :func:`_previously_published_fix` correctly
+          will not treat it as an already-published fix on a later run. This
+          is also how an ``expected_head_sha`` mismatch surfaces: branch prep
+          reports ``ok=False``, the workflow terminalizes as a GitHub failure
+          notice rather than ``"completed"``, and this function raises the
+          same as any other non-success result, leaving the thread open for
+          the next run to re-triage against the branch's current head.
         - If ``execute_coding_team_workflow`` itself raises (rather than
           returning a non-``"completed"`` status), that exception propagates
           uncaught — it is not wrapped in a try/except here. The child job
           row was created before that call, but whether the Temporal
           workflow itself was started depends on where inside
           ``execute_coding_team_workflow`` the raise happened.
+        - Raises ``RuntimeError`` (before creating/touching anything) instead
+          of dispatching when a job already exists for
+          :func:`_child_job_id_for_comment`\\ ``(comment.id)`` in an ACTIVE
+          state (``"pending"``, ``"running"``, or ``"waiting_for_user"``) —
+          because the child job id is now comment-scoped rather than
+          parent-job-scoped (see the ``parent_job_id`` precondition above),
+          the SAME id can otherwise be reused across two runs. The caller
+          (:func:`_handle_comment`) only reaches this function after
+          :func:`_previously_published_fix` found no ``"completed"`` job for
+          this comment, so any job found here is either a stale/orphaned
+          active job (e.g. its worker crashed or the server restarted
+          mid-run) or, in principle, a genuinely still-running one — either
+          way, blindly overwriting it via ``create_job``'s upsert could
+          corrupt or orphan real in-flight work. A job whose status is
+          already TERMINAL but not ``"completed"`` (``"failed"``,
+          ``"completed_with_failures"``, ``"cancelled"``) is safe to reset
+          and retry — that is the common, intended case a comment resurfaces
+          for re-dispatch at all.
     """
     if pr_remote is None:
         raise RuntimeError(
             f"cannot determine the head repository for {request.owner}/{request.repo}"
             f"#{request.pr_number}'s branch {pr_head!r} (its fork appears to have been "
             "deleted); the fix cannot be published"
+        )
+    child_job_id = _child_job_id_for_comment(comment.id)
+    try:
+        existing_job = _main.get_job(child_job_id)
+    except Exception as e:  # noqa: BLE001 - best-effort; a failed lookup must not block dispatch
+        logger.warning(
+            "address-comments: could not check for an existing job before dispatching "
+            "comment %s's implementation: %s",
+            comment.id,
+            scrub_token_from_text(str(e)),
+        )
+        existing_job = None
+    if existing_job and existing_job.get("status") in _ACTIVE_JOB_STATUSES:
+        raise RuntimeError(
+            f"a job already exists for comment {comment.id} (id {child_job_id!r}, status "
+            f"{existing_job.get('status')!r}); refusing to overwrite a possibly still-running "
+            "implementation"
         )
     requirements = "\n".join(f"- {r}" for r in plan.requirements) or "- (none stated)"
     description = (
@@ -870,7 +1109,6 @@ def _dispatch_implementation(
         },
     )
     plan_input_dict = plan_input.model_dump()
-    child_job_id = f"{parent_job_id}:comment:{comment.id}"
     _main.create_job(
         job_id=child_job_id,
         repo_path=request.repo_path,
@@ -878,6 +1116,7 @@ def _dispatch_implementation(
     )
     child_fields: Dict[str, Any] = {
         "parent_job_id": parent_job_id,
+        "chosen_plan": plan.chosen_plan,
         "github_context": {
             "owner": request.owner,
             "repo": request.repo,
@@ -1089,6 +1328,12 @@ def _reply_and_resolve(
           reply would close the thread with no explanatory comment ever
           posted, and since a resolved thread is never re-triaged, the
           reviewer's concern would be silently dropped.
+        - Whenever a resolve is attempted, best-effort updates the resolve-
+          attempt ledger (:mod:`resolve_attempt_store`): a failure records
+          ``(thread.id, reply's comment id)`` so a future run's
+          ``_unresolved_comments`` can positively confirm "our own resolve
+          failed" rather than treating the still-unresolved thread as an
+          ambiguous reviewer reopen; success clears any existing entry.
         - WHEN ``thread`` is known, checks the thread's LIVE state
           (:func:`_thread_has_new_reviewer_feedback`) BEFORE posting anything:
           a reviewer may have posted follow-up feedback on this thread while
@@ -1110,8 +1355,19 @@ def _reply_and_resolve(
           fallback applies when ``thread`` IS known but carries an empty
           ``comment_ids`` (should also not normally happen — a real thread
           always has at least a root comment).
+        - The posted reply body carries :func:`_accounted_through_marker` for
+          the highest comment id in ``history`` (i.e. the boundary of what
+          this specific reply was actually generated from), in addition to
+          the client's own authorship marker. A LATER run's
+          ``_unresolved_comments`` uses this to tell a thread where nothing
+          arrived before this reply was generated apart from one where a
+          reviewer's message slipped in during generation but happened to be
+          assigned a lower id than the reply itself — see that marker's own
+          docstring.
     """
     history = thread_history if thread_history is not None else [comment]
+    accounted_through_id = max((m.id for m in history), default=comment.id)
+    reply_body = f"{reply_body}\n\n{_accounted_through_marker(accounted_through_id)}"
     if thread is not None and _thread_has_new_reviewer_feedback(
         client,
         request.owner,
@@ -1131,8 +1387,9 @@ def _reply_and_resolve(
 
     reply_target_id = thread.comment_ids[0] if thread is not None and thread.comment_ids else comment.id
     replied = False
+    reply_id: Optional[int] = None
     try:
-        client.reply_to_review_comment(
+        reply_payload = client.reply_to_review_comment(
             owner=request.owner,
             repo=request.repo,
             number=request.pr_number,
@@ -1140,6 +1397,12 @@ def _reply_and_resolve(
             body=scrub_token_from_text(reply_body),
         )
         replied = True
+        # Best-effort only: feeds the resolve-attempt ledger below so a
+        # subsequent failed resolve can be matched back to THIS reply on the
+        # next run's `has_recorded_resolve_failure` check. A missing/odd
+        # payload shape just means that ledger entry keys off `None` instead —
+        # never fails the reply itself, which already landed.
+        reply_id = reply_payload.get("id") if isinstance(reply_payload, dict) else None
     except Exception as e:  # noqa: BLE001 - reply is best-effort
         logger.warning(
             "address-comments: failed to reply to comment %s: %s",
@@ -1184,6 +1447,17 @@ def _reply_and_resolve(
                 scrub_token_from_text(str(e)),
             )
             resolved = False
+        # Record/clear the resolve-attempt ledger regardless of which branch
+        # set `resolved` above — this is the ONLY evidence `_unresolved_
+        # comments` will later trust to route this thread down the
+        # resolve-only retry path rather than treating a still-unresolved,
+        # Khala-marker-ending thread as an ambiguous reviewer reopen.
+        if resolved:
+            _main.clear_resolve_attempt(request.owner, request.repo, request.pr_number, thread.id)
+        else:
+            _main.record_resolve_failure(
+                request.owner, request.repo, request.pr_number, thread.id, reply_id
+            )
     elif thread is not None:
         # The reply failed: resolving now would close the thread with no
         # explanatory comment ever posted, and the next run would never
@@ -1382,7 +1656,10 @@ def _handle_comment(
           * ``false_positive`` — triage decided the concern does not hold,
             and the reply/resolve step succeeded.
           * ``resolved`` — a fix was planned, implemented, and pushed to the
-            PR, and the reply/resolve step succeeded.
+            PR, and the reply/resolve step succeeded. This also covers the
+            case where an EARLIER run already did the planning/implementing/
+            publishing and only the reply/resolve step is being retried now
+            (see ``_previously_published_fix``).
           * ``failed`` — the comment could not be fully handled: the PR's
             head SHA moved (or the PR closed) while triage/planning was in
             flight, newer reviewer feedback appeared on the thread before
@@ -1404,6 +1681,42 @@ def _handle_comment(
         outcome="failed",
     )
     try:
+        # An earlier run may have already implemented and published a fix for
+        # this exact comment and then failed at the reply/resolve step that
+        # follows (e.g. the reply POST itself errored) — GitHub still reports
+        # the thread unresolved with no Khala reply, so this SAME comment
+        # (same id; nothing new was ever posted) resurfaces here again. Skip
+        # straight to reply/resolve using the already-published fix instead
+        # of re-triaging and re-dispatching a brand new implementation
+        # workflow on top of one that may already be on the PR branch — see
+        # _previously_published_fix for how this is recognized across runs.
+        published = _previously_published_fix(comment.id)
+        if published is not None:
+            child_job_id, chosen_plan = published
+            try:
+                post_dispatch_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
+            except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block
+                logger.warning(
+                    "address-comments: could not re-check PR state before retrying reply/resolve "
+                    "for comment %s's already-published fix: %s",
+                    comment.id,
+                    scrub_token_from_text(str(e)),
+                )
+            else:
+                if post_dispatch_pr.state != "open":
+                    base.detail = (
+                        f"PR {request.owner}/{request.repo}#{request.pr_number} is no longer open "
+                        f"(state={post_dispatch_pr.state}); a fix was already published by job "
+                        f"{child_job_id} but the thread was left as-is rather than replying to or "
+                        "resolving a conversation on a closed PR."
+                    )
+                    return base
+            reply = f"Addressed by the software-engineering team in job `{child_job_id}`. {chosen_plan}"
+            ok = _reply_and_resolve(client, request, comment, thread, reply, thread_history)
+            base.outcome = "resolved" if ok else "failed"
+            base.detail = chosen_plan if ok else "Reply/resolve step failed."
+            return base
+
         # _read_cited_code's own contract calls for the PR head SHA (resolvable
         # via the base repo's contents API regardless of which repository the
         # branch itself lives in), NOT the branch short name (pr_head): for a
@@ -1753,6 +2066,10 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                         )
                         retry_resolve_ok = False
                         run_stopped_early = True
+                        # address-comments never revisits a closed PR, so any
+                        # rows this PR left in the resolve-attempt ledger
+                        # would otherwise never be cleared. Best-effort.
+                        _main.clear_resolve_attempts_for_pr(owner, repo, pr_number)
 
             if not run_stopped_early:
                 for thread_id, khala_reply_id in retry_resolve_threads:
@@ -1773,11 +2090,18 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                         )
                         retry_resolve_ok = False
                         continue
-                    if not client.resolve_review_thread(thread_id):
+                    if client.resolve_review_thread(thread_id):
+                        # The retry succeeded — clear the ledger entry so a
+                        # LATER, genuine reviewer reopen of this same thread
+                        # (a fresh, unrelated event) is never mistaken for
+                        # leftover evidence from this now-resolved attempt.
+                        _main.clear_resolve_attempt(owner, repo, pr_number, thread_id)
+                    else:
                         retry_resolve_ok = False
                         logger.warning(
                             "address-comments: retry-resolve failed for thread %s", thread_id
                         )
+                        _main.record_resolve_failure(owner, repo, pr_number, thread_id, khala_reply_id)
 
             outcomes: List[CommentOutcome] = []
             for comment in unresolved:

@@ -45,15 +45,9 @@ from software_engineering_team.devops_team.iac_agent.prompts import IAC_AGENT_PR
 from software_engineering_team.devops_team.task_clarifier.prompts import (
     DEVOPS_TASK_CLARIFIER_PROMPT,
 )
-from software_engineering_team.integration_team.prompts import INTEGRATION_PROMPT
-from software_engineering_team.problem_solver_agent.prompts import PROBLEM_SOLVER_PROMPT
 from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 from software_engineering_team.technical_writers.dbc_comments_agent.prompts import (
     DBC_COMMENTS_PROMPT,
-)
-from software_engineering_team.technical_writers.documentation_agent.prompts import (
-    DOCUMENTATION_CONTRIBUTORS_PROMPT,
-    DOCUMENTATION_README_PROMPT,
 )
 
 # Prompts where JSON_OUTPUT_INSTRUCTION is the trailing content -- direct
@@ -62,13 +56,9 @@ from software_engineering_team.technical_writers.documentation_agent.prompts imp
 # override, so the builder's default (JSON_OUTPUT_INSTRUCTION) applies
 # (Pattern 2).
 ENDS_WITH_INSTRUCTION = [
-    DOCUMENTATION_README_PROMPT,
-    DOCUMENTATION_CONTRIBUTORS_PROMPT,
     DBC_COMMENTS_PROMPT,
     ACCESSIBILITY_PROMPT,
-    INTEGRATION_PROMPT,
     ARCHITECTURE_PROMPT,
-    PROBLEM_SOLVER_PROMPT,
     IAC_AGENT_PROMPT,
     CICD_PIPELINE_PROMPT,
     DOC_RUNBOOK_PROMPT,
@@ -116,17 +106,3 @@ def test_no_prompt_retains_the_old_weak_json_only_phrasing() -> None:
     for prompt in ENDS_WITH_INSTRUCTION + CONTAINS_INSTRUCTION:
         for phrasing in old_phrasings:
             assert phrasing not in prompt
-
-
-def test_problem_solver_prompt_keeps_its_key_list_schema() -> None:
-    """The problem-solver prompt's directive wording changed (no longer
-    claims to itself be the JSON-only instruction), but the required-keys
-    schema it lists must survive the migration unchanged."""
-    for key in (
-        "plan",
-        "execution_steps",
-        "review_checks",
-        "testing_strategy",
-        "fix_recommendation",
-    ):
-        assert f"- {key}" in PROBLEM_SOLVER_PROMPT

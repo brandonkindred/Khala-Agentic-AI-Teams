@@ -194,6 +194,12 @@ from software_engineering_team.models import (  # noqa: F401
     CodingTeamPlanInput,
 )
 from software_engineering_team.postgres import SCHEMA as SE_POSTGRES_SCHEMA
+from software_engineering_team.resolve_attempt_store import (  # noqa: F401
+    clear_resolve_attempt,
+    clear_resolve_attempts_for_pr,
+    has_recorded_resolve_failure,
+    record_resolve_failure,
+)
 from software_engineering_team.review_history_store import (  # noqa: F401
     get_review,
     get_review_transcript,

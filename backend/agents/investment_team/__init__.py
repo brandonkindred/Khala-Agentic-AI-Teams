@@ -33,13 +33,6 @@ from .models import (
     WorkflowMode,
 )
 from .orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
-from .spec_models import (
-    IPSV1,
-    InvestmentProfileV1,
-    PromotionDecisionV1,
-    StrategySpecV1,
-    ValidationReportV1,
-)
 
 __all__ = [
     "AdvisorSession",
@@ -61,23 +54,18 @@ __all__ = [
     "InvestmentCommitteeAgent",
     "InvestmentCommitteeMemo",
     "InvestmentProfile",
-    "InvestmentProfileV1",
     "InvestmentTeamOrchestrator",
     "OrderIntent",
     "PolicyGuardianAgent",
     "PortfolioProposal",
     "PromotionDecision",
-    "PromotionDecisionV1",
     "PromotionGate",
     "PromotionGateAgent",
     "QueueItem",
     "SPECIALIST_DESKS",
     "StrategySpec",
-    "StrategySpecV1",
     "UnderwritingSummary",
     "ValidationReport",
-    "ValidationReportV1",
     "WorkflowMode",
     "WorkflowState",
-    "IPSV1",
 ]

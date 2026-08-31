@@ -381,6 +381,22 @@ def _khala_reply(ac, fake, cid: int) -> ReviewComment:
     )
 
 
+def _khala_reply_with_accounted_through(
+    ac, fake, cid: int, accounted_through: int, body: str = "Addressed by the SE team."
+) -> ReviewComment:
+    """A synthetic Khala-generated reply that also carries the
+    `_accounted_through_marker` boundary `_reply_and_resolve` now embeds in
+    every reply it posts, built from the production module's own marker
+    helpers (mirroring `_khala_reply`'s rationale) so a change to the marker
+    format can't silently stop these tests from exercising the path they're
+    meant to cover."""
+    return _comment(
+        cid,
+        body=f"{body} {ac._accounted_through_marker(accounted_through)} {ac._KHALA_COMMENT_MARKER}",
+        author=fake.authenticated_login,
+    )
+
+
 @pytest.fixture
 def address_env(monkeypatch: pytest.MonkeyPatch):
     """Wire the address_comments module with a fake client and stubbed LLM/pipeline."""
@@ -396,6 +412,12 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
     # Not cancelled by default — a test simulating cancellation flips this
     # (e.g. `job_state["status"] = "cancelled"`).
     job_state: dict[str, Any] = {"status": "running"}
+    # Comment-scoped child job records, keyed by `_child_job_id_for_comment(id)`
+    # (e.g. "address-comment:2") — a test simulating an already-published or
+    # still-active prior dispatch populates this; absent (the default), a
+    # lookup by a comment-scoped id returns None (not found), matching a real
+    # job service for a comment never dispatched before.
+    child_job_states: dict[str, dict[str, Any]] = {}
 
     monkeypatch.setattr(_main, "GitHubClient", lambda **_kw: fake)
     monkeypatch.setattr(_main, "update_job", lambda job_id, **kw: job_updates.append(kw))
@@ -409,8 +431,18 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
     # The real get_job also hits the job service — _job_cancelled checks it at
     # multiple points in the run now, so every test would otherwise pay a real
     # (and, against the deliberately-unreachable test JOB_SERVICE_URL, slow
-    # and retried) network call for each check.
-    monkeypatch.setattr(_main, "get_job", lambda job_id: dict(job_state))
+    # and retried) network call for each check. `_previously_published_fix`
+    # and `_dispatch_implementation`'s active-job guard also now call get_job,
+    # but with a comment-scoped id (see `child_job_states` above) rather than
+    # the parent run's own job_id `_job_cancelled` checks — route each id to
+    # its own fake store rather than conflating the two.
+    monkeypatch.setattr(
+        _main,
+        "get_job",
+        lambda job_id: dict(child_job_states[job_id]) if job_id in child_job_states else (
+            dict(job_state) if not job_id.startswith("address-comment:") else None
+        ),
+    )
 
     def _execute(*args, **kwargs):
         executions.append({"args": args, "kwargs": kwargs})
@@ -426,6 +458,7 @@ def address_env(monkeypatch: pytest.MonkeyPatch):
         "child_jobs": child_jobs,
         "executions": executions,
         "job_state": job_state,
+        "child_job_states": child_job_states,
         "request": AddressCommentsRequest(owner="o", repo="r", repo_path="/tmp/x", pr_number=7),
     }
 
@@ -544,12 +577,45 @@ class TestUnresolvedComments:
         # but which thread's comment comes first is an implementation detail.
         assert {c.id for c in unresolved} == {3, 5}
 
-    def test_thread_with_marked_reply_excluded_even_via_unmarked_root(self, address_env) -> None:
+    def test_thread_with_marked_reply_excluded_even_via_unmarked_root(
+        self, address_env, monkeypatch
+    ) -> None:
         """A thread whose root comment carries no marker but whose LATER reply
         does (Khala already replied) must never surface via its unmarked root —
-        the whole thread is excluded from `unresolved`, and since it is still
-        unresolved (the resolve mutation failed previously), its id is reported
-        for a resolve-only retry."""
+        the whole thread is excluded from `unresolved`. With PERSISTED evidence
+        that Khala's own resolve mutation for this reply is on record as having
+        failed, its id is reported for a resolve-only retry."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _khala_reply(ac, fake, 3),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+        monkeypatch.setattr(
+            address_env["main"],
+            "has_recorded_resolve_failure",
+            lambda owner, repo, pr_number, thread_id, reply_id: (thread_id, reply_id) == ("T2", 3),
+        )
+
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert unresolved == []
+        assert retry_resolve == [("T2", 3)]
+
+    def test_khala_marker_reply_with_no_recorded_failure_is_ambiguous_and_skipped(
+        self, address_env
+    ) -> None:
+        """P1 regression: an unresolved thread whose LATEST message is Khala's
+        own reply is NOT automatically retried just because GitHub still
+        reports it unresolved — that state is identical whether our resolve
+        mutation genuinely failed or a reviewer manually clicked "Reopen
+        conversation" with no new comment. Without persisted evidence that
+        OUR resolve call actually ran and failed for this reply (the default
+        in this test — no Postgres, so `has_recorded_resolve_failure`
+        degrades to False), the thread must be treated as an ambiguous
+        possible reviewer reopen: neither auto-resolved (excluded from
+        `retry_resolve`) nor silently re-triaged (excluded from
+        `unresolved`) — just left alone for a human to actually look at."""
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
@@ -560,7 +626,33 @@ class TestUnresolvedComments:
         unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
-        assert retry_resolve == [("T2", 3)]
+        assert retry_resolve == []
+
+    def test_recorded_failure_for_a_superseded_reply_does_not_authorize_retry(
+        self, address_env, monkeypatch
+    ) -> None:
+        """Evidence recorded against an OLDER Khala reply must not authorize a
+        retry for a DIFFERENT (newer) reply on the same thread — e.g. a
+        reviewer reopened after reply #3, Khala replied again as #5, and only
+        #3's earlier resolve failure is on record. `has_recorded_resolve_
+        failure` is called with the CURRENT latest reply's id, so a store
+        keyed on the old id correctly reports no evidence for the new one."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _khala_reply(ac, fake, 5),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 5))]
+        monkeypatch.setattr(
+            address_env["main"],
+            "has_recorded_resolve_failure",
+            lambda owner, repo, pr_number, thread_id, reply_id: (thread_id, reply_id) == ("T2", 3),
+        )
+
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert unresolved == []
+        assert retry_resolve == []
 
     def test_reviewer_feedback_after_khala_reply_is_re_triaged_not_discarded(
         self, address_env
@@ -581,6 +673,64 @@ class TestUnresolvedComments:
 
         assert [c.id for c in unresolved] == [4]
         assert retry_resolve == []
+
+    def test_reviewer_feedback_unaccounted_for_by_reply_is_re_triaged_even_with_a_lower_id(
+        self, address_env
+    ) -> None:
+        """Regression test for the P1 gap: a reviewer's follow-up (H, id 3)
+        that was posted before Khala's reply (R, id 4) actually landed — but
+        AFTER `R` was generated from a snapshot that only saw the root
+        comment — must still be re-triaged next run, even though H's id is
+        LOWER than R's and R is therefore GitHub's chronologically-latest
+        message. Using message order alone (R is latest → "safe resolve-only
+        retry") would silently bury H forever the moment the retry resolves
+        the thread; the reply's own embedded accounted-through boundary (2 —
+        the root comment's id, the only thing R was actually generated from)
+        proves H (id 3 > 2) was never accounted for."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(3, body="wait, this is still broken"),
+            _khala_reply_with_accounted_through(ac, fake, 4, accounted_through=2),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+
+        unresolved, _by_comment, retry_resolve, history = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert [c.id for c in unresolved] == [3]
+        assert retry_resolve == []
+        # The full thread is still handed to triage as context, not just H
+        # in isolation.
+        assert [m.id for m in history[3]] == [2, 3, 4]
+
+    def test_reply_accounted_for_every_earlier_message_is_still_a_clean_retry(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The ordinary, fine shape — every message in the thread predates
+        (by id) the boundary Khala's reply was actually generated from —
+        must still take the resolve-only retry path with the new
+        accounted-through check in place, not be swept into re-triage just
+        because the check now exists. Persisted evidence that Khala's own
+        resolve for this reply is on record as having failed authorizes the
+        retry (see the reviewer-reopen ambiguity check in
+        TestUnresolvedComments above)."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(3, body="also consider this"),
+            _khala_reply_with_accounted_through(ac, fake, 4, accounted_through=3),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+        monkeypatch.setattr(
+            address_env["main"],
+            "has_recorded_resolve_failure",
+            lambda owner, repo, pr_number, thread_id, reply_id: (thread_id, reply_id) == ("T2", 4),
+        )
+
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert unresolved == []
+        assert retry_resolve == [("T2", 4)]
 
     def test_fails_closed_when_unresolved_thread_has_no_fetched_messages(
         self, address_env
@@ -887,7 +1037,7 @@ class TestHandleComment:
         )
 
         assert outcome.outcome == "resolved"
-        assert address_env["child_jobs"][0]["job_id"] == "parent:comment:2"
+        assert address_env["child_jobs"][0]["job_id"] == "address-comment:2"
         github = address_env["executions"][0]["kwargs"]["github"]
         assert github["publish_mode"] == "existing_pr"
         assert github["integration_branch"] == "feature"
@@ -950,6 +1100,168 @@ class TestHandleComment:
         assert address_env["child_jobs"]  # the implementation job DID run
         assert fake.replies == []  # but no reply or resolve followed
         assert fake.resolved == []
+
+    def test_previously_published_fix_retries_reply_resolve_without_redispatching(
+        self, address_env, monkeypatch
+    ) -> None:
+        """An earlier run's implementation can have already been published
+        (child job completed) while that run's own reply/resolve step then
+        failed — GitHub still reports the thread unresolved with the SAME
+        original comment as its latest message, so this run must retry ONLY
+        the reply/resolve step for the already-completed child job, never
+        re-triage or dispatch a brand new implementation workflow on top of
+        one that may already be on the PR branch."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {
+            "status": "completed",
+            "chosen_plan": "Add the missing null check.",
+            "github_context": {"review_comment_id": 2},
+        }
+        # If triage or planning were reached, this would raise and fail the test.
+        monkeypatch.setattr(
+            ac,
+            "_triage_comment",
+            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not re-triage")),
+        )
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "resolved"
+        assert "Add the missing null check." in outcome.detail
+        assert address_env["child_jobs"] == []  # no new implementation dispatched
+        assert fake.replies and fake.replies[0][0] == 2
+        assert "address-comment:2" in fake.replies[0][1]
+        assert fake.resolved == ["T2"]
+
+    def test_previously_published_fix_with_closed_pr_skips_reply(
+        self, address_env
+    ) -> None:
+        """A fix already published by an earlier run must not be replied to
+        or resolved against a PR that has since closed or merged."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        fake.get_pull_request = lambda _o, _r, _n: replace(fake.pr, state="closed")  # type: ignore[assignment]
+
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {
+            "status": "completed",
+            "chosen_plan": "Add the missing null check.",
+            "github_context": {"review_comment_id": 2},
+        }
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "no longer open" in outcome.detail
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_active_prior_job_for_same_comment_blocks_redispatch(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The child job id is now comment-scoped (stable across runs), so an
+        earlier run's job for this exact comment can still be ACTIVE (e.g. a
+        stale/orphaned "running" row left behind by a crashed worker) when
+        this run reaches dispatch — `_previously_published_fix` only skips
+        re-dispatch for a `"completed"` job, so anything else falls through
+        here. Dispatching anyway would call `create_job` with the SAME id and
+        silently reset that row, risking corruption of a genuinely still-
+        running implementation. This must be refused instead: no new job is
+        created, and the thread is left unresolved for the next run rather
+        than replied to or resolved."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {"status": "running"}
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert outcome.left_unpublished_work is True
+        assert address_env["child_jobs"] == []  # never called create_job
+        assert fake.replies == []
+        assert fake.resolved == []
+
+    def test_terminal_non_completed_prior_job_allows_redispatch(
+        self, address_env, monkeypatch
+    ) -> None:
+        """Unlike an ACTIVE prior job, one that already reached a TERMINAL
+        but non-"completed" status (failed, completed_with_failures,
+        cancelled) is safe to reset and retry — that is the ordinary case a
+        comment resurfaces for re-dispatch at all (its previous attempt
+        didn't succeed)."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+        address_env["child_job_states"][ac._child_job_id_for_comment(2)] = {"status": "failed"}
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "resolved"
+        assert address_env["child_jobs"] and address_env["child_jobs"][0]["job_id"] == "address-comment:2"
+        assert fake.replies and fake.replies[0][0] == 2
+        assert fake.resolved == ["T2"]
 
     def test_new_reviewer_feedback_during_workflow_prevents_resolution(
         self, address_env, monkeypatch
@@ -1199,6 +1511,41 @@ class TestHandleComment:
         assert fake.replies[0][0] == 2  # thread.comment_ids[0], not comment.id (4)
         assert fake.resolved == ["T2"]
 
+    def test_posted_reply_embeds_accounted_through_marker_for_highest_history_id(
+        self, address_env, monkeypatch
+    ) -> None:
+        """Every reply this flow posts must carry `_accounted_through_marker`
+        for the highest comment id in the thread history it was actually
+        generated from, so a later run can tell a genuinely clean
+        resolve-only retry apart from a reviewer follow-up that slipped in
+        before the reply was generated but got assigned a lower id than the
+        reply itself (see `_unresolved_comments`'s own regression test)."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
+        history = [_comment(2), _comment(6, body="also this")]
+        fake.review_comments = list(history)
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(6, body="also this"),
+            thread,
+            history,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "false_positive"
+        assert len(fake.replies) == 1
+        assert ac._parse_accounted_through(fake.replies[0][1]) == 6
+
     def test_real_issue_does_not_reply_or_resolve_until_workflow_succeeds(
         self, address_env, monkeypatch
     ) -> None:
@@ -1255,6 +1602,106 @@ class TestHandleComment:
 
         # Must NOT falsely report a handled false positive when the thread stays open.
         assert outcome.outcome == "failed"
+
+    def test_reply_and_resolve_records_ledger_entry_when_resolve_fails(
+        self, address_env, monkeypatch
+    ) -> None:
+        """When `resolve_review_thread` fails, `_reply_and_resolve` must record
+        the failure in the resolve-attempt ledger, keyed by the reply comment's
+        own id — this is the ONLY evidence a later run's `_unresolved_comments`
+        will trust to authorize a resolve-only retry rather than treating the
+        still-unresolved thread as an ambiguous reviewer reopen."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        fake.resolve_result = False
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+        recorded: list[tuple] = []
+        monkeypatch.setattr(
+            address_env["main"],
+            "record_resolve_failure",
+            lambda owner, repo, pr_number, thread_id, reply_id: recorded.append(
+                (owner, repo, pr_number, thread_id, reply_id)
+            ),
+        )
+        cleared: list[tuple] = []
+        monkeypatch.setattr(
+            address_env["main"],
+            "clear_resolve_attempt",
+            lambda owner, repo, pr_number, thread_id: cleared.append(
+                (owner, repo, pr_number, thread_id)
+            ),
+        )
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+
+        ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert len(recorded) == 1
+        assert recorded[0][:4] == (req.owner, req.repo, req.pr_number, "T2")
+        # The reply landed (see `fake.replies`) before the resolve failed — the
+        # recorded id is the newly-created reply comment's own id, the same id
+        # a later run's `_unresolved_comments` would see as the thread's
+        # LATEST message.
+        assert fake.replies
+        assert recorded[0][4] is not None
+        assert cleared == []
+
+    def test_reply_and_resolve_clears_ledger_entry_when_resolve_succeeds(
+        self, address_env, monkeypatch
+    ) -> None:
+        """A successful resolve must clear any stale ledger entry for the
+        thread — otherwise a LATER, genuine reviewer reopen of the same
+        thread could be mistaken for leftover evidence of this now-resolved
+        attempt."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        fake.resolve_result = True
+        fake.review_comments = [_comment(2)]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
+        recorded: list[tuple] = []
+        cleared: list[tuple] = []
+        monkeypatch.setattr(
+            address_env["main"],
+            "record_resolve_failure",
+            lambda *a, **kw: recorded.append(a),
+        )
+        monkeypatch.setattr(
+            address_env["main"],
+            "clear_resolve_attempt",
+            lambda *a, **kw: cleared.append(a),
+        )
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+
+        ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert cleared == [(req.owner, req.repo, req.pr_number, "T2")]
+        assert recorded == []
 
     def test_not_an_issue_is_skipped(self, address_env, monkeypatch) -> None:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
@@ -1627,6 +2074,7 @@ class TestRunAddressComments:
             _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+        monkeypatch.setattr(address_env["main"], "has_recorded_resolve_failure", lambda *a, **kw: True)
 
         ac._run_address_comments("job1", req, "tok")
 
@@ -1641,6 +2089,34 @@ class TestRunAddressComments:
         # docstring. The real work is still surfaced via the waiting-for-review
         # label instead (see test_marks_waiting_for_review_on_retry_only_success).
         assert final and final[-1]["review_summary"]["counts"] == {}
+
+    def test_retry_resolve_failure_is_recorded_in_ledger(self, address_env, monkeypatch) -> None:
+        """When the resolve-only retry's own `resolve_review_thread` call
+        fails again, that failure must be (re-)recorded in the ledger — the
+        SAME evidence a future run's `_unresolved_comments` needs to keep
+        authorizing the retry, rather than the thread silently reverting to
+        "ambiguous" the moment persisted evidence would otherwise expire or
+        be cleared elsewhere."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _khala_reply(ac, fake, 3),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+        fake.resolve_result = False
+        monkeypatch.setattr(address_env["main"], "has_recorded_resolve_failure", lambda *a, **kw: True)
+        recorded: list[tuple] = []
+        monkeypatch.setattr(
+            address_env["main"],
+            "record_resolve_failure",
+            lambda *a, **kw: recorded.append(a),
+        )
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == ["T2"]  # the retry was attempted...
+        assert recorded == [("o", "r", 7, "T2", 3)]  # ...and its failure recorded
+        assert fake.labels_set == []  # never mislabelled ready when the retry itself failed
 
     def test_retry_resolve_blocks_on_edit_to_earlier_history_message(
         self, address_env, monkeypatch
@@ -1669,6 +2145,7 @@ class TestRunAddressComments:
 
         fake.list_review_comments = _list_review_comments  # type: ignore[assignment]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+        monkeypatch.setattr(address_env["main"], "has_recorded_resolve_failure", lambda *a, **kw: True)
 
         ac._run_address_comments("job1", req, "tok")
 
@@ -1741,7 +2218,7 @@ class TestRunAddressComments:
         # ...and the final write re-adds it once this run's own work succeeds.
         assert ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
 
-    def test_marks_waiting_for_review_on_retry_only_success(self, address_env) -> None:
+    def test_marks_waiting_for_review_on_retry_only_success(self, address_env, monkeypatch) -> None:
         """A run consisting SOLELY of successful resolve-only retries (no fresh
         unresolved comments to triage) still did real work — the resolve
         mutation that a previous run's reply left pending — and must be
@@ -1749,19 +2226,21 @@ class TestRunAddressComments:
         ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
         # Latest message in the thread is already Khala's own reply, so this
         # routes entirely through retry_resolve_thread_ids; `unresolved`/
-        # `outcomes` stay empty.
+        # `outcomes` stay empty. Persisted evidence confirms our own resolve
+        # for this reply is on record as having failed, authorizing the retry.
         fake.review_comments = [
             _comment(2, body="please fix this"),
             _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+        monkeypatch.setattr(address_env["main"], "has_recorded_resolve_failure", lambda *a, **kw: True)
 
         ac._run_address_comments("job1", req, "tok")
 
         assert fake.resolved == ["T2"]
         assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
 
-    def test_retry_only_skips_resolve_when_pr_already_closed(self, address_env) -> None:
+    def test_retry_only_skips_resolve_when_pr_already_closed(self, address_env, monkeypatch) -> None:
         """The PR can already be closed by the time the resolve-only retry
         loop runs — this run's own pre-loop snapshot can be stale by then,
         since `_unresolved_comments` above can take a while. Resolving a
@@ -1777,6 +2256,7 @@ class TestRunAddressComments:
             _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+        monkeypatch.setattr(address_env["main"], "has_recorded_resolve_failure", lambda *a, **kw: True)
 
         calls = {"n": 0}
         real_pr = fake.pr
@@ -1797,7 +2277,9 @@ class TestRunAddressComments:
         assert fake.resolved == []  # never resolved on the closed PR
         assert fake.labels_set == []
 
-    def test_retry_only_skips_label_when_pr_closes_after_resolving(self, address_env) -> None:
+    def test_retry_only_skips_label_when_pr_closes_after_resolving(
+        self, address_env, monkeypatch
+    ) -> None:
         """The PR can also close AFTER the resolve-only retries' own
         PR-state check runs (and the retry succeeds) but BEFORE the run is
         labelled waiting-for-review — the post-loop re-check must catch that
@@ -1808,6 +2290,7 @@ class TestRunAddressComments:
             _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+        monkeypatch.setattr(address_env["main"], "has_recorded_resolve_failure", lambda *a, **kw: True)
 
         calls = {"n": 0}
         real_pr = fake.pr
@@ -1828,7 +2311,7 @@ class TestRunAddressComments:
         assert fake.resolved == ["T2"]  # the retry itself succeeded
         assert fake.labels_set == []  # but never mislabelled on the now-closed PR
 
-    def test_retry_resolve_revalidates_freshness_before_resolving(self, address_env) -> None:
+    def test_retry_resolve_revalidates_freshness_before_resolving(self, address_env, monkeypatch) -> None:
         """A reviewer's follow-up posted in the window between the
         `_unresolved_comments` snapshot (which routed this thread to the
         resolve-only retry path because its LATEST message was Khala's own
@@ -1842,6 +2325,7 @@ class TestRunAddressComments:
             _khala_reply(ac, fake, 3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+        monkeypatch.setattr(address_env["main"], "has_recorded_resolve_failure", lambda *a, **kw: True)
 
         # The snapshot (_unresolved_comments' own list_review_comments call) sees
         # only [2, 3] — comment 4 lands only on SUBSEQUENT calls, simulating a

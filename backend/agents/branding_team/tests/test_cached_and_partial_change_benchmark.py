@@ -25,6 +25,16 @@ be compared against:
    This test asserts exactly that: only STRATEGIC_CORE's six calls (five
    specialists + one compositor, see ``graphs/phase1_strategic_core.py``)
    fire again, not the full ``EXPECTED_CALL_COUNT``.
+3. A fourth run whose mission differs only in ``desired_voice`` -- a field
+   on NARRATIVE_MESSAGING's allowlist and no other phase's (in particular,
+   *not* STRATEGIC_CORE's), still reusing the same cache. This is the
+   scoping mechanism's proof for a non-Phase-1 phase: STRATEGIC_CORE sits
+   upstream of NARRATIVE_MESSAGING but ``desired_voice`` is outside its own
+   allowlist, so STRATEGIC_CORE's cache entry must not even be touched --
+   only NARRATIVE_MESSAGING's six calls (see
+   ``graphs/phase2_narrative.py``) fire again, and, by the same
+   deterministic-dummy-output reasoning as scenario 2, VISUAL_IDENTITY,
+   CHANNEL_ACTIVATION, and GOVERNANCE stay cache hits too.
 
 Uses the shared ``_benchmark_helpers`` module (also used by
 ``test_phase2_parallelism_benchmark.py`` and
@@ -78,6 +88,18 @@ _STRATEGIC_CORE_CALL_COUNT = 6
 # baseline if this scenario silently stops being phase-1-only.
 _PHASE_ONE_ONLY_MIN_WALL_CLOCK_SECONDS = 2 * PER_CALL_DELAY_SECONDS * 0.5
 _PHASE_ONE_ONLY_MAX_WALL_CLOCK_SECONDS = 6.0
+
+# NARRATIVE_MESSAGING's six specialists (see ``graphs/phase2_narrative.py``)
+# run fully concurrently with no compositor -- the only phase this
+# NARRATIVE_MESSAGING-allowlisted mission-field change invalidates.
+_NARRATIVE_MESSAGING_CALL_COUNT = 6
+
+# NARRATIVE_MESSAGING's critical-path depth under 1s-per-call mocked latency:
+# a single delay, since all six specialists fan out concurrently with no
+# compositor step after them (unlike STRATEGIC_CORE's fan-out-then-compositor
+# shape). Same generous ceiling as the Phase-1-only scenario above.
+_PHASE_TWO_ONLY_MIN_WALL_CLOCK_SECONDS = 1 * PER_CALL_DELAY_SECONDS * 0.5
+_PHASE_TWO_ONLY_MAX_WALL_CLOCK_SECONDS = 6.0
 
 
 @pytest.mark.bench
@@ -160,4 +182,55 @@ def test_phase_one_relevant_mission_change_reinvokes_only_strategic_core() -> No
     ), (
         f"phase-1-only recompute took {elapsed:.2f}s, outside the expected "
         f"[{_PHASE_ONE_ONLY_MIN_WALL_CLOCK_SECONDS}, {_PHASE_ONE_ONLY_MAX_WALL_CLOCK_SECONDS}]s window"
+    )
+
+
+@pytest.mark.bench
+def test_phase_two_relevant_mission_change_reinvokes_only_narrative_messaging() -> None:
+    """A mission change to a field on NARRATIVE_MESSAGING's ``mission_fields``
+    allowlist (``desired_voice``) and no other phase's -- crucially, not
+    STRATEGIC_CORE's, even though STRATEGIC_CORE runs upstream of
+    NARRATIVE_MESSAGING -- reusing the same warm cache, must miss only
+    NARRATIVE_MESSAGING's cache entry. STRATEGIC_CORE's own input hash never
+    even sees ``desired_voice`` (it's outside STRATEGIC_CORE's allowlist), so
+    its cache entry isn't touched at all; and, as in the Phase-1 scenario
+    above, NARRATIVE_MESSAGING's recomputed output is identical to what
+    every downstream phase's cache key already expects (the dummy provider's
+    structured output is deterministic per request, not per mission text),
+    so VISUAL_IDENTITY, CHANNEL_ACTIVATION, and GOVERNANCE stay cache hits.
+    This is the scoping mechanism's proof for a non-Phase-1, non-upstream-most
+    phase: firing NARRATIVE_MESSAGING's six calls again and nothing else,
+    finishing in roughly NARRATIVE_MESSAGING's own critical-path depth rather
+    than the full cold run's wall-clock."""
+    orchestrator = BrandingTeamOrchestrator()
+    original_mission = make_mission()
+    changed_mission = make_mission(desired_voice="Playful, irreverent, unmistakably direct")
+    human_review = HumanReview(approved=False)
+    cache = PhaseOutputCache()
+
+    with mock_llm_latency(
+        PER_CALL_DELAY_SECONDS,
+        min_executor_workers=EXECUTOR_WORKERS,
+        executor_thread_name_prefix="partial-change-benchmark",
+    ) as harness:
+        run_and_assert_cold_baseline(orchestrator, original_mission, human_review, cache, harness)
+
+        calls_before = harness.call_count
+        start = time.monotonic()
+        orchestrator.run(changed_mission, human_review, phase_cache=cache)
+        elapsed = time.monotonic() - start
+
+    calls_made = harness.call_count - calls_before
+    assert calls_made == _NARRATIVE_MESSAGING_CALL_COUNT, (
+        f"expected exactly {_NARRATIVE_MESSAGING_CALL_COUNT} LLM calls (NARRATIVE_MESSAGING only) "
+        f"for a NARRATIVE_MESSAGING-allowlisted-only mission change, got {calls_made} -- either the "
+        "mission_fields allowlist stopped scoping this phase's cache key (letting a non-allowlisted "
+        "field like this one re-invalidate STRATEGIC_CORE or another phase), or NARRATIVE_MESSAGING's "
+        "recompute stopped matching what downstream phases' cache keys expect"
+    )
+    assert (
+        _PHASE_TWO_ONLY_MIN_WALL_CLOCK_SECONDS <= elapsed <= _PHASE_TWO_ONLY_MAX_WALL_CLOCK_SECONDS
+    ), (
+        f"phase-2-only recompute took {elapsed:.2f}s, outside the expected "
+        f"[{_PHASE_TWO_ONLY_MIN_WALL_CLOCK_SECONDS}, {_PHASE_TWO_ONLY_MAX_WALL_CLOCK_SECONDS}]s window"
     )
