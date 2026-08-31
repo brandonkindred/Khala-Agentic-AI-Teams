@@ -476,6 +476,12 @@ def test_phase_transition_attempt_increments_on_design_reentry(
         (Phase.CODE_SYNTHESIS.value, Phase.BACKTEST_AND_VERIFICATION.value),
         (Phase.BACKTEST_AND_VERIFICATION.value, None),
     ]
+    # The re-entry branch computes a resume determination for the failed
+    # attempt (design_attempt=0), but this test's fake raiser never captures
+    # any checkpoints for that attempt, so the determination is "no usable
+    # checkpoint" — computed, not acted on, and the cycle's actual behavior
+    # (asserted above) is unaffected either way.
+    assert orch.last_resume_determination is None
 
 
 def test_run_design_attempt_checkpoint_hook_fires_once_at_design_synthesis_boundary(

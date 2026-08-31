@@ -19,16 +19,57 @@ same-attempt scenario, so a crash during synthesis, refinement, or alignment
 can also resume without redoing the stages already converged in the current
 attempt. Nothing here changes ``DesignAttemptCheckpoint`` or its ADR.
 
-**Same-attempt only — this is not a cross-attempt re-entry mechanism.** A
-checkpoint captured for ``design_attempt=N`` is never read while running
-``design_attempt=N+1``. When ``SpecImplementabilityError`` triggers a design
-re-entry, the new attempt starts fresh with none of this family's
-checkpoints consulted, exactly as ``RETRY_STATE_ISOLATION.md`` requires for
-every other kind of attempt-local state: a failed attempt's mutations must
-never leak into the next attempt's reasoning. Letting a *new* attempt resume
-from a *prior* attempt's partial convergence would require an explicit
-amendment to that isolation contract (to define which stages, if any, survive
-the failure that caused re-entry) and is out of scope for this family.
+**Same-attempt, plus one narrow, explicitly-gated cross-attempt exception.**
+A checkpoint captured for ``design_attempt=N`` is, with one exception, never
+read while running ``design_attempt=N+1``: when ``SpecImplementabilityError``
+triggers a design re-entry, the new attempt starts fresh with none of this
+family's checkpoints consulted, exactly as ``RETRY_STATE_ISOLATION.md``
+requires for every other kind of attempt-local state — a failed attempt's
+mutations must never leak into the next attempt's reasoning.
+
+The exception: ``run_cycle``'s re-entry branch *may* let attempt ``N+1``
+consume attempt ``N``'s **``ReviewCheckpoint``** — and only that stage, via
+``_run_design_attempt``'s ``resume_spec``/``resume_design_context``
+parameters — but only when the ``SpecImplementabilityError`` that
+triggered the re-entry itself declares ``spec_implicated=False`` (see
+``exceptions.py``). This gate exists because a cross-attempt amendment was
+first attempted *unconditionally* and reverted: every ``SpecImplementabilityError``
+raise site that existed at the time (``orchestrator_synthesis.py``'s
+``ENTRY_WITH_NO_EXIT`` redesign-required raise; ``_apply_updates``'s
+stray-key-mutation and risk-limits-loosening trips in ``orchestrator.py``)
+exists specifically *because* the checkpointed spec needs a design-level
+revision that refinement cannot make on its own — that is the whole
+documented purpose of this exception (see its own docstring: raised when
+"the refinement loop cannot make the spec implementable"). Resuming with
+that same, unrevised spec therefore either guarantees (``ENTRY_WITH_NO_EXIT``,
+a deterministic re-check against unchanged code and market data) or makes
+likely (the two mutation-trip sites, since an LLM refinement agent that just
+tried the same disallowed change would plausibly try it again) the identical
+failure recurring on every subsequent attempt, burning the whole re-entry
+budget with no chance of recovery — worse than the full-restart behavior it
+was meant to optimize, which gives every re-entry a fresh,
+potentially-corrected spec. Every one of those raise sites (plus the one
+site that fires before any checkpoint exists — an unsupported
+``asset_class`` rejected at spec-build time, in ``orchestrator_design.py``)
+now explicitly passes ``spec_implicated=True``, so the resume mechanism
+below is real, wired, and tested, but structurally inert on every real
+re-entry today. It only activates for a future raise site that has proven
+its failure doesn't implicate the checkpointed spec — that per-site
+soundness analysis is deliberately out of scope here (see ``exceptions.py``'s
+``SpecImplementabilityError.spec_implicated`` docstring for the contract a
+new raise site must satisfy before setting it ``False``).
+
+**A ``SynthesisCheckpoint`` boundary was considered and deliberately
+excluded.** ``spec_implicated=False`` is a claim about the checkpointed
+*spec*, not about any already-synthesized *code* — a raise site could set
+it because it has proven the spec is sound while the code is exactly what's
+defective. Letting resume additionally skip code synthesis (reusing a
+``SynthesisCheckpoint``'s ``code`` verbatim, as an earlier version of this
+amendment did) would then replay that same defective code into every
+subsequent attempt, the identical failure mode this whole gate exists to
+prevent — just shifted from the spec to the code. A future extension past
+the REVIEW boundary needs its own, separate code-soundness signal before it
+could be sound; it is not implied by ``spec_implicated`` alone.
 
 Serialization relies entirely on Pydantic's built-in ``model_dump(mode="json")``
 / ``model_validate`` — the same mechanism already proven for
@@ -59,7 +100,7 @@ scope boundary.**
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -159,14 +200,21 @@ class PipelineCheckpoint(BaseModel):
         identically-shaped ``design_context: Dict[str, Any]`` field.
 
     Invariants:
-      - **Never cross-attempt.** A checkpoint captured while running
-        ``design_attempt=N`` is never read or considered while running
-        ``design_attempt=N+1`` — a design re-entry (``SpecImplementabilityError``)
-        starts a fresh attempt with its own fresh state, exactly as
-        ``RETRY_STATE_ISOLATION.md`` already requires for other attempt-local
-        state. This family's resume scenario is strictly same-attempt crash
-        recovery (see the module docstring); it is never a mechanism for a
-        new attempt to reuse a prior attempt's partial convergence.
+      - **Cross-attempt only for a REVIEW-stage checkpoint, and only when
+        the triggering exception declares ``spec_implicated=False``; never
+        otherwise.** A checkpoint captured while running
+        ``design_attempt=N`` is, by default, never read or considered while
+        running ``design_attempt=N+1`` — a design re-entry
+        (``SpecImplementabilityError``) starts a fresh attempt with its own
+        fresh state, exactly as ``RETRY_STATE_ISOLATION.md`` already
+        requires for other attempt-local state. ``ReviewCheckpoint`` is the
+        one documented exception (see the module docstring), and only
+        fires when the raising exception's ``spec_implicated`` is
+        ``False`` — no production raise site sets this today, so this
+        family's resume scenario remains, in practice, strictly
+        same-attempt crash recovery (see the module docstring); it is not
+        a mechanism any current attempt actually uses to reuse a
+        prior attempt's partial convergence.
       - **Never survives a generation bump.** A checkpoint minted under an
         older fencing generation is stale the instant a restart mints a new
         one (``restart_strategy_lab_run``'s full-reset semantics) — the same
@@ -387,3 +435,153 @@ def parse_checkpoint(raw: dict[str, Any]) -> AnyPipelineCheckpoint:
     stage = PipelineStage(raw["stage"])
     checkpoint_cls = _CHECKPOINT_CLASSES_BY_STAGE[stage]
     return checkpoint_cls.model_validate(raw)
+
+
+# ---------------------------------------------------------------------------
+# Resume-point determination.
+#
+# The module docstring above documents this family as same-attempt-only, with
+# one narrow, explicitly-gated exception. ``find_latest_checkpoint_for_attempt``
+# and ``determine_resume_stage`` below *compute* where a subsequent attempt
+# could resume from; ``resolve_cross_attempt_resume`` (further below) is the
+# actual gate consumed by both ``orchestrator.run_cycle``'s
+# ``except SpecImplementabilityError`` branch and Temporal mode's
+# ``StrategyLabCycleWorkflow.run`` re-entry branch -- shared so the two modes'
+# soundness gate can't independently drift out of sync (see that function's
+# own docstring for the gate itself, and why per-mode resume-state extraction
+# is deliberately NOT also unified here). Every ``determine_resume_stage``
+# result other than ``PipelineStage.SYNTHESIS`` (i.e. ``REVIEW``,
+# ``REFINEMENT``, ``ALIGNMENT``, or ``None``) has no matching resume
+# parameter on either mode's per-attempt entry point and is left for a
+# future, separately-scoped amendment -- ``REFINEMENT`` (a checkpoint that
+# converged through SYNTHESIS) deliberately included, since resuming past
+# code synthesis would need its own code-soundness signal that
+# ``spec_implicated`` alone doesn't provide (see the module docstring's
+# "SynthesisCheckpoint boundary was considered and deliberately excluded"
+# paragraph). No production raise site sets ``spec_implicated=False`` today
+# (an earlier, unconditional version of this consumption was tried and
+# reverted -- see the module docstring's "cross-attempt amendment was
+# attempted once" paragraph for why), so the "never cross-attempt"
+# *behavioral* invariant still holds in practice for every real re-entry.
+# ---------------------------------------------------------------------------
+
+
+def find_latest_checkpoint_for_attempt(
+    checkpoints: Iterable[AnyPipelineCheckpoint],
+    *,
+    run_id: str,
+    cycle_scope: str,
+    design_attempt: int,
+    generation: int,
+) -> AnyPipelineCheckpoint | None:
+    """Return the most-converged valid checkpoint captured for one attempt.
+
+    Preconditions:
+      - ``run_id``/``cycle_scope``/``design_attempt``/``generation`` identify
+        exactly the attempt to look up, using the same identity/versioning
+        fields every checkpoint carries (see ``PipelineCheckpoint``'s own
+        docstring: an attempt's identity is ``(run_id, cycle_scope,
+        design_attempt)``, disambiguated further by ``generation``).
+
+    Postconditions:
+      - Checkpoints in ``checkpoints`` whose ``run_id``, ``cycle_scope``,
+        ``design_attempt``, or ``generation`` don't match the given values
+        are excluded -- this is what makes a checkpoint from a different run
+        or attempt, or a stale-generation checkpoint, invalid for this
+        lookup, per ``PipelineCheckpoint``'s identity fields and its "never
+        survives a generation bump" invariant.
+      - Among the remaining matches, returns the one whose ``stage`` is
+        furthest along ``PIPELINE_STAGES`` -- the most-converged valid
+        checkpoint for the attempt, since a checkpoint at stage ``S`` implies
+        every stage before ``S`` has already converged.
+      - Returns ``None`` when no checkpoint in ``checkpoints`` matches.
+    """
+    matches = [
+        cp
+        for cp in checkpoints
+        if cp.run_id == run_id
+        and cp.cycle_scope == cycle_scope
+        and cp.design_attempt == design_attempt
+        and cp.generation == generation
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda cp: PIPELINE_STAGES.index(cp.stage))
+
+
+def determine_resume_stage(checkpoint: AnyPipelineCheckpoint | None) -> PipelineStage | None:
+    """Determine the first non-converged stage to resume from, given a checkpoint.
+
+    Preconditions:
+      - ``checkpoint`` is either ``None`` (no usable checkpoint was found for
+        the attempt) or a checkpoint already validated as usable by the
+        caller, e.g. via ``find_latest_checkpoint_for_attempt``.
+
+    Postconditions:
+      - Returns ``None`` when ``checkpoint`` is ``None`` -- signals "no usable
+        checkpoint", i.e. a full restart from the top of the pipeline.
+      - Returns ``None`` when ``checkpoint.stage`` is ``PipelineStage.ALIGNMENT``
+        (the last stage): there is no stage after the last one to resume into.
+        This is a distinct condition from the no-checkpoint case above --
+        "every stage already converged" rather than "nothing converged" --
+        but both currently collapse to the same ``None`` signal, since no
+        caller yet distinguishes them.
+      - Otherwise returns ``PIPELINE_STAGES[idx + 1]``, where ``idx`` is
+        ``checkpoint.stage``'s position in ``PIPELINE_STAGES`` -- the first
+        stage not yet known to have converged.
+    """
+    if checkpoint is None:
+        return None
+    idx = PIPELINE_STAGES.index(checkpoint.stage)
+    if idx + 1 >= len(PIPELINE_STAGES):
+        return None
+    return PIPELINE_STAGES[idx + 1]
+
+
+def resolve_cross_attempt_resume(
+    checkpoint: AnyPipelineCheckpoint | None, *, spec_implicated: bool
+) -> AnyPipelineCheckpoint | None:
+    """Decide whether the next design attempt may resume from ``checkpoint``.
+
+    The single soundness gate shared by both thread mode
+    (``orchestrator.py::run_cycle``) and Temporal mode
+    (``temporal/workflows.py::StrategyLabCycleWorkflow.run``): resume is sound
+    only when the raising ``SpecImplementabilityError`` declares the
+    checkpointed spec was NOT implicated in the failure
+    (``spec_implicated=False``) AND ``checkpoint`` converged through exactly
+    ``PipelineStage.REVIEW`` (i.e. :func:`determine_resume_stage` returns
+    ``PipelineStage.SYNTHESIS``) -- the one stage boundary either caller's
+    ``_run_design_attempt`` actually knows how to resume into. See this
+    module's docstring for the full soundness contract (why an unconditional
+    version of this was tried and reverted, and why a ``SynthesisCheckpoint``
+    boundary is deliberately excluded).
+
+    Deliberately does not also unify the per-mode extraction of
+    ``checkpoint.spec``/``.rationale``/``.design_context``/
+    ``.spec_history``/``.code_history``/``.gate_timeline`` into the caller's
+    own resume-state representation: thread mode needs a live
+    ``_DesignPersistContext``/``_DriftCollector`` (reconstructed via
+    ``orchestrator_record_assembly._design_context_from_checkpoint``, in-process),
+    while Temporal mode needs a JSON-wire dict (crossing the activity
+    boundary via ``run_design_attempt_activity``'s params, reconstructed
+    there via ``_design_context_from_wire``) -- plain attribute reads with no
+    policy of their own to drift, unlike this gate.
+
+    Preconditions:
+      - ``checkpoint`` is the result of :func:`find_latest_checkpoint_for_attempt`
+        for the just-failed attempt (or ``None`` when none was found).
+    Postconditions:
+      - Returns ``checkpoint`` unchanged when resume should activate.
+      - Returns ``None`` ("no usable checkpoint" / full restart) otherwise --
+        including when ``checkpoint`` itself is ``None``.
+    Invariants:
+      - Pure: only reads ``checkpoint``'s already-validated fields, no I/O, no
+        mutation, no wall-clock or random calls -- safe to call from inside a
+        temporalio workflow sandbox, same discipline as
+        :func:`determine_resume_stage` above.
+    """
+    if spec_implicated:
+        return None
+    if determine_resume_stage(checkpoint) is not PipelineStage.SYNTHESIS:
+        return None
+    return checkpoint

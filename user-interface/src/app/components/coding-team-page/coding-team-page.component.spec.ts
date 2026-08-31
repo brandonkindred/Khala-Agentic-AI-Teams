@@ -1562,7 +1562,7 @@ describe('CodingTeamPageComponent', () => {
       await flushAsync();
       // The running run is auto-selected and its issue shows "In progress".
       expect(component.selectedRunId).toBe('r1');
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(true);
 
       // Collapsing the run drops the selection *and* its issue number.
       component.toggleRun(component.runs[0]);
@@ -1573,7 +1573,7 @@ describe('CodingTeamPageComponent', () => {
       component['applyRuns']([
         ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } }),
       ]);
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(false);
     });
 
     it('auto-selects a non-terminal run on first load and starts polling it', async () => {
@@ -1584,7 +1584,7 @@ describe('CodingTeamPageComponent', () => {
       expect(component.selectedRunId).toBe('j-restore');
       expect(component.selectedRunNumber).toBe(2);
       expect(apiSpy.getJobStatus).toHaveBeenCalledWith('j-restore');
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(true);
     });
 
     it('prefers a run paused on questions over a more-recent running run', async () => {
@@ -1609,7 +1609,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       await flushAsync();
       expect(component.selectedRunId).toBe('newer');
-      expect(component.activeIssueKeys).toEqual(new Set(['acme/widgets#2', 'acme/widgets#3']));
+      expect(component.activeRunKeys).toEqual(new Set(['acme/widgets#2', 'acme/widgets#3']));
     });
 
     it('lists runs from every repository the PAT can access, keyed per repo', async () => {
@@ -1631,7 +1631,7 @@ describe('CodingTeamPageComponent', () => {
       // Runs are no longer filtered to a single configured repo.
       expect(component.runs.length).toBe(2);
       // The same issue number in two repos yields two distinct chips.
-      expect(component.activeIssueKeys).toEqual(
+      expect(component.activeRunKeys).toEqual(
         new Set(['acme/other-repo#2', 'someone-else/widgets#2']),
       );
     });
@@ -1651,7 +1651,7 @@ describe('CodingTeamPageComponent', () => {
       // Only the accessible-repo run survives; the run for the unreachable repo is hidden.
       expect(component.runs.length).toBe(1);
       expect(component.runs[0].github_context?.repo).toBe('widgets');
-      expect(component.activeIssueKeys.has('gone/repo#9')).toBe(false);
+      expect(component.activeRunKeys.has('gone/repo#9')).toBe(false);
     });
 
     it('lowercases the repo identity so chips match case-insensitively', async () => {
@@ -1661,7 +1661,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       await flushAsync();
       expect(component.selectedRunId).toBe('j-run');
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(true);
     });
 
     it('lists a terminal run under Recent without auto-selecting it', async () => {
@@ -1675,7 +1675,7 @@ describe('CodingTeamPageComponent', () => {
       await flushAsync();
       expect(component.selectedRunId).toBeNull();
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['done']);
-      expect(component.activeIssueKeys.size).toBe(0);
+      expect(component.activeRunKeys.size).toBe(0);
     });
 
     it('stays usable when the runs list cannot be fetched', async () => {
@@ -1745,7 +1745,7 @@ describe('CodingTeamPageComponent', () => {
       component.selectedRunRepo = 'widgets';
       component.jobStatus = { job_id: 'mine', status: 'running' };
       component['applyRuns']([]);
-      expect(component.activeIssueKeys.has('acme/widgets#9')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#9')).toBe(true);
     });
 
     it('does not re-add the chip for a selected run that has finished', async () => {
@@ -1756,7 +1756,7 @@ describe('CodingTeamPageComponent', () => {
       component.selectedRunRepo = 'widgets';
       component.jobStatus = { job_id: 'mine', status: 'completed' };
       component['applyRuns']([]);
-      expect(component.activeIssueKeys.has('acme/widgets#9')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#9')).toBe(false);
     });
 
     it('drops the chip once the snapshot reports the selected run terminal, even if the polled status is stale', async () => {
@@ -1772,7 +1772,7 @@ describe('CodingTeamPageComponent', () => {
         ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
       ]);
       // The fresh snapshot is trusted: #5 is no longer in progress and the run sits under Recent.
-      expect(component.activeIssueKeys.has('acme/widgets#5')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#5')).toBe(false);
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['r1']);
     });
 
@@ -1782,13 +1782,13 @@ describe('CodingTeamPageComponent', () => {
       component.selectedRunNumber = 7;
       component.selectedRunOwner = 'acme';
       component.selectedRunRepo = 'widgets';
-      component.activeIssueKeys.add('acme/widgets#7');
+      component.activeRunKeys.add('acme/widgets#7');
       apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'completed' }));
       apiSpy.listJobs.mockReturnValue(of([]));
       component['startPolling']('j1');
       await flushAsync();
       expect(component.jobStatus?.status).toBe('completed');
-      expect(component.activeIssueKeys.has('acme/widgets#7')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#7')).toBe(false);
     });
 
     it('discards a stale poll for a run the user switched away from', async () => {
@@ -1799,6 +1799,137 @@ describe('CodingTeamPageComponent', () => {
       component['startPolling']('a');
       await flushAsync();
       expect(component.jobStatus).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // PR-driven runs (address-comments remediation jobs: github_context carries
+  // pr_number instead of issue_number)
+  // -------------------------------------------------------------------------
+
+  describe('PR-driven runs', () => {
+    it('includes a PR-context job in the Runs list instead of filtering it out', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-job',
+            status: 'running',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 42, pr_url: 'https://example.com/pull/42' },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      expect(component.runs.map((r) => r.job_id)).toEqual(['pr-job']);
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.coding-run-item').length).toBe(1);
+      expect(el.textContent).toContain('acme/widgets#42 (PR)');
+    });
+
+    it('selects a PR-context run, deriving its kind and number', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-job',
+            status: 'running',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 42, pr_url: 'https://example.com/pull/42' },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      // Non-terminal runs are auto-selected on first load, same as an issue-driven run.
+      expect(component.selectedRunId).toBe('pr-job');
+      expect(component.selectedRunNumber).toBe(42);
+      expect(component.selectedRunKind).toBe('pr');
+      expect(component.selectedRunOwner).toBe('acme');
+      expect(component.selectedRunRepo).toBe('widgets');
+    });
+
+    it('keys the "in progress" chip for a PR run separately from an issue of the same number', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-job',
+            status: 'running',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 2 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      expect(component.activeRunKeys.has('acme/widgets#pr-2')).toBe(true);
+      // A same-numbered issue is a distinct identity and must not be flagged in progress.
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(false);
+    });
+
+    it('makes a paused PR-remediation run reachable for answering questions, like an issue run', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-paused',
+            status: 'waiting_for_user',
+            waiting_for_answers: true,
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 7 },
+          }),
+        ]),
+      );
+      apiSpy.getJobStatus.mockReturnValue(
+        of({
+          job_id: 'pr-paused',
+          status: 'waiting_for_user',
+          waiting_for_answers: true,
+          pending_questions: [
+            { id: 'q1', question_text: 'Which approach?', options: [{ id: 'a', label: 'A' }], required: true, source: 'tech_lead' },
+          ],
+          github_context: { owner: 'acme', repo: 'widgets', pr_number: 7 },
+        }),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      fixture.detectChanges();
+      // Paused runs are preferred by auto-select, so this run's answer controls are on screen.
+      expect(component.selectedRunId).toBe('pr-paused');
+      expect(fixture.nativeElement.querySelector('app-pending-questions')).not.toBeNull();
+    });
+
+    it('does not offer "Run again" for a finished PR-remediation run', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'pr-done',
+            status: 'completed',
+            github_context: { owner: 'acme', repo: 'widgets', pr_number: 3 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      component.toggleRun(component.recentRuns[0]);
+      await flushAsync();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.run-detail__retry')).toBeNull();
+      component.retrySelectedRun();
+      expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
+    });
+
+    it('backfills selectedRunKind from the polled status even when selectedRunNumber is already set', async () => {
+      await setup();
+      // A run pre-selected with only its number known (no kind yet) — startPolling must not
+      // skip the kind backfill just because the number is already present.
+      component.selectedRunId = 'pr-job';
+      component.selectedRunNumber = 9;
+      component.selectedRunKind = null;
+      apiSpy.getJobStatus.mockReturnValue(
+        of({ job_id: 'pr-job', status: 'running', github_context: { owner: 'acme', repo: 'widgets', pr_number: 9 } }),
+      );
+      component['startPolling']('pr-job');
+      await flushAsync();
+      expect(component.selectedRunKind).toBe('pr');
+      expect(component.selectedRunNumber).toBe(9);
     });
   });
 

@@ -33,6 +33,9 @@ from investment_team.tests.strategy_lab_temporal_fixtures import (
     WF_CONFIG as _WF_CONFIG,
 )
 from investment_team.tests.strategy_lab_temporal_fixtures import (
+    checkpoint_json as _checkpoint_json,
+)
+from investment_team.tests.strategy_lab_temporal_fixtures import (
     config_dict as _config_dict,
 )
 from investment_team.tests.strategy_lab_temporal_fixtures import (
@@ -45,7 +48,10 @@ from shared.temporal.testing import workflow_environment as _workflow_environmen
 
 
 def _make_fake_activities(
-    *, design_attempt_outcomes: list[Dict[str, Any]], config_overrides: Dict[str, Any]
+    *,
+    design_attempt_outcomes: list[Dict[str, Any]],
+    config_overrides: Dict[str, Any],
+    on_design_attempt_params: Any = None,
 ):
     """Build fake activities registered under the real activity names.
 
@@ -55,6 +61,12 @@ def _make_fake_activities(
           ``_reentry_outcome``/``_record_outcome``).
         - ``config_overrides`` supplies ``_WF_CONFIG``-shaped overrides (e.g.
           ``max_design_reentries``) for the fake config-resolution activity.
+        - ``on_design_attempt_params``, when not ``None``, is a callable
+          invoked with the ``params`` dict on every
+          ``strategy_lab_run_design_attempt`` call, in order — lets a test
+          observe exactly what the workflow threaded into each attempt
+          (e.g. cross-attempt resume state) without needing its own
+          duplicate worker-wiring boilerplate.
     Postconditions:
         - Returns a list of ``@activity.defn``-decorated callables suitable
           for ``Worker(activities=...)``, registered under
@@ -80,6 +92,8 @@ def _make_fake_activities(
 
     @activity.defn(name="strategy_lab_run_design_attempt")
     def _fake_run_design_attempt(params: Dict[str, Any]) -> Dict[str, Any]:
+        if on_design_attempt_params is not None:
+            on_design_attempt_params(params)
         index = calls["design_attempt"]
         calls["design_attempt"] += 1
         return design_attempt_outcomes[min(index, len(design_attempt_outcomes) - 1)]
@@ -101,11 +115,14 @@ def _make_fake_activities(
     ]
 
 
-async def _run_cycle_workflow_and_replay(*, design_attempt_outcomes, config_overrides):
+async def _run_cycle_workflow_and_replay(
+    *, design_attempt_outcomes, config_overrides, on_design_attempt_params=None
+):
     """Drive ``StrategyLabCycleWorkflow`` to completion, then replay its history.
 
     Preconditions:
-        - See ``_make_fake_activities``.
+        - See ``_make_fake_activities`` (``on_design_attempt_params`` is
+          forwarded to it verbatim).
     Postconditions:
         - Returns the workflow's result dict. Raises if history replay
           detects nondeterminism, or the workflow itself fails/times out.
@@ -123,7 +140,9 @@ async def _run_cycle_workflow_and_replay(*, design_attempt_outcomes, config_over
     from shared.temporal.worker import _build_workflow_runner
 
     fake_activities = _make_fake_activities(
-        design_attempt_outcomes=design_attempt_outcomes, config_overrides=config_overrides
+        design_attempt_outcomes=design_attempt_outcomes,
+        config_overrides=config_overrides,
+        on_design_attempt_params=on_design_attempt_params,
     )
 
     cycle_input = {
@@ -206,3 +225,86 @@ async def test_replay_after_reentry_budget_exhausted_is_deterministic() -> None:
         "status": "failed: spec_unimplementable",
     }
     assert "convergence_tracker_state" in result
+
+
+def _review_checkpoint_json(**overrides: Any) -> Dict[str, Any]:
+    """A real ``ReviewCheckpoint``'s wire (``model_dump(mode="json")``) form.
+
+    Thin wrapper over the shared ``checkpoint_json`` fixture builder
+    (``strategy_lab_temporal_fixtures.py``, also used by
+    ``test_strategy_lab_temporal_workflows.py``) supplying the specific
+    ``run_id``/``cycle_scope``/history this replay test needs, so checkpoint
+    fixture construction stays in one place.
+    """
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+
+    base: Dict[str, Any] = {
+        "run_id": "replay-test-run-1",
+        "cycle_scope": "replay-test-run-1-0",
+        "design_context": {
+            "rounds": 1,
+            "critiques": [],
+            "stop_reason": "ready",
+            "loop_telemetry": {},
+        },
+        "review_rounds_completed": 1,
+        "spec_history": [
+            {
+                "phase": "design",
+                "agent": "DesignAgent",
+                "timestamp": "2026-08-27T00:00:00Z",
+                "before_hash": "a" * 64,
+                "after_hash": "b" * 64,
+                "diff": "--- before\n+++ after\n",
+                "reason": "tightened entry threshold",
+                "gate_failures": [],
+            }
+        ],
+    }
+    base.update(overrides)
+    return _checkpoint_json(ReviewCheckpoint, **base)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replay_after_cross_attempt_resume_is_deterministic_and_preserves_evidence_chain() -> (
+    None
+):
+    """Required proof that a resumed cycle's evidence chain matches a
+    non-resumed one: a ``spec_implicated=False`` re-entry whose checkpoint
+    converged through REVIEW resumes the next attempt with
+    that checkpoint's exact spec/rationale/design_context and history --
+    replaying the resulting workflow history without a nondeterminism error
+    (the evidence chain a resumed cycle hands to its next stage is real
+    workflow state derived deterministically, not lost or duplicated in a
+    way that would itself be nondeterministic on replay).
+    """
+    checkpoint = _review_checkpoint_json()
+    captured_params: list[Dict[str, Any]] = []
+
+    result = await _run_cycle_workflow_and_replay(
+        design_attempt_outcomes=[
+            _reentry_outcome(pipeline_checkpoints=[checkpoint], spec_implicated=False),
+            _record_outcome(),
+        ],
+        config_overrides={"max_design_reentries": 2},
+        on_design_attempt_params=captured_params.append,
+    )
+
+    assert result["record"] == {"lab_record_id": "rec-1"}
+    assert len(captured_params) == 2
+    first_call, second_call = captured_params
+    # Attempt 0 (the one that failed): no resume state yet, exactly like
+    # every full-restart attempt today.
+    assert first_call["resume_spec"] is None
+    # Attempt 1 (resumed): carries the checkpoint's own converged spec,
+    # rationale, design_context, and history forward -- the exact evidence a
+    # non-resumed cycle would have had to re-derive from scratch, not lost
+    # and not duplicated.
+    assert second_call["resume_spec"] == checkpoint["spec"]
+    assert second_call["resume_rationale"] == checkpoint["rationale"]
+    assert second_call["resume_design_context"] == checkpoint["design_context"]
+    assert second_call["drift"]["spec_history"] == checkpoint["spec_history"]
+    # A spec_implicated=False failure's evidence must never be mislabeled
+    # into a later restart's design directives.
+    assert second_call["directives"] == []

@@ -381,6 +381,22 @@ def _khala_reply(ac, fake, cid: int) -> ReviewComment:
     )
 
 
+def _khala_reply_with_accounted_through(
+    ac, fake, cid: int, accounted_through: int, body: str = "Addressed by the SE team."
+) -> ReviewComment:
+    """A synthetic Khala-generated reply that also carries the
+    `_accounted_through_marker` boundary `_reply_and_resolve` now embeds in
+    every reply it posts, built from the production module's own marker
+    helpers (mirroring `_khala_reply`'s rationale) so a change to the marker
+    format can't silently stop these tests from exercising the path they're
+    meant to cover."""
+    return _comment(
+        cid,
+        body=f"{body} {ac._accounted_through_marker(accounted_through)} {ac._KHALA_COMMENT_MARKER}",
+        author=fake.authenticated_login,
+    )
+
+
 @pytest.fixture
 def address_env(monkeypatch: pytest.MonkeyPatch):
     """Wire the address_comments module with a fake client and stubbed LLM/pipeline."""
@@ -581,6 +597,56 @@ class TestUnresolvedComments:
 
         assert [c.id for c in unresolved] == [4]
         assert retry_resolve == []
+
+    def test_reviewer_feedback_unaccounted_for_by_reply_is_re_triaged_even_with_a_lower_id(
+        self, address_env
+    ) -> None:
+        """Regression test for the P1 gap: a reviewer's follow-up (H, id 3)
+        that was posted before Khala's reply (R, id 4) actually landed — but
+        AFTER `R` was generated from a snapshot that only saw the root
+        comment — must still be re-triaged next run, even though H's id is
+        LOWER than R's and R is therefore GitHub's chronologically-latest
+        message. Using message order alone (R is latest → "safe resolve-only
+        retry") would silently bury H forever the moment the retry resolves
+        the thread; the reply's own embedded accounted-through boundary (2 —
+        the root comment's id, the only thing R was actually generated from)
+        proves H (id 3 > 2) was never accounted for."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(3, body="wait, this is still broken"),
+            _khala_reply_with_accounted_through(ac, fake, 4, accounted_through=2),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+
+        unresolved, _by_comment, retry_resolve, history = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert [c.id for c in unresolved] == [3]
+        assert retry_resolve == []
+        # The full thread is still handed to triage as context, not just H
+        # in isolation.
+        assert [m.id for m in history[3]] == [2, 3, 4]
+
+    def test_reply_accounted_for_every_earlier_message_is_still_a_clean_retry(
+        self, address_env
+    ) -> None:
+        """The ordinary, fine shape — every message in the thread predates
+        (by id) the boundary Khala's reply was actually generated from —
+        must still take the resolve-only retry path with the new
+        accounted-through check in place, not be swept into re-triage just
+        because the check now exists."""
+        ac, fake = address_env["ac"], address_env["fake"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _comment(3, body="also consider this"),
+            _khala_reply_with_accounted_through(ac, fake, 4, accounted_through=3),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+
+        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+
+        assert unresolved == []
+        assert retry_resolve == [("T2", 4)]
 
     def test_fails_closed_when_unresolved_thread_has_no_fetched_messages(
         self, address_env
@@ -1279,6 +1345,41 @@ class TestHandleComment:
         assert len(fake.replies) == 1
         assert fake.replies[0][0] == 2  # thread.comment_ids[0], not comment.id (4)
         assert fake.resolved == ["T2"]
+
+    def test_posted_reply_embeds_accounted_through_marker_for_highest_history_id(
+        self, address_env, monkeypatch
+    ) -> None:
+        """Every reply this flow posts must carry `_accounted_through_marker`
+        for the highest comment id in the thread history it was actually
+        generated from, so a later run can tell a genuinely clean
+        resolve-only retry apart from a reviewer follow-up that slipped in
+        before the reply was generated but got assigned a lower id than the
+        reply itself (see `_unresolved_comments`'s own regression test)."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=True)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 6))
+        history = [_comment(2), _comment(6, body="also this")]
+        fake.review_comments = list(history)
+        fake.threads = [thread]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(6, body="also this"),
+            thread,
+            history,
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "false_positive"
+        assert len(fake.replies) == 1
+        assert ac._parse_accounted_through(fake.replies[0][1]) == 6
 
     def test_real_issue_does_not_reply_or_resolve_until_workflow_succeeds(
         self, address_env, monkeypatch

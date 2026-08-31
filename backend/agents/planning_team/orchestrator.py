@@ -125,6 +125,7 @@ def run_workflow(
         wait_for_ai_systems_build_completion,
         wait_for_product_analysis_completion,
     )
+    from planning_team.exceptions import PlanningAnswerPauseSignal
     from planning_team.phases import (
         run_discovery,
         run_document_production,
@@ -240,6 +241,12 @@ def run_workflow(
         result["summary"] = "Planning completed; handoff package ready."
         result["current_phase"] = Phase.SUB_AGENT_PROVISIONING.value
         _update(Phase.SUB_AGENT_PROVISIONING.value, 100, "Complete")
+    except PlanningAnswerPauseSignal:
+        # A durable-signal answer_callback (see build_temporal_planning_answer_callback)
+        # raises this as its "no answer yet" control-flow signal — it must reach the
+        # caller (an activity boundary) unconverted, not be folded into a normal
+        # success=False failure result like every other exception here.
+        raise
     except Exception as e:
         logger.exception("Planning workflow failed")
         result["failure_reason"] = str(e)
