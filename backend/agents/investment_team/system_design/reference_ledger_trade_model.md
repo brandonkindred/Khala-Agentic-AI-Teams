@@ -32,7 +32,12 @@ itself) — because once that behavior ships, comparing the reference ledger
 against the pre-change approximation would make every stop/take-profit trade
 trivially "diverge." Implementers should not be surprised that this document
 does not match the current `_build_close_order` behavior for those three
-rule kinds; that divergence is intentional and temporary.
+rule kinds; that divergence is intentional and temporary. Until the
+execution-fidelity change ships, the later trade-matching module must read
+every `stop_loss`/`take_profit`/`scaled_take_profit` divergence during this
+interim window the same way it reads a participation-cap divergence below —
+as outside this module's modeled (target) behavior, not a spec/engine
+mismatch to flag.
 
 It is **not** a fill-cost engine. Explicitly out of scope:
 
@@ -216,13 +221,41 @@ view over the raw `bars` it receives. `predicate_evaluator.py`'s
 of the live engine — but the implementation step should confirm it carries
 no import chain back into the excluded modules above before relying on it.
 This does not weaken the Postconditions' no-forbidden-import guarantee below
-into a contingency: if `PandasHistoryView` turns out to carry such a chain,
-the implementation must **not** relax the exclusion list to accommodate it —
-it must instead construct a narrow, local read-only history/indicator view
-over `bars` (reusing only `PandasHistoryView`'s indicator-computation logic,
-not its import) and pass that to `evaluate_signal_exit_rules`. The
-Postconditions' guarantee holds either way; only the concrete history-view
-implementation is left for Step 2 to pick.
+into a contingency: `PandasHistoryView` is defined in the same
+`predicate_evaluator.py` module the Reuse list above already mandates
+importing `evaluate_entry_rules`/`evaluate_signal_exit_rules` from, so the
+fallback below applies only to one of two distinct cases:
+
+- **A forbidden chain local to `PandasHistoryView`'s own code** (e.g., a
+  function-level import inside one of its methods, not touched by importing
+  the module's other names): the implementation must **not** relax the
+  exclusion list to accommodate it — it must instead construct a narrow,
+  local read-only history/indicator view over `bars` (reusing only
+  `PandasHistoryView`'s indicator-computation logic, not its import) and
+  pass that to `evaluate_signal_exit_rules`. Since duplicating indicator
+  logic instead of importing it creates its own silent-divergence risk for a
+  reference oracle that must match production's signal-exit decisions, any
+  such local view must be pinned to `PandasHistoryView`'s behavior by a
+  parity test (comparing indicator outputs on shared fixture bars) before
+  this module relies on it.
+- **A forbidden chain at `predicate_evaluator.py`'s own module level** (e.g.,
+  a top-level import in that file): the local-view fallback above does not
+  help, since merely importing the Reuse-mandated
+  `evaluate_entry_rules`/`evaluate_signal_exit_rules` would already violate
+  the exclusion Postcondition, independent of `PandasHistoryView`. This
+  would mean the Reuse mandate and the Exclusions Postcondition directly
+  conflict — not a case Step 2 should silently work around by re-deriving
+  the evaluators; the implementer must stop and escalate the conflict
+  instead. (Verified against the current source: `predicate_evaluator.py`
+  carries no such top-level import today — only stdlib, `pandas`, and
+  sibling `strategy_lab` modules — so this case does not apply as of this
+  writing, but the distinction should still be confirmed at Step 2 rather
+  than assumed to still hold.)
+
+In the first case, the Postconditions' no-forbidden-import guarantee holds
+regardless of which concrete history-view implementation Step 2 picks; the
+second case is a design-level conflict outside Step 2's authority to
+resolve unilaterally.
 
 ### Contract
 
@@ -353,8 +386,11 @@ one from the other.
 out of scope per §1): `position_value`, `gross_pnl`, `net_pnl`, `return_pct`,
 `outcome`, `cumulative_pnl`, `entry_fill_price`, `exit_fill_price`,
 `entry_order_type`, `exit_order_type`, `participation_clipped`,
-`partial_fill_count`, `total_unfilled_qty`, `hold_days` (trivially derivable
-by the matching module from the two dates), `entry_reason`/`exit_reason`
+`partial_fill_count`, `total_unfilled_qty`,
+`hold_days` — trivially derivable by the matching module from the entry
+and exit dates, unlike the two partial-fill fields before it, which this
+module simply never models (§1's "Order-book / partial-fill mechanics"
+exclusion) — `entry_reason`/`exit_reason`
 free text — `entry_reason` superseded by the structured `entry_rule_index`
 field above, `exit_reason` superseded by the structured
 `exit_rule_kind`/`exit_rule_index`/`level_index` triple above.
@@ -484,7 +520,11 @@ either. Since `ReferenceTrade.entry_price > 0` is a value-object invariant
 (§3), this module must check `bars[symbol][entry_bar].open <= 0` itself and,
 if true, skip opening a position for that trigger — the same no-position
 outcome as a nonpositive trigger-bar close, just guarding the other price
-this module reads before a `ReferenceTrade` can be constructed.
+this module reads before a `ReferenceTrade` can be constructed. Because
+production lacks this guard, a degenerate fill-bar open `<= 0` yields a
+**production** trade with no reference counterpart at all — the later
+trade-matching module must treat that case as an expected unmatched
+production trade, not a matching failure.
 
 **Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
 against a running equity figure it tracks itself — seeded at
@@ -538,8 +578,10 @@ reference fill itself resolves one bar later, at `entry_bar.open`, per the
   `atr / trigger_bar.close` instead would produce a reference ledger that
   systematically diverges from production's real sizing by a factor of
   `trigger_bar.close` — reproducing production's actual computation is this
-  module's entire purpose, dimensional oddity included. Which ATR — "first" is fully determined, not left to the
-  implementer's choice: scan the entry rules' own predicates first (in
+  module's entire purpose, dimensional oddity included.
+
+  **Which ATR is fully determined, not left to the implementer's choice.**
+  "First" means: scan the entry rules' own predicates first (in
   `spec.entry_rules` list order), then the signal-exit rules' predicates (in
   `spec.exit_rules` list order); within one rule's predicate tree, take the
   first `IndicatorRef` named `"atr"` in leaf order (each leaf predicate's
