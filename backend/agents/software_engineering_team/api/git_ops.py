@@ -844,24 +844,17 @@ def _prepare_issue_branch(
     # needs the credential. The clone was authenticated transiently by the
     # unified API; that auth is not persisted, so we re-supply it per fetch.
     auth_env = _git_auth_env(token) if token else None
-    rc, msg = _main._git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
-    if rc != 0:
-        return False, msg, notes
-    # Resolve the fetched commit via FETCH_HEAD, not `<remote>/<default_branch>`:
-    # an explicit `fetch <remote> <branch>` always updates FETCH_HEAD, but only
-    # updates the `<remote>/<branch>` tracking ref when it matches the checkout's
-    # configured refspec -- a restricted/nonstandard refspec on an
-    # operator-managed checkout could otherwise leave that tracking ref stale
-    # while this fetch reports success. Rebinding `base_ref` to the resolved
-    # commit (instead of keeping the mutable ref name) also pins every
-    # downstream base-branch operation below to this exact commit -- immune to
-    # a concurrent fetch on a shared checkout (e.g. another job's own
-    # base-SHA resolution) moving the tracking ref again before seed
-    # selection/checkout consume it.
-    rc, base_ref_or_err = _main._git(repo_path, "rev-parse", "FETCH_HEAD")
-    if rc != 0:
-        return False, base_ref_or_err, notes
-    base_ref = base_ref_or_err.strip()
+    # Resolve via the same consolidated primitive the route uses to capture
+    # the triaged SHA (fetch + FETCH_HEAD rev-parse, credential-scrubbed) --
+    # not a second inline copy of that sequence. Rebinding `base_ref` to the
+    # resolved commit (instead of keeping the mutable `<remote>/<branch>` ref
+    # name) also pins every downstream base-branch operation below to this
+    # exact commit -- immune to a concurrent fetch on a shared checkout (e.g.
+    # another job's own base-SHA resolution) moving the tracking ref again
+    # before seed selection/checkout consume it.
+    ok, base_ref = _main.resolve_remote_branch_sha(repo_path, remote, default_branch, token)
+    if not ok:
+        return False, base_ref, notes
     # This freshness check must also precede dirty-tree recovery, same as the
     # unsafe-ref checks above: a job whose plan is already known stale must
     # not commit WIP or create rescue branches on its way to being rejected.

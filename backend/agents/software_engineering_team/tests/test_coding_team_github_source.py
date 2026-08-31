@@ -2409,16 +2409,22 @@ class TestPrepareIssueBranch:
         ).stdout.strip()
         assert concurrent_sha != original_sha
 
-        real_git = api._git
+        # The base-branch fetch+resolve now runs through the consolidated
+        # `resolve_remote_branch_sha` primitive, which calls
+        # `shared.git.git_utils._run_git` -- not `api._git` -- so the
+        # injected mutation must hook that call, not the local one.
+        import shared.git.git_utils as shared_git_utils_mod
 
-        def _spy(repo_path, *args, **kw):
-            rc, out = real_git(repo_path, *args, **kw)
-            if rc == 0 and args == ("fetch", "--", "origin", "main"):
+        real_run_git = shared_git_utils_mod._run_git
+
+        def _spy(path, cmd, *a, **kw):
+            rc, out = real_run_git(path, cmd, *a, **kw)
+            if rc == 0 and cmd == ["git", "fetch", "--", "origin", "main"]:
                 subprocess.run(
                     [
                         "git",
                         "-C",
-                        repo_path,
+                        str(path),
                         "update-ref",
                         "refs/remotes/origin/main",
                         concurrent_sha,
@@ -2429,7 +2435,7 @@ class TestPrepareIssueBranch:
                 )
             return rc, out
 
-        monkeypatch.setattr(api, "_git", _spy)
+        monkeypatch.setattr(shared_git_utils_mod, "_run_git", _spy)
 
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
@@ -2475,6 +2481,16 @@ class TestGitCredentialThreading:
         assert "PATH" in env
 
     def test_prepare_issue_branch_passes_auth_env_to_fetch(self, api, monkeypatch) -> None:
+        # The base-branch fetch+resolve now goes through the consolidated
+        # `resolve_remote_branch_sha` primitive (shared.git.git_utils under
+        # it), not the local `_git` choke point -- capture its own call
+        # instead of expecting it to show up as a `_git("fetch", ...)` call.
+        resolve_calls = []
+
+        def fake_resolve(repo_path, remote, branch, token=None):
+            resolve_calls.append((repo_path, remote, branch, token))
+            return True, "f" * 40
+
         calls = []
 
         def fake_git(repo_path, *args, timeout=120.0, env=None):
@@ -2483,14 +2499,17 @@ class TestGitCredentialThreading:
 
         monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
+        monkeypatch.setattr(api, "resolve_remote_branch_sha", fake_resolve)
         ok, msg, _notes = api._prepare_issue_branch(
             "/repo", "origin", "main", "khala/issue-1", "tok-123"
         )
         assert ok is True, msg
-        # Both fetches (base branch + issue-branch continuation candidate)
-        # must carry the auth env.
+        # The base-branch resolution carried the token.
+        assert resolve_calls == [("/repo", "origin", "main", "tok-123")]
+        # The remaining fetch (issue-branch continuation candidate) must
+        # still carry the auth env.
         fetches = [(args, env) for args, env in calls if args[0] == "fetch"]
-        assert len(fetches) == 2
+        assert len(fetches) == 1
         for _args, env in fetches:
             assert env is not None
             assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
@@ -2498,6 +2517,12 @@ class TestGitCredentialThreading:
         assert all(env is None for args, env in calls if args[0] != "fetch")
 
     def test_prepare_issue_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
+        resolve_calls = []
+
+        def fake_resolve(repo_path, remote, branch, token=None):
+            resolve_calls.append(token)
+            return True, "f" * 40
+
         calls = []
 
         def fake_git(repo_path, *args, timeout=120.0, env=None):
@@ -2506,8 +2531,10 @@ class TestGitCredentialThreading:
 
         monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
+        monkeypatch.setattr(api, "resolve_remote_branch_sha", fake_resolve)
         ok, _msg, _notes = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
         assert ok is True
+        assert resolve_calls == [None]
         assert all(env is None for _, env in calls)
 
     def test_push_branch_passes_auth_env(self, api, monkeypatch) -> None:

@@ -206,9 +206,10 @@ def test_branch_prep_activity_raises_on_missing_required_field(
 
 
 def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None:
-    """The token must reach both fetch calls (base branch + issue-branch
-    continuation candidate) transiently, and never a local-only git op --
-    mirrors TestGitCredentialThreading.test_prepare_issue_branch_passes_auth_env_to_fetch
+    """The token must reach both the base-branch resolution and the
+    issue-branch continuation-candidate fetch transiently, and never a
+    local-only git op -- mirrors
+    TestGitCredentialThreading.test_prepare_issue_branch_passes_auth_env_to_fetch
     at the activity boundary."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
@@ -223,8 +224,15 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
         calls.append((args, env))
         return 0, ""
 
+    resolve_calls = []
+
+    def fake_resolve(repo_path: str, remote: str, branch: str, token: Optional[str] = None):
+        resolve_calls.append(token)
+        return True, "f" * 40
+
     monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
     monkeypatch.setattr(api, "_git", fake_git)
+    monkeypatch.setattr(api, "resolve_remote_branch_sha", fake_resolve)
 
     out = github_branch_prep_activity(
         {
@@ -237,8 +245,11 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
     )
 
     assert out["ok"] is True, out["error"]
+    # The base-branch resolution (now via resolve_remote_branch_sha) carried
+    # the token.
+    assert resolve_calls == ["tok-123"]
     fetches = [(args, env) for args, env in calls if args[0] == "fetch"]
-    assert len(fetches) == 2
+    assert len(fetches) == 1
     for _args, env in fetches:
         assert env is not None
         assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
