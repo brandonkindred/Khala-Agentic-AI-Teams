@@ -999,18 +999,30 @@ class SpecReadinessGate(GateResultsMixin):
         assert capital > 0, "initial_capital must be strictly positive"
         enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
-        # ``max_concurrent_positions`` is a declared *upper bound* on intent, but
-        # the runtime's actual concurrency gate is ``risk_limits.max_open_positions``
-        # (``RiskFilter.can_enter``, default 10) — reconcile the two by taking the
-        # tighter of the pair so this check models what the engine would actually
-        # allow, not just what the spec declares. Likewise the runtime's leverage
-        # gate compares total notional against ``risk_limits.max_gross_leverage``
-        # (default 1.0, but spec-configurable), so use that as the equity ceiling
-        # here instead of assuming 1.0x.
-        max_concurrent = min(
-            ctx.spec.max_concurrent_positions, ctx.spec.risk_limits.max_open_positions
-        )
-        max_gross_leverage = float(ctx.spec.risk_limits.max_gross_leverage)
+        # ``StrategySpec.max_concurrent_positions`` is a declared upper bound
+        # on intent, but no runtime code reads it (``run_backtest`` never
+        # passes the spec object into ``TradingService``) — so it cannot be
+        # used to bound worst-case exposure without risking a false pass on a
+        # spec that omits it (default 1) yet runs on a multi-symbol universe.
+        # The runtime's actual worst-case concurrency is structural: the
+        # engine dispatcher never pyramids a symbol that already has an open
+        # position (``FillSimulator``/entry dispatcher), so at most one
+        # position per symbol can ever be open, and ``RiskFilter.can_enter``
+        # additionally caps total open positions at
+        # ``risk_limits.max_open_positions`` (default 10). Worst case is
+        # therefore ``min(len(symbols), max_open_positions)``.
+        worst_case_concurrent = min(len(symbols), ctx.spec.risk_limits.max_open_positions)
+
+        # Likewise, the runtime has no margin facility: ``Portfolio.open``/
+        # ``extend`` deduct the full order notional from cash, and the fill
+        # simulator rejects any order whose notional exceeds available cash
+        # with ``insufficient_capital`` regardless of
+        # ``risk_limits.max_gross_leverage`` — leverage only gates whether
+        # ``RiskFilter.can_enter`` allows the order, it never funds beyond
+        # cash. So a configured leverage above 1.0 cannot expand what's
+        # fundable, but a leverage below 1.0 does tighten what the risk
+        # filter would actually allow through.
+        cash_bound_multiplier = min(1.0, float(ctx.spec.risk_limits.max_gross_leverage))
 
         # Notional is symbol-independent for both supported kinds, so resolve
         # it once. fixed_notional with notional_usd > initial_capital can
@@ -1018,49 +1030,52 @@ class SpecReadinessGate(GateResultsMixin):
         # ``insufficient_capital`` the moment ``portfolio.capital < notional``
         # (see ``fill_simulator.py``). fixed_fraction is bounded by
         # ``fraction <= 1.0`` in the DSL so a single order cannot trip this
-        # branch — but ``max_concurrent`` simultaneous entries each sized at
-        # ``fraction``/``notional_usd`` can jointly overcommit capital even
-        # when no single order would. At the default concurrency of 1 and
-        # default ``max_gross_leverage`` of 1.0, both worst-case checks below
-        # degenerate to the single-order case and are no-ops.
+        # branch — but ``worst_case_concurrent`` simultaneous entries each
+        # sized at ``fraction``/``notional_usd`` can jointly overcommit cash
+        # even when no single order would. On a single-symbol universe (or
+        # at the default ``max_open_positions``/``max_gross_leverage``),
+        # both worst-case checks below degenerate to the single-order case
+        # and are no-ops.
         if kind == "fixed_fraction":
             fraction = float(ctx.spec.sizing.fraction)
             notional = capital * fraction
-            worst_case_fraction = fraction * max_concurrent
-            if worst_case_fraction > max_gross_leverage:
+            worst_case_fraction = fraction * worst_case_concurrent
+            if worst_case_fraction > cash_bound_multiplier:
                 return (
                     self._critical(
                         f"Sizing realisability: fixed_fraction {fraction:.4f} × "
-                        f"max_concurrent_positions {max_concurrent} (reconciled with "
-                        f"risk_limits.max_open_positions) = {worst_case_fraction:.2f}x "
-                        f"equity would exceed risk_limits.max_gross_leverage "
-                        f"{max_gross_leverage:.2f}x (initial_capital ${capital:.0f}) if "
-                        "all concurrent positions filled simultaneously."
+                        f"worst-case concurrency {worst_case_concurrent} "
+                        f"(min of {len(symbols)} target symbol(s) and "
+                        f"risk_limits.max_open_positions "
+                        f"{ctx.spec.risk_limits.max_open_positions}) = "
+                        f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
+                        f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
+                        f"${capital:.0f}) if all concurrent positions filled "
+                        "simultaneously."
                     ),
                 )
         elif kind == "fixed_notional":
             notional = float(ctx.spec.sizing.notional_usd)
-            leveraged_capital = capital * max_gross_leverage
-            worst_case_notional = notional * max_concurrent
-            if worst_case_notional > leveraged_capital:
-                if max_concurrent > 1:
+            fundable_capital = capital * cash_bound_multiplier
+            worst_case_notional = notional * worst_case_concurrent
+            if worst_case_notional > fundable_capital:
+                if worst_case_concurrent > 1:
                     return (
                         self._critical(
                             f"Sizing realisability: fixed_notional ${notional:.0f} × "
-                            f"max_concurrent_positions {max_concurrent} (reconciled with "
-                            f"risk_limits.max_open_positions) = ${worst_case_notional:.0f}, "
-                            f"which exceeds initial_capital ${capital:.0f} (risk_limits."
-                            f"max_gross_leverage {max_gross_leverage:.2f}x → "
-                            f"${leveraged_capital:.0f} available) if all concurrent "
+                            f"worst-case concurrency {worst_case_concurrent} (min of "
+                            f"{len(symbols)} target symbol(s) and risk_limits."
+                            f"max_open_positions "
+                            f"{ctx.spec.risk_limits.max_open_positions}) = "
+                            f"${worst_case_notional:.0f}, which exceeds the cash-bound "
+                            f"fundable capital ${fundable_capital:.0f} if all concurrent "
                             "positions filled simultaneously."
                         ),
                     )
                 return (
                     self._critical(
                         f"Sizing realisability: fixed_notional ${notional:.0f} "
-                        f"exceeds initial_capital ${capital:.0f} (risk_limits."
-                        f"max_gross_leverage {max_gross_leverage:.2f}x → "
-                        f"${leveraged_capital:.0f} available); the first order "
+                        f"exceeds initial_capital ${capital:.0f}; the first order "
                         "would be rejected with insufficient_capital."
                     ),
                 )

@@ -354,17 +354,19 @@ class StrategySpec(BaseModel):
     # Defaults to 1 so every existing spec/caller that omits this field keeps
     # today's implicit one-position-per-symbol behavior exactly — this is a
     # hard backward-compatibility requirement, not just a convenience default.
-    # This field is a declared upper bound on intent; it does NOT itself
-    # derive from ``risk_limits.max_open_positions`` (default 10,
-    # RiskFilter.can_enter) — doing so would silently change the effective
-    # default for every spec that omits both fields. Instead, spec_readiness's
-    # sizing-realizability check (Rule 5) reconciles the two at validation
-    # time by taking ``min(max_concurrent_positions, risk_limits.
-    # max_open_positions)`` as the worst-case concurrency to size against, and
-    # evaluates fixed_fraction/fixed_notional notional against
-    # ``risk_limits.max_gross_leverage`` rather than assuming 1.0x — so a
-    # spec cannot pass readiness with a concurrency/sizing combination the
-    # runtime would actually reject.
+    # This field is purely declarative: no runtime code reads it —
+    # ``run_backtest`` never passes the ``StrategySpec`` object into
+    # ``TradingService``, so this value has no effect on backtest or live
+    # execution. spec_readiness's sizing-realizability check (Rule 5) does
+    # NOT use this field either, for the same reason: sizing against a
+    # declared-but-unenforced bound risks a false pass on a spec that omits
+    # it (default 1) yet runs on a multi-symbol universe. Instead Rule 5
+    # derives worst-case concurrency from what the engine actually enforces
+    # today — at most one open position per symbol (the entry dispatcher
+    # never pyramids) capped by ``risk_limits.max_open_positions`` — i.e.
+    # ``min(len(target_symbols_or_default_universe), risk_limits.
+    # max_open_positions)``. Wiring this field into the runtime (and then
+    # into Rule 5's worst-case math) is left to follow-up work.
     max_concurrent_positions: int = Field(
         default=1,
         ge=1,
@@ -373,10 +375,11 @@ class StrategySpec(BaseModel):
             "Maximum number of positions this spec may hold open "
             "concurrently across target_symbols. Defaults to 1, preserving "
             "today's implicit one-position-per-symbol behavior for any spec "
-            "that omits it. Reconciled against ``risk_limits."
-            "max_open_positions`` (default 10, via ``RiskFilter.can_enter``) "
-            "by spec_readiness's sizing-realizability check, which sizes "
-            "worst-case notional against the tighter of the two."
+            "that omits it. Purely declarative: no runtime code reads it, "
+            "and spec_readiness's sizing-realizability check sizes against "
+            "the engine's actual enforced concurrency (one position per "
+            "symbol, capped by risk_limits.max_open_positions) rather than "
+            "this field."
         ),
     )
     # Phase 3: risk_limits is validated at spec construction time.  Dicts

@@ -519,26 +519,28 @@ def test_rule5_fixed_notional_exceeds_initial_capital_is_critical() -> None:
     assert matches, _critical(results)
 
 
-def test_rule5_fixed_fraction_over_committed_by_concurrency_is_critical() -> None:
+def test_rule5_fixed_fraction_over_committed_across_symbols_is_critical() -> None:
     """A fixed_fraction spec that is safe for a single order can still
-    overcommit capital once ``max_concurrent_positions`` simultaneous
-    entries are considered. 0.5 fraction × 3 concurrent = 1.5x equity."""
+    overcommit capital once the runtime's actual worst-case concurrency —
+    one open position per target symbol, up to risk_limits.max_open_positions
+    — is considered. 0.5 fraction × 3 symbols = 1.5x equity (default
+    max_open_positions=10 doesn't tighten this)."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.5),
-        target_symbols=["AAPL"],
+        target_symbols=["AAPL", "MSFT", "GOOG"],
         asset_class="stocks",
-        max_concurrent_positions=3,
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     matches = [
-        c for c in _critical(results) if "fixed_fraction" in c and "max_concurrent_positions" in c
+        c for c in _critical(results) if "fixed_fraction" in c and "worst-case concurrency" in c
     ]
     assert matches, _critical(results)
 
 
-def test_rule5_fixed_fraction_default_concurrency_is_unaffected() -> None:
-    """The same 0.5 fraction is implementable at the default concurrency of
-    1 — the new worst-case check must be a no-op there."""
+def test_rule5_fixed_fraction_single_symbol_is_unaffected() -> None:
+    """The same 0.5 fraction is implementable on a single-symbol universe —
+    the entry dispatcher never pyramids a symbol, so worst-case concurrency
+    is structurally 1 regardless of any declared max_concurrent_positions."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.5),
         target_symbols=["AAPL"],
@@ -549,40 +551,35 @@ def test_rule5_fixed_fraction_default_concurrency_is_unaffected() -> None:
     assert not matches, matches
 
 
-def test_rule5_fixed_notional_over_committed_by_concurrency_is_critical() -> None:
+def test_rule5_fixed_notional_over_committed_across_symbols_is_critical() -> None:
     """A fixed_notional spec whose single order fits within initial_capital
-    can still overcommit once ``max_concurrent_positions`` simultaneous
-    entries are considered. $40k × 3 = $120k against the default $100k."""
+    can still overcommit once worst-case concurrency across target symbols
+    is considered. $40k × 3 symbols = $120k against the default $100k."""
     spec = _spec(
         sizing=FixedNotionalSizing(notional_usd=40_000.0),
-        target_symbols=["AAPL"],
+        target_symbols=["AAPL", "MSFT", "GOOG"],
         asset_class="stocks",
-        max_concurrent_positions=3,
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     matches = [
-        c
-        for c in _critical(results)
-        if "max_concurrent_positions" in c and "exceeds initial_capital" in c
+        c for c in _critical(results) if "fixed_notional" in c and "worst-case concurrency" in c
     ]
     assert matches, _critical(results)
 
 
-def test_rule5_concurrency_reconciled_with_max_open_positions() -> None:
-    """A large ``max_concurrent_positions`` must be capped by the runtime's
-    actual concurrency gate, ``risk_limits.max_open_positions``, not used
-    raw. 20 declared concurrent positions at 0.1 fraction would be 2.0x
-    equity — but max_open_positions=5 caps the worst case at 5 × 0.1 = 0.5x,
-    which fits, so no critical should fire."""
+def test_rule5_concurrency_capped_by_max_open_positions() -> None:
+    """Worst-case concurrency must be capped by risk_limits.max_open_positions
+    even when more target symbols are declared. 5 symbols at 0.3 fraction
+    would be 1.5x equity uncapped — but max_open_positions=2 caps the worst
+    case at 2 × 0.3 = 0.6x, which fits, so no critical should fire."""
     spec = _spec(
-        sizing=FixedFractionSizing(fraction=0.1),
-        target_symbols=["AAPL"],
+        sizing=FixedFractionSizing(fraction=0.3),
+        target_symbols=["AAPL", "MSFT", "GOOG", "AMZN", "META"],
         asset_class="stocks",
-        max_concurrent_positions=20,
         risk_limits={
-            "max_position_pct": 15,
+            "max_position_pct": 35,
             "max_drawdown_pct": 10,
-            "max_open_positions": 5,
+            "max_open_positions": 2,
         },
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
@@ -590,16 +587,17 @@ def test_rule5_concurrency_reconciled_with_max_open_positions() -> None:
     assert not matches, matches
 
 
-def test_rule5_fixed_fraction_respects_configured_leverage_above_one() -> None:
-    """A ``risk_limits.max_gross_leverage`` above 1.0 must raise the equity
-    ceiling accordingly — 0.6 fraction × 2 concurrent = 1.2x equity, which
-    would have failed under a hard-coded 1.0x cap but fits under a
-    configured 1.5x max_gross_leverage."""
+def test_rule5_fixed_fraction_leverage_above_one_does_not_expand_cash_bound() -> None:
+    """The runtime has no margin facility — entries are fully cash-funded,
+    so a configured risk_limits.max_gross_leverage above 1.0 cannot expand
+    what's fundable. 0.6 fraction × 2 symbols = 1.2x equity must still be
+    critical even under a configured 1.5x max_gross_leverage, since the
+    fill engine would reject the second order on cash long before any
+    leverage gate is reached."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.6),
-        target_symbols=["AAPL"],
+        target_symbols=["AAPL", "MSFT"],
         asset_class="stocks",
-        max_concurrent_positions=2,
         risk_limits={
             "max_position_pct": 60,
             "max_drawdown_pct": 10,
@@ -607,14 +605,14 @@ def test_rule5_fixed_fraction_respects_configured_leverage_above_one() -> None:
         },
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    matches = [c for c in _critical(results) if "fixed_fraction" in c]
-    assert not matches, matches
+    matches = [c for c in _critical(results) if "fixed_fraction" in c and "cash-bound" in c]
+    assert matches, _critical(results)
 
 
 def test_rule5_fixed_fraction_respects_configured_leverage_below_one() -> None:
     """A ``risk_limits.max_gross_leverage`` below 1.0 must tighten the
-    equity ceiling accordingly — a single 0.6 fraction order fits under the
-    default 1.0x cap but must fail under a configured 0.5x
+    cash-bound ceiling accordingly — a single 0.6 fraction order fits under
+    the default 1.0x cap but must fail under a configured 0.5x
     max_gross_leverage."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.6),
@@ -627,7 +625,7 @@ def test_rule5_fixed_fraction_respects_configured_leverage_below_one() -> None:
         },
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    matches = [c for c in _critical(results) if "fixed_fraction" in c and "max_gross_leverage" in c]
+    matches = [c for c in _critical(results) if "fixed_fraction" in c and "cash-bound" in c]
     assert matches, _critical(results)
 
 
@@ -768,7 +766,7 @@ def test_check_sizing_realisable_directly_emits_volatility_target_warning() -> N
 
 
 def test_check_sizing_realisable_directly_catches_concurrent_fixed_notional_overcommit() -> None:
-    """Direct probe pinning the concurrency-aware fixed_notional worst-case
+    """Direct probe pinning the worst-case-across-symbols fixed_notional
     check in isolation, mirroring the existing direct-probe tests above."""
     from investment_team.strategy_lab.quality_gates.spec_readiness import (
         SpecReadinessCtx,
@@ -777,9 +775,8 @@ def test_check_sizing_realisable_directly_catches_concurrent_fixed_notional_over
 
     spec = _spec(
         sizing=FixedNotionalSizing(notional_usd=40_000.0),
-        target_symbols=["AAPL"],
+        target_symbols=["AAPL", "MSFT", "GOOG"],
         asset_class="stocks",
-        max_concurrent_positions=3,
     )
     gate = SpecReadinessGate()
     ctx = SpecReadinessCtx(spec=spec, config=_config())
@@ -787,8 +784,8 @@ def test_check_sizing_realisable_directly_catches_concurrent_fixed_notional_over
         results = list(gate._check_sizing_realisable(ctx))
     assert len(results) == 1
     assert results[0].severity == "critical"
-    assert "max_concurrent_positions" in results[0].details
-    assert "exceeds initial_capital" in results[0].details
+    assert "worst-case concurrency" in results[0].details
+    assert "cash-bound fundable capital" in results[0].details
 
 
 def test_rule5_accepts_fractional_qty_on_crypto() -> None:
