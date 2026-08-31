@@ -1054,14 +1054,30 @@ The primitive #7445-B builds must satisfy:
   backstop today. **Contract requirement, scoped to what this story adds:** because this activity
   runs under `NO_RETRY`/`SINGLE_ATTEMPT` — zero retry cushion, unlike the `SAFE_RETRY` phases where
   a crash on a non-final attempt still gets a further chance to run `_guarded` to completion — the
-  workflow must wrap its `execute_activity(document_production_pra_submit_activity, ...)` call in
-  a `try/except` that, on any exception surfacing to the workflow (including one from a crashed,
-  never-`_guarded`-completed attempt), performs a best-effort terminal job-store update
-  (`mark_job_failed`/`update_job(status="failed", ...)`) before re-raising to fail the workflow —
-  a workflow-level backstop specifically for the one activity in this contract with no retry
-  cushion at all. Extending the same backstop to the pre-existing per-phase activities is a
-  legitimate follow-up but out of this story's scope; it does not block this contract, since those
-  activities' existing behavior is unmodified by it.
+  workflow must wrap its `execute_activity(document_production_pra_submit_activity, ...)` call in a
+  `try/except` that, on any exception surfacing to the workflow (including one from a crashed,
+  never-`_guarded`-completed attempt), performs a best-effort terminal job-store update before
+  re-raising to fail the workflow — a workflow-level backstop specifically for the one activity in
+  this contract with no retry cushion at all. Extending the same backstop to the pre-existing
+  per-phase activities is a legitimate follow-up but out of this story's scope; it does not block
+  this contract, since those activities' existing behavior is unmodified by it.
+
+  **Correction — the `except` block must call a Temporal *activity*, never `mark_job_failed`/
+  `update_job` directly from workflow code.** `planning_team/temporal/workflows.py`'s own module
+  docstring states "the workflow body is deterministic: it only threads a JSON-native `context`
+  dict from one `workflow.execute_activity` call to the next" — `mark_job_failed`/`update_job`
+  perform job-service HTTP I/O, which is exactly the kind of nondeterministic external call
+  Temporal's workflow sandbox forbids and this codebase's own workflow code never does directly.
+  Calling either from the `except` block as literally described above would execute network I/O
+  inside the workflow sandbox — at best rejected outright, at worst repeatedly failing the
+  workflow task (a Temporal workflow-task failure, not an activity failure) rather than
+  terminalizing the job the way this backstop is meant to. **Contract requirement:** register a
+  small, separate failure-marking activity (e.g. `mark_planning_job_failed_activity(job_id, error)`,
+  itself following this same rollout's worker-versioning requirement above since it too is a new
+  activity type) that performs the `mark_job_failed` call, and have the workflow's `except` block
+  invoke it via `await workflow.execute_activity(...)` — with its own short, bounded retry policy,
+  since this call's own failure must not block the workflow from re-raising and terminating — before
+  re-raising the original exception.
 
 **`document_production_activity` (entry — every invocation, paused or not)**
 This contract's pause machinery (checkpoint-before-`run_pra`, the new `SAFE_RETRY` policy, the
@@ -1174,13 +1190,34 @@ this contract:
   `observed_generation` a later attempt has since advanced past fails this guard unconditionally,
   regardless of what `waiting_for_answers` happens to read at that moment.
 
+  **The `pause_generation` fence alone still admits one more stale-resurrection shape: a job that
+  reached a *terminal* status without ever locally advancing `pause_generation` at all.** A delayed
+  attempt that observed unanswered PRA questions at generation 0 is not guaranteed to be racing
+  against another *local* pause — PRA can also be answered directly through its own public
+  answers endpoint (bypassing this Planning workflow's signal path entirely, since PRA is an
+  independent SE-team service reachable outside Planning), or a newer attempt's `wait_pra` call can
+  simply observe `"completed"` with no further questions and finish the job without ever calling
+  the paused-return path. In either case `waiting_for_answers` stays falsy and `pause_generation`
+  stays at `0` throughout — nothing *local* ever advanced — so the delayed attempt's guard above
+  passes cleanly and it publishes an orphan pause onto a job that has already terminally completed
+  (or failed). **Contract requirement:** the same conditional write must additionally guard on the
+  job record's own top-level `status` still being active — i.e. not `JOB_STATUS_COMPLETED` or
+  `JOB_STATUS_FAILED` (`planning_team/shared/job_store.py`'s existing status constants) — so a
+  write against a job that has already reached a terminal status fails this guard unconditionally,
+  independent of whatever `pause_generation`/`waiting_for_answers` happen to read. Terminalizing a
+  job (the existing `finalize_planning_activity` completion path, or this contract's own
+  crash-backstop failure path below) is itself then the thing that permanently invalidates every
+  outstanding `observed_generation` for that job, without needing to touch `pause_generation` at
+  all.
+
   **This requires a new job-store primitive — it cannot be expressed with `update_job_if_not_cancelled`
   or the `resume_token`-guarded primitive from §4.4, and implementing it as a client-side
   read-then-write reintroduces the exact TOCTOU race this section exists to close.**
   **Contract requirement:** #7445-B MUST add a second narrowly-scoped conditional-write primitive —
   e.g. `create_pause_if_generation_matches(job_id, observed_generation, **pause_fields)` —
   mirroring `update_job_if_not_cancelled`'s single server-side `UPDATE ... WHERE` shape and
-  `True`/`False`/`None` return convention, with the guard `(data->>'waiting_for_answers' IS NULL OR
+  `True`/`False`/`None` return convention, with the guard `data->>'status' NOT IN
+  ('completed', 'failed') AND (data->>'waiting_for_answers' IS NULL OR
   data->>'waiting_for_answers' = 'false') AND COALESCE((data->>'pause_generation')::int, 0) =
   %(observed_generation)s`, and the write setting `pause_generation = observed_generation + 1`
   alongside `waiting_for_answers`/`resume_token`/`pause_kind`/`pause_context`/`pending_questions`.
