@@ -441,6 +441,10 @@ class CodingTeamWorkflow:
               either ``issue_number``/``issue_title`` for issue-driven publishing
               or ``publish_mode="existing_pr"``/``pr_number`` for review-comment
               remediation. ``remote`` defaults to ``"origin"`` when absent.
+              An optional ``expected_head_sha`` is forwarded to
+              ``github_branch_prep_activity`` (see its contract) so branch
+              prep fails closed if the branch moved since the caller's plan
+              was grounded, rather than silently checking out newer code.
             - Any GitHub token or credential stays outside workflow activity
               arguments. This workflow passes only repository coordinates and
               issue metadata to GitHub activities; a ``"token"`` key must
@@ -522,6 +526,7 @@ class CodingTeamWorkflow:
                         "default_branch": github["base"],
                         "integration_branch": github["integration_branch"],
                         "issue_number": github.get("issue_number"),
+                        "expected_head_sha": github.get("expected_head_sha"),
                     },
                     start_to_close_timeout=github_timeout,
                     retry_policy=_GITHUB_ACTIVITY_RETRY,

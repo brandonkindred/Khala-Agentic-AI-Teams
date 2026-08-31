@@ -20,6 +20,7 @@ from typing import Any, Optional
 import pytest
 
 from software_engineering_team.tests.conftest import (
+    _commit_on_branch,
     _ensure_real_modules,
     _expected_basic_header,
     _stub_orchestrator_only,
@@ -125,6 +126,71 @@ def test_branch_prep_activity_clean_checkout_returns_ok_true(api, monkeypatch, t
         text=True,
     ).stdout.strip()
     assert head == "khala/issue-9"
+
+
+def test_branch_prep_activity_expected_head_sha_match_succeeds(api, monkeypatch, tmp_path) -> None:
+    """``expected_head_sha`` is forwarded to ``_prepare_issue_branch``; when it
+    matches the branch's live remote tip, prep proceeds normally."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+    )
+
+    _seed_job_token(monkeypatch, api, "job-1")
+    repo = _init_repo(tmp_path)
+    live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+
+    out = github_branch_prep_activity(
+        {
+            "job_id": "job-1",
+            "repo_path": repo,
+            "remote": "origin",
+            "default_branch": "main",
+            "integration_branch": "khala/issue-9",
+            "expected_head_sha": live_sha,
+        }
+    )
+
+    assert out["ok"] is True, out["error"]
+
+
+def test_branch_prep_activity_expected_head_sha_mismatch_fails_closed(
+    api, monkeypatch, tmp_path
+) -> None:
+    """Reproduces the P1 race this parameter exists to close: the review-
+    comment remediation flow triaged/planned against ``stale_sha``, but by the
+    time this Temporal activity actually runs (it may have been queued) a
+    newer commit landed on the PR branch. The activity must report ok=False
+    rather than silently checking out the newer code the plan was never
+    grounded on."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+    )
+
+    _seed_job_token(monkeypatch, api, "job-1")
+    repo = _init_repo(tmp_path)
+    stale_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+    _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+
+    out = github_branch_prep_activity(
+        {
+            "job_id": "job-1",
+            "repo_path": repo,
+            "remote": "origin",
+            "default_branch": "main",
+            "integration_branch": "khala/issue-9",
+            "expected_head_sha": stale_sha,
+        }
+    )
+
+    assert out["ok"] is False
+    assert stale_sha in (out["error"] or "")
+    head = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == "main"
 
 
 def test_branch_prep_activity_unsafe_ref_returns_ok_false(api, monkeypatch) -> None:
