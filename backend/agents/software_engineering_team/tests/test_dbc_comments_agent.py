@@ -231,11 +231,12 @@ def test_dbc_run_recovers_after_one_schema_validation_failure(monkeypatch) -> No
     good_payload = {"insertions": [], "already_compliant": True, "summary": "ok"}
     client = _SequencedClient([bad_payload, good_payload])
 
-    complete_validated_calls: List[Any] = []
+    complete_validated_call_count = 0
     original_complete_validated = dbc_mod.complete_validated
 
     def _spy(*args: Any, **kwargs: Any) -> Any:
-        complete_validated_calls.append(1)
+        nonlocal complete_validated_call_count
+        complete_validated_call_count += 1
         return original_complete_validated(*args, **kwargs)
 
     monkeypatch.setattr(dbc_mod, "complete_validated", _spy)
@@ -243,7 +244,7 @@ def test_dbc_run_recovers_after_one_schema_validation_failure(monkeypatch) -> No
     out = _agent(client).run(DbcCommentsInput(code="def f(): pass"))
     assert out.already_compliant is True
     assert len(client.calls) == 2  # complete_validated's own internal correction retry
-    assert len(complete_validated_calls) == 1  # the agent invoked complete_validated once
+    assert complete_validated_call_count == 1  # the agent invoked complete_validated once
 
 
 def test_dbc_run_non_dict_top_level_json_fails_loud_non_compliant() -> None:

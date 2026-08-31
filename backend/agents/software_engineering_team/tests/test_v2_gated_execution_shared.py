@@ -30,7 +30,7 @@ import logging
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 
@@ -1840,13 +1840,15 @@ def test_dbc_self_review_invokes_dbc_comments_agent_at_default_config(tmp_path, 
     class _FakeAgent:
         """Stand-in for DbcCommentsAgent, capturing whether/how it was invoked."""
 
-        last_input: Optional[Any] = None
+        last_input: Any = None
         run_call_count: int = 0
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def run(self, input_data: Any, on_status: Optional[Any] = None) -> DbcCommentsOutput:
+        def run(
+            self, input_data: Any, on_status: Optional[Callable[..., Any]] = None
+        ) -> DbcCommentsOutput:
             type(self).last_input = input_data
             type(self).run_call_count += 1
             return DbcCommentsOutput(files={})
