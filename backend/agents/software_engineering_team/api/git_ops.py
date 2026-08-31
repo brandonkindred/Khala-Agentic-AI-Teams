@@ -862,6 +862,7 @@ def _prepare_issue_branch(
     token: Optional[str] = None,
     issue_number: Optional[int] = None,
     expected_head_sha: Optional[str] = None,
+    base_remote: str = "origin",
 ) -> Tuple[bool, Optional[str], List[str]]:
     """Prepare development + integration branches, recovering interrupted state.
 
@@ -882,6 +883,13 @@ def _prepare_issue_branch(
           interim; passing it closes that last window. ``None`` (the default,
           used by the plain issue-driven flow, which has no such snapshot to
           pin to) skips the check entirely.
+        - ``base_remote`` names the remote pointing at the PR's (or issue's)
+          BASE repository — defaults to ``"origin"``, matching
+          ``unified_api._ensure_repo_clone``'s convention of always cloning
+          the base repository under that name. Only relevant when ``remote``
+          resolves to a fork remote (see the ``is_fork_remote`` note below);
+          non-fork callers use ``remote`` for both fetches regardless of this
+          value.
     Postconditions (success):
         - integration_branch is checked out with a clean working tree;
           khala.active-issue records issue_number when provided; every commit
@@ -952,13 +960,13 @@ def _prepare_issue_branch(
     # needs the credential. The clone was authenticated transiently by the
     # unified API; that auth is not persisted, so we re-supply it per fetch.
     auth_env = _git_auth_env(token) if token else None
-    # default_branch always lives in the checkout's own "origin" — the PR's (or
-    # issue's) BASE repository, which unified_api's _ensure_repo_clone always
+    # default_branch always lives in the checkout's own base remote — the PR's
+    # (or issue's) BASE repository, which unified_api's _ensure_repo_clone always
     # clones from — so a resolved FORK remote (only ever relevant to
     # integration_branch, the PR's head) must not be used to fetch it too.
     # Every non-fork caller keeps its prior behaviour exactly: `remote` is
     # "origin" (or an operator's custom remote name) for both fetches, unchanged.
-    default_branch_remote = "origin" if is_fork_remote else remote
+    default_branch_remote = base_remote if is_fork_remote else remote
     rc, msg = _main._git(repo_path, "fetch", "--", default_branch_remote, default_branch, env=auth_env)
     if rc != 0:
         return False, msg, notes

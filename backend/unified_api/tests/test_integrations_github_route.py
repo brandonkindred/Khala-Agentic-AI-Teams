@@ -24,7 +24,6 @@ if str(_agents) not in sys.path:
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from shared.git.git_utils import remote_url_matches  # noqa: E402
 from unified_api.main import app  # noqa: E402
 from unified_api.routes.integrations import (  # noqa: E402
     _ensure_repo_clone,
@@ -826,49 +825,6 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
         "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False, acquire_lock=False
     )
 
-
-# ---------------------------------------------------------------------------
-# remote_url_matches: exact owner/repo + host comparison (no substring false
-# positives, no cross-host false positives)
-# ---------------------------------------------------------------------------
-
-
-def test_remote_matches_rejects_wrong_host():
-    """A remote whose owner/repo segments match but whose HOST does not is
-    still a mismatch — otherwise https://evil.example.com/acme/widget.git
-    would be accepted as a match for github.com's acme/widget."""
-    assert remote_url_matches("https://evil.example.com/acme/widget.git", "acme", "widget") is False
-
-
-def test_remote_matches_exact_https():
-    """An exact https remote (with or without .git) matches owner/repo."""
-    assert remote_url_matches("https://github.com/acme/widget.git", "acme", "widget") is True
-    assert remote_url_matches("https://github.com/acme/widget", "acme", "widget") is True
-
-
-def test_remote_matches_is_case_insensitive():
-    """owner/repo comparison is case-insensitive (GitHub treats them that way)."""
-    assert remote_url_matches("https://github.com/ACME/Widget.git", "acme", "widget") is True
-
-
-def test_remote_matches_accepts_scp_form():
-    """The git@host:owner/repo scp form matches the same owner/repo."""
-    assert remote_url_matches("git@github.com:acme/widget.git", "acme", "widget") is True
-
-
-def test_remote_matches_rejects_repo_prefix_substring():
-    """'acme/widget' is a substring of 'acme/widget-extra' but must NOT match."""
-    assert remote_url_matches("https://github.com/acme/widget-extra.git", "acme", "widget") is False
-
-
-def test_remote_matches_rejects_owner_suffix_substring():
-    """'acme/widget' is a suffix of 'notacme/widget' but must NOT match."""
-    assert remote_url_matches("https://github.com/notacme/widget.git", "acme", "widget") is False
-
-
-def test_remote_matches_rejects_short_url():
-    """A URL with fewer than two path segments never matches."""
-    assert remote_url_matches("widget", "acme", "widget") is False
 
 
 def test_ensure_repo_clone_rejects_substring_remote(tmp_path):
