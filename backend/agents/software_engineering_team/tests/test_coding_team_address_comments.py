@@ -891,6 +891,12 @@ class TestHandleComment:
         github = address_env["executions"][0]["kwargs"]["github"]
         assert github["publish_mode"] == "existing_pr"
         assert github["integration_branch"] == "feature"
+        # The PR head SHA this run's triage/plan was grounded on (see the
+        # pr_head_sha argument to _handle_comment above) must reach the child
+        # workflow so branch prep can pin to it -- see
+        # test_stale_pr_head_sha_at_dispatch_blocks_child_workflow_branch_prep
+        # for the mismatch-detection path this enables.
+        assert github["expected_head_sha"] == "sha1"
         assert fake.replies and fake.replies[0][0] == 2
         assert fake.resolved == ["T2"]
 

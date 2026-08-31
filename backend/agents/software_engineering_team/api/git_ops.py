@@ -865,6 +865,7 @@ def _prepare_issue_branch(
     integration_branch: str,
     token: Optional[str] = None,
     issue_number: Optional[int] = None,
+    expected_head_sha: Optional[str] = None,
 ) -> Tuple[bool, Optional[str], List[str]]:
     """Prepare development + integration branches, recovering interrupted state.
 
@@ -875,6 +876,16 @@ def _prepare_issue_branch(
 
     Preconditions:
         - repo_path is a git checkout; ref arguments may be untrusted.
+        - ``expected_head_sha``, when provided, is the ``integration_branch``
+          head SHA a caller's plan was grounded on (e.g. review-comment
+          remediation, which triages and plans against a specific PR head
+          before this ever runs — see ``address_comments._pr_became_stale``
+          for the same freshness concern applied earlier in that flow). This
+          activity can run long after that snapshot was taken (queued behind
+          other Temporal work), so the branch may have moved again in the
+          interim; passing it closes that last window. ``None`` (the default,
+          used by the plain issue-driven flow, which has no such snapshot to
+          pin to) skips the check entirely.
     Postconditions (success):
         - integration_branch is checked out with a clean working tree;
           khala.active-issue records issue_number when provided; every commit
@@ -884,6 +895,12 @@ def _prepare_issue_branch(
     Postconditions (failure):
         - No uncommitted work has been deleted and no commit that was
           reachable on entry has become unreachable.
+        - When ``expected_head_sha`` is provided and, after fetching, the
+          remote's live ``integration_branch`` tip does not resolve to that
+          exact SHA (a newer commit landed, or the branch is gone), returns
+          ``False`` with an explanatory message BEFORE any local branch is
+          touched (no checkout/reset yet at that point) — the caller's plan
+          was grounded on stale code and must not be applied to newer state.
     """
     notes: List[str] = []
 
@@ -968,6 +985,27 @@ def _prepare_issue_branch(
         )
         if reconcile_err:
             return False, reconcile_err, notes
+
+    if expected_head_sha is not None:
+        # Pin to the exact head the caller's plan was grounded on. Checked
+        # right after the fetch above (the freshest possible read of the
+        # remote) and before any local branch is touched below, so a stale
+        # plan is rejected here rather than being silently applied to newer
+        # code that landed while this activity was queued or the caller's
+        # own LLM round-trips were in flight.
+        rc_live_head, live_head = _main._git(
+            repo_path, "rev-parse", "--verify", "--quiet", remote_issue_ref
+        )
+        live_head_sha = live_head.strip() if rc_live_head == 0 else None
+        if live_head_sha != expected_head_sha:
+            return (
+                False,
+                f"integration_branch {integration_branch!r} head is "
+                f"{live_head_sha or '<unresolved>'}, expected {expected_head_sha!r}; "
+                "the branch moved after this run's plan was grounded, so branch prep "
+                "was aborted rather than applying it to newer code",
+                notes,
+            )
 
     seed = _select_seed(
         repo_path,

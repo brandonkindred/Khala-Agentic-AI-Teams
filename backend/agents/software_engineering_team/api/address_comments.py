@@ -778,6 +778,7 @@ def _dispatch_implementation(
     comment: ReviewComment,
     plan: IssueResolutionPlan,
     pr_head: str,
+    pr_head_sha: str,
     pr_base: str,
     pr_url: str,
     pr_remote: Optional[str],
@@ -798,6 +799,16 @@ def _dispatch_implementation(
         - ``pr_head``/``pr_base`` are the PR's head/base branch SHORT names
           (not SHAs) — passed straight through to the child workflow's branch
           preparation.
+        - ``pr_head_sha`` is the PR head SHA the caller's plan was grounded
+          on (the same value threaded through ``_handle_comment``'s own
+          freshness checks — see ``_pr_became_stale``). Forwarded to the
+          child workflow as ``expected_head_sha`` so branch preparation
+          (``github_branch_prep_activity`` / ``_prepare_issue_branch``) fails
+          closed if the branch moved again between this dispatch and the
+          Temporal workflow actually running branch prep — a window this
+          function cannot itself observe or wait out, since
+          ``execute_coding_team_workflow`` may reattach to a workflow that
+          was queued for a while.
         - ``pr_url`` is the PR's web URL, stored on the child job's github
           context for traceability.
         - ``pr_remote`` is the remote to fetch/push the head branch through
@@ -816,7 +827,12 @@ def _dispatch_implementation(
           returning, so the caller never replies to or resolves the thread
           over a partially-failed implementation. In that case the child job
           row and its Temporal workflow were both created (the workflow ran;
-          only its result was unsuccessful).
+          only its result was unsuccessful) — this is also how an
+          ``expected_head_sha`` mismatch surfaces: branch prep reports
+          ``ok=False``, the workflow terminalizes as a GitHub failure notice
+          rather than ``"completed"``, and this function raises the same as
+          any other non-success result, leaving the thread open for the next
+          run to re-triage against the branch's current head.
         - If ``execute_coding_team_workflow`` itself raises (rather than
           returning a non-``"completed"`` status), that exception propagates
           uncaught — it is not wrapped in a try/except here. The child job
@@ -889,6 +905,7 @@ def _dispatch_implementation(
             "publish_mode": "existing_pr",
             "base": pr_base,
             "integration_branch": pr_head,
+            "expected_head_sha": pr_head_sha,
             "remote": pr_remote,
         },
     )
@@ -1473,6 +1490,7 @@ def _handle_comment(
                 comment,
                 plan,
                 pr_head,
+                pr_head_sha,
                 pr_base,
                 pr_url,
                 pr_remote,
