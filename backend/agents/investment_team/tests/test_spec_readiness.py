@@ -884,53 +884,54 @@ def test_check_sizing_realisable_directly_emits_volatility_target_warning() -> N
     assert "0.001" in results[0].details
 
 
-def test_rule5_volatility_target_atr_floor_bound_scales_with_symbol_price() -> None:
-    """The ATR-floor bound is NOT symbol-price-independent: the engine's
-    sizing formula (``notional = equity * target_annual_vol / atr_val``)
-    only cancels the reference price once ``atr_val`` is known, and the
-    conservative floor substitutes ``atr_val_floor = price *
-    _MIN_PLAUSIBLE_ATR_PCT`` — so a lower-priced symbol implies a smaller
-    absolute-dollar ATR floor at the same target_annual_vol, hence a LARGER
-    worst-case notional bound. Two 2-symbol specs with identical sizing but a
-    100x price difference must size very differently: at $100/share the
-    ATR-derived term (0.2x) stays below max_position_pct and 2 positions fit
-    within capital; at $1/share the ATR-derived term explodes and clamps to
-    max_position_pct (0.9x), and 2 × 0.9x overcommits."""
-    spec_kwargs = dict(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.02),
-        target_symbols=["AAPL", "MSFT"],
+def test_rule5_volatility_target_bound_is_independent_of_target_annual_vol_and_price() -> None:
+    """The worst-case bound is exactly ``risk_limits.max_position_pct`` — NOT
+    a function of ``target_annual_vol`` or the sampled price. The engine's
+    sizing formula (``raw_qty = equity * target_annual_vol / (close *
+    atr_val)`` in ``_compute_qty``) accepts any positive ``atr_val`` with no
+    enforced floor, so no ATR-derived estimate is a provably safe worst case
+    — a low enough realised ATR always deploys up to the unconditional
+    ``max_position_pct`` clamp regardless of ``target_annual_vol``. Two
+    3-symbol specs with wildly different ``target_annual_vol`` (0.05 vs 2.0)
+    and different sample prices must produce the IDENTICAL verdict, since
+    both quantities are irrelevant to the bound."""
+    low_tav_spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.05),
+        target_symbols=["AAPL", "MSFT", "GOOG"],
         asset_class="stocks",
-        risk_limits={"max_position_pct": 90, "max_drawdown_pct": 10},
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
     )
-    high_price_spec = _spec(**spec_kwargs)
-    high_price_results = SpecReadinessGate(market_sample_provider=lambda sym, ac: 100.0).validate(
-        high_price_spec, backtest_config=_config()
+    low_tav_results = SpecReadinessGate(market_sample_provider=lambda sym, ac: 100.0).validate(
+        low_tav_spec, backtest_config=_config()
     )
-    high_price_matches = [c for c in _critical(high_price_results) if "volatility_target" in c]
-    assert not high_price_matches, high_price_matches
-
-    low_price_spec = _spec(**spec_kwargs)
-    low_price_results = SpecReadinessGate(market_sample_provider=lambda sym, ac: 1.0).validate(
-        low_price_spec, backtest_config=_config()
-    )
-    low_price_matches = [
-        c
-        for c in _critical(low_price_results)
-        if "volatility_target" in c and "worst-case concurrency" in c
+    low_tav_matches = [
+        c for c in _critical(low_tav_results) if "volatility_target" in c and "worst-case" in c
     ]
-    assert low_price_matches, _critical(low_price_results)
+    assert low_tav_matches, _critical(low_tav_results)
+
+    high_tav_spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=2.0),
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        asset_class="stocks",
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
+    )
+    high_tav_results = SpecReadinessGate(market_sample_provider=lambda sym, ac: 1.0).validate(
+        high_tav_spec, backtest_config=_config()
+    )
+    high_tav_matches = [
+        c for c in _critical(high_tav_results) if "volatility_target" in c and "worst-case" in c
+    ]
+    assert high_tav_matches, _critical(high_tav_results)
 
 
 def test_rule5_volatility_target_over_committed_across_symbols_is_critical() -> None:
-    """A volatility_target spec whose worst-case conservative-ATR-floor bound
-    is safe for a single order can still overcommit capital once worst-case
-    concurrency is considered — mirrors the fixed_fraction/fixed_notional
-    over-commit tests. At the default $100 sample price, target_annual_vol
-    =0.3 ÷ ($100 × 0.10% ATR floor) = 3.0x equity, far above max_position_pct
-    (50%), so max_position_pct is the binding term: 0.5 × 3 symbols = 1.5x
-    equity."""
+    """A volatility_target spec whose worst-case (max_position_pct-bound)
+    notional is safe for a single order can still overcommit capital once
+    worst-case concurrency is considered — mirrors the
+    fixed_fraction/fixed_notional over-commit tests. 0.5 (50% max_position_pct)
+    × 3 symbols = 1.5x equity."""
     spec = _spec(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.3),
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         target_symbols=["AAPL", "MSFT", "GOOG"],
         asset_class="stocks",
         risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
@@ -943,35 +944,11 @@ def test_rule5_volatility_target_over_committed_across_symbols_is_critical() -> 
     assert any("max_position_pct" in c for c in matches), matches
 
 
-def test_rule5_volatility_target_atr_floor_term_binds_over_max_position_pct() -> None:
-    """When target_annual_vol is small enough, the conservative-ATR-floor
-    fraction is the tighter (binding) term rather than max_position_pct.
-    The engine's sizing formula ``notional = equity * target_annual_vol /
-    atr_val`` cancels the reference price out ONLY once ``atr_val`` is
-    known — the conservative floor substitutes ``atr_val_floor = price *
-    _MIN_PLAUSIBLE_ATR_PCT``, so price re-enters the readiness bound: at the
-    default $100 sample price, target_annual_vol=0.03 ÷ (price=$100 ×
-    ATR floor 0.001) = 0.3x equity per position (below the configured 90%
-    max_position_pct), but 0.3 × 4 symbols = 1.2x equity overcommits."""
-    spec = _spec(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.03),
-        target_symbols=["AAPL", "MSFT", "GOOG", "AMZN"],
-        asset_class="stocks",
-        risk_limits={"max_position_pct": 90, "max_drawdown_pct": 10},
-    )
-    results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    matches = [
-        c for c in _critical(results) if "volatility_target" in c and "worst-case concurrency" in c
-    ]
-    assert matches, _critical(results)
-    assert any("conservative ATR floor" in c and "target_annual_vol" in c for c in matches), matches
-
-
 def test_rule5_volatility_target_single_symbol_is_unaffected() -> None:
-    """The same aggressive target_annual_vol is implementable on a
-    single-symbol universe — worst-case concurrency is structurally 1."""
+    """The same max_position_pct is implementable on a single-symbol
+    universe — worst-case concurrency is structurally 1."""
     spec = _spec(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.3),
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         target_symbols=["AAPL"],
         asset_class="stocks",
         risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
@@ -983,19 +960,17 @@ def test_rule5_volatility_target_single_symbol_is_unaffected() -> None:
 
 def test_rule5_volatility_target_concurrency_capped_by_max_open_positions() -> None:
     """Worst-case concurrency must be capped by risk_limits.max_open_positions
-    even when more target symbols are declared. 5 symbols at an effective 0.3x
-    equity per position (target_annual_vol=0.03 ÷ [$100 sample price × 0.001
-    ATR floor], below the 90% max_position_pct) would be 1.5x equity
-    uncapped — but max_open_positions=2 caps the worst case at 2 × 0.3 =
-    0.6x, which fits."""
+    even when more target symbols are declared. 5 symbols at 50%
+    max_position_pct would be 2.5x equity uncapped — but max_open_positions=1
+    caps the worst case at 1 × 0.5 = 0.5x, which fits."""
     spec = _spec(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.03),
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         target_symbols=["AAPL", "MSFT", "GOOG", "AMZN", "META"],
         asset_class="stocks",
         risk_limits={
-            "max_position_pct": 90,
+            "max_position_pct": 50,
             "max_drawdown_pct": 10,
-            "max_open_positions": 2,
+            "max_open_positions": 1,
         },
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
@@ -1008,7 +983,7 @@ def test_rule5_volatility_target_ignores_declarative_max_concurrent_positions() 
     declarative max_concurrent_positions field — declaring 1 must not
     suppress the over-commit critical on a genuinely multi-symbol spec."""
     spec = _spec(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.3),
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         target_symbols=["AAPL", "MSFT", "GOOG"],
         asset_class="stocks",
         risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
@@ -1025,14 +1000,13 @@ def test_rule5_volatility_target_worst_case_accounts_for_slippage() -> None:
     """Same slippage-inflation concern as fixed_notional: 4 fractional
     (crypto) positions whose worst-case notional sums to exactly the default
     $100k capital must still be flagged critical once the default 2bps
-    slippage is applied. At the default $100 sample price, target_annual_vol
-    =0.025 ÷ ($100 × ATR floor 0.001) = 0.25x equity per position (below
-    the 30% max_position_pct), 4 × 0.25x = 1.0x equity exactly."""
+    slippage is applied. 0.25 (25% max_position_pct) × 4 = 1.0x equity
+    exactly."""
     spec = _spec(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.025),
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         target_symbols=["BTC", "ETH", "SOL", "ADA"],
         asset_class="crypto",
-        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+        risk_limits={"max_position_pct": 25, "max_drawdown_pct": 10},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     matches = [c for c in _critical(results) if "volatility_target" in c and "slippage" in c]
@@ -1044,10 +1018,10 @@ def test_rule5_volatility_target_worst_case_fits_with_slippage_headroom() -> Non
     NOT be flagged — the adjustment should not be so conservative it blocks a
     genuinely fundable spec."""
     spec = _spec(
-        sizing=VolatilityTargetSizing(target_annual_vol=0.02),
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         target_symbols=["BTC", "ETH", "SOL", "ADA"],
         asset_class="crypto",
-        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+        risk_limits={"max_position_pct": 20, "max_drawdown_pct": 10},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     matches = [c for c in _critical(results) if "volatility_target" in c]
@@ -1067,14 +1041,15 @@ def test_rule5_volatility_target_worst_case_fits_with_slippage_headroom() -> Non
         (lambda: FixedNotionalSizing(notional_usd=40_000.0), 2, False),  # $80k
         (lambda: FixedNotionalSizing(notional_usd=40_000.0), 3, True),  # $120k
         (lambda: FixedNotionalSizing(notional_usd=40_000.0), 5, True),  # $200k
-        # volatility_target: at the default $100 sample price,
-        # target_annual_vol=0.04 ÷ ($100 × 0.001 ATR floor) = 0.4x equity per
-        # position (below the 50% max_position_pct), same shape as
-        # fixed_fraction(0.4) above.
-        (lambda: VolatilityTargetSizing(target_annual_vol=0.04), 1, False),
-        (lambda: VolatilityTargetSizing(target_annual_vol=0.04), 2, False),
-        (lambda: VolatilityTargetSizing(target_annual_vol=0.04), 3, True),
-        (lambda: VolatilityTargetSizing(target_annual_vol=0.04), 5, True),
+        # volatility_target's bound is exactly max_position_pct
+        # (target_annual_vol is irrelevant to it — see
+        # test_rule5_volatility_target_bound_is_independent_of_target_annual_vol_and_price),
+        # set via a per-kind max_position_pct below rather than
+        # fixed_fraction's 0.4/fixed_notional's $40k shape.
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 1, False),
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 2, False),
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 3, True),
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 5, True),
     ],
 )
 def test_rule5_all_sizing_kinds_against_max_open_positions(
@@ -1084,12 +1059,18 @@ def test_rule5_all_sizing_kinds_against_max_open_positions(
     kinds validated against a range of risk_limits.max_open_positions values,
     on a fixed 5-symbol universe so max_open_positions is always the tighter
     concurrency bound below 5 and a no-op at/above it."""
+    is_vol_target = isinstance(sizing_factory(), VolatilityTargetSizing)
+    # 45% (not 50%) so 2 positions (0.9x) clears the >1-position slippage
+    # inflation with headroom, while 3 positions (1.35x) still overcommits —
+    # 50% put the 2-position case exactly on the 1.0x boundary, which
+    # slippage inflation then tips over into a false critical.
+    max_position_pct = 45 if is_vol_target else 50
     spec = _spec(
         sizing=sizing_factory(),
         target_symbols=["AAPL", "MSFT", "GOOG", "AMZN", "META"],
         asset_class="stocks",
         risk_limits={
-            "max_position_pct": 50,
+            "max_position_pct": max_position_pct,
             "max_drawdown_pct": 10,
             "max_open_positions": max_open_positions,
         },
