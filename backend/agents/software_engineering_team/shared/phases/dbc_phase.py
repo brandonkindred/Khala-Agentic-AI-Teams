@@ -12,9 +12,13 @@ Two layers, mirroring ``documentation_phase.py``'s factoring:
   ``gate_config.run_dbc_self_review(...)`` and applying the write/revert
   machinery.
 
-Neither function is called from ``run_gated_execution_impl`` yet -- wiring
-that call (and each team's ``GATE_CONFIG.run_dbc_self_review`` assignment) is
-sibling work. This module is self-contained and directly tested.
+Both functions are wired and live: ``run_gated_execution_impl`` (see
+``execution.py``) calls :func:`_run_dbc_self_review` whenever
+``gate_config.run_dbc_self_review is not None and config.enable_dbc_comments``,
+and both the backend and frontend ``GATE_CONFIG``s set
+``run_dbc_self_review=run_dbc_comments_review`` -- so this phase runs on every
+V2 backend/frontend microtask by default (``enable_dbc_comments`` defaults to
+``True``). This module remains self-contained and is also directly tested.
 """
 
 from __future__ import annotations
@@ -513,9 +517,11 @@ def _run_dbc_self_review(
     Intended to run immediately before the Documentation phase for the same
     microtask, so ``microtask_files`` reflects any DbC insertions by the time
     Documentation reads it as its own ``code_files`` argument. ``gate_config``
-    is duck-typed here (``Any``): ``GatedExecutionConfig`` does not yet carry
-    a ``run_dbc_self_review`` field -- adding it and wiring this function into
-    ``run_gated_execution_impl`` is sibling work.
+    is duck-typed here (``Any``): ``GatedExecutionConfig`` carries the
+    ``run_dbc_self_review`` field (see ``execution.py``), and this function is
+    wired into ``run_gated_execution_impl``, which calls it whenever
+    ``gate_config.run_dbc_self_review is not None and
+    config.enable_dbc_comments``.
 
     Preconditions:
         ``microtask_files`` reflects the last review-gate-accepted write.
