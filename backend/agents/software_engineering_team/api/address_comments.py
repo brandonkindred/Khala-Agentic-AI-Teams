@@ -103,6 +103,14 @@ def _parse_accounted_through(body: str) -> Optional[int]:
 # this), to bound prompt size regardless of the actual file's length.
 _MAX_CITED_CODE_CHARS = 20000
 
+# Non-terminal coding-team job statuses: a job in one of these states may still be
+# actively running (or was, until its worker crashed/restarted without terminalizing
+# it). Used by `_dispatch_implementation` to refuse overwriting an existing job for
+# the same comment-scoped id rather than blindly resetting possibly-live state.
+_ACTIVE_JOB_STATUSES = frozenset(
+    {JobStatus.PENDING.value, JobStatus.RUNNING.value, JobStatus.WAITING_FOR_USER.value}
+)
+
 # Named pieces of _unresolved_comments' return type, factored out so the function's
 # own signature doesn't carry one unreadable nested 4-tuple annotation.
 RetryResolveEntry = Tuple[str, int]
@@ -895,6 +903,73 @@ def _pr_head_remote(owner: str, repo: str, pr: Any, web_host: str = "github.com"
     return f"https://{web_host}/{head_repo_full_name}.git"
 
 
+def _child_job_id_for_comment(comment_id: int) -> str:
+    """Return the deterministic child-implementation job id for a review comment.
+
+    Postconditions:
+        - Returns ``f"address-comment:{comment_id}"`` — keyed on the GitHub
+          review comment's own globally-unique id, NOT on any per-run
+          address-comments parent job id, so the SAME id is produced on
+          every run that handles this comment. This is what lets
+          :func:`_previously_published_fix` recognize, on a later run, that
+          a fix for this exact comment was already implemented and
+          published — see its docstring for why a parent-job-scoped id
+          cannot do that.
+    """
+    return f"address-comment:{comment_id}"
+
+
+def _previously_published_fix(comment_id: int) -> Optional[Tuple[str, str]]:
+    """Best-effort check: was a fix for this comment already implemented and published?
+
+    A run can dispatch ``_dispatch_implementation`` successfully (the fix lands
+    on the PR branch) and then fail at the reply/resolve step that follows it
+    (see ``_handle_comment``) — e.g. the reply POST itself errors. GitHub then
+    still reports the thread unresolved with no Khala-authored reply on it, so
+    a later run's ``_unresolved_comments`` re-surfaces the SAME original
+    comment (its id unchanged, since nothing new was ever posted) and would
+    otherwise re-triage and re-dispatch a brand new implementation for a fix
+    that may already be on the branch. This is only possible to catch across
+    runs because the child job id is derived from ``comment_id`` alone (see
+    :func:`_child_job_id_for_comment`) rather than from the per-run parent job
+    id: a parent-scoped id (the old ``f"{parent_job_id}:comment:{comment_id}"``
+    scheme) is a fresh, different string on every new address-comments run, so
+    a later run could never look up an earlier run's child job by id.
+
+    Postconditions:
+        - Returns ``(child_job_id, chosen_plan)`` when a child job already
+          exists for ``comment_id``, its status is exactly ``"completed"``
+          (an exact terminal success — see ``_dispatch_implementation``'s own
+          postcondition for why partial results don't count), its
+          ``github_context.review_comment_id`` matches ``comment_id`` (defends
+          against a hypothetical id collision or corrupted record), and it
+          carries a non-empty ``chosen_plan`` field.
+        - Returns ``None`` otherwise, including on a lookup failure — this is
+          advisory; a failed check must not block the run, it just means the
+          comment is triaged fresh as if no prior attempt existed.
+    """
+    child_job_id = _child_job_id_for_comment(comment_id)
+    try:
+        job = _main.get_job(child_job_id)
+    except Exception as e:  # noqa: BLE001 - best-effort; a failed lookup must not block
+        logger.warning(
+            "address-comments: could not check for a previously-published fix for "
+            "comment %s: %s",
+            comment_id,
+            scrub_token_from_text(str(e)),
+        )
+        return None
+    if not job or job.get("status") != JobStatus.COMPLETED.value:
+        return None
+    github_context = job.get("github_context") or {}
+    if github_context.get("review_comment_id") != comment_id:
+        return None
+    chosen_plan = job.get("chosen_plan")
+    if not chosen_plan:
+        return None
+    return child_job_id, chosen_plan
+
+
 def _dispatch_implementation(
     parent_job_id: str,
     request: AddressCommentsRequest,
@@ -915,9 +990,13 @@ def _dispatch_implementation(
     the review thread open.
 
     Preconditions:
-        - ``parent_job_id`` is the address-comments run's own job id (used to
-          derive the deterministic child job id ``f"{parent_job_id}:comment:
-          {comment.id}"``).
+        - ``parent_job_id`` is the address-comments run's own job id, stored on
+          the child job's ``parent_job_id`` field for traceability and PR-review
+          admission exclusion (see ``pr_review._running_review_for_pr``) — it is
+          NOT used to derive the child job id itself; that comes from
+          :func:`_child_job_id_for_comment` (comment-scoped, stable across runs)
+          so a later run can recognize this exact dispatch as already done (see
+          :func:`_previously_published_fix`).
         - ``pr_head``/``pr_base`` are the PR's head/base branch SHORT names
           (not SHAs) — passed straight through to the child workflow's branch
           preparation.
@@ -932,26 +1011,63 @@ def _dispatch_implementation(
         - ``token`` is a valid GitHub token for ``request.owner``/``request.repo``.
     Postconditions:
         - On success, returns the child job id
-          (``f"{parent_job_id}:comment:{comment.id}"``) after
+          (:func:`_child_job_id_for_comment`\\ ``(comment.id)``) after
           ``execute_coding_team_workflow`` reports an exact ``"completed"``
           status; any other terminal status (including
           ``"completed_with_failures"``) raises ``RuntimeError`` instead of
           returning, so the caller never replies to or resolves the thread
           over a partially-failed implementation. In that case the child job
           row and its Temporal workflow were both created (the workflow ran;
-          only its result was unsuccessful).
+          only its result was unsuccessful) but its status is not
+          ``"completed"``, so :func:`_previously_published_fix` correctly
+          will not treat it as an already-published fix on a later run.
         - If ``execute_coding_team_workflow`` itself raises (rather than
           returning a non-``"completed"`` status), that exception propagates
           uncaught — it is not wrapped in a try/except here. The child job
           row was created before that call, but whether the Temporal
           workflow itself was started depends on where inside
           ``execute_coding_team_workflow`` the raise happened.
+        - Raises ``RuntimeError`` (before creating/touching anything) instead
+          of dispatching when a job already exists for
+          :func:`_child_job_id_for_comment`\\ ``(comment.id)`` in an ACTIVE
+          state (``"pending"``, ``"running"``, or ``"waiting_for_user"``) —
+          because the child job id is now comment-scoped rather than
+          parent-job-scoped (see the ``parent_job_id`` precondition above),
+          the SAME id can otherwise be reused across two runs. The caller
+          (:func:`_handle_comment`) only reaches this function after
+          :func:`_previously_published_fix` found no ``"completed"`` job for
+          this comment, so any job found here is either a stale/orphaned
+          active job (e.g. its worker crashed or the server restarted
+          mid-run) or, in principle, a genuinely still-running one — either
+          way, blindly overwriting it via ``create_job``'s upsert could
+          corrupt or orphan real in-flight work. A job whose status is
+          already TERMINAL but not ``"completed"`` (``"failed"``,
+          ``"completed_with_failures"``, ``"cancelled"``) is safe to reset
+          and retry — that is the common, intended case a comment resurfaces
+          for re-dispatch at all.
     """
     if pr_remote is None:
         raise RuntimeError(
             f"cannot determine the head repository for {request.owner}/{request.repo}"
             f"#{request.pr_number}'s branch {pr_head!r} (its fork appears to have been "
             "deleted); the fix cannot be published"
+        )
+    child_job_id = _child_job_id_for_comment(comment.id)
+    try:
+        existing_job = _main.get_job(child_job_id)
+    except Exception as e:  # noqa: BLE001 - best-effort; a failed lookup must not block dispatch
+        logger.warning(
+            "address-comments: could not check for an existing job before dispatching "
+            "comment %s's implementation: %s",
+            comment.id,
+            scrub_token_from_text(str(e)),
+        )
+        existing_job = None
+    if existing_job and existing_job.get("status") in _ACTIVE_JOB_STATUSES:
+        raise RuntimeError(
+            f"a job already exists for comment {comment.id} (id {child_job_id!r}, status "
+            f"{existing_job.get('status')!r}); refusing to overwrite a possibly still-running "
+            "implementation"
         )
     requirements = "\n".join(f"- {r}" for r in plan.requirements) or "- (none stated)"
     description = (
@@ -977,7 +1093,6 @@ def _dispatch_implementation(
         },
     )
     plan_input_dict = plan_input.model_dump()
-    child_job_id = f"{parent_job_id}:comment:{comment.id}"
     _main.create_job(
         job_id=child_job_id,
         repo_path=request.repo_path,
@@ -985,6 +1100,7 @@ def _dispatch_implementation(
     )
     child_fields: Dict[str, Any] = {
         "parent_job_id": parent_job_id,
+        "chosen_plan": plan.chosen_plan,
         "github_context": {
             "owner": request.owner,
             "repo": request.repo,
@@ -1523,7 +1639,10 @@ def _handle_comment(
           * ``false_positive`` — triage decided the concern does not hold,
             and the reply/resolve step succeeded.
           * ``resolved`` — a fix was planned, implemented, and pushed to the
-            PR, and the reply/resolve step succeeded.
+            PR, and the reply/resolve step succeeded. This also covers the
+            case where an EARLIER run already did the planning/implementing/
+            publishing and only the reply/resolve step is being retried now
+            (see ``_previously_published_fix``).
           * ``failed`` — the comment could not be fully handled: the PR's
             head SHA moved (or the PR closed) while triage/planning was in
             flight, newer reviewer feedback appeared on the thread before
@@ -1545,6 +1664,42 @@ def _handle_comment(
         outcome="failed",
     )
     try:
+        # An earlier run may have already implemented and published a fix for
+        # this exact comment and then failed at the reply/resolve step that
+        # follows (e.g. the reply POST itself errored) — GitHub still reports
+        # the thread unresolved with no Khala reply, so this SAME comment
+        # (same id; nothing new was ever posted) resurfaces here again. Skip
+        # straight to reply/resolve using the already-published fix instead
+        # of re-triaging and re-dispatching a brand new implementation
+        # workflow on top of one that may already be on the PR branch — see
+        # _previously_published_fix for how this is recognized across runs.
+        published = _previously_published_fix(comment.id)
+        if published is not None:
+            child_job_id, chosen_plan = published
+            try:
+                post_dispatch_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
+            except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block
+                logger.warning(
+                    "address-comments: could not re-check PR state before retrying reply/resolve "
+                    "for comment %s's already-published fix: %s",
+                    comment.id,
+                    scrub_token_from_text(str(e)),
+                )
+            else:
+                if post_dispatch_pr.state != "open":
+                    base.detail = (
+                        f"PR {request.owner}/{request.repo}#{request.pr_number} is no longer open "
+                        f"(state={post_dispatch_pr.state}); a fix was already published by job "
+                        f"{child_job_id} but the thread was left as-is rather than replying to or "
+                        "resolving a conversation on a closed PR."
+                    )
+                    return base
+            reply = f"Addressed by the software-engineering team in job `{child_job_id}`. {chosen_plan}"
+            ok = _reply_and_resolve(client, request, comment, thread, reply, thread_history)
+            base.outcome = "resolved" if ok else "failed"
+            base.detail = chosen_plan if ok else "Reply/resolve step failed."
+            return base
+
         # _read_cited_code's own contract calls for the PR head SHA (resolvable
         # via the base repo's contents API regardless of which repository the
         # branch itself lives in), NOT the branch short name (pr_head): for a
