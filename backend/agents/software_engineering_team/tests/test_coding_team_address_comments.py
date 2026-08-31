@@ -687,13 +687,16 @@ class TestUnresolvedComments:
         assert [m.id for m in history[3]] == [2, 3, 4]
 
     def test_reply_accounted_for_every_earlier_message_is_still_a_clean_retry(
-        self, address_env
+        self, address_env, monkeypatch
     ) -> None:
         """The ordinary, fine shape — every message in the thread predates
         (by id) the boundary Khala's reply was actually generated from —
         must still take the resolve-only retry path with the new
         accounted-through check in place, not be swept into re-triage just
-        because the check now exists."""
+        because the check now exists. Persisted evidence that Khala's own
+        resolve for this reply is on record as having failed authorizes the
+        retry (see the reviewer-reopen ambiguity check in
+        TestUnresolvedComments above)."""
         ac, fake = address_env["ac"], address_env["fake"]
         fake.review_comments = [
             _comment(2, body="please fix this"),
@@ -701,6 +704,11 @@ class TestUnresolvedComments:
             _khala_reply_with_accounted_through(ac, fake, 4, accounted_through=3),
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
+        monkeypatch.setattr(
+            address_env["main"],
+            "has_recorded_resolve_failure",
+            lambda owner, repo, pr_number, thread_id, reply_id: (thread_id, reply_id) == ("T2", 4),
+        )
 
         unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
 
