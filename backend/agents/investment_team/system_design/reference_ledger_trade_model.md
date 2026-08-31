@@ -61,6 +61,16 @@ def simulate(
     starting_equity: float,
 ) -> List[ReferenceTrade]:
     """Pure re-simulation of spec.entry_rules / spec.exit_rules over bars.
+
+    Preconditions:
+        - spec is a validated StrategySpec.
+        - bars contains a non-empty, strictly timestamp-increasing Bar
+          sequence for every symbol spec references.
+        - starting_equity > 0.
+
+    Returns:
+        One ReferenceTrade per fully closed position, in global emission
+        order (§2's Contract spells out both in full).
     """
 ```
 
@@ -312,13 +322,24 @@ symbols** (unrealized value included, not just realized/closed reference
 trades) — mirroring `Portfolio.mark_to_market()`, which values open
 positions the same way, and consistent with §1's scope in that this
 mark-to-market uses only this module's own no-slippage reference prices,
-never the true, cost-adjusted equity a real run would show. This is why the
-"Cross-symbol processing order" note above matters: computing this equity
-figure correctly for a multi-symbol spec requires walking every symbol's
-bars in one merged chronological order, not resolving one symbol's trades
-in isolation. The per-sizing-kind formula mirrors production's (evaluated
-against the trigger bar's close, the same reference price used for the
-reference fill's next-bar-open resolution one bar later):
+never the true, cost-adjusted equity a real run would show. "Latest
+observed price" is precise, not approximate: for each open position, it is
+the **close of the most recently processed bar for that symbol** as of the
+current point in the merged walk — mirrors `Portfolio.update_last_price`,
+which stamps `last_price[symbol] = bar.close` every time a bar for that
+symbol is processed, so `mark_to_market()` reads whatever close was last
+recorded for a symbol even when the walk has since moved on to other
+symbols' more recent bars. A symbol with no processed bar yet values at its
+own `entry_price` (mirrors `last_price.get(sym, pos.entry_price)`'s
+fallback) — though that case cannot arise for a symbol contributing to
+equity, since a position must already be open (i.e., already past its own
+entry) to be marked at all. This is why the "Cross-symbol processing order"
+note above matters: computing this equity figure correctly for a
+multi-symbol spec requires walking every symbol's bars in one merged
+chronological order, not resolving one symbol's trades in isolation. The
+per-sizing-kind formula mirrors production's (evaluated against the trigger
+bar's close, the same reference price used for the reference fill's
+next-bar-open resolution one bar later):
 
 - `FixedFractionSizing`: `equity * fraction / trigger_bar.close`.
 - `FixedNotionalSizing`: `notional_usd / trigger_bar.close`.
@@ -480,7 +501,16 @@ fill.
   for a long's trailing-high stop, `min` of `bar.low` for a short's
   trailing-low stop) and re-derive the effective stop level from it each
   bar, since the reused decision evaluator is stateless per call and does
-  not itself carry this history. **Evaluate-then-extend ordering matters**:
+  not itself carry this history. **Seed value**: the watermark is
+  initialized to `entry_price` — **not** `entry_bar`'s own high/low —
+  mirroring `_TrackedPosition`'s own initialization (`high_since_entry =
+  low_since_entry = pos.entry_price`); including the entry bar's actual
+  high/low here would be intrabar lookahead the same way including the
+  current bar's would be (see below). Since this kind isn't eligible until
+  `entry_bar + 1` (per "Per-bar evaluation order" above), the first trigger
+  check — on `entry_bar + 1` — runs against this `entry_price` seed, then
+  extends with `entry_bar + 1`'s own high/low for the bar after that.
+  **Evaluate-then-extend ordering matters** on every bar thereafter too:
   each bar's trigger check must run against the watermark **as of the prior
   bar** — not yet including this bar's own high/low — and only *after* that
   check does the watermark extend with this bar's high/low, for the next
@@ -516,10 +546,22 @@ fill.
 ### `take_profit`
 
 Modeled as a resting limit at the exact target price
-(`entry_price * (1 ± pct)`). Always fills at the exact target — a limit
-order's defining property is that it never fills worse than its price, so
-unlike `stop_loss` there is no worse-of-open-and-level adjustment here, even
-on a gap through the target. Fill bar is the trigger bar.
+(`entry_price * (1 ± pct)`). Always fills at **exactly** the target — never
+better, never worse, even on a gap through it — which is a deliberate
+production design choice, not merely "a limit never fills worse than its
+price" (that premise alone would permit *better*-than-target price
+improvement on a gap, which this module must **not** model): the default
+execution model's own limit-pricing rule is titled "Limit fills always at
+the limit price when the bar's range covers it," and its docstring
+explicitly rejects the alternative (`min`/`max`-of-open-and-limit) as "free
+alpha" a live resting limit order would not actually receive — that
+alternative exists only in a legacy, non-default execution model this
+module does not target. `stop_loss`'s worse-of-open-and-level adjustment
+and `take_profit`'s exact-price fill are therefore not an inconsistency —
+both are the *default* execution model's real behavior, just asymmetric
+because stops and limits behave asymmetrically by nature (a stop can gap
+through to a worse fill; a limit either fills exactly or doesn't fill).
+Fill bar is the trigger bar.
 
 ### `scaled_take_profit`
 
