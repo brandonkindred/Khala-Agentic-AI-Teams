@@ -1536,7 +1536,7 @@ describe('CodingTeamPageComponent', () => {
       await flushAsync();
       // The running run is auto-selected and its issue shows "In progress".
       expect(component.selectedRunId).toBe('r1');
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(true);
 
       // Collapsing the run drops the selection *and* its issue number.
       component.toggleRun(component.runs[0]);
@@ -1547,7 +1547,7 @@ describe('CodingTeamPageComponent', () => {
       component['applyRuns']([
         ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } }),
       ]);
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(false);
     });
 
     it('auto-selects a non-terminal run on first load and starts polling it', async () => {
@@ -1558,7 +1558,7 @@ describe('CodingTeamPageComponent', () => {
       expect(component.selectedRunId).toBe('j-restore');
       expect(component.selectedRunNumber).toBe(2);
       expect(apiSpy.getJobStatus).toHaveBeenCalledWith('j-restore');
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(true);
     });
 
     it('prefers a run paused on questions over a more-recent running run', async () => {
@@ -1583,7 +1583,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       await flushAsync();
       expect(component.selectedRunId).toBe('newer');
-      expect(component.activeIssueKeys).toEqual(new Set(['acme/widgets#2', 'acme/widgets#3']));
+      expect(component.activeRunKeys).toEqual(new Set(['acme/widgets#2', 'acme/widgets#3']));
     });
 
     it('lists runs from every repository the PAT can access, keyed per repo', async () => {
@@ -1605,7 +1605,7 @@ describe('CodingTeamPageComponent', () => {
       // Runs are no longer filtered to a single configured repo.
       expect(component.runs.length).toBe(2);
       // The same issue number in two repos yields two distinct chips.
-      expect(component.activeIssueKeys).toEqual(
+      expect(component.activeRunKeys).toEqual(
         new Set(['acme/other-repo#2', 'someone-else/widgets#2']),
       );
     });
@@ -1625,7 +1625,7 @@ describe('CodingTeamPageComponent', () => {
       // Only the accessible-repo run survives; the run for the unreachable repo is hidden.
       expect(component.runs.length).toBe(1);
       expect(component.runs[0].github_context?.repo).toBe('widgets');
-      expect(component.activeIssueKeys.has('gone/repo#9')).toBe(false);
+      expect(component.activeRunKeys.has('gone/repo#9')).toBe(false);
     });
 
     it('lowercases the repo identity so chips match case-insensitively', async () => {
@@ -1635,7 +1635,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       await flushAsync();
       expect(component.selectedRunId).toBe('j-run');
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(true);
     });
 
     it('lists a terminal run under Recent without auto-selecting it', async () => {
@@ -1649,7 +1649,7 @@ describe('CodingTeamPageComponent', () => {
       await flushAsync();
       expect(component.selectedRunId).toBeNull();
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['done']);
-      expect(component.activeIssueKeys.size).toBe(0);
+      expect(component.activeRunKeys.size).toBe(0);
     });
 
     it('stays usable when the runs list cannot be fetched', async () => {
@@ -1719,7 +1719,7 @@ describe('CodingTeamPageComponent', () => {
       component.selectedRunRepo = 'widgets';
       component.jobStatus = { job_id: 'mine', status: 'running' };
       component['applyRuns']([]);
-      expect(component.activeIssueKeys.has('acme/widgets#9')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#9')).toBe(true);
     });
 
     it('does not re-add the chip for a selected run that has finished', async () => {
@@ -1730,7 +1730,7 @@ describe('CodingTeamPageComponent', () => {
       component.selectedRunRepo = 'widgets';
       component.jobStatus = { job_id: 'mine', status: 'completed' };
       component['applyRuns']([]);
-      expect(component.activeIssueKeys.has('acme/widgets#9')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#9')).toBe(false);
     });
 
     it('drops the chip once the snapshot reports the selected run terminal, even if the polled status is stale', async () => {
@@ -1746,7 +1746,7 @@ describe('CodingTeamPageComponent', () => {
         ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
       ]);
       // The fresh snapshot is trusted: #5 is no longer in progress and the run sits under Recent.
-      expect(component.activeIssueKeys.has('acme/widgets#5')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#5')).toBe(false);
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['r1']);
     });
 
@@ -1756,13 +1756,13 @@ describe('CodingTeamPageComponent', () => {
       component.selectedRunNumber = 7;
       component.selectedRunOwner = 'acme';
       component.selectedRunRepo = 'widgets';
-      component.activeIssueKeys.add('acme/widgets#7');
+      component.activeRunKeys.add('acme/widgets#7');
       apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'completed' }));
       apiSpy.listJobs.mockReturnValue(of([]));
       component['startPolling']('j1');
       await flushAsync();
       expect(component.jobStatus?.status).toBe('completed');
-      expect(component.activeIssueKeys.has('acme/widgets#7')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#7')).toBe(false);
     });
 
     it('discards a stale poll for a run the user switched away from', async () => {
@@ -1833,9 +1833,9 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       await flushAsync();
-      expect(component.activeIssueKeys.has('acme/widgets#pr-2')).toBe(true);
+      expect(component.activeRunKeys.has('acme/widgets#pr-2')).toBe(true);
       // A same-numbered issue is a distinct identity and must not be flagged in progress.
-      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(false);
+      expect(component.activeRunKeys.has('acme/widgets#2')).toBe(false);
     });
 
     it('makes a paused PR-remediation run reachable for answering questions, like an issue run', async () => {

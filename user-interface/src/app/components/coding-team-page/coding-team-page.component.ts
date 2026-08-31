@@ -413,8 +413,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** True for a short window after the job id is copied, to flip the copy icon to a check. */
   jobIdCopied = false;
 
-  /** Issue keys ("owner/repo#number") with a non-terminal coding-team run, for "In progress" chips. */
-  activeIssueKeys = new Set<string>();
+  /** Issue/PR keys ("owner/repo#number" or "owner/repo#pr-number") with a non-terminal coding-team run, for "In progress" chips. */
+  activeRunKeys = new Set<string>();
 
   private pollSub: Subscription | null = null;
   private runsSub: Subscription | null = null;
@@ -803,7 +803,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Rebuild the visible issue-row view-models (current page × current "In progress" chip set).
    *
-   * Preconditions: `issues`/`pageIndex`/`pageSize`/`activeIssueKeys` reflect the state to render.
+   * Preconditions: `issues`/`pageIndex`/`pageSize`/`activeRunKeys` reflect the state to render.
    * Postconditions: `pagedIssueVms` matches the current `pagedIssues` slice one-to-one.
    */
   private recomputeIssueVms(): void {
@@ -825,7 +825,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    *
    * Preconditions: none enforced — a no-op when `selectedIssue`/`selectedRepo` is null or a run is
    * already starting (`runningIssue`), so a double-click can't submit the same issue twice.
-   * Postconditions: on success the issue is marked in progress (`activeIssueKeys`), the returned
+   * Postconditions: on success the issue is marked in progress (`activeRunKeys`), the returned
    * run is selected (so its live detail shows immediately), the Runs list is refreshed, and the
    * selection is cleared; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
    */
@@ -841,7 +841,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
         this.selectedIssue = null;
-        this.activeIssueKeys.add(runKey(repo.owner, repo.name, { type: 'issue', number: resp.issue_number }));
+        this.activeRunKeys.add(runKey(repo.owner, repo.name, { type: 'issue', number: resp.issue_number }));
         // Set the selected run's issue first so selectRun (which can't find the run in `runs`
         // until the next list tick) doesn't clear it.
         this.selectedRunNumber = resp.issue_number;
@@ -889,7 +889,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       .subscribe({
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
-        this.activeIssueKeys.add(runKey(owner, repo, { type: 'issue', number: resp.issue_number }));
+        this.activeRunKeys.add(runKey(owner, repo, { type: 'issue', number: resp.issue_number }));
         this.selectedRunNumber = resp.issue_number;
         this.selectedRunKind = 'issue';
         this.selectedRunOwner = owner;
@@ -945,7 +945,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Preconditions: the poll only starts once configured (enabled + token).
    * Postconditions: `runs` holds every issue- or PR-bearing run for a repository the PAT can
    * currently access (running + terminal) and `runningRuns`/`recentRuns` hold its non-terminal/terminal
-   * partitions; `activeIssueKeys` holds the non-terminal subset's "owner/repo#number" (issue) or
+   * partitions; `activeRunKeys` holds the non-terminal subset's "owner/repo#number" (issue) or
    * "owner/repo#pr-number" (PR) keys, plus the selected run's key only while that run is absent from
    * this snapshot and not yet observed terminal (so a snapshot that lags a just-started run can't wipe
    * its chip, while a run the snapshot already reports terminal is trusted and dropped). On the first
@@ -1001,7 +1001,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         }),
       );
     }
-    this.activeIssueKeys = active;
+    this.activeRunKeys = active;
     this.buildRunVms();
     this.recomputeIssueVms();
 
@@ -1262,7 +1262,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   isIssueInProgress(issue: GitHubIssueItem): boolean {
     const repo = this.selectedRepo;
     if (!repo) return false;
-    return this.activeIssueKeys.has(runKey(repo.owner, repo.name, { type: 'issue', number: issue.number }));
+    return this.activeRunKeys.has(runKey(repo.owner, repo.name, { type: 'issue', number: issue.number }));
   }
 
   /**
