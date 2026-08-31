@@ -454,7 +454,9 @@ def test_validated_trail_offset_rejects_preview_stop_that_underflows_to_zero() -
     postcondition in isolation, as a defense-in-depth guard independent of
     whatever stop_price happens to compute."""
     with pytest.raises(ValueError, match="materialization round-trip vanishes"):
-        _validated_trail_offset(_leg(OrderType.TRAILING_STOP, pct=0.9), 0, 5e-324, True)
+        _validated_trail_offset(
+            _leg(OrderType.TRAILING_STOP, pct=0.9), i=0, ref_price=5e-324, is_long=True
+        )
 
 
 def test_validated_trail_offset_rejects_preview_stop_that_overflows() -> None:
@@ -463,7 +465,9 @@ def test_validated_trail_offset_rejects_preview_stop_that_overflows() -> None:
     preview_offset overflows to inf. Also calls _validated_trail_offset
     directly for the same reason as above."""
     with pytest.raises(ValueError, match="materialization round-trip vanishes"):
-        _validated_trail_offset(_leg(OrderType.TRAILING_STOP, pct=0.9), 0, 1.7e308, False)
+        _validated_trail_offset(
+            _leg(OrderType.TRAILING_STOP, pct=0.9), i=0, ref_price=1.7e308, is_long=False
+        )
 
 
 # ---------------------------------------------------------------------------

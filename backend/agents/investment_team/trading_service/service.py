@@ -1595,7 +1595,7 @@ def _validated_trail_offset(leg: ExitLegSpec, i: int, ref_price: float, is_long:
 
 def resolve_exit_leg_attachments(
     legs: Sequence[ExitLegSpec], side: OrderSide, ref_price: float
-) -> list[Union[StopAttachment, LimitAttachment]]:
+) -> List[Union[StopAttachment, LimitAttachment]]:
     """Resolve an ordered list of protective/target exit-leg specs into entry-order attachments.
 
     Pure function (no engine/dispatcher state) so the price math is
@@ -1642,16 +1642,19 @@ def resolve_exit_leg_attachments(
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
             ``<= 0``, if ``side`` is not ``OrderSide.LONG`` or
-            ``OrderSide.SHORT``, or if a resolved price, a ``STOP_LIMIT``
-            leg's ``limit_offset`` or derived protective limit price, or a
-            ``TRAILING_STOP`` leg's round-trip-previewed effective stop is
-            non-finite, non-positive, or too small to survive its downstream
-            arithmetic — a defensive guard that would only trip if a leg
-            field bound were loosened without updating this math, an
-            extreme ``ref_price`` overflowed the resolved price to ``inf``,
-            or a vanishingly small ``pct``/``limit_offset_pct`` rounded away
-            to nothing in float64 on the side-specific direction
-            materialization applies.
+            ``OrderSide.SHORT``, if a leg's ``kind`` is not one of
+            ``OrderType.LIMIT``/``OrderType.STOP``/``OrderType.STOP_LIMIT``/
+            ``OrderType.TRAILING_STOP`` (defense-in-depth; ``ExitLegSpec``
+            already rejects such kinds at construction), or if a resolved
+            price, a ``STOP_LIMIT`` leg's ``limit_offset`` or derived
+            protective limit price, or a ``TRAILING_STOP`` leg's
+            round-trip-previewed effective stop is non-finite, non-positive,
+            or too small to survive its downstream arithmetic — a defensive
+            guard that would only trip if a leg field bound were loosened
+            without updating this math, an extreme ``ref_price`` overflowed
+            the resolved price to ``inf``, or a vanishingly small
+            ``pct``/``limit_offset_pct`` rounded away to nothing in float64
+            on the side-specific direction materialization applies.
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
     # contract stays enforced in optimized production runs. ``ref_price`` is a
@@ -1669,7 +1672,7 @@ def resolve_exit_leg_attachments(
     if side not in (OrderSide.LONG, OrderSide.SHORT):
         raise ValueError(f"exit leg side must be OrderSide.LONG or OrderSide.SHORT, got {side!r}")
     is_long = side == OrderSide.LONG
-    attachments: list[Union[StopAttachment, LimitAttachment]] = []
+    attachments: List[Union[StopAttachment, LimitAttachment]] = []
     # Every resolved-price check below (LIMIT's limit_price, the stop-family's
     # stop_price, and STOP_LIMIT's derived protective limit further down)
     # guards against the same two float64 failure modes: overflow to inf
@@ -1736,8 +1739,8 @@ def resolve_exit_leg_attachments(
 
 
 def _as_bracket_attachment_pair(
-    attachments: list[Union[StopAttachment, LimitAttachment]],
-) -> tuple[StopAttachment, LimitAttachment]:
+    attachments: List[Union[StopAttachment, LimitAttachment]],
+) -> Tuple[StopAttachment, LimitAttachment]:
     """Narrow a generalized attachment list to the bracket-specific
     ``(StopAttachment, LimitAttachment)`` pair.
 
@@ -1778,7 +1781,7 @@ def _as_bracket_attachment_pair(
     return stop_attachment, limit_attachment
 
 
-def _bracket_to_leg_specs(bracket: OcoBracketRule) -> list[ExitLegSpec]:
+def _bracket_to_leg_specs(bracket: OcoBracketRule) -> List[ExitLegSpec]:
     """Translate an OCO bracket's two fixed legs into generic exit-leg specs.
 
     Preconditions: ``bracket`` is a validated :class:`OcoBracketRule`.
@@ -1802,7 +1805,7 @@ def _bracket_to_leg_specs(bracket: OcoBracketRule) -> list[ExitLegSpec]:
 
 def resolve_bracket_attachments(
     bracket: OcoBracketRule, side: OrderSide, ref_price: float
-) -> tuple[StopAttachment, LimitAttachment]:
+) -> Tuple[StopAttachment, LimitAttachment]:
     """Resolve an OCO bracket's percentage legs into entry-order attachments.
 
     Thin adapter over the generalized :func:`resolve_exit_leg_attachments`:
@@ -1990,7 +1993,7 @@ class _EngineEntryDispatcher:
 
     def _bracket_attachments(
         self, side: OrderSide, ref_price: float
-    ) -> tuple[Optional[StopAttachment], Optional[LimitAttachment]]:
+    ) -> Tuple[Optional[StopAttachment], Optional[LimitAttachment]]:
         """Resolve this run's OCO bracket (if any) into entry-order attachments.
 
         Builds the bracket's legs via :func:`_bracket_to_leg_specs` and
