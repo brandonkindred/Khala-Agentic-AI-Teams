@@ -1053,9 +1053,37 @@ The primitive #7445-B builds must satisfy:
   needless, non-idempotent side effect against a job nothing will ever resume. **Contract
   requirement:** if the job's own `status` is not `pending`/`running` when this activity runs, treat
   it as a no-op (return without calling `run_pra`, without writing a checkpoint) rather than
-  proceeding — the same active-status check this contract's other conditional writes already apply,
-  here as a plain read-then-skip rather than part of a CAS, since there is no competing write to
-  race against at this specific check (the job is already terminal, not concurrently becoming so).
+  proceeding.
+
+  **Correction — this is a plain read, not a closed race.** An earlier draft of this requirement
+  claimed "there is no competing write to race against at this specific check (the job is already
+  terminal, not concurrently becoming so)" — that is false: cancellation or interruption can land
+  in the window *between* this read and the `run_pra()` POST that follows it, since nothing holds
+  the row across that gap the way a conditional `UPDATE` would. This check reduces the window (it
+  catches every case where the job was already terminal *before* this activity ran, which is the
+  common case) but does not close it completely; a job that becomes terminal in that narrow gap can
+  still get a real external PRA job submitted for it. **Contract requirement:** this residual gap is
+  an inherited, not-fully-closable risk under this contract's scope (add it to §5's open risks,
+  alongside PRA's own lack of submission idempotency) — closing it completely requires coordinating
+  submission with a durable active-state claim PRA itself understands (the same class of gap as
+  risk 2), which is outside `planning_team`'s boundary; this spec does not claim the plain read
+  eliminates the race, only narrows it.
+
+  **This activity must also return a distinct outcome when it skips for terminal status — not
+  the same success shape used after a real submission — so the workflow can stop instead of
+  proceeding into a checkpoint-requiring phase.** `document_production_activity`'s own precondition
+  (below) requires a `document_production_pra` checkpoint to be present before it runs; a terminal
+  skip deliberately writes no checkpoint (there is nothing to check for re-entry against). If the
+  workflow could not tell "submitted successfully" apart from "skipped, job already terminal" and
+  proceeded to `document_production_activity` regardless, that activity's precondition would be
+  violated immediately, likely surfacing as its own failure against an already-terminal row —
+  potentially re-triggering the same terminal-state-clobbering class of bug the activity-level
+  conditional failure writer above exists to prevent, just one activity later. **Contract
+  requirement:** this activity must return a distinct `{"outcome": "skipped_terminal"}`-shaped
+  result (as opposed to the checkpoint-bearing success shape) when it takes the terminal no-op path,
+  and the workflow must branch on that outcome to stop the `document_production` phase entirely
+  (skip straight to whatever finalize/no-op path is appropriate for an already-terminal job) rather
+  than calling `document_production_activity` next.
   If absent (checkpoint) and active (status), calls `run_pra(...)`. **`run_pra`/`run_product_analysis`
   returns `None` when the Software Engineering service is unconfigured or the submission POST fails
   (`adapters/product_analysis.py:33-48`) — this activity must treat a `None`/falsy return as a
@@ -1369,12 +1397,27 @@ this contract:
   untouched, unreachable, and never cleared. **Contract requirement:** the success path's
   terminal write must use the *same* `create_pause_if_generation_matches`-style conditional
   `UPDATE` — guarded on `status IN ('pending', 'running') AND waiting_for_answers` falsy `AND
-  pause_generation == observed_generation` — to *claim* completion, not merely to record it. When
-  this conditional claim fails (a pause already won), the activity must not proceed as if it
-  completed: it must reload the job record's now-current pause envelope and return the *paused*
-  result instead, exactly as a losing paused-return attempt does above — the two code paths
-  converge on the same "reload and defer to the winner" behavior, just triggered from opposite
-  directions of the same race.
+  pause_generation == observed_generation` — to *claim* completion, not merely to record it.
+
+  **A failed claim does not by itself prove "a pause won" — it could just as easily mean a different
+  overlapping attempt's own *completion* claim won first.** Two attempts can both reach `wait_pra`
+  reporting `"completed"` (the same heartbeat-loss overlap as every other race in this section); one
+  succeeds at this same conditional claim (advancing `pause_generation`, but its Temporal *result*
+  is the one that gets discarded, since Temporal only delivers the surviving attempt's result to the
+  workflow), the surviving attempt then attempts the identical claim and loses — but the job record
+  at that point is not paused at all: it is still `running`, `waiting_for_answers` is falsy, and
+  `finalize_planning_activity` simply hasn't run yet. A losing attempt that assumes a failed claim
+  always means "reload and return the paused result" has no paused result to return in this case,
+  and cannot resolve to anything — leaving no attempt able to advance the workflow at all.
+  **Contract requirement:** the conditional completion claim must persist a small, durable
+  completion marker (e.g. `document_production_outcome: "completed"`, or equivalently reusing
+  `pause_generation`'s parity/a dedicated field) as part of the *same* atomic write that advances
+  `pause_generation`, not merely the counter. A losing attempt must reload the job record and branch
+  on what it actually finds: a populated pause envelope (`waiting_for_answers: True`) means re-emit
+  the *paused* result exactly as a losing paused-return attempt does; a completion marker instead
+  means re-emit the *same successful completion* result the winning attempt would have returned
+  (not raise, not treat the lost claim as an error) — the two code paths converge on "reload and
+  re-emit whatever the winner actually recorded," never on an assumption about which side won.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
@@ -1445,13 +1488,46 @@ this contract:
   drop `question_text` (downstream coverage checks use it to avoid re-asking an already-answered
   question) and leave `selected_answer` empty for every multi-select answer (only
   `selected_option_ids` is populated on those, never a computed label). **Contract requirement:**
-  this activity must convert each consumed `AnswerSubmission` into a proper `AnsweredQuestion`
-  before hydration — looking up the matching persisted `pending_questions` entry by `question_id`
-  for its `question_text`/options, and computing `selected_answer` from the selected option
-  label(s) (joining multiple labels, and substituting `other_text` for an `"other"` selection),
-  mirroring PRA's own `apply_answers` conversion already documented in this contract
+  each consumed `AnswerSubmission` must be converted into an enriched record — looking up the
+  matching persisted `pending_questions` entry by `question_id` for its `question_text`/options, and
+  computing `selected_answer` from the selected option label(s) (joining multiple labels, and
+  substituting `other_text` for an `"other"` selection), mirroring PRA's own `apply_answers`
+  conversion already documented in this contract
   (`product_requirements_analysis_agent/user_communication.py:210-219`, §4.1) rather than
   reinventing a third version of the same label-resolution logic.
+
+  **Two further corrections to that conversion, both load-bearing:**
+
+  **(a) `planning_team.models.AnsweredQuestion` does not declare `question_text` at all —
+  constructing it with that field silently drops the value.** The model's actual fields are only
+  `question_id`, `selected_option_id`, `selected_option_ids`, `selected_answer`, `other_text`
+  (`models.py:237-244`) — no `question_text`. Under Pydantic's default extra-field handling, passing
+  `question_text=...` to this model either raises (if a stricter `extra="forbid"` config is ever
+  added) or is silently dropped from `model_dump()` (the default `extra="ignore"`) — either way, the
+  "proper `AnsweredQuestion`" this requirement describes cannot actually carry `question_text`
+  through as specified, and the handoff would still lack the identity downstream coverage needs even
+  after this whole fix. **Contract requirement:** #7445-B must add a `question_text` field to
+  `planning_team.models.AnsweredQuestion` itself (the model this contract's `resolved_questions`
+  are stored as), or this conversion step must persist an explicitly enriched
+  dict/second model that retains `question_text` alongside the `AnsweredQuestion` fields — not an
+  unmodified `AnsweredQuestion` instance, which structurally cannot hold it.
+
+  **(b) The lookup this conversion depends on happens too late — resume step (2) already clears
+  `pending_questions` by the time terminal hydration runs, and a later round can overwrite it before
+  then too.** This conversion is described as happening at *terminal* hydration (just before the
+  final `update_job`), reading `pending_questions` to resolve labels — but §4.3's resume-path step
+  (2) atomically *clears* `pending_questions` as part of consuming each round (it is part of the
+  same pause envelope this contract clears on every successful resume), and by the time a job
+  reaches its terminal write, `pending_questions` reflects only whatever the *last* round left
+  behind (or nothing, if the last round cleared it too) — the question text/option labels for every
+  *earlier* consumed round are already gone by the time this conversion tries to read them. Deferring
+  conversion to the terminal write therefore cannot reliably reconstruct `selected_answer` for any
+  round but the most recent one. **Contract requirement:** the `AnswerSubmission`-to-enriched-record
+  conversion must happen at *resume time* — inside step (2), using that round's still-current
+  `pending_questions` before it is cleared — and the already-enriched record (not the raw
+  `AnswerSubmission`) is what step (2) persists into `resolved_questions`/wherever the durable
+  consumed batches live; the terminal-write hydration described above then only needs to *read back*
+  already-enriched records, never re-derive labels from question metadata that may no longer exist.
 
   **Hydrating `context`/`context_update` is not sufficient on its own to fix the handoff package —
   the `handoff.setdefault` call is a no-op against an already-populated key.** `DocumentProductionAgent.run`
@@ -1546,8 +1622,23 @@ no persisted pause to resume from, silently hanging the job.
   round.
 - *Invariants:* `self._buffered_signals` holds at most one entry per distinct `resume_token` seen
   while no pause was active; every entry is discarded the moment a new pause is armed and its
-  matching entry (if any) is applied — the dict cannot grow unbounded across a long-running
-  workflow's many pause rounds.
+  matching entry (if any) is applied — the dict does not accumulate stale entries *across* a
+  long-running workflow's many pause rounds, since arming each new pause clears the previous
+  round's leftovers.
+
+  **This does not bound the buffer's size *within* one stretch where no pause is active at all.**
+  A signal handler cannot reject a signal (§4.2's own precondition), so nothing stops a
+  misconfigured or abusive client from sending arbitrarily many distinct-token `submit_answers`
+  signals while the workflow is mid-`document_production_activity` with no pause armed yet, or
+  during a run that completes without ever pausing — every such signal buffers as a new entry, and
+  none of them are ever cleared (no pause ever arms to clear them), growing this durable
+  workflow-state field without bound for the life of that execution. **Contract requirement:** cap
+  `self._buffered_signals` at a small fixed size (e.g. a handful of entries) — since at most one
+  buffered token can ever legitimately matter (the *next* pause this workflow arms), evicting the
+  oldest entry when the cap is reached, or discarding a new signal outright once the cap is reached,
+  is a bounded and safe policy; the same reload/re-emit correction pattern used elsewhere in this
+  contract does not apply here since no client-visible durability guarantee for an early signal
+  (received before any matching pause exists) is being made in the first place.
 
 **Open risks, not resolved by this spec:**
 1. *Carried over from `hitl_pause_resume_contract.md` §4:* `workflow.wait_condition` here is
@@ -1589,6 +1680,26 @@ no persisted pause to resume from, silently hanging the job.
    `planning_team`'s boundary and this spec's stated scope. Until PRA offers that, #7445-B inherits
    the residual risk that a heartbeat-loss race can deliver an answer batch to PRA twice, even though
    this contract's own job record and workflow state stay consistent throughout.
+5. *New to this spec, cross-team:* while `PlanningWorkflow` is genuinely paused (a real
+   `waiting_for_answers` envelope persisted, the workflow asleep on `wait_condition` for the
+   `submit_answers` signal — no activity running at all at that point), a submission through PRA's
+   own public answers endpoint (the same direct-to-PRA path this contract already acknowledges is
+   possible elsewhere, e.g. §4.3's pause-generation fencing discussion) updates only PRA's internal
+   job state and sends **no signal to Planning whatsoever** — Planning's workflow and PRA's job are
+   two independent systems connected only by this contract's own signal/resume machinery, which a
+   direct PRA submission bypasses entirely. Even if PRA fully completes as a result, Planning's
+   workflow has no mechanism to notice: it is asleep on a signal that will never arrive, and nothing
+   in this contract polls PRA's status while paused (`wait_pra`'s poll loop only runs *inside* an
+   active `document_production_activity` invocation, and none is running while paused). The job
+   hangs indefinitely, silently, with no error and no timeout (risk 1, above, already flags the
+   underlying unbounded `wait_condition`; this is a distinct way to reach the same hang). **Full
+   closure is outside this contract's boundary** and requires one of: PRA itself refusing or
+   brokering direct submissions against a PRA job it knows is owned by a paused Planning execution;
+   a callback/signal path from PRA back into the owning Planning workflow when answered directly;
+   or workflow-side reconciliation (a periodic timer inside `wait_condition`'s wait that polls PRA's
+   status independently of the signal path) — any of which is a substantive addition beyond this
+   contract's signal-reuse scope. #7445-B inherits this risk knowingly; this contract does not
+   claim to close it, only to name it explicitly rather than let it stay an unstated assumption.
 
 ---
 
