@@ -2110,7 +2110,7 @@ def test_dedup_resets_across_review_cycles(tmp_path):
 
     assert len(captured) == 3
     assert len(captured[0]) == 1  # cycle 1 CR fix: first time seeing the issue
-    assert len(captured[1]) == 1  # QA fix (different issue key): unaffected
+    assert captured[1] == [qa_issue]  # QA fix (different issue key): unaffected
     assert captured[2] == [
         recurring_issue
     ]  # cycle 2 CR fix: issue recurred, must not be suppressed
