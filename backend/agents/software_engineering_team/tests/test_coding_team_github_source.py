@@ -43,7 +43,7 @@ from software_engineering_team.github_source.client_http import (
     _parse_next_link,
 )
 from software_engineering_team.models import CodingTeamPlanInput
-from software_engineering_team.tests.conftest import _expected_basic_header
+from software_engineering_team.tests.conftest import _commit_on_branch, _expected_basic_header
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2304,6 +2304,69 @@ class TestPrepareIssueBranch:
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
         assert ok is False
         assert "unsafe" in (msg or "")
+
+    def test_expected_head_sha_matching_live_remote_tip_succeeds(self, api, tmp_path) -> None:
+        """When the caller's ``expected_head_sha`` matches what a fresh fetch
+        reports as the branch's live tip, prep proceeds exactly as without the
+        check (proving the check does not misfire on the ordinary case)."""
+        repo = self._init_repo(tmp_path)
+        live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_head_sha=live_sha
+        )
+        assert ok is True, msg
+        import subprocess
+
+        head = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "khala/issue-9"
+
+    def test_expected_head_sha_mismatch_blocks_prep_without_mutating_checkout(
+        self, api, tmp_path
+    ) -> None:
+        """Simulates the P1 race: a caller's plan was grounded on ``stale_sha``,
+        but by the time branch prep actually runs (this fetch) a newer commit
+        has landed on the PR branch. Prep must fail closed -- proceeding would
+        apply the caller's plan to code newer than what it was grounded on --
+        and must not touch the checkout on its way to failing."""
+        repo = self._init_repo(tmp_path)
+        stale_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+        assert stale_sha != live_sha
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_head_sha=stale_sha
+        )
+
+        assert ok is False
+        assert stale_sha in (msg or "")
+        assert live_sha in (msg or "")
+        import subprocess
+
+        # The checkout must be left exactly where _init_repo put it -- no
+        # branch switch, no local integration branch created.
+        head = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "main"
+
+    def test_expected_head_sha_none_skips_check(self, api, tmp_path) -> None:
+        """The default (``None``, used by the plain issue-driven flow) must not
+        perform the check at all -- prep succeeds regardless of the branch's
+        live tip, exactly as before this parameter existed."""
+        repo = self._init_repo(tmp_path)
+        _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is True, msg
 
 
 class TestGitCredentialThreading:

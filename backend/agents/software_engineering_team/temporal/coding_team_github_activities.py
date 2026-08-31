@@ -78,16 +78,20 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
     ``api/coding_team_main.py``) as a Temporal activity, so a GitHub-issue
     workflow run can execute the same branch-recovery/continuation logic the
     thread-mode ``_run_with_github_hooks`` orchestrator calls today, on a
-    worker rather than a caller thread. Not yet called by ``CodingTeamWorkflow``
-    (workflow wiring is a separate, later follow-up) and does not publish
-    comments (that is the sibling publish/failure-notice activity work).
+    worker rather than a caller thread. Called by ``CodingTeamWorkflow.run``
+    before ``run_pipeline_activity`` whenever the request carries GitHub
+    metadata; does not publish comments (that is the sibling publish/
+    failure-notice activity work).
 
     Preconditions:
         - ``request`` carries non-empty string values for ``job_id``, ``repo_path``,
           ``remote``, ``default_branch``, and ``integration_branch``. Must NOT
           include a ``token`` field -- the activity resolves the GitHub token
           from the job's ``github_token_encrypted`` or ``GITHUB_TOKEN``.
-        - May also carry ``issue_number`` (Optional[int]).
+        - May also carry ``issue_number`` (Optional[int]) and
+          ``expected_head_sha`` (Optional[str]) -- see
+          ``_prepare_issue_branch``'s own contract for the latter; passed
+          through unchanged and ``None`` when absent.
         - ``repo_path`` names a git checkout the calling process can write
           to; ``remote``/``default_branch``/``integration_branch`` may be
           untrusted ref-shaped strings -- ``_prepare_issue_branch`` rejects
@@ -99,7 +103,9 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
           ``integration_branch`` is checked out with a clean working tree;
           ``notes`` describes any recovery/continuation actions taken.
           ``ok=False`` means no uncommitted work was deleted and no
-          previously-reachable commit became unreachable; ``error`` says why.
+          previously-reachable commit became unreachable; ``error`` says why
+          (including when ``expected_head_sha`` was given and no longer
+          matches the branch's live remote tip).
         - Raises ``ValueError`` (not a discriminated return) when ``request``
           is missing a required field -- a caller-wiring bug, not a git
           failure, so it must not be conflated with the ``ok=False`` outcome.
@@ -126,6 +132,7 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
         request["integration_branch"],
         token,
         issue_number=request.get("issue_number"),
+        expected_head_sha=request.get("expected_head_sha"),
     )
     return {"ok": ok, "error": err, "notes": notes}
 

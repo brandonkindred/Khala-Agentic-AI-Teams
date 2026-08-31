@@ -446,10 +446,48 @@ def test_github_run_calls_prep_then_pipeline_then_publish(monkeypatch: pytest.Mo
     assert snapshots[0]["job_id"] == "job-1"
     assert snapshots[0]["default_branch"] == "main"
     assert snapshots[0]["integration_branch"] == "khala/issue-9"
+    # The plain issue-driven flow has no prior-plan snapshot to pin to.
+    assert snapshots[0]["expected_head_sha"] is None
     assert "token" not in snapshots[0]
     assert snapshots[2]["issue_title"] == "Fix the widget"
     assert "token" not in snapshots[2]
     assert result["github_pr_url"] == "https://example/pull/1"
+
+
+def test_github_branch_prep_forwards_expected_head_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the caller (review-comment remediation) supplies ``expected_head_sha``
+    on the ``github`` payload, it must reach ``github_branch_prep_activity``'s
+    request unchanged, so branch prep can pin to the exact head the plan was
+    grounded on -- see ``_prepare_issue_branch``'s own contract for the check
+    this enables."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": True, "error": None, "notes": []},
+        {"job_id": "job-1", "status": "completed"},
+        {"job_id": "job-1", "status": "completed", "github_pr_url": "https://example/pull/1"},
+    ]
+    calls, snapshots = _patch_execute(monkeypatch, results)
+
+    async def _no_wait(*_a, **_kw):
+        raise AssertionError("wait_condition must not be called")
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
+
+    request = _github_request(github={**_GITHUB, "expected_head_sha": "deadbeef"})
+    asyncio.run(workflow_obj.run(request))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_publish_activity,
+    ]
+    assert snapshots[0]["expected_head_sha"] == "deadbeef"
 
 
 def test_pr_comment_run_uses_existing_pr_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
