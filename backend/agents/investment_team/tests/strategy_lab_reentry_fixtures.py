@@ -9,6 +9,9 @@ and for the forced failure itself, so
 tests and its Temporal-mode re-entry test can't drift to different round
 counts or differently-shaped errors -- a prerequisite for a later cross-mode
 parity test to compare apples to apples.
+``test_strategy_lab_cross_attempt_resume.py``'s re-entry tests also consume
+this module (via ``_review_loop_stubs``, which defaults to
+``REENTRY_REVIEW_NOT_READY_ROUNDS``).
 
 The two modes' *injection mechanisms* stay separate (thread-mode drives a
 real in-process design/review round loop; Temporal-mode fakes a higher-level
@@ -86,7 +89,15 @@ def synthesis_boundary_spec_implementability_error(
 def _not_ready_then_ready_critiques(review_not_ready_rounds: int) -> List[Any]:
     """Build the ``review_not_ready_rounds`` not-ready critiques followed by
     the final ready critique that both re-entry fixture shapes below drive
-    a design attempt's review loop through."""
+    a design attempt's review loop through.
+
+    Preconditions:
+        ``review_not_ready_rounds >= 0``.
+    Postconditions:
+        Returns ``review_not_ready_rounds + 1`` critiques -- the first
+        ``review_not_ready_rounds`` with ``ready=False``, the last with
+        ``ready=True``.
+    """
     from investment_team.strategy_lab.agents.design_review import SpecCritique
 
     return [
@@ -96,6 +107,8 @@ def _not_ready_then_ready_critiques(review_not_ready_rounds: int) -> List[Any]:
 
 
 def _revised_spec_dict(spec_dict: Any) -> Any:
+    """Return a copy of ``spec_dict`` with a marker ``hypothesis`` revision
+    applied (what ``design_agent.revise`` is stubbed to produce)."""
     revised = dict(spec_dict)
     revised["hypothesis"] = "revised hypothesis"
     return revised
@@ -124,8 +137,7 @@ def _charging_design_stubs(
     """
     from investment_team.strategy_lab.agents._llm_budget import charge_active_budget
 
-    from .conftest import design_returning, design_revising, review_returning
-    from .test_strategy_lab_phase_transitions import _spec_dict
+    from .conftest import default_rsi_spec_dict, design_returning, design_revising, review_returning
 
     attempt: Dict[str, Any] = {}
 
@@ -135,9 +147,9 @@ def _charging_design_stubs(
             *_not_ready_then_ready_critiques(review_not_ready_rounds)
         )
         attempt["revise"] = design_revising(
-            [_revised_spec_dict(_spec_dict()) for _ in range(review_not_ready_rounds)]
+            [_revised_spec_dict(default_rsi_spec_dict()) for _ in range(review_not_ready_rounds)]
         )
-        return design_returning(_spec_dict())(**kwargs)
+        return design_returning(default_rsi_spec_dict())(**kwargs)
 
     def _review(*args: Any, **kwargs: Any) -> Any:
         charge_active_budget()
@@ -154,7 +166,7 @@ def _charging_design_stubs(
     return design_attempt_llm_call_cost(review_not_ready_rounds)
 
 
-def _one_revision_review_stubs(
+def _review_loop_stubs(
     monkeypatch: "pytest.MonkeyPatch",
     orch: Any,
     *,
@@ -176,11 +188,10 @@ def _one_revision_review_stubs(
         are replaced with stubs producing the known not-ready-then-ready
         sequence.
     """
-    from .conftest import design_revising, review_returning
-    from .test_strategy_lab_phase_transitions import _spec_dict
+    from .conftest import default_rsi_spec_dict, design_revising, review_returning
 
     revise_stub = design_revising(
-        [_revised_spec_dict(_spec_dict()) for _ in range(review_not_ready_rounds)]
+        [_revised_spec_dict(default_rsi_spec_dict()) for _ in range(review_not_ready_rounds)]
     )
 
     def _revise(*_args: Any, **kwargs: Any) -> Any:

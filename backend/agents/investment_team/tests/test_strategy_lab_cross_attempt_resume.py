@@ -58,7 +58,7 @@ from investment_team.strategy_lab.phases import PHASE_TRANSITION_EVENT_NAME, Pha
 
 from .strategy_lab_reentry_fixtures import (
     REENTRY_REVIEW_NOT_READY_ROUNDS,
-    _one_revision_review_stubs,
+    _review_loop_stubs,
     synthesis_boundary_spec_implementability_error,
 )
 from .test_strategy_lab_phase_transitions import (
@@ -262,9 +262,7 @@ def test_spec_implicated_false_resumes_from_review_checkpoint(
     _stub_pipeline_for_happy_path(monkeypatch, orch)
     design_run_calls = _wrap_with_call_counter(monkeypatch, orch.design_agent, "run")
 
-    _one_revision_review_stubs(
-        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
-    )
+    _review_loop_stubs(monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS)
 
     real_synthesize = orch._synthesize_initial_code
 
@@ -339,9 +337,7 @@ def test_repeated_resume_does_not_duplicate_seeded_drift_history(
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 
-    _one_revision_review_stubs(
-        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
-    )
+    _review_loop_stubs(monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS)
     review_call_count = _wrap_with_call_counter(monkeypatch, orch.design_review_agent, "run")
 
     def _always_raise_not_spec_implicated(**kwargs: Any) -> Any:
@@ -386,9 +382,7 @@ def test_non_spec_implicated_failure_does_not_mislabel_convergence_directive(
     orch = StrategyLabOrchestrator()
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 
-    _one_revision_review_stubs(
-        monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS
-    )
+    _review_loop_stubs(monkeypatch, orch, review_not_ready_rounds=REENTRY_REVIEW_NOT_READY_ROUNDS)
 
     real_synthesize = orch._synthesize_initial_code
 
