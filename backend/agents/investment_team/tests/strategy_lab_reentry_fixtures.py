@@ -86,6 +86,66 @@ def synthesis_boundary_spec_implementability_error(
     )
 
 
+def record_synthesis_boundary_checkpoint(
+    capture: Any,
+    *,
+    spec: Any,
+    design_attempt: int,
+    generation: int,
+    review_rounds_completed: int,
+    budget_calls: int,
+    rationale: str = "r",
+    captured_at: str = "2026-08-31T00:00:00Z",
+) -> None:
+    """Build and record the real ``ReviewCheckpoint`` both the Temporal-mode
+    bounded-cost test and the cross-mode parity test need
+    ``resolve_cross_attempt_resume`` to see, at the synthesis boundary after
+    ``review_rounds_completed`` rounds of partial convergence.
+
+    Single source of truth for the checkpoint's field values, so a change to
+    ``ReviewCheckpoint``'s required fields (or to what "the known point of
+    partial convergence" looks like on the wire) can't drift between the two
+    call sites the way it did before this helper existed.
+
+    Preconditions:
+        ``capture`` is not ``None`` (a ``checkpoint_capture`` handed to a
+        stubbed ``_run_design_attempt``); ``spec`` is the ``StrategySpec``
+        the checkpoint should carry.
+    Postconditions:
+        Records one ``ReviewCheckpoint`` via ``capture.record(...)``, built
+        from ``capture.run_id``/``cycle_scope``/``generation`` and the given
+        spec/attempt/round-count. Returns ``None``.
+    """
+    from investment_team.strategy_lab import phases
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+
+    capture.record(
+        ReviewCheckpoint(
+            run_id=capture.run_id,
+            cycle_scope=capture.cycle_scope,
+            design_attempt=design_attempt,
+            generation=generation,
+            spec_hash=phases.hash_spec(spec),
+            code_hash=phases.hash_code(None),
+            captured_at=captured_at,
+            budget_calls=budget_calls,
+            gate_results=[],
+            spec_history=[],
+            code_history=[],
+            gate_timeline=[],
+            spec=spec,
+            rationale=rationale,
+            design_context={
+                "rounds": review_rounds_completed,
+                "critiques": [],
+                "stop_reason": "converged",
+                "loop_telemetry": {},
+            },
+            review_rounds_completed=review_rounds_completed,
+        )
+    )
+
+
 def _not_ready_then_ready_critiques(review_not_ready_rounds: int) -> List[Any]:
     """Build the ``review_not_ready_rounds`` not-ready critiques followed by
     the final ready critique that both re-entry fixture shapes below drive
