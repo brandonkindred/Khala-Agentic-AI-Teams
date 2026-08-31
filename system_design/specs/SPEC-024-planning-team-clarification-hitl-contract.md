@@ -1442,6 +1442,25 @@ this contract:
   transient state by construction, not a fourth durable outcome this contract needs to define new
   persisted fields for.
 
+  **A fourth, genuinely durable reload outcome is still undefined: the job itself became terminal
+  (cancelled, interrupted, or independently failed) while this claim was in flight.** The
+  conditional claim's guard includes `status IN ('pending', 'running')`; if a cancellation or
+  interruption lands first, the guard fails for that reason alone, with no pause envelope and no
+  completion marker ever written — a case the "intermediate, retry" handling above explicitly does
+  not cover (that branch applies "only while active"; a terminal row is not active). A losing
+  attempt that reloads into a genuinely terminal row has nothing to reload-and-re-emit: it is not
+  paused, not completed, and not merely "not yet resolved." If this activity instead raises for lack
+  of any defined branch, it is retryable (`SAFE_RETRY`) and can eventually reach its own `_guarded`
+  final-attempt failure writer — unconditional, per the earlier finding this activity's failure
+  writer must guard against, unless that same conditional-writer fix is applied here too — clobbering
+  the terminal status the workflow was trying to respect in the first place. **Contract
+  requirement:** a losing attempt that reloads and finds the job's own `status` no longer
+  `pending`/`running` must return a distinct terminal/skipped outcome (the same
+  `{"outcome": "skipped_terminal"}` shape §4.3.1 already establishes for the submit activity, reused
+  here rather than inventing a second shape) instead of raising or fabricating a paused/completed
+  result, and the workflow must branch on it the same way — return immediately, scheduling no
+  further activity — exactly as it does for the submit activity's own terminal skip.
+
   **The terminal-status guard alone leaves one more race: a stale attempt's pause-creation write can
   still land in the narrow window *before* the job's status actually flips to terminal.** Two
   overlapping attempts (the same heartbeat-loss scenario throughout this section) can each be
@@ -1735,6 +1754,22 @@ no persisted pause to resume from, silently hanging the job.
   before concluding no early submission exists. This closes the gap the eviction cap opens: a
   legitimately durable answer is never lost even if its in-memory buffered signal was evicted, since
   the job record itself is the authoritative source `_buffered_signals` was only ever ballast for.
+
+  **This reconciliation check must be a Temporal activity, not a job-record read performed directly
+  inside the workflow.** Arming a pause happens inside `PlanningWorkflow`'s own workflow code; a
+  direct job-store read there is the same class of nondeterministic-I/O violation this contract
+  already corrected for the crash backstop (§4.3.1) — `workflows.py`'s own module docstring states
+  the workflow body only performs external work through `workflow.execute_activity`. Simply omitting
+  the check to avoid that violation is not an acceptable alternative either: it reintroduces the
+  exact evicted-signal hang this whole correction exists to close. **Contract requirement:** register
+  a small, separate read/reconciliation activity (e.g.
+  `check_submitted_answers_activity(job_id, resume_token)`, itself following this contract's own
+  worker-versioning requirement above since it too is a new activity type) that performs the durable
+  `submitted_answers` lookup, and have the workflow `await workflow.execute_activity(...)` it
+  immediately after arming a new pause envelope, *before* entering `wait_condition` — treating a
+  match exactly as if the corresponding signal had already arrived (setting `_submitted_answers`
+  directly) so `wait_condition` returns immediately rather than blocking on a signal that will never
+  come.
 
   **This cap must be version-gated for `CodingTeamWorkflow`, whose existing histories this
   contract's mandatory extraction (§4.4) requires migrating onto the same shared state machine.**
