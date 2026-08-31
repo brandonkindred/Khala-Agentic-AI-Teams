@@ -55,6 +55,33 @@ def _cleanup_handoff_failure(
         ops.delete_branch(repo_path, branch_name)
 
 
+def _cleanup_inline_merge_failure(
+    repo_path: Path,
+    branch_name: str,
+    *,
+    ops: DeliverGitOps,
+) -> None:
+    """Return to development and remove the feature branch after a failed inline merge.
+
+    By the time this runs, the branch may carry a delivery commit that never
+    made it into ``DEVELOPMENT_BRANCH`` (write/gate/autofix/merge all fail
+    *after* the initial commit) -- a plain ``git branch -d`` refuses to delete
+    such an unmerged branch, so this force-deletes it; the whole point of this
+    cleanup is discarding the abandoned branch, commits included. Likewise, the
+    quality gate's build verifier may have autofixed tracked files and left
+    them uncommitted before reporting failure, which a plain checkout would
+    refuse to overwrite -- and a branch that failed to check out of can't be
+    deleted either -- so the checkout is forced too, discarding that dirty
+    state along with everything else on the abandoned branch.
+
+    Best-effort: failures from ``checkout_branch``/``delete_branch`` themselves are
+    not surfaced here, matching this function's other cleanup calls.
+    """
+    ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH, force=True)
+    if branch_name:
+        ops.delete_branch(repo_path, branch_name, force=True)
+
+
 def prepare_handoff_branch(
     *,
     task_id: str,
@@ -238,7 +265,7 @@ def deliver_inline_merge(
     if not write_ok:
         result.summary = f"Write failed: {write_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
-        ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+        _cleanup_inline_merge_failure(repo_path, result.branch_name, ops=ops)
         return result
     result.commit_messages.append(commit_msg)
 
@@ -254,7 +281,7 @@ def deliver_inline_merge(
     if not gate_ok:
         result.summary = f"Pre-merge quality gate failed: {gate_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
-        ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+        _cleanup_inline_merge_failure(repo_path, result.branch_name, ops=ops)
         return result
 
     # The gate's build verifier may have autofixed and left uncommitted changes;
@@ -265,7 +292,7 @@ def deliver_inline_merge(
     if not autofix_ok:
         result.summary = f"Autofix commit failed: {autofix_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
-        ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+        _cleanup_inline_merge_failure(repo_path, result.branch_name, ops=ops)
         return result
 
     merge_ok, merge_msg = ops.merge_branch(repo_path, result.branch_name, DEVELOPMENT_BRANCH)
@@ -273,7 +300,7 @@ def deliver_inline_merge(
         result.summary = f"Merge failed: {merge_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
         ops.abort_merge(repo_path)
-        ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+        _cleanup_inline_merge_failure(repo_path, result.branch_name, ops=ops)
         return result
 
     result.merged = True

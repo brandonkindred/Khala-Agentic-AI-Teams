@@ -435,9 +435,9 @@ def find_architecture_and_redundancy_issues(
           ``ReviewProfile.CODE_REVIEW`` (the other profiles -- ``ACCEPTANCE``,
           ``SPEC_CONFORMANCE``, ... -- have a narrower contract that expects
           every issue to be attributable to a specific criterion/requirement,
-          which an architecture/refactor finding never is; e.g.
-          ``AcceptanceVerifierAgent`` treats any unattributed issue as an
-          unmet criterion, so letting this pass run under that profile could
+          which an architecture/refactor finding never is; a per-criterion
+          acceptance gate treats any unattributed issue as an unmet
+          criterion, so letting this pass run under that profile could
           spuriously fail acceptance verification even when every criterion
           is satisfied), when there is no architecture payload and no
           ``repo_reader`` / ``existing_codebase`` evidence, or when the

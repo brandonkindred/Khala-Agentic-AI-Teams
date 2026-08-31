@@ -166,7 +166,7 @@ if TYPE_CHECKING:
     # Type-checking only -- runtime resolution stays lazy (see module
     # docstring) since this import pulls in the full strategy-lab dependency
     # graph and this file's own ACTIVITIES list must stay importable without it.
-    from investment_team.models import DesignAttemptCheckpoint
+    from investment_team.models import DesignAttemptCheckpoint, StrategySpec
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
 
 logger = logging.getLogger(__name__)
@@ -790,6 +790,66 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
     )
 
 
+def _cross_attempt_resume_from_params(
+    params: Dict[str, Any], *, run_id: Optional[str], design_attempt_index: int
+) -> "Tuple[Optional[StrategySpec], Optional[str], Optional[_DesignPersistContext]]":
+    """Reconstruct ``run_design_attempt_activity``'s cross-attempt resume state from ``params``.
+
+    Temporal-mode parity with thread mode's gated cross-attempt resume
+    (``orchestrator.py::run_cycle``). Only ever called from
+    ``run_design_attempt_activity`` when the ADR-012 same-attempt checkpoint
+    lookup found nothing -- the two never actually collide, since an
+    ADR-012 checkpoint is keyed to the exact ``design_attempt_index``
+    crashing mid-execution, while ``params["resume_spec"]`` is supplied by
+    the calling workflow for a ``design_attempt_index`` that has never run
+    yet. The workflow is the sole source of truth for whether resuming is
+    sound (gated on the prior attempt's
+    ``SpecImplementabilityError.spec_implicated`` being ``False`` -- see
+    ``checkpoints.py`` and ``orchestrator.py::run_cycle`` for the full
+    contract); this function just reconstructs whatever it's handed,
+    wire-shaped exactly like the ADR-012 fields so both paths land in the
+    same ``orch._run_design_attempt(resume_spec=..., ...)`` call.
+
+    Preconditions:
+        ``params["resume_spec"]`` is not ``None`` (the caller's own
+        precondition for calling this at all).
+    Postconditions:
+        Reconstructs into temporaries first and only returns them together
+        on success -- mirrors the ADR-012 block's own fail-open discipline
+        (never leave ``resume_spec``/``resume_design_context`` in a
+        partially-reconstructed, inconsistent mix). A malformed or empty
+        payload here is always a caller bug (this is only ever fed by this
+        same module's own workflow, not external input), but the failure
+        mode of *not* guarding it is a crash-loop identical to the one
+        ADR-012's own guard exists to avoid -- skipping Phase 1 with
+        ``resume_design_context is None`` while ``resume_spec`` is set,
+        then failing identically on every Temporal retry -- so this fails
+        open to ``(None, None, None)`` ("no resume", i.e. full restart)
+        instead, logging a warning.
+    """
+    from investment_team.models import StrategySpec
+
+    try:
+        spec = StrategySpec(**params["resume_spec"])
+        design_context = _design_context_from_wire(params.get("resume_design_context"))
+        if design_context is None:
+            raise ValueError(
+                "cross-attempt resume design_context is empty; refusing to "
+                "resume without a valid design context"
+            )
+    except Exception as exc:  # noqa: BLE001 -- fail open, see docstring above
+        logger.warning(
+            "cross-attempt resume params for run %s attempt %s failed to "
+            "reconstruct (treating as no resume): %s",
+            run_id,
+            design_attempt_index,
+            exc,
+            exc_info=True,
+        )
+        return None, None, None
+    return spec, params.get("resume_rationale"), design_context
+
+
 @activity.defn(name="strategy_lab_snapshot_prior_records")
 def snapshot_prior_records_activity(reverse: bool = False) -> List[Dict[str, Any]]:
     """Read the durable strategy-lab record store, sorted by creation time.
@@ -1028,6 +1088,24 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             calling workflow incarnation was dispatched with, mirroring
             ``persist_run_state_activity``'s own default-generation
             backward-compat convention.
+          - ``resume_spec``/``resume_rationale``/``resume_design_context``
+            (all optional): cross-attempt resume state, Temporal-mode parity
+            with thread mode's ``orchestrator.py::run_cycle`` gated
+            cross-attempt resume -- the calling workflow's own
+            ``StrategyLabCycleWorkflow.run`` supplies these,
+            wire-shaped exactly like the ADR-012 same-attempt checkpoint
+            fields below, only when a *prior* attempt's
+            ``SpecImplementabilityError.spec_implicated`` was ``False`` and
+            its checkpoint converged through ``PipelineStage.REVIEW``. Only
+            consulted when no ADR-012 same-attempt checkpoint was found for
+            this ``design_attempt_index`` (the common case, since ADR-012
+            checkpoints are keyed to the exact attempt that crashed, never a
+            not-yet-attempted one). ``resume_spec is not None`` if and only
+            if ``resume_design_context is not None`` (``resume_rationale``
+            may independently be ``None``/``""`` -- same invariant as the
+            ADR-012 fields, and as ``_run_design_attempt``'s own
+            ``resume_spec``/``resume_rationale``/``resume_design_context``
+            parameters it feeds into).
     Postconditions:
         Returns either
         ``{"kind": "record", "record": <StrategyLabRecord JSON dump>,
@@ -1035,9 +1113,13 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         "budget_calls": int, "drift": {...}}`` on a terminal record, or
         ``{"kind": "reentry", "evidence": str, "last_spec": <StrategySpec JSON
         dump or None>, "last_code": str, "failure_phase": str|None,
-        "design_context": {...}|None, "convergence_tracker_state": ...,
+        "design_context": {...}|None, "spec_implicated": bool,
+        "convergence_tracker_state": ...,
         "gate_results": [...], "budget_calls": int, "drift": {...}}`` when
-        ``_run_design_attempt`` raised ``SpecImplementabilityError``, or
+        ``_run_design_attempt`` raised ``SpecImplementabilityError``
+        (``spec_implicated`` mirrors the exception's own field -- see
+        ``exceptions.py`` -- and is what the calling workflow gates
+        cross-attempt resume on for the *next* attempt), or
         ``{"kind": "skipped", "reason": "no_market_data",
         "convergence_tracker_state": ..., "gate_results": [...],
         "budget_calls": int, "drift": {...}}`` when this attempt recorded a
@@ -1262,6 +1344,20 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 resume_spec = checkpoint.spec
                 resume_rationale = checkpoint.rationale
                 resume_design_context = checkpoint_design_context
+
+    # Cross-attempt resume (Temporal-mode parity with thread mode's gated
+    # cross-attempt resume): only consulted when the ADR-012 same-attempt
+    # lookup just above found nothing -- the two never actually collide,
+    # since an ADR-012 checkpoint is keyed to THIS exact
+    # ``design_attempt_index`` crashing mid-execution, while
+    # ``params["resume_spec"]`` is supplied by the calling workflow for a
+    # ``design_attempt_index`` that has never run yet. See
+    # ``_cross_attempt_resume_from_params`` for the full contract and its
+    # fail-open discipline.
+    if resume_spec is None and params.get("resume_spec") is not None:
+        resume_spec, resume_rationale, resume_design_context = _cross_attempt_resume_from_params(
+            params, run_id=run_id, design_attempt_index=design_attempt_index
+        )
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
         """``checkpoint_hook`` passed into ``_run_design_attempt`` (``PhaseCallback`` shape).
@@ -1517,6 +1613,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "last_code": exc.last_code or "",
             "failure_phase": exc.failure_phase,
             "design_context": design_context_wire,
+            "spec_implicated": exc.spec_implicated,
             "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
             "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
             "budget_calls": budget.calls_made,

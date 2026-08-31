@@ -792,18 +792,28 @@ def _now_iso() -> str:
 
 
 def add_pending_questions(
-    client: JobServiceClient, job_id: str, questions: List[Dict[str, Any]]
+    client: JobServiceClient,
+    job_id: str,
+    questions: List[Dict[str, Any]],
+    resume_token: Optional[str] = None,
 ) -> None:
     """Append pending questions and set ``waiting_for_answers=True`` to pause the job.
 
     Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is
         non-empty; ``questions`` is a list of structured question dicts.
     Postconditions: the job's ``waiting_for_answers`` is True and ``questions``
-        are appended to ``pending_questions`` in one atomic write.
+        are appended to ``pending_questions`` in one atomic write. When
+        ``resume_token`` is supplied (a Temporal-native pause), it is persisted in
+        that SAME atomic write — never a separate call — so a client polling the
+        job record between two writes can never observe ``waiting_for_answers=True``
+        without the token that identifies which pause it answers.
     """
+    merge_fields: Dict[str, Any] = {"waiting_for_answers": True}
+    if resume_token is not None:
+        merge_fields["resume_token"] = resume_token
     client.atomic_update(
         job_id,
-        merge_fields={"waiting_for_answers": True},
+        merge_fields=merge_fields,
         append_to={"pending_questions": questions},
     )
 
@@ -881,13 +891,15 @@ def make_cachedir_hitl(
     Callable[..., None],
     Callable[..., bool],
     Callable[..., List[Dict[str, Any]]],
+    Callable[..., None],
 ]:
-    """Build the four ``cache_dir``-keyed HITL wrappers over a team's client getter.
+    """Build the five ``cache_dir``-keyed HITL wrappers over a team's client getter.
 
     Both team job-stores (``coding_team.job_store`` and
     ``software_engineering_team.shared.job_store``) expose the same
     human-in-the-loop surface — pause a job with pending questions, submit answers
-    to resume, and query the wait flag / submitted answers — keyed by a
+    to resume, append answers for a Temporal-native pause without clearing the
+    envelope, and query the wait flag / submitted answers — keyed by a
     ``cache_dir`` rather than an explicit ``JobServiceClient``. Each wrapper is a
     one-line delegation to the module-level client-based function above; this
     factory single-sources them so the two teams cannot drift.
@@ -898,15 +910,23 @@ def make_cachedir_hitl(
           wrappers' ``cache_dir`` default).
     Postconditions:
         - Returns ``(add_pending_questions, submit_answers, is_waiting_for_answers,
-          get_submitted_answers)``. Each accepts ``(job_id, ..., cache_dir=default)``
-          and carries the contract of its client-based counterpart; the returned
-          callables' ``__name__`` match the public wrapper names for clean
-          tracebacks. Never raises here.
+          get_submitted_answers, append_submitted_answers)``. Each accepts
+          ``(job_id, ..., cache_dir=default)`` and carries the contract of its
+          client-based counterpart; the returned callables' ``__name__`` match the
+          public wrapper names for clean tracebacks. Never raises here.
     """
 
-    def add_pending_questions_cd(job_id, questions, cache_dir=default_cache_dir) -> None:
-        """Append pending questions and set waiting_for_answers=True (pauses the job)."""
-        add_pending_questions(client_getter(cache_dir), job_id, questions)
+    def add_pending_questions_cd(
+        job_id, questions, resume_token=None, cache_dir=default_cache_dir
+    ) -> None:
+        """Append pending questions and set waiting_for_answers=True (pauses the job).
+
+        ``resume_token``, when supplied, is persisted in the SAME atomic write as
+        ``waiting_for_answers``/``pending_questions`` (a Temporal-native pause) — never a
+        separate call, so a client polling the job record can never observe the pause flag
+        without the token that identifies which pause it is.
+        """
+        add_pending_questions(client_getter(cache_dir), job_id, questions, resume_token)
 
     def submit_answers_cd(job_id, answers, cache_dir=default_cache_dir) -> None:
         """Store answers, clear pending questions, and clear the wait flag (resumes the job)."""
@@ -920,13 +940,20 @@ def make_cachedir_hitl(
         """Return the answers submitted for this job (empty when none/unknown)."""
         return get_submitted_answers(client_getter(cache_dir), job_id)
 
+    def append_submitted_answers_cd(job_id, answers, cache_dir=default_cache_dir) -> None:
+        """Append answers to submitted_answers WITHOUT clearing the pause envelope
+        (a Temporal-native pause's resume path — see ``append_submitted_answers`` above)."""
+        append_submitted_answers(client_getter(cache_dir), job_id, answers)
+
     add_pending_questions_cd.__name__ = "add_pending_questions"
     submit_answers_cd.__name__ = "submit_answers"
     is_waiting_for_answers_cd.__name__ = "is_waiting_for_answers"
     get_submitted_answers_cd.__name__ = "get_submitted_answers"
+    append_submitted_answers_cd.__name__ = "append_submitted_answers"
     return (
         add_pending_questions_cd,
         submit_answers_cd,
         is_waiting_for_answers_cd,
         get_submitted_answers_cd,
+        append_submitted_answers_cd,
     )

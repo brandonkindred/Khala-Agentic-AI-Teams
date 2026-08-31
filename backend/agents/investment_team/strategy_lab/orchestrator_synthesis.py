@@ -1095,6 +1095,10 @@ class SynthesisMixin:
                 last_spec=spec,
                 last_code=code,
                 drift_collector=drift_collector,
+                # Deterministic re-check against unchanged code and market
+                # data: resuming would reproduce this exact failure every
+                # time. Only a design-level exit_rules revision can fix it.
+                spec_implicated=True,
             )
 
         # ── 3: Specialised zero-trade repair (if diagnostics support it) ──

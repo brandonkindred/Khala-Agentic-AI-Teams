@@ -76,6 +76,19 @@ class SpecImplementabilityError(Exception):
     that raised, so the re-entry-exhaustion short-circuit record preserves
     the generation-funnel telemetry of the design loop that actually ran
     rather than persisting an empty default.
+
+    ``spec_implicated`` (default ``True``) declares whether the checkpointed
+    spec that was in effect when this failure occurred needs a design-level
+    revision. ``True`` (the default) means ``run_cycle`` must full-restart
+    on re-entry — resuming from a checkpoint would replay the same,
+    unrevised spec into the same failure. ``False`` means this raise site
+    has proven the failure is unrelated to the checkpointed spec's
+    soundness, so ``run_cycle`` MAY resume the next attempt from the
+    checkpoint captured just before this failure instead of re-deriving
+    already-converged state. Every production raise site MUST pass this
+    explicitly rather than rely on the default, so the choice is always a
+    deliberate, reviewable decision made at the call site, not an
+    accident of construction order.
     """
 
     def __init__(
@@ -87,6 +100,7 @@ class SpecImplementabilityError(Exception):
         last_code: str,
         drift_collector: Optional[Any] = None,
         design_context: Optional[Any] = None,
+        spec_implicated: bool = True,
     ) -> None:
         super().__init__(evidence)
         self.evidence = evidence
@@ -95,6 +109,7 @@ class SpecImplementabilityError(Exception):
         self.last_code = last_code
         self.drift_collector = drift_collector
         self.design_context = design_context
+        self.spec_implicated = spec_implicated
 
 
 class OrchestratorContractError(ValueError):

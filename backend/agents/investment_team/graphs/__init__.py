@@ -1,1 +1,0 @@
-"""Investment team graphs."""
