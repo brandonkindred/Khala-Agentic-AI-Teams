@@ -1528,10 +1528,10 @@ def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -
     relative order (build before lint, matching the wired frontend roster) --
     not whichever happens to start first. A plain mutex would give the first
     guarantee but not the second (acquisition order isn't FIFO), so this
-    checks both. A non-``build_runner`` (LLM-only) agent still runs fully
-    concurrently alongside them -- made deliberately slower here so that, if
-    it were serialized in with the command agents by mistake, it would show
-    up as either an overlap or an out-of-order start."""
+    checks both. A non-``build_runner`` (LLM-only) agent is included to
+    exercise a mixed roster alongside the command agents; its own
+    concurrency is not directly asserted here (see
+    ``test_run_review_tool_agents_run_concurrently`` for that)."""
     import threading
     import time
 

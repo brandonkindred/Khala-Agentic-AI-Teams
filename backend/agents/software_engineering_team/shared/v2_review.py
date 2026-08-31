@@ -1101,6 +1101,16 @@ def _run_tool_agents_review(
     phase_inp = config.tool_phase_input_factory(**phase_inp_kwargs)
 
     def _review_one(kind: Any, agent: Any) -> Optional[List[ReviewIssue]]:
+        """Run one tool agent's cache-read/review()/fold/cache-write sequence.
+
+        Postconditions: never raises -- every failure in that sequence is caught,
+        logged, and reported as ``None`` (meaning "this agent failed, fold
+        nothing"). A non-``None`` return is a list (possibly empty) of this
+        agent's folded issues, ready for the caller to extend ``issues`` with.
+        This never-raises guarantee is what makes it safe to run as a dispatched
+        thunk (see ``_dispatch_review_thunks``) or from inside
+        ``_review_command_agents_in_order``'s sequential loop.
+        """
         cache_key = None
         if tool_agent_cache is not None and microtask is not None:
             cache_key = _tool_agent_cache_key(
@@ -1217,6 +1227,11 @@ def run_review(
           unaffected.
         - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
           (defaults True).
+        - ``llm`` is forwarded to both the step fan-out (``_run_review_steps``)
+          and the tool-agent fan-out (``_run_tool_agents_review``), where it
+          selects sequential vs. concurrent dispatch via
+          ``_dispatch_review_thunks`` -- a scripted test-double client (see
+          ``_review_steps_run_sequentially``) forces both fan-outs sequential.
         - ``old_contents`` is forwarded to the code-review step only (see
           ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
           caller-supplied base" -- the code-review step then auto-resolves a base from
