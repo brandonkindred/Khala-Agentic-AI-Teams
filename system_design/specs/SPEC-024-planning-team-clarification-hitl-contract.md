@@ -575,6 +575,20 @@ on "did this specific call perform the write." Re-signaling an already-applied t
 regardless: §4.2's signal handler ignores a signal that doesn't match an active pause and, once
 consumed, ignores a duplicate for the same token.
 
+**"Identical content" must be checked after canonicalizing, not as a raw JSONB-array comparison.**
+`request.answers` is an ordered list; a legitimate retry can carry the same per-question decisions
+in a different list order (a client rebuilding its request body, a re-serialization that doesn't
+preserve insertion order) and still be logically the identical answer batch. Comparing the stored and
+incoming values as raw JSONB arrays treats list order as significant, so this retry would compare
+"different" from what's already persisted and be rejected outright by the write-once guard above —
+silently dropping the re-signal this correction exists to guarantee, and leaving the workflow asleep
+on a durable answer it will never receive notice of. **Contract requirement:** canonicalize each
+answer batch before storing it and before every equality comparison against it — sort entries by
+`question_id` (each `question_id` appears at most once per batch, per this contract's own duplicate-id
+rejection, §4.1) and canonicalize each entry's own `selected_option_ids` list (e.g. sorted) before
+comparing, since multi-select order is equally not meaningful to answer identity. Store and compare
+the canonical form throughout, not the client's as-submitted ordering.
+
 **Persisted answers must be scoped to the active question round, not accumulated across rounds.**
 Unlike the coding team's single Tech-Lead clarify loop, a single `document_production_activity`
 run can pass through PRA's `wait_pra` poll loop (`adapters/product_analysis.py:80-106`) more than
@@ -1568,13 +1582,26 @@ this contract:
   `wait_pra` reports completion and the activity then crashes before that later `update_job` call, a
   retried/losing attempt that reloads and finds the completion marker already set re-emits success
   per the rule below — but the handoff was never persisted, and the workflow proceeds to finalize a
-  job with no `handoff_package`. **Contract requirement:** the completion claim's conditional write
-  must be the *last* durable step of this activity's work — performed only after the handoff (and the
-  top-level `open_questions`/`resolved_questions` fields) have already been successfully persisted,
-  not at the moment `wait_pra` itself returns `"completed"`. Equivalently: fold the completion claim
-  into the same `update_job` call that persists the handoff, rather than treating them as two
-  separable writes — so a losing attempt that finds the completion marker can trust the handoff it
-  guards is already durably there too.
+  job with no `handoff_package`.
+
+  **Sequencing the completion claim strictly after a separate handoff-persisting write is not
+  sufficient either — it only narrows the crash window this section exists to close, it does not
+  close it.** Two durable writes, however ordered, still leave a gap between them: if the handoff
+  write lands but a competing pause-creation attempt's conditional write (the paused-return path
+  above) wins the `pause_generation` race in the interval before the completion claim itself is
+  issued, this attempt's completion claim then fails its own guard — but the handoff and
+  `open_questions`/`resolved_questions` fields it already persisted are now sitting on a job record
+  that is correctly about to report *paused*, not completed. A losing completion attempt in that
+  state must re-emit the pause result per the rule below, yet terminal-shaped output it already wrote
+  contradicts that re-emitted outcome — the job record simultaneously carries a fresh handoff meant
+  for a completed run and an active pause envelope for a round that hasn't been answered.
+  **Contract requirement:** the handoff/`open_questions`/`resolved_questions` output fields and the
+  completion marker (and `pause_generation` advance) must be committed by the *same* conditional
+  `UPDATE` — one atomic, generation-guarded write that both claims completion and persists the
+  output — not two separable durable writes in any order. If that single write's guard fails (a
+  competing pause already won), none of the output fields are persisted either; the losing attempt
+  reloads and re-emits whatever the winner actually recorded, exactly as the rule below already
+  requires, with no partially-committed output left behind either way.
 
   **The completion claim leaves the job's SQL `status` column untouched — still `pending`/`running`
   — and `finalize_planning_activity` still terminalizes it unconditionally afterward.**
@@ -1596,6 +1623,24 @@ this contract:
   contract widens (by introducing the first workflow path where a pause/resume round can race against
   external cancellation before finalize runs), not a new activity — but the fix belongs in this
   contract's scope because this contract is what first makes the race reachable.
+
+  **Making the write conditional is not sufficient by itself — `_work()` must also branch on whether
+  it won, not silently continue as if it always does.** `finalize_planning_activity`'s existing
+  `_work()` (`temporal/activities.py:472-494`) calls the terminalizing write, then unconditionally
+  proceeds into the audit block (`get_job`/`record_planning_run`) and returns `{"success": True,
+  ...}` regardless of what the write reported. A conditional write that merely returns `False` on a
+  guard failure, with the caller ignoring that return value, changes nothing observable: the audit
+  block still runs and calls `record_planning_run` — persisting a `planning_runs` row that
+  attributes a completed-planning outcome to a job that is actually `cancelled`/`interrupted` — and
+  the activity still returns success, so the workflow still believes finalize succeeded. **Contract
+  requirement:** the conditional terminalizing write must report whether it won (the same
+  `True`/`False`/`None` convention as this contract's other conditional primitives), and `_work()`
+  must check that result: on a loss, skip the audit block entirely (there is nothing to audit — the
+  job never completed) and return a result reflecting that this attempt did not complete the job,
+  rather than the unconditional `{"success": True, ...}` shape. The workflow does not need a new
+  branch for this — `finalize_planning_activity` is the terminal activity in the workflow's own
+  sequential chain (§4.3), so a non-completing return here simply means nothing further schedules,
+  matching the treatment of every other `skipped_terminal`-shaped stop in this contract.
 
   **A failed claim does not by itself prove "a pause won" — it could just as easily mean a different
   overlapping attempt's own *completion* claim won first.** Two attempts can both reach `wait_pra`
@@ -1742,6 +1787,26 @@ this contract:
   consumed batches live; the terminal-write hydration described above then only needs to *read back*
   already-enriched records, never re-derive labels from question metadata that may no longer exist.
 
+  **(c) Converting only the *submitted* batch silently drops every question PRA answered by
+  default.** §4.1's resume-path precondition (above) permits an optional question to be omitted from
+  the submitted batch — `validate_answers`'s `required_ids - answered_ids` check only requires
+  required questions, and PRA's own `apply_answers` (`user_communication.py:248-260`) supplies a
+  default-flagged `AnsweredQuestion` for every question with no matching submitted entry. Because
+  this conversion step (above) only converts entries present in the *submitted* `AnswerSubmission`
+  batch, an all-optional or partially-omitted round produces no enriched record at all for the
+  omitted questions — an empty batch yields zero `resolved_questions` entries for that round even
+  though PRA actually recorded (defaulted) decisions for every one of them. The resulting handoff is
+  inconsistent with the spec PRA actually generated (which reflects the defaults PRA applied), and
+  any downstream coverage check that consults `resolved_questions` to avoid re-asking an
+  already-answered question would re-ask one PRA already defaulted. **Contract requirement:** step
+  (2)'s conversion must produce an enriched record for **every** question in the round's persisted
+  `pending_questions`, not only the ones present in the submitted batch — for a question with no
+  matching submitted entry, synthesize the same default `AnsweredQuestion` PRA's own `apply_answers`
+  would produce (the question's `is_default`-flagged option, or its highest-confidence option absent
+  one — mirroring `get_default_option`, `user_communication.py:265-280`, already cited in this
+  contract), so Planning's own `resolved_questions` matches what PRA actually applied rather than
+  only what the client explicitly chose to submit.
+
   **Hydrating `context`/`context_update` is not sufficient on its own to fix the handoff package —
   the `handoff.setdefault` call is a no-op against an already-populated key.** `DocumentProductionAgent.run`
   constructs `HandoffPackage` without ever setting `resolved_questions` explicitly (`agent.py:147-157`),
@@ -1814,7 +1879,28 @@ this contract:
   `pending_questions` is assembled for a pause (whether by PRA's own parser or this contract's own
   pause-creation step) — rather than merely detecting the collision later during multiset
   reconciliation, which narrows the *retry-safety* problem but does nothing for the *answerability*
-  problem a duplicate-id round has regardless of retries. **This is not a complete fix.**
+  problem a duplicate-id round has regardless of retries.
+
+  **The same duplicate-id problem exists one level down, inside each question's own offered
+  options, and this contract's duplicate-*question*-id rejection above does nothing to catch it.**
+  PRA's option parser (`question_processing.py:858-883`, `parse_question_option`) has no uniqueness
+  check on option ids either — like the question-id fallback, a missing option id defaults to
+  `opt{index}`, and nothing rejects two explicit, identical option ids within one question's options
+  list. Every downstream consumer of a selected option id collapses that duplication the same way
+  the question-id case does: `shared.hitl.validation.validate_answers`'s own membership check builds
+  `options_by_qid` as `{o.get("id") for o in options}` (`validation.py:80`), a set that silently
+  discards the second entry; PRA's own `apply_answers` resolves a selected id via
+  `next((o for o in q.options if o.id == opt_id), None)` (`user_communication.py:217,230`), which
+  always returns the *first* option matching that id. A question offering two options that happen to
+  share an id but carry different labels is therefore unanswerable in the same way a duplicate
+  *question* id is: the client's selection is silently resolved against whichever option the
+  validator/`apply_answers` happens to pick, never provably the one the human actually chose.
+  **Contract requirement:** reject duplicate option ids within a single question's `options` list at
+  the same point `pending_questions` is assembled for a pause — alongside, not instead of, the
+  duplicate-question-id check above — so a round with an internally ambiguous question never reaches
+  a client as answerable in the first place.
+
+  **This is not a complete fix.**
   `question_text`
   has the identical fallback problem as `id`:
   `_require_string_field(q_data, "question_text", "")` (`question_processing.py:822`) defaults a
@@ -1933,6 +2019,32 @@ no persisted pause to resume from, silently hanging the job.
   directly) so `wait_condition` returns immediately rather than blocking on a signal that will never
   come.
 
+  **A signal carrying a matching `resume_token` is not, by itself, proof a durable answer batch
+  exists — the signal handler's own precondition is "none on the caller."** §4.2 states the signal
+  handler must accept any payload without raising, since a Temporal signal handler cannot reject a
+  signal back to the sender. That means any caller who knows the client-visible `resume_token` — not
+  only this contract's own answer-submission route, but any direct Temporal client with signal
+  access — can send `submit_answers` with a matching token and an arbitrary `answers` payload
+  *without ever having persisted anything to the job record first*. The postcondition above sets
+  `self._submitted_answers` directly from that payload and lets `wait_condition` return; the workflow
+  then proceeds to resume `document_production_activity` with
+  `acknowledged_resume_token=resume_token`, whose own precondition (§4.3) requires the job record's
+  answer store to already carry a batch tagged with that token — a requirement this rogue signal
+  never satisfied. Nothing in this contract defines what happens next; the resumed activity's own
+  precondition is violated, and behavior is undefined. **Contract requirement:** the signal handler
+  must not treat an arriving signal's payload as the authoritative answer content — it is a wake-up
+  hint only. On any signal matching the active `resume_token` (first arrival, buffered-and-then-armed,
+  or the reconciliation activity's own direct set above), the workflow must confirm the durable
+  answer batch through `check_submitted_answers_activity` (the same reconciliation activity
+  introduced above, reused here rather than adding a second one) *before* leaving `wait_condition` and
+  proceeding to resume — treating "signal received" as "check the durable store," never as "the
+  payload itself is the answer." If that check finds no matching durable batch (the rogue-signal
+  case, or any other payload that reached the handler without a corresponding persisted write), the
+  workflow must not proceed to resume; it continues waiting, exactly as if no signal had arrived at
+  all, since by this contract's own invariants (§4.3) the only path that legitimately produces a
+  durable batch is the answer-submission route's persist-then-signal ordering, which this rogue
+  signal bypassed.
+
   **This cap must be version-gated for `CodingTeamWorkflow`, whose existing histories this
   contract's mandatory extraction (§4.4) requires migrating onto the same shared state machine.**
   Unlike this contract's other behavior changes (all new, on a workflow type with no pre-existing
@@ -1948,6 +2060,33 @@ no persisted pause to resume from, silently hanging the job.
   predates the patch keeps the old unbounded-within-one-stretch buffering behavior for its own
   replay, and only executions started after the patch (Planning's new workflow included, which has
   no pre-existing histories to protect) get the capped behavior from the start.
+
+  **The eviction-recovery reconciliation above is specified only for Planning, but the capped buffer
+  it protects against is required of `CodingTeamWorkflow` too — and Coding's existing durable answer
+  store is not token-keyed the way this reconciliation assumes.** §4.4 requires
+  `CodingTeamWorkflow`'s existing `_buffered_signals` machinery to adopt this same cap (gated by the
+  patch above), which means Coding is equally exposed to the evicted-legitimate-signal hang the
+  reconciliation check exists to close — but the reconciliation requirement itself, and the
+  `check_submitted_answers_activity` introduced to perform it, are described only in terms of
+  Planning's job record. Coding's own durable `submitted_answers` field accumulates every posted
+  batch onto one flat, unscoped list rather than storing per-`resume_token` entries
+  (`hitl.py:353-377`'s own docstring: "Answers for other batches (`submitted_answers` accumulates
+  across pause cycles) are for a different resume token and are skipped"; `pause_cycle.py:212,380`
+  reads that same flat list) — a reconciliation check written to look up "the durable batch matching
+  this `resume_token`" cannot be pointed at Coding's store unmodified, since there is no scoped entry
+  to find, only an undifferentiated history filtered ad hoc at read time (`hitl.py:372-377`). Without
+  an equivalent fix on the Coding side, a legitimate early Coding signal that eviction discards is
+  never recovered when its pause later arms — `CodingTeamWorkflow` hangs exactly as this whole
+  correction was written to prevent, just on the one workflow type this section otherwise leaves out.
+  **Contract requirement:** extend the token-scoped reconciliation requirement to
+  `CodingTeamWorkflow` as part of the same version-gated migration (behind the same patch marker
+  above) — either by adding a Coding-side reconciliation activity that filters its existing flat
+  `submitted_answers` history the same way `hitl.py:372-377`'s own reentry logic already does (by
+  membership against the currently-pending question ids, not a `resume_token` field — Coding's store
+  has none today, so this filtering approach requires no schema change), or by scoping Coding's own
+  store the same way this contract scopes Planning's (§4.3's `resume_token` tagging). Either shape is
+  acceptable; leaving Coding's capped buffer without any reconciliation path is not, since this
+  contract is what first introduces the cap that makes eviction possible on that workflow.
 
 **Open risks, not resolved by this spec:**
 1. *Carried over from `hitl_pause_resume_contract.md` §4:* `workflow.wait_condition` here is
