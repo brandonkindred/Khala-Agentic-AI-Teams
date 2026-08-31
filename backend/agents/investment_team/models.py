@@ -321,6 +321,15 @@ class ExpectancyForecast(BaseModel):
         return v if math.isfinite(v) else 0.0
 
 
+# Ceiling for max_concurrent_positions. Mirrors the order of magnitude of
+# _DEFAULT_MAX_UNIVERSE_SYMBOLS (market_data_service.py) — a spec's
+# concurrency budget shouldn't imply more simultaneous positions than a
+# typical target-symbol universe spans. Not imported from
+# market_data_service.py: that module already imports StrategySpec from
+# here, so importing back would be circular.
+_MAX_CONCURRENT_POSITIONS = 20
+
+
 class StrategySpec(BaseModel):
     strategy_id: str
     authored_by: str
@@ -342,6 +351,33 @@ class StrategySpec(BaseModel):
     # instead of the asset-class default universe, so a hypothesis naming
     # QQQ doesn't get silently backtested on AAPL.
     target_symbols: List[str] = Field(default_factory=list)
+    # Defaults to 1 so every existing spec/caller that omits this field keeps
+    # today's implicit one-position-per-symbol behavior exactly — this is a
+    # hard backward-compatibility requirement, not just a convenience default.
+    # This field is purely declarative for now: nothing reads it yet, so its
+    # value has no effect on current runtime behavior. The runtime's actual
+    # (and only) concurrency gate today is ``risk_limits.max_open_positions``
+    # (default 10, RiskFilter.can_enter) — this field does NOT derive from or
+    # reconcile with that default; doing so would silently change the
+    # effective default for every spec that omits both fields. Reconciling
+    # the two into a single source of truth is deferred to the follow-up
+    # readiness/sizing validation step, which is where the field gets an
+    # actual consumer.
+    max_concurrent_positions: int = Field(
+        default=1,
+        ge=1,
+        le=_MAX_CONCURRENT_POSITIONS,
+        description=(
+            "Maximum number of positions this spec may hold open "
+            "concurrently across target_symbols. Defaults to 1, preserving "
+            "today's implicit one-position-per-symbol behavior for any spec "
+            "that omits it. Not yet consumed by any readiness check or the "
+            "trading engine — today's actual runtime concurrency gate is "
+            "``risk_limits.max_open_positions`` (default 10, via "
+            "``RiskFilter.can_enter``); reconciling the two is deferred to "
+            "follow-up work."
+        ),
+    )
     # Phase 3: risk_limits is validated at spec construction time.  Dicts
     # authored by the LLM (or persisted before this field was typed) are
     # accepted and routed through ``RiskLimits.from_legacy_dict``, which

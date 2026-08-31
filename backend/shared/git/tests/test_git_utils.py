@@ -28,6 +28,7 @@ from shared.git.git_utils import (
     remote_url_matches,
     remove_worktree,
     reset_hard_to,
+    resolve_remote_branch_sha,
 )
 
 
@@ -648,3 +649,193 @@ def test_remote_url_matches_rejects_at_sign_inside_repo_name() -> None:
     head here that looks like a userinfo section ending exactly at the host,
     so this should simply fail to match cleanly rather than false-match."""
     assert remote_url_matches("https://github.com/acme/w@idget", "acme", "widget") is False
+
+
+def _self_alias_origin(repo: Path) -> None:
+    """Add ``origin`` pointing at ``repo`` itself, so fetch works without a real remote."""
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_resolve_remote_branch_sha_returns_fetched_head(repo: Path) -> None:
+    _self_alias_origin(repo)
+    expected = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", DEVELOPMENT_BRANCH],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    ok, sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+
+    assert ok is True, sha
+    assert sha == expected
+
+
+def test_resolve_remote_branch_sha_fails_honestly_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = resolve_remote_branch_sha(not_a_repo, "origin", "main")
+    assert not ok
+    assert "Not a git repository" in msg
+
+
+def test_resolve_remote_branch_sha_fails_honestly_when_fetch_fails(repo: Path) -> None:
+    """No remote named 'origin' exists: fetch fails, and the caller gets that failure
+    rather than a rev-parse error against stale/nonexistent local state."""
+    ok, msg = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+    assert not ok
+    assert msg
+
+
+def test_resolve_remote_branch_sha_threads_env_through_both_git_calls(repo: Path, monkeypatch) -> None:
+    """The caller-supplied env (e.g. a transient auth header) must reach the
+    fetch, the rev-parse, and the private-ref cleanup, and this module must
+    not fall back to git_identity_env() when an env was explicitly
+    supplied."""
+    import os
+
+    import shared.git.git_utils as git_utils_mod
+
+    _self_alias_origin(repo)
+    seen_envs = []
+    real_run_git = git_utils_mod._run_git
+
+    def _spy(path, cmd, *a, **kw):
+        seen_envs.append(kw.get("env"))
+        return real_run_git(path, cmd, *a, **kw)
+
+    monkeypatch.setattr(git_utils_mod, "_run_git", _spy)
+
+    sentinel_env = {**os.environ, "CUSTOM_MARKER": "1"}
+    ok, _sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH, env=sentinel_env)
+
+    assert ok is True
+    # fetch (into the private ref), rev-parse (of it), and its cleanup delete.
+    assert len(seen_envs) == 3
+    assert all(env == sentinel_env for env in seen_envs)
+
+
+def test_resolve_remote_branch_sha_gives_the_fetch_120s_not_the_30s_default(
+    repo: Path, monkeypatch
+) -> None:
+    """The fetch is the same network operation api/git_ops.py's own _git
+    (120s default) previously ran it through; it must not regress to this
+    module's 30s default and start timing out large/slow fetches that
+    previously succeeded."""
+    import shared.git.git_utils as git_utils_mod
+
+    _self_alias_origin(repo)
+    seen_timeouts = []
+    real_run_git = git_utils_mod._run_git
+
+    def _spy(path, cmd, timeout=30, **kw):
+        seen_timeouts.append((cmd[1], timeout))
+        return real_run_git(path, cmd, timeout, **kw)
+
+    monkeypatch.setattr(git_utils_mod, "_run_git", _spy)
+
+    ok, _sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+
+    assert ok is True
+    fetch_timeouts = [t for cmd, t in seen_timeouts if cmd == "fetch"]
+    assert fetch_timeouts == [120]
+
+
+def test_resolve_remote_branch_sha_deletes_private_ref_after_use(repo: Path) -> None:
+    """The private ref used to resolve the SHA must not leak into the
+    checkout's normal ref namespace afterward."""
+    _self_alias_origin(repo)
+
+    ok, _sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+    assert ok is True
+
+    listing = subprocess.run(
+        ["git", "-C", str(repo), "for-each-ref", "refs/khala/"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert listing.strip() == ""
+
+
+def test_resolve_remote_branch_sha_immune_to_concurrent_fetch_head_overwrite(
+    repo: Path, monkeypatch
+) -> None:
+    """A concurrent fetch elsewhere in the same checkout (e.g. another job)
+    overwriting the shared FETCH_HEAD between this call's own fetch and its
+    read-back must not change the SHA this call resolves -- it must read its
+    own private ref, not the checkout-wide FETCH_HEAD."""
+    import shared.git.git_utils as git_utils_mod
+
+    _self_alias_origin(repo)
+    expected = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", DEVELOPMENT_BRANCH],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # A second, unrelated branch a "concurrent fetch" would have left
+    # FETCH_HEAD pointing at.
+    subprocess.run(
+        ["git", "-C", str(repo), "branch", "other", DEVELOPMENT_BRANCH],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    with open(f"{repo}/README.md", "a") as fh:
+        fh.write("other-branch-only\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-q", "other"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "--no-gpg-sign", "-am", "other branch commit"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-q", DEVELOPMENT_BRANCH],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    other_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "other"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert other_sha != expected
+
+    real_run_git = git_utils_mod._run_git
+
+    def _spy(path, cmd, *a, **kw):
+        rc, out = real_run_git(path, cmd, *a, **kw)
+        if rc == 0 and cmd[:2] == ["git", "fetch"]:
+            # Simulate a concurrent fetch elsewhere in this checkout landing
+            # right after this call's own fetch: overwrite the shared
+            # FETCH_HEAD with an unrelated branch's commit.
+            subprocess.run(
+                ["git", "-C", str(path), "fetch", "--", "origin", "other"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        return rc, out
+
+    monkeypatch.setattr(git_utils_mod, "_run_git", _spy)
+
+    ok, sha = resolve_remote_branch_sha(repo, "origin", DEVELOPMENT_BRANCH)
+
+    assert ok is True, sha
+    assert sha == expected
+    assert sha != other_sha

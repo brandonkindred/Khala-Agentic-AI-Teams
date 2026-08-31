@@ -119,6 +119,7 @@ from .budget_config import StrategyLabBudgetConfig
 from .checkpoints import (
     PipelineStage,
     determine_resume_stage,
+    drift_histories_past_seed,
     find_latest_checkpoint_for_attempt,
     resolve_cross_attempt_resume,
 )
@@ -734,17 +735,19 @@ class StrategyLabOrchestrator(
                     # provenance -- so only the entries this attempt actually
                     # produced beyond the seed are folded in.
                     if resume_drift_seed_for_attempt is not None:
+                        spec_history, code_history, gate_timeline = drift_histories_past_seed(
+                            attempt_drift.spec_history,
+                            attempt_drift.code_history,
+                            attempt_drift.gate_timeline,
+                            seed_spec_len=len(resume_drift_seed_for_attempt.spec_history),
+                            seed_code_len=len(resume_drift_seed_for_attempt.code_history),
+                            seed_gate_len=len(resume_drift_seed_for_attempt.gate_timeline),
+                        )
                         drift_collector.merge(
                             _DriftCollector(
-                                spec_history=attempt_drift.spec_history[
-                                    len(resume_drift_seed_for_attempt.spec_history) :
-                                ],
-                                code_history=attempt_drift.code_history[
-                                    len(resume_drift_seed_for_attempt.code_history) :
-                                ],
-                                gate_timeline=attempt_drift.gate_timeline[
-                                    len(resume_drift_seed_for_attempt.gate_timeline) :
-                                ],
+                                spec_history=spec_history,
+                                code_history=code_history,
+                                gate_timeline=gate_timeline,
                             )
                         )
                     else:

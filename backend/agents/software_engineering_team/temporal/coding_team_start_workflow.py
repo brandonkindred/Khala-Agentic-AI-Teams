@@ -80,8 +80,9 @@ def start_coding_team_workflow(
         - ``repo_path`` is a non-empty str; ``plan_input`` is a JSON-serializable
           plan dict (a run with no plan has nothing to execute).
         - ``github``, when provided, is a dict of GitHub-issue run metadata for
-          the workflow (owner/repo/issue/base/integration_branch/...). It must
-          not contain a plaintext token — activities resolve tokens activity-side.
+          the workflow (owner/repo/issue/base/integration_branch/expected_base_sha/...).
+          It must not contain a plaintext token — activities resolve tokens
+          activity-side.
     Postconditions:
         - A workflow with id ``coding_team-<job_id>`` is started on the coding
           team task queue (fire-and-forget; the caller polls

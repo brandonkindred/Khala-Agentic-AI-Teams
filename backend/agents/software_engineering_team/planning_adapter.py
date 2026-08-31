@@ -133,8 +133,6 @@ def adapt_planning_result(
 
     handoff_raw = result.get("handoff_package")
     handoff = _handoff_to_dict(handoff_raw)
-    if not handoff and handoff_raw is not None:
-        handoff = _handoff_to_dict(handoff_raw)
 
     validated_spec = handoff.get("validated_spec_content") or ""
     prd_content = handoff.get("prd_content")

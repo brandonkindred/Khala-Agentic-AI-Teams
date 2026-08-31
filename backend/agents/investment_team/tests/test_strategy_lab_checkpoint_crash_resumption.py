@@ -351,19 +351,15 @@ async def test_design_attempt_activity_resumes_from_checkpoint_after_temporal_re
     the checkpoint reads/writes go through is the same in-memory fake the
     direct-call tests above use, so this test needs no live job service.
     """
-    from temporalio.worker import Worker
-
     from investment_team.models import StrategySpec
     from investment_team.strategy_lab import orchestrator_api, run_state
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
     from investment_team.strategy_lab.agents._llm_budget import active_budget
     from investment_team.strategy_lab.exceptions import StrategyLabLLMError
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
-    from investment_team.strategy_lab.temporal.workflows import (
-        TASK_QUEUE,
-        StrategyLabCycleWorkflow,
-    )
-    from shared.temporal.worker import _build_workflow_runner
+    from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE, StrategyLabCycleWorkflow
+
+    from .strategy_lab_temporal_fixtures import build_strategy_lab_worker
 
     _, fake_persist, fake_load, fake_generation = _fake_job_store()
     monkeypatch.setattr(orchestrator_api, "_persist_run_state", fake_persist)
@@ -419,20 +415,7 @@ async def test_design_attempt_activity_resumes_from_checkpoint_after_temporal_re
                 StrategyLabOrchestrator, "_run_design_attempt", _fake_run_design_attempt
             ),
         ):
-            worker = Worker(
-                env.client,
-                task_queue=TASK_QUEUE,
-                workflows=[StrategyLabCycleWorkflow],
-                activities=[act.run_design_attempt_activity],
-                activity_executor=activity_executor,
-                max_cached_workflows=0,
-                # See test_strategy_lab_temporal_cancellation.py's identical
-                # worker construction for why this is required: without it,
-                # validating StrategyLabCycleWorkflow re-imports
-                # investment_team's numpy/pandas transitive chain inside the
-                # sandbox's isolated namespace, crashing numpy's C extension.
-                workflow_runner=_build_workflow_runner(),
-            )
+            worker = build_strategy_lab_worker(env, activity_executor)
             async with worker:
                 handle = await env.client.start_workflow(
                     StrategyLabCycleWorkflow.run,
@@ -447,6 +430,169 @@ async def test_design_attempt_activity_resumes_from_checkpoint_after_temporal_re
         ("phase1", phase1_calls),
         ("resume", phase1_calls + phase2_calls),
     ], "LLM-call budget was double-charged (or lost) across the crash/resume cycle"
+    assert result["record"]["lab_record_id"] == "rec-resumed"
+
+
+# ---------------------------------------------------------------------------
+# Integration: Temporal-mode cross-attempt re-entry LLM-call count is bounded
+# ---------------------------------------------------------------------------
+#
+# The integration test above covers a same-*attempt* Temporal-level retry
+# (a genuine worker crash mid-attempt). This test covers a distinct shape:
+# the workflow's own cross-*attempt* re-entry loop
+# (``StrategyLabCycleWorkflow.run``'s ``resolve_cross_attempt_resume`` gate
+# in ``strategy_lab/temporal/workflows.py``), which re-dispatches a brand
+# new ``design_attempt`` after ``SpecImplementabilityError``. It is the
+# Temporal-mode analog of this file's own thread-mode section below
+# (``test_cross_attempt_resume_llm_call_count_bounded_to_resumed_portion``):
+# same claim -- a re-entry that resumes from a checkpoint which converged
+# through REVIEW pays only for the resumed portion of the pipeline
+# (synthesis onward), not DESIGN+REVIEW again -- proven here through the
+# real workflow re-entry loop and the real, unmodified
+# ``run_design_attempt_activity`` instead of a direct orchestrator call.
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_design_attempt_activity_cross_attempt_resume_bounds_llm_call_cost(
+    monkeypatch,
+) -> None:
+    """Attempt 0 charges a known DESIGN+REVIEW cost, checkpoints at the
+    design/synthesis boundary, then fails with
+    ``SpecImplementabilityError(spec_implicated=False)``. The workflow's
+    re-entry loop resolves that checkpoint as a usable cross-attempt resume
+    (``determine_resume_stage`` is ``PipelineStage.SYNTHESIS``) and
+    re-dispatches ``run_design_attempt_activity`` for attempt 1 with the
+    checkpointed spec threaded in as ``resume_spec``. Attempt 1 must not
+    re-pay the DESIGN+REVIEW cost -- only the (separately known) cost of the
+    resumed portion.
+    """
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab import orchestrator_api, phases, run_state
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE, StrategyLabCycleWorkflow
+
+    from .strategy_lab_temporal_fixtures import build_strategy_lab_worker
+
+    _, fake_persist, fake_load, fake_generation = _fake_job_store()
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", fake_persist)
+    monkeypatch.setattr(run_state, "load_run_from_job_service", fake_load)
+    monkeypatch.setattr(run_state, "get_run_generation_strict", fake_generation)
+
+    checkpointed_spec = StrategySpec.parse_persisted(_spec_dict())
+    checkpointed_context = _DesignPersistContext(
+        rounds=1, critiques=[], stop_reason="converged", loop_telemetry={}
+    )
+    phase1_calls = 3
+    phase2_calls = 2
+    state: Dict[str, Any] = {"budget_seen": []}
+
+    def _fake_run_design_attempt(self: Any, **kwargs: Any) -> Any:
+        if kwargs["resume_spec"] is None:
+            for _ in range(phase1_calls):
+                active_budget().charge()
+            state["budget_seen"].append(("attempt0", active_budget().calls_made))
+            kwargs["checkpoint_hook"](
+                "design_synthesis_boundary",
+                {
+                    "spec": checkpointed_spec,
+                    "rationale": "r",
+                    "design_context": checkpointed_context,
+                },
+            )
+            # checkpoint_hook (above) only persists the ADR-012 SAME-attempt
+            # crash-recovery store -- irrelevant here, since design_attempt 1
+            # has never run before. The workflow's cross-attempt re-entry
+            # branch instead reads outcome["pipeline_checkpoints"], built
+            # from checkpoint_capture -- so a real ReviewCheckpoint must be
+            # recorded here too, or resolve_cross_attempt_resume never
+            # activates and attempt 1 re-enters this same branch instead of
+            # the "resume_spec is not None" one below.
+            capture = kwargs["checkpoint_capture"]
+            if capture is not None:
+                capture.record(
+                    ReviewCheckpoint(
+                        run_id=capture.run_id,
+                        cycle_scope=capture.cycle_scope,
+                        design_attempt=kwargs["design_attempt"],
+                        generation=capture.generation,
+                        spec_hash=phases.hash_spec(checkpointed_spec),
+                        code_hash=phases.hash_code(None),
+                        captured_at="2026-08-31T00:00:00Z",
+                        budget_calls=phase1_calls,
+                        gate_results=[],
+                        spec_history=[],
+                        code_history=[],
+                        gate_timeline=[],
+                        spec=checkpointed_spec,
+                        rationale="r",
+                        design_context={
+                            "rounds": 1,
+                            "critiques": [],
+                            "stop_reason": "converged",
+                            "loop_telemetry": {},
+                        },
+                        review_rounds_completed=1,
+                    )
+                )
+            raise SpecImplementabilityError(
+                "forced fail at synthesis boundary, not spec-implicated",
+                failure_phase="synthesis",
+                last_spec=checkpointed_spec,
+                last_code="",
+                spec_implicated=False,
+            )
+        assert kwargs["resume_spec"] == checkpointed_spec
+        for _ in range(phase2_calls):
+            active_budget().charge()
+        state["budget_seen"].append(("resume", active_budget().calls_made))
+        return _FakeRecord()
+
+    cycle_input = {
+        "prior_records": [],
+        "config": _backtest_config_dict(),
+        "signal_brief": None,
+        "exclude_asset_classes": None,
+        "convergence_tracker_state": {},
+        # Unlike the same-attempt crash test above, this needs at least one
+        # re-entry to actually run (attempt 0 fails, attempt 1 resumes).
+        "workflow_config": {"regime_summary_enabled": False, "max_design_reentries": 1},
+        "run_id": "run-reentry-integration",
+        "generation": 1,
+    }
+
+    async with _workflow_environment() as env:
+        with (
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as activity_executor,
+            mock.patch.object(
+                StrategyLabOrchestrator, "_run_design_attempt", _fake_run_design_attempt
+            ),
+        ):
+            worker = build_strategy_lab_worker(env, activity_executor)
+            async with worker:
+                handle = await env.client.start_workflow(
+                    StrategyLabCycleWorkflow.run,
+                    cycle_input,
+                    id="strategy-lab-reentry-resume-test",
+                    task_queue=TASK_QUEUE,
+                )
+                result = await handle.result()
+
+    assert result["resume_stage_determinations"] == ["synthesis"], (
+        "cross-attempt resume was not activated -- attempt 1 did not resume from "
+        "the attempt-0 checkpoint"
+    )
+    assert state["budget_seen"] == [
+        ("attempt0", phase1_calls),
+        ("resume", phase1_calls + phase2_calls),
+    ], (
+        "re-entry's LLM-call cost was not bounded to the resumed portion -- "
+        "DESIGN+REVIEW was paid for again instead of being skipped"
+    )
     assert result["record"]["lab_record_id"] == "rec-resumed"
 
 

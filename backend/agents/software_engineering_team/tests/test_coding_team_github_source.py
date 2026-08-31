@@ -1358,6 +1358,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(api_main, "_prepare_issue_branch", lambda *a, **kw: (True, None, []))
     monkeypatch.setattr(api_main, "_fast_forward", lambda *a, **kw: (True, None))
     monkeypatch.setattr(api_main, "_push_branch", lambda *a, **kw: (True, None))
+    monkeypatch.setattr(api_main, "resolve_remote_branch_sha", lambda *a, **kw: (True, "deadbeef"))
 
     # Orchestrator no-op: mark a merged task on the job.
     def _fake_orchestrator(job_id: str, _repo_path, _plan, **kw):
@@ -1523,6 +1524,7 @@ class TestEndpointHappyPath:
             "remote": "upstream",
             "base": "trunk",
             "integration_branch": "khala/issue-1",
+            "expected_base_sha": "deadbeef",
             "cleanup_checkout_on_success": True,
         }
         assert "token" not in started["github"]
@@ -1591,6 +1593,41 @@ class TestEndpointHappyPath:
         assert job is not None
         assert job["status"] == "failed"
         assert "Temporal dispatch failed" in job["error"]
+
+    def test_run_from_github_returns_502_when_base_sha_unresolvable(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """When the base branch's HEAD SHA can't be resolved, fail before dispatch
+        rather than starting a workflow with no freshness anchor."""
+        import software_engineering_team.api.coding_team_main as api_main
+
+        monkeypatch.setattr(
+            api_main, "resolve_remote_branch_sha", lambda *a, **kw: (False, "fetch failed")
+        )
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+
+        assert resp.status_code == 502
+        assert "fetch failed" in resp.json()["detail"]
+
+        # The job row was already created before the SHA check ran; it must be
+        # marked failed here or every retry for this issue would 409 forever
+        # against an orphaned 'pending' job that nothing ever dispatched.
+        jobs = patched_app["jobs"].list_jobs()
+        assert len(jobs) == 1
+        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
+        assert job["status"] == "failed"
+        assert "fetch failed" in job["error"]
 
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
@@ -2326,6 +2363,57 @@ class TestPrepareIssueBranch:
         ).stdout.strip()
         assert head == "khala/issue-9"
 
+    def test_matching_expected_base_sha_succeeds(self, api, tmp_path) -> None:
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        import subprocess
+
+        head_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha=head_sha
+        )
+        assert ok is True, msg
+
+    def test_stale_expected_base_sha_rejected_before_any_checkout(self, api, tmp_path) -> None:
+        """The base moved since triage: fail closed, before touching the checkout."""
+        import subprocess
+
+        repo = self._init_repo(tmp_path)
+        # Advance origin/main past the SHA the (fake) triage step observed.
+        with open(f"{repo}/README.md", "a") as fh:
+            fh.write("more\n")
+        self._git(repo, "add", "README.md")
+        self._git(repo, "commit", "-q", "--no-gpg-sign", "-m", "advance")
+
+        original_head_on_disk = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha="0" * 40
+        )
+        assert ok is False
+        assert "moved" in (msg or "")
+        assert "0" * 40 in (msg or "")
+
+        # No checkout switch happened -- HEAD is exactly where the test left it.
+        head_after = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head_after == original_head_on_disk
+
     def test_expected_head_sha_mismatch_blocks_prep_without_mutating_checkout(
         self, api, tmp_path
     ) -> None:
@@ -2390,6 +2478,126 @@ class TestPrepareIssueBranch:
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
 
+    def test_stale_expected_base_sha_rejected_before_dirty_tree_recovery(
+        self, api, tmp_path
+    ) -> None:
+        """A stale plan must fail before dirty-tree recovery runs -- recovery can
+        commit WIP and create rescue branches, which must not happen on a job
+        already known to be stale."""
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        with open(f"{repo}/README.md", "a") as fh:
+            fh.write("dirty\n")
+
+        ok, msg, notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha="0" * 40
+        )
+        assert ok is False
+        assert "moved" in (msg or "")
+        assert notes == []
+
+        import subprocess
+
+        # No rescue branch was created and the dirty change is still unstaged.
+        branches = subprocess.run(
+            ["git", "-C", repo, "branch", "--list", "khala/rescue/*"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert branches.strip() == ""
+        status = subprocess.run(
+            ["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip()
+        assert "README.md" in status
+
+    def test_base_ref_pinned_immune_to_concurrent_tracking_ref_mutation(
+        self, api, tmp_path, monkeypatch
+    ) -> None:
+        """A concurrent fetch against the same shared checkout (e.g. another
+        job's own base-SHA resolution, as the newly-added route-side call
+        does) can move the local `origin/main` tracking ref again after this
+        call's own fetch resolves it. Seed selection and checkout must still
+        use the commit resolved at fetch time, not whatever the tracking ref
+        points to by the time they run -- otherwise a validated base can be
+        silently swapped out from under the job."""
+        import subprocess
+
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        original_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        # Mint a second commit object standing in for "what a concurrent
+        # fetch would have moved the tracking ref to" -- never checked out,
+        # never actually the content of "origin", just a distinct valid SHA.
+        tree = subprocess.run(
+            ["git", "-C", repo, "rev-parse", f"{original_sha}^{{tree}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        concurrent_sha = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo,
+                "commit-tree",
+                tree,
+                "-p",
+                original_sha,
+                "-m",
+                "concurrent advance",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert concurrent_sha != original_sha
+
+        # The base-branch fetch+resolve now runs through the consolidated
+        # `resolve_remote_branch_sha` primitive, which calls
+        # `shared.git.git_utils._run_git` -- not `api._git` -- so the
+        # injected mutation must hook that call, not the local one.
+        import shared.git.git_utils as shared_git_utils_mod
+
+        real_run_git = shared_git_utils_mod._run_git
+
+        def _spy(path, cmd, *a, **kw):
+            rc, out = real_run_git(path, cmd, *a, **kw)
+            if rc == 0 and cmd == ["git", "fetch", "--", "origin", "main"]:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(path),
+                        "update-ref",
+                        "refs/remotes/origin/main",
+                        concurrent_sha,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            return rc, out
+
+        monkeypatch.setattr(shared_git_utils_mod, "_run_git", _spy)
+
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is True, msg
+
+        final_dev_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "development"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert final_dev_sha == original_sha
+        assert final_dev_sha != concurrent_sha
 
 class TestGitCredentialThreading:
     """The token must reach the network git ops (fetch/push) transiently.
@@ -2422,6 +2630,16 @@ class TestGitCredentialThreading:
         assert "PATH" in env
 
     def test_prepare_issue_branch_passes_auth_env_to_fetch(self, api, monkeypatch) -> None:
+        # The base-branch fetch+resolve now goes through the consolidated
+        # `resolve_remote_branch_sha` primitive (shared.git.git_utils under
+        # it), not the local `_git` choke point -- capture its own call
+        # instead of expecting it to show up as a `_git("fetch", ...)` call.
+        resolve_calls = []
+
+        def fake_resolve(repo_path, remote, branch, token=None):
+            resolve_calls.append((repo_path, remote, branch, token))
+            return True, "f" * 40
+
         calls = []
 
         def fake_git(repo_path, *args, timeout=120.0, env=None):
@@ -2430,14 +2648,17 @@ class TestGitCredentialThreading:
 
         monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
+        monkeypatch.setattr(api, "resolve_remote_branch_sha", fake_resolve)
         ok, msg, _notes = api._prepare_issue_branch(
             "/repo", "origin", "main", "khala/issue-1", "tok-123"
         )
         assert ok is True, msg
-        # Both fetches (base branch + issue-branch continuation candidate)
-        # must carry the auth env.
+        # The base-branch resolution carried the token.
+        assert resolve_calls == [("/repo", "origin", "main", "tok-123")]
+        # The remaining fetch (issue-branch continuation candidate) must
+        # still carry the auth env.
         fetches = [(args, env) for args, env in calls if args[0] == "fetch"]
-        assert len(fetches) == 2
+        assert len(fetches) == 1
         for _args, env in fetches:
             assert env is not None
             assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
@@ -2445,6 +2666,12 @@ class TestGitCredentialThreading:
         assert all(env is None for args, env in calls if args[0] != "fetch")
 
     def test_prepare_issue_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
+        resolve_calls = []
+
+        def fake_resolve(repo_path, remote, branch, token=None):
+            resolve_calls.append(token)
+            return True, "f" * 40
+
         calls = []
 
         def fake_git(repo_path, *args, timeout=120.0, env=None):
@@ -2453,8 +2680,10 @@ class TestGitCredentialThreading:
 
         monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
+        monkeypatch.setattr(api, "resolve_remote_branch_sha", fake_resolve)
         ok, _msg, _notes = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
         assert ok is True
+        assert resolve_calls == [None]
         assert all(env is None for _, env in calls)
 
     def test_push_branch_passes_auth_env(self, api, monkeypatch) -> None:

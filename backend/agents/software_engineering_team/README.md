@@ -253,6 +253,9 @@ Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`)
 | `CODING_TEAM_GROOM_CONCURRENCY` | Max Tech Lead task-grooming LLM calls dispatched concurrently | `4` |
 | `CODING_TEAM_IMPLEMENTATION_CONCURRENCY` | Max implementation workers dispatched concurrently in one round | `4` |
 | `SE_EXECUTION_WAVE_CONCURRENCY` | Max concurrent microtask workers in one independent code-v2 execution wave | `4` |
+| `CODING_TEAM_WORKERS_PER_STACK` | Number of implementation-worker `agent_id`s `derive_stack_roster` emits per stack (e.g. `backend_v2-1`, `backend_v2-2` when set to `2`); widens same-stack parallelism | `1` |
+
+Raising `CODING_TEAM_WORKERS_PER_STACK` above `1` widens same-stack parallelism (distinct `agent_id`s, isolated worktrees via `WorktreeManager`), but backend workers' dependency installs are still serialized process-wide by `pip_install_lock` (not per-worktree), so concurrent same-stack backend workers' install-and-test steps queue rather than run in parallel.
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
 

@@ -156,15 +156,14 @@ async def test_design_attempt_activity_stops_promptly_after_workflow_terminate()
     """
     import concurrent.futures
 
-    from temporalio.worker import Worker
-
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
     from investment_team.strategy_lab.temporal import activities as act
     from investment_team.strategy_lab.temporal.workflows import (
         TASK_QUEUE,
         StrategyLabCycleWorkflow,
     )
-    from shared.temporal.worker import _build_workflow_runner
+
+    from .strategy_lab_temporal_fixtures import build_strategy_lab_worker
 
     state: Dict[str, Any] = {"started": threading.Event()}
     fake_run_design_attempt = _make_fake_run_design_attempt(state)
@@ -188,22 +187,7 @@ async def test_design_attempt_activity_stops_promptly_after_workflow_terminate()
                 act, "_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S", _TEST_HEARTBEAT_INTERVAL_S
             ),
         ):
-            worker = Worker(
-                env.client,
-                task_queue=TASK_QUEUE,
-                workflows=[StrategyLabCycleWorkflow],
-                activities=[act.run_design_attempt_activity],
-                activity_executor=activity_executor,
-                max_cached_workflows=0,
-                # Matches shared.temporal.worker._run_worker_async's real
-                # worker construction: without the numpy/pandas passthrough,
-                # validating StrategyLabCycleWorkflow re-imports
-                # investment_team/__init__.py's transitive chain (.agents ->
-                # .models -> .execution.metrics -> numpy) inside the
-                # sandbox's isolated namespace, and numpy's C extension can't
-                # be loaded a second time in the same process.
-                workflow_runner=_build_workflow_runner(),
-            )
+            worker = build_strategy_lab_worker(env, activity_executor)
             async with worker:
                 handle = await env.client.start_workflow(
                     StrategyLabCycleWorkflow.run,

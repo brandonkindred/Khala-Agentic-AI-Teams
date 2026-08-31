@@ -531,6 +531,7 @@ class CodingTeamWorkflow:
                         "integration_branch": github["integration_branch"],
                         "issue_number": github.get("issue_number"),
                         "expected_head_sha": github.get("expected_head_sha"),
+                        "expected_base_sha": github.get("expected_base_sha"),
                     },
                     start_to_close_timeout=github_timeout,
                     retry_policy=_GITHUB_ACTIVITY_RETRY,

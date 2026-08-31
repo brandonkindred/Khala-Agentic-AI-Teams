@@ -46,7 +46,9 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
           token is stored on the job record too, so a later resume can re-drive
           the GitHub publish flow without the caller supplying it again.
         - The CodingTeamWorkflow is started with a GitHub payload that contains
-          branch metadata but never the plaintext token.
+          branch metadata (including the base branch's HEAD SHA at this
+          moment, so branch prep can detect the base moving before it runs)
+          but never the plaintext token.
         - A 409 is raised when a job is already running for this issue, OR when
           another active job (any issue/PR — including an address-comments
           remediation) is already using the SAME ``request.repo_path``: an
@@ -162,6 +164,29 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                 status_code=500,
                 detail="unable to resolve base branch for GitHub-issue run",
             )
+        # Pin branch prep to the exact commit the plan above was grounded on: if
+        # `base` moves between now and when the Temporal branch-prep activity
+        # actually runs (queueing, retries, worker restarts), that activity must
+        # detect the drift instead of silently seeding work from a different HEAD.
+        sha_ok, base_sha_or_err = _main.resolve_remote_branch_sha(
+            request.repo_path, request.remote, base, token
+        )
+        if not sha_ok:
+            # The job row already exists (created above) and _running_job_for_issue
+            # treats a pending job as active, so leaving it pending here would make
+            # every retry for this issue 409 forever with nothing left to
+            # terminalize it. Mark it failed, same as a Temporal dispatch failure.
+            logger.error("Unable to resolve base branch head sha: %s", base_sha_or_err)
+            _main.update_job(
+                job_id,
+                status=JobStatus.FAILED.value,
+                error=f"unable to resolve base branch head sha: {base_sha_or_err}",
+                current_activity=None,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"unable to resolve base branch head sha: {base_sha_or_err}",
+            )
         integration_branch = f"khala/issue-{issue.number}"
         try:
             start_coding_team_workflow(
@@ -176,6 +201,7 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                     "remote": request.remote,
                     "base": base,
                     "integration_branch": integration_branch,
+                    "expected_base_sha": base_sha_or_err,
                     "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
                 },
             )

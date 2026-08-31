@@ -715,9 +715,6 @@ def delete_design_attempt_checkpoint(run_id: str, cycle_scope: str, generation: 
     )
 
 
-_DESIGN_CONTEXT_WIRE_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
-
-
 def _design_context_to_wire(
     design_context: Optional["_DesignPersistContext"],
 ) -> Optional[Dict[str, Any]]:
@@ -755,39 +752,19 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
         ``SpecCritique`` instances -- not left as plain dicts, which would
         raise ``AttributeError`` deep inside record assembly
         (``orchestrator_record_assembly.py`` calls ``.model_dump()`` on each
-        ``design_context.critiques`` element). Raises ``ValueError`` /
-        ``TypeError`` when a nonempty payload is missing keys or has the
-        wrong shape, so checkpoint resume can fail open instead of
-        fabricating default audit fields.
+        ``design_context.critiques`` element). Raises ``ValueError`` when a
+        nonempty payload fails ``checkpoints.design_context_wire_shape_is_valid``
+        (missing keys or a wrong-typed field), so checkpoint resume can fail
+        open instead of fabricating default audit fields. Thin wrapper around
+        ``_orchestrator_helpers.rebuild_design_context`` -- the shared
+        validate+rebuild core also used by
+        ``orchestrator_record_assembly._design_context_from_checkpoint`` --
+        this function's own contribution is only the ``data`` empty/``None``
+        precondition and this docstring's Temporal-specific framing.
     """
-    if not data:
-        return None
-    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
-    from investment_team.strategy_lab.agents.design_review import SpecCritique
+    from investment_team.strategy_lab._orchestrator_helpers import rebuild_design_context
 
-    missing = [key for key in _DESIGN_CONTEXT_WIRE_KEYS if key not in data]
-    if missing:
-        raise ValueError(f"design_context missing wire fields: {missing}")
-    rounds = data["rounds"]
-    critiques = data["critiques"]
-    stop_reason = data["stop_reason"]
-    loop_telemetry = data["loop_telemetry"]
-    if isinstance(rounds, bool) or not isinstance(rounds, int):
-        raise TypeError(f"design_context.rounds must be int, got {type(rounds).__name__}")
-    if not isinstance(critiques, list):
-        raise TypeError(f"design_context.critiques must be list, got {type(critiques).__name__}")
-    if not isinstance(stop_reason, str):
-        raise TypeError(f"design_context.stop_reason must be str, got {type(stop_reason).__name__}")
-    if not isinstance(loop_telemetry, dict):
-        raise TypeError(
-            f"design_context.loop_telemetry must be dict, got {type(loop_telemetry).__name__}"
-        )
-    return _DesignPersistContext(
-        rounds=rounds,
-        critiques=[SpecCritique.model_validate(c) for c in critiques],
-        stop_reason=stop_reason,
-        loop_telemetry=dict(loop_telemetry),
-    )
+    return rebuild_design_context(data)
 
 
 def _cross_attempt_resume_from_params(
@@ -848,6 +825,69 @@ def _cross_attempt_resume_from_params(
         )
         return None, None, None
     return spec, params.get("resume_rationale"), design_context
+
+
+def _resolve_resume_state(
+    params: Dict[str, Any],
+    *,
+    run_id: Optional[str],
+    design_attempt_index: int,
+    resume_spec: Optional["StrategySpec"],
+    resume_rationale: Optional[str],
+    resume_design_context: Optional["_DesignPersistContext"],
+    resumed_via_adr012: bool,
+) -> "Tuple[Optional[StrategySpec], Optional[str], Optional[_DesignPersistContext], bool]":
+    """Fold cross-attempt resume into the ADR-012 lookup's result, plus the seed-unused flag.
+
+    Extracted out of ``run_design_attempt_activity`` to stay under the
+    repo's statement-count lint gate. ``resume_spec``/``resume_rationale``/
+    ``resume_design_context``/``resumed_via_adr012`` are that lookup's
+    already-decided result -- this function only adds cross-attempt resume
+    on top, when applicable, and computes ``cross_attempt_seed_unused``.
+
+    Preconditions:
+        ``resumed_via_adr012`` is ``True`` iff ``resume_spec`` was already
+        set from a same-attempt ADR-012 checkpoint (never from this
+        function).
+    Postconditions:
+        When ``resumed_via_adr012``, returns the inputs unchanged for the
+        first three, plus a freshly computed fourth. Otherwise, when
+        ``params["resume_spec"]`` is not ``None``, returns
+        ``_cross_attempt_resume_from_params``'s result for the first three.
+        The fourth (``cross_attempt_seed_unused``) is ``True`` iff the
+        workflow supplied a cross-attempt resume seed
+        (``params["resume_spec"]``, and therefore ``params["drift"]``) that
+        was never legitimately adopted -- reconstruction failed outright,
+        or an ADR-012 same-attempt checkpoint's own drift snapshot was
+        taken after a Phase 1 that itself ran from scratch, even though
+        ADR-012 has since taken over ``resume_spec`` for a strictly more
+        recent, unrelated reason (a crash after that checkpoint write, then
+        a retry). Evaluating ``_cross_attempt_resume_from_params`` even when
+        ``resumed_via_adr012`` is what makes this correct across a crash:
+        it's a pure function of ``params`` alone, so its outcome is
+        identical on every Temporal retry of this same
+        ``design_attempt_index`` -- on the very first (pre-crash)
+        execution, no ADR-012 checkpoint existed yet, so THAT outcome is
+        what actually determined whether Phase 1 ran from the cross-attempt
+        seed or from scratch, and hence whether a later-written ADR-012
+        checkpoint legitimately carries the seed's provenance.
+    """
+    if params.get("resume_spec") is None:
+        return resume_spec, resume_rationale, resume_design_context, False
+    if resumed_via_adr012:
+        # ``_cross_attempt_resume_from_params`` always returns a 3-tuple,
+        # never a bare ``None`` -- ``(None, None, None)`` on failure -- so
+        # adoption is checked on its first element, not the tuple itself.
+        would_be_spec, _would_be_rationale, _would_be_design_context = (
+            _cross_attempt_resume_from_params(
+                params, run_id=run_id, design_attempt_index=design_attempt_index
+            )
+        )
+        return resume_spec, resume_rationale, resume_design_context, would_be_spec is None
+    resume_spec, resume_rationale, resume_design_context = _cross_attempt_resume_from_params(
+        params, run_id=run_id, design_attempt_index=design_attempt_index
+    )
+    return resume_spec, resume_rationale, resume_design_context, resume_spec is None
 
 
 @activity.defn(name="strategy_lab_snapshot_prior_records")
@@ -1014,6 +1054,74 @@ _PROGRESS_EVENT_FIELDS: Tuple[str, ...] = (
     "changes_made",
     "is_winning",
 )
+
+
+def _strip_unused_resume_seed_from_record(
+    record_dump: Dict[str, Any],
+    *,
+    unused: bool,
+    seed_spec_len: int,
+    seed_code_len: int,
+    seed_gate_len: int,
+) -> Dict[str, Any]:
+    """Drop a discarded cross-attempt resume seed's prefix from a JSON-dumped record.
+
+    Delegates the actual slicing to ``checkpoints.drift_histories_past_seed``
+    -- the same pure helper thread mode's ``orchestrator.py::run_cycle`` and
+    Temporal mode's ``StrategyLabCycleWorkflow.run`` use for their own
+    (structurally different) seed-prefix stripping, so the three sites can't
+    drift out of sync on the drift-triple key set or prefix semantics.
+
+    A no-op (returns ``record_dump`` unchanged) unless ``unused`` -- ``True``
+    only when the workflow supplied a cross-attempt resume seed
+    (``params["drift"]``, seeded from a checkpoint) that this attempt never
+    actually adopted -- reconstruction failed, or an ADR-012 same-attempt
+    checkpoint won instead. That seed was still fed into ``drift_collector``
+    before the outcome was known (needed so a *reentry* outcome's returned
+    ``"drift"`` wire dict keeps the seed prefix intact --
+    ``StrategyLabCycleWorkflow.run`` always strips exactly that many entries
+    itself when folding a reentry's drift into its own parent commit log,
+    regardless of whether this attempt actually resumed). A *record* outcome
+    has no such downstream consumer expecting the seed, so its persisted
+    ``spec_history``/``code_history``/``gate_timeline`` must not carry a
+    checkpoint's provenance that this attempt never earned.
+
+    Preconditions:
+        ``record_dump`` is a ``StrategyLabRecord.model_dump(mode="json")``
+        when ``unused`` is ``True`` (so ``spec_history``/``code_history``/
+        ``gate_timeline`` are present lists) -- irrelevant when ``unused`` is
+        ``False``, since it's then returned untouched. ``seed_*_len`` are the
+        lengths of the seed the workflow supplied in ``params["drift"]`` for
+        this attempt.
+    Postconditions:
+        When ``unused`` is ``True`` and at least one seed length is nonzero,
+        mutates ``record_dump`` in place by slicing each of
+        ``spec_history``/``code_history``/``gate_timeline`` past its
+        ``seed_*_len``-entry prefix, then returns it. ``record.spec_history``/
+        ``code_history`` are exactly ``drift_collector``'s own lists
+        (unreordered); ``gate_timeline`` has this attempt's own gate results
+        appended after ``drift_collector.gate_timeline`` -- either way, the
+        seed is always the first ``seed_*_len`` entries. When ``unused`` is
+        ``False`` or all seed lengths are zero, returns ``record_dump``
+        unchanged.
+    """
+    if not unused or not (seed_spec_len or seed_code_len or seed_gate_len):
+        return record_dump
+    from investment_team.strategy_lab.checkpoints import drift_histories_past_seed
+
+    (
+        record_dump["spec_history"],
+        record_dump["code_history"],
+        record_dump["gate_timeline"],
+    ) = drift_histories_past_seed(
+        record_dump["spec_history"],
+        record_dump["code_history"],
+        record_dump["gate_timeline"],
+        seed_spec_len=seed_spec_len,
+        seed_code_len=seed_code_len,
+        seed_gate_len=seed_gate_len,
+    )
+    return record_dump
 
 
 @activity.defn(name="strategy_lab_run_design_attempt", no_thread_cancel_exception=True)
@@ -1238,6 +1346,24 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         code_history=[CodeRevision(**d) for d in drift_data.get("code_history", [])],
         gate_timeline=[GateEvent(**d) for d in drift_data.get("gate_timeline", [])],
     )
+    # Length of whatever the workflow itself seeded into ``params["drift"]``
+    # for this attempt -- 0 unless the workflow is resuming (cross-attempt
+    # seed and ``params["resume_spec"]`` are always populated together, see
+    # ``workflows.py``'s ``pending_resume_drift_seed``/``pending_resume_spec``).
+    # Captured now, before ``drift_collector`` gains any of this attempt's
+    # own entries, so it stays correct as "the seed length" regardless of
+    # whether cross-attempt resume below actually succeeds -- used only to
+    # strip a failed resume's discarded seed out of a "record" outcome's
+    # persisted history (never out of a "reentry" outcome's returned
+    # ``drift`` wire dict: ``StrategyLabCycleWorkflow.run`` always strips
+    # exactly this many entries itself when merging a reentry's drift into
+    # its own parent commit log, so that wire dict must keep the seed
+    # prefix intact no matter what happened here).
+    _seed_spec_len, _seed_code_len, _seed_gate_len = (
+        len(drift_data.get("spec_history", [])),
+        len(drift_data.get("code_history", [])),
+        len(drift_data.get("gate_timeline", [])),
+    )
     # ``_run_design_attempt`` appends to this list in place (its
     # ``all_gate_results``); returning the mutated list threads accumulation
     # across re-entries, matching ``run_cycle``'s single ``cumulative_gate_results``.
@@ -1286,6 +1412,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     resume_spec = None
     resume_rationale = None
     resume_design_context = None
+    resumed_via_adr012 = False
     if checkpoint_enabled:
         checkpoint = load_design_attempt_checkpoint(run_id, cycle_scope, design_attempt_index)
         if checkpoint is not None:
@@ -1344,20 +1471,31 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 resume_spec = checkpoint.spec
                 resume_rationale = checkpoint.rationale
                 resume_design_context = checkpoint_design_context
+                resumed_via_adr012 = True
 
     # Cross-attempt resume (Temporal-mode parity with thread mode's gated
-    # cross-attempt resume): only consulted when the ADR-012 same-attempt
-    # lookup just above found nothing -- the two never actually collide,
-    # since an ADR-012 checkpoint is keyed to THIS exact
+    # cross-attempt resume): only *adopted* into resume_spec/etc. when the
+    # ADR-012 same-attempt lookup just above found nothing -- the two never
+    # actually collide, since an ADR-012 checkpoint is keyed to THIS exact
     # ``design_attempt_index`` crashing mid-execution, while
     # ``params["resume_spec"]`` is supplied by the calling workflow for a
-    # ``design_attempt_index`` that has never run yet. See
-    # ``_cross_attempt_resume_from_params`` for the full contract and its
-    # fail-open discipline.
-    if resume_spec is None and params.get("resume_spec") is not None:
-        resume_spec, resume_rationale, resume_design_context = _cross_attempt_resume_from_params(
-            params, run_id=run_id, design_attempt_index=design_attempt_index
+    # ``design_attempt_index`` that has never run yet. ``cross_attempt_seed_unused``
+    # gates stripping a discarded seed's provenance out of a "record"
+    # outcome's persisted history (see ``_seed_spec_len``'s comment above
+    # for why a "reentry" outcome's ``drift`` wire dict must NOT be touched
+    # by this) -- see ``_resolve_resume_state``'s own docstring for why it's
+    # computed correctly even across a crash-then-ADR-012-wins retry.
+    resume_spec, resume_rationale, resume_design_context, cross_attempt_seed_unused = (
+        _resolve_resume_state(
+            params,
+            run_id=run_id,
+            design_attempt_index=design_attempt_index,
+            resume_spec=resume_spec,
+            resume_rationale=resume_rationale,
+            resume_design_context=resume_design_context,
+            resumed_via_adr012=resumed_via_adr012,
         )
+    )
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
         """``checkpoint_hook`` passed into ``_run_design_attempt`` (``PhaseCallback`` shape).
@@ -1654,9 +1792,16 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         return _skipped_outcome()
 
     _delete_checkpoint()
+    record_dump = _strip_unused_resume_seed_from_record(
+        record.model_dump(mode="json"),
+        unused=cross_attempt_seed_unused,
+        seed_spec_len=_seed_spec_len,
+        seed_code_len=_seed_code_len,
+        seed_gate_len=_seed_gate_len,
+    )
     return {
         "kind": "record",
-        "record": record.model_dump(mode="json"),
+        "record": record_dump,
         "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
         "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
         "budget_calls": budget.calls_made,

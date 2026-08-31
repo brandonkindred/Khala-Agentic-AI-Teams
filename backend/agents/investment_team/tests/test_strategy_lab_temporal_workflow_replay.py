@@ -131,13 +131,15 @@ async def _run_cycle_workflow_and_replay(
     """
     import concurrent.futures
 
-    from temporalio.worker import Replayer, Worker
+    from temporalio.worker import Replayer
 
     from investment_team.strategy_lab.temporal.workflows import (
         TASK_QUEUE,
         StrategyLabCycleWorkflow,
     )
     from shared.temporal.worker import _build_workflow_runner
+
+    from .strategy_lab_temporal_fixtures import build_strategy_lab_worker
 
     fake_activities = _make_fake_activities(
         design_attempt_outcomes=design_attempt_outcomes,
@@ -159,19 +161,7 @@ async def _run_cycle_workflow_and_replay(
 
     async with _workflow_environment() as env:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as activity_executor:
-            worker = Worker(
-                env.client,
-                task_queue=TASK_QUEUE,
-                workflows=[StrategyLabCycleWorkflow],
-                activities=fake_activities,
-                activity_executor=activity_executor,
-                # See test_strategy_lab_temporal_cancellation.py's identical
-                # worker construction for why this is required: without it,
-                # validating StrategyLabCycleWorkflow re-imports
-                # investment_team's numpy/pandas transitive chain inside the
-                # sandbox's isolated namespace, crashing numpy's C extension.
-                workflow_runner=_build_workflow_runner(),
-            )
+            worker = build_strategy_lab_worker(env, activity_executor, activities=fake_activities)
             async with worker:
                 handle = await env.client.start_workflow(
                     StrategyLabCycleWorkflow.run,

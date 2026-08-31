@@ -401,6 +401,7 @@ _GITHUB = {
     "remote": "origin",
     "base": "main",
     "integration_branch": "khala/issue-9",
+    "expected_base_sha": "a" * 40,
     "cleanup_checkout_on_success": False,
 }
 
@@ -448,6 +449,7 @@ def test_github_run_calls_prep_then_pipeline_then_publish(monkeypatch: pytest.Mo
     assert snapshots[0]["integration_branch"] == "khala/issue-9"
     # The plain issue-driven flow has no prior-plan snapshot to pin to.
     assert snapshots[0]["expected_head_sha"] is None
+    assert snapshots[0]["expected_base_sha"] == "a" * 40
     assert "token" not in snapshots[0]
     assert snapshots[2]["issue_title"] == "Fix the widget"
     assert "token" not in snapshots[2]

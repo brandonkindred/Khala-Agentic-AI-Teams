@@ -163,7 +163,7 @@ def _ref_roc(bars, period: int) -> Optional[float]:
     """Rate of Change (percent) over ``period`` bars; zero reference price → 0.0."""
     if len(bars) < period + 1:
         return None
-    cur, prev = bars[-1].close, bars[-1 - period].close
+    cur, prev = bars[-1].close, bars[-(1 + period)].close
     return 0.0 if prev == 0 else (cur - prev) / prev * 100.0
 
 

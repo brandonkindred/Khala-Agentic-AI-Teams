@@ -373,7 +373,7 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
    * `inputError` to the error message and returns without opening the dialog.
    * Side effects: opens a Material dialog; on success prepends the new entry
    * to `savedInputs` and sets `selectedPickerValue` to the new saved ID;
-   * alerts the user on API failure.
+   * shows an error snackbar on API failure.
    */
   openSaveInputDialog(): void {
     const agent = this.selectedAgentId();
