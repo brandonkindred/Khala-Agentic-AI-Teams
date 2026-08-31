@@ -12,8 +12,9 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,12 @@ def git_identity_env() -> Dict[str, str]:
 
 
 def _run_git(
-    repo_path: Path, cmd: list[str], timeout: int = 30, *, merge_stderr: bool = True
+    repo_path: Path,
+    cmd: list[str],
+    timeout: int = 30,
+    *,
+    merge_stderr: bool = True,
+    env: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, str]:
     """Run git command in repo. Returns (returncode, output).
 
@@ -84,10 +90,19 @@ def _run_git(
         the caller either raises with this text or discards it — so stderr is
         appended regardless of *merge_stderr*, keeping the failure cause
         (``fatal: ...``) out of an otherwise-empty diagnostic.
+    env:
+        Subprocess environment override. Omitted (default), the process
+        observes a complete author/committer identity (see
+        ``git_identity_env``) -- the right default for any command that may
+        create a commit. Callers that need a *different* environment (e.g. a
+        transient auth header for a network operation against a private
+        remote) pass it explicitly; this module has no opinion on what that
+        environment contains, keeping auth-scheme specifics out of this
+        neutral, team-agnostic layer.
 
     Postconditions:
-        - The spawned git process observes a complete author/committer
-          identity (see git_identity_env).
+        - The spawned git process observes ``env`` when given, else a
+          complete author/committer identity (see git_identity_env).
         - Output is decoded with ``surrogateescape`` so a path containing bytes
           invalid in the locale encoding round-trips instead of raising and
           collapsing the whole command's output.
@@ -100,7 +115,7 @@ def _run_git(
             text=True,
             errors="surrogateescape",
             timeout=timeout,
-            env=git_identity_env(),
+            env=env if env is not None else git_identity_env(),
         )
         out = result.stdout or ""
         # Merge stderr when asked, or unconditionally on failure: a non-zero exit
@@ -438,6 +453,70 @@ def get_head_sha(repo_path: str | Path) -> Tuple[bool, str]:
     if code != 0:
         return False, f"rev-parse failed: {out}"
     return True, out.strip()
+
+
+def resolve_remote_branch_sha(
+    repo_path: str | Path,
+    remote: str,
+    branch: str,
+    *,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, str]:
+    """Fetch ``branch`` from ``remote`` and resolve its current HEAD SHA.
+
+    Generic freshness-anchor primitive: fetch a named branch and report
+    exactly the commit it currently points to, so a caller can compare it
+    against a later re-fetch of the same branch to detect drift. This module
+    stays neutral on how a caller authenticates the fetch against a private
+    remote -- pass ``env`` (e.g. augmented with a transient auth header) when
+    one is needed; this function has no opinion on its contents.
+
+    Fetches into a fresh, uniquely-named private ref (``<branch>:<private
+    ref>``) rather than relying on ``<remote>/<branch>`` or ``FETCH_HEAD``:
+    the tracking ref only updates when it matches the checkout's configured
+    refspec, and ``FETCH_HEAD`` is a single file shared by every fetch
+    against this checkout -- on an operator-managed checkout where multiple
+    callers (e.g. separate jobs) can fetch concurrently, a second fetch can
+    overwrite ``FETCH_HEAD`` between this call's own fetch and its
+    ``rev-parse``, handing back an unrelated branch's commit. An explicit
+    private destination ref is written by this call's own fetch and read
+    back by name, so a concurrent fetch elsewhere in the same checkout
+    (updating its own distinct ref, or the shared ``FETCH_HEAD``) cannot
+    interleave with it.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout; ``remote``/``branch`` are
+          ref-shaped names the caller trusts enough to fetch -- this helper
+          does not itself validate them, so a caller accepting these from an
+          untrusted source must validate first.
+    Postconditions:
+        - On success returns ``(True, <full sha>)`` -- the commit ``branch``
+          on ``remote`` resolved to as of this fetch. The private ref used to
+          resolve it is deleted before returning (best-effort; a leftover
+          ref would be harmless garbage, never a correctness problem, so a
+          delete failure does not turn a successful resolution into a
+          reported failure).
+        - On failure (not a repo, or a fetch/rev-parse error) returns
+          ``(False, message)`` and never a partial/garbage SHA.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    private_ref = f"refs/khala/resolve-remote-branch-sha/{uuid.uuid4().hex}"
+    # 120s, not this module's 30s default: this is the same network fetch
+    # _prepare_issue_branch previously ran through api/git_ops.py's own
+    # _git (120s default) -- a large repo or slow private remote that
+    # fetched fine before must not now start timing out at 30s.
+    code, out = _run_git(
+        path, ["git", "fetch", "--", remote, f"{branch}:{private_ref}"], 120, env=env
+    )
+    if code != 0:
+        return False, out
+    code, sha_out = _run_git(path, ["git", "rev-parse", private_ref], merge_stderr=False, env=env)
+    _run_git(path, ["git", "update-ref", "-d", private_ref], env=env)
+    if code != 0:
+        return False, sha_out
+    return True, sha_out.strip()
 
 
 def commit_paths(repo_path: str | Path, paths: List[str], message: str) -> Tuple[bool, str]:

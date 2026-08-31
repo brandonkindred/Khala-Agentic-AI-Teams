@@ -101,6 +101,7 @@ from software_engineering_team.api.git_ops import (  # noqa: F401
     _utc_timestamp,
     _working_tree_dirty,
     _write_active_issue,
+    resolve_remote_branch_sha,
 )
 from software_engineering_team.api.orchestration import (  # noqa: F401
     _defer_terminal_success,

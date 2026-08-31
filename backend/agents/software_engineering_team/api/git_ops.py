@@ -21,6 +21,9 @@ from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     git_identity_env,
 )
+from shared.git.git_utils import (
+    resolve_remote_branch_sha as _shared_resolve_remote_branch_sha,
+)
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.clone_workspace import (
     clone_lock_path,
@@ -753,6 +756,42 @@ def _merge_recovered_wip(
     )
 
 
+def resolve_remote_branch_sha(
+    repo_path: str,
+    remote: str,
+    branch: str,
+    token: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Fetch ``branch`` from ``remote`` and resolve its current HEAD SHA.
+
+    Thin coding-team-specific wrapper over the neutral
+    ``shared.git.git_utils.resolve_remote_branch_sha`` primitive: this
+    function's only job is translating ``token`` into the transient GitHub
+    auth env that primitive accepts generically, and scrubbing any
+    credential out of its error text -- exactly what ``_git``'s other
+    callers get. The fetch/rev-parse mechanics themselves live in the
+    shared, team-agnostic layer (see ``backend/shared/git/README.md``) since
+    they have nothing coding-team-specific about them.
+
+    Preconditions:
+        - repo_path is a git checkout; remote/branch are ref-shaped names
+          the caller trusts enough to fetch (this helper does not itself
+          validate them via ``_is_safe_ref`` -- callers that accept these
+          names from an untrusted source must validate first).
+    Postconditions:
+        - On success returns ``(True, <full sha>)`` for ``<remote>/<branch>``
+          exactly as fetched -- callers use this as a freshness anchor to
+          compare against a later re-fetch of the same branch.
+        - On failure (fetch or rev-parse error) returns ``(False, message)``,
+          scrubbed of any credential.
+    """
+    auth_env = _git_auth_env(token) if token else None
+    ok, msg = _shared_resolve_remote_branch_sha(repo_path, remote, branch, env=auth_env)
+    if not ok:
+        return False, scrub_token_from_text(_scrub_auth_header_values(msg, auth_env))
+    return True, msg
+
+
 def _prepare_issue_branch(
     repo_path: str,
     remote: str,
@@ -760,6 +799,7 @@ def _prepare_issue_branch(
     integration_branch: str,
     token: Optional[str] = None,
     issue_number: Optional[int] = None,
+    expected_base_sha: Optional[str] = None,
 ) -> Tuple[bool, Optional[str], List[str]]:
     """Prepare development + integration branches, recovering interrupted state.
 
@@ -770,6 +810,9 @@ def _prepare_issue_branch(
 
     Preconditions:
         - repo_path is a git checkout; ref arguments may be untrusted.
+        - expected_base_sha, when provided, is the default_branch HEAD SHA
+          observed at triage time (before this activity ran) -- used only as
+          a freshness check, never passed to git as a ref.
     Postconditions (success):
         - integration_branch is checked out with a clean working tree;
           khala.active-issue records issue_number when provided; every commit
@@ -779,6 +822,12 @@ def _prepare_issue_branch(
     Postconditions (failure):
         - No uncommitted work has been deleted and no commit that was
           reachable on entry has become unreachable.
+        - When expected_base_sha is provided and the freshly-fetched
+          default_branch HEAD no longer matches it, fails closed with an
+          error naming both SHAs -- before any dirty-tree recovery, seed
+          selection, or checkout runs -- since the plan this job carries was
+          grounded on the expected SHA and must not be silently applied to
+          different code.
     """
     notes: List[str] = []
 
@@ -790,6 +839,32 @@ def _prepare_issue_branch(
         return False, f"unsafe default_branch ref: {default_branch!r}", notes
     if not _is_safe_ref(integration_branch):
         return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
+
+    # `fetch` is the only network op here (the checkouts below are local), so it
+    # needs the credential. The clone was authenticated transiently by the
+    # unified API; that auth is not persisted, so we re-supply it per fetch.
+    auth_env = _git_auth_env(token) if token else None
+    # Resolve via the same consolidated primitive the route uses to capture
+    # the triaged SHA (fetch + FETCH_HEAD rev-parse, credential-scrubbed) --
+    # not a second inline copy of that sequence. Rebinding `base_ref` to the
+    # resolved commit (instead of keeping the mutable `<remote>/<branch>` ref
+    # name) also pins every downstream base-branch operation below to this
+    # exact commit -- immune to a concurrent fetch on a shared checkout (e.g.
+    # another job's own base-SHA resolution) moving the tracking ref again
+    # before seed selection/checkout consume it.
+    ok, base_ref = _main.resolve_remote_branch_sha(repo_path, remote, default_branch, token)
+    if not ok:
+        return False, base_ref, notes
+    # This freshness check must also precede dirty-tree recovery, same as the
+    # unsafe-ref checks above: a job whose plan is already known stale must
+    # not commit WIP or create rescue branches on its way to being rejected.
+    if expected_base_sha and base_ref != expected_base_sha:
+        return (
+            False,
+            f"base branch `{default_branch}` moved from `{expected_base_sha}` to "
+            f"`{base_ref}` since triage; plan is stale, re-triage required",
+            notes,
+        )
 
     marker = _read_active_issue(repo_path)
 
@@ -818,16 +893,8 @@ def _prepare_issue_branch(
     # path's _write_active_issue overwrite; every failure exit retains it
     # so a retry can still attribute and continue the prior work.
 
-    # `fetch` is the only network op here (the checkouts below are local), so it
-    # needs the credential. The clone was authenticated transiently by the
-    # unified API; that auth is not persisted, so we re-supply it per fetch.
-    auth_env = _git_auth_env(token) if token else None
-    rc, msg = _main._git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
-    if rc != 0:
-        return False, msg, notes
     # The issue branch may exist remotely from a previous job that pushed
     # before dying; fetch it as a continuation candidate (absence is fine).
-    base_ref = f"{remote}/{default_branch}"
     remote_issue_ref = f"{remote}/{integration_branch}"
     rc_issue_fetch, issue_fetch_msg = _main._git(
         repo_path, "fetch", "--", remote, integration_branch, env=auth_env
