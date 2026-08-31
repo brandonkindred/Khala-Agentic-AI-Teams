@@ -39,7 +39,11 @@ It is **not** a fill-cost engine. Explicitly out of scope:
 - **Slippage and transaction costs.** Reference prices are exact bar-derived
   levels (a resting order's authored price, or worse-of-open-and-level on a
   gap), not slippage-adjusted fills. See §3 for exactly which production
-  field this corresponds to.
+  field this corresponds to. The one exception, scoped narrowly: an
+  `entry_slippage_bps` input is needed purely to anchor `basis="entry_price"`
+  levels where production's real engine actually places them (§5's
+  `stop_loss` subsection) — it never appears in, or adjusts, any output
+  field.
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
   at a single price.
@@ -59,14 +63,17 @@ def simulate(
     spec: StrategySpec,
     bars: Mapping[str, Sequence[Bar]],
     starting_equity: float,
+    entry_slippage_bps: float,
 ) -> List[ReferenceTrade]:
     """Pure re-simulation of spec.entry_rules / spec.exit_rules over bars.
 
     Preconditions:
-        - spec is a validated StrategySpec.
+        - spec is a validated StrategySpec, with spec.requires_custom_code
+          False.
         - bars contains a non-empty, strictly timestamp-increasing Bar
           sequence for every symbol spec references.
         - starting_equity > 0.
+        - entry_slippage_bps >= 0.
 
     Returns:
         One ReferenceTrade per fully closed position, in global emission
@@ -88,6 +95,19 @@ def simulate(
   paired with a spec only at the backtest-orchestration layer, not part of
   `StrategySpec` itself. A caller reproducing a specific backtest run passes
   that run's `BacktestConfig.initial_capital` through as `starting_equity`.
+- `entry_slippage_bps` — likewise not read off `spec`: it mirrors the
+  separate `BacktestConfig.slippage_bps`. It is needed **only** to compute an
+  internal entry-price *basis* for anchoring `basis="entry_price"`
+  stop-loss/take-profit/scaled-take-profit levels and the trailing-stop
+  watermark seed (§5's `stop_loss` subsection) — production's real engine
+  anchors those against `Position.entry_price`, which is the **post-slippage**
+  fill, not the pre-slippage bid `ReferenceTrade.entry_price` reports (§3).
+  It does **not** reintroduce slippage into this module's own output fields
+  or into fill-price computation anywhere else — `ReferenceTrade.entry_price`/
+  `exit_price` stay the pre-slippage bid values (§3), unaffected by this
+  parameter; only the internal rule-level anchor changes. A caller
+  reproducing a specific backtest run passes that run's
+  `BacktestConfig.slippage_bps` through.
 - Return value: one `ReferenceTrade` per **fully closed** position, in
   emission order — never one row per partial exit. A position reduced by one
   or more `scaled_take_profit` rungs before its final closing event
@@ -163,9 +183,20 @@ no import chain back into the excluded modules above before relying on it.
   across a `ScaledTakeProfitRule`'s levels — `simulate` may assume every
   ladder's rungs never over-close a position and does not need its own
   defensive check for this).
+- `spec.requires_custom_code is False`. A `requires_custom_code=True` spec's
+  production entries/quantities come entirely from LLM-authored
+  `strategy_code`, not `spec.entry_rules`/`spec.sizing` — the backtest mode
+  passes `entry_rules=None`, `sizing=None`, `target_symbols=None` to the live
+  dispatcher for such a spec, bypassing the DSL engine path this module
+  re-simulates entirely. Re-simulating `spec.entry_rules` against a
+  custom-code spec would produce a ledger with no relationship to what
+  production actually traded — this module is out of scope for that case
+  (already covered by a separate replay-oracle epic for Path-B/custom-code
+  faithfulness).
 - For every symbol `spec` references, `bars[symbol]` is non-empty and
   strictly increasing by `timestamp`.
 - `starting_equity > 0`.
+- `entry_slippage_bps >= 0`.
 
 **Postconditions:**
 - The returned list is in **global emission order**: a `ReferenceTrade` is
@@ -193,10 +224,10 @@ no import chain back into the excluded modules above before relying on it.
 **Invariants:**
 - `simulate` has no side effects: it does not mutate `spec` or `bars`, and
   performs no I/O.
-- `simulate` is deterministic — identical `(spec, bars, starting_equity)`
-  inputs always produce an identical output list. This is required for it
-  to function as a reference oracle; a non-deterministic simulator cannot be
-  diffed meaningfully against a single production run.
+- `simulate` is deterministic — identical `(spec, bars, starting_equity,
+  entry_slippage_bps)` inputs always produce an identical output list. This
+  is required for it to function as a reference oracle; a non-deterministic
+  simulator cannot be diffed meaningfully against a single production run.
 
 ## 3. `ReferenceTrade` schema
 
@@ -232,6 +263,14 @@ production's `entry_fill_price`/`exit_fill_price` (and their legacy
 explicitly excludes slippage/cost modeling (§1), its own `entry_price`/
 `exit_price` are the pre-slippage reference levels — directly comparable to
 production's `entry_bid_price`/`exit_bid_price`, not the fill prices.
+
+**Rounding.** Production rounds `entry_bid_price`/`exit_bid_price` — 4
+decimal places when the price is below $10, 2 decimal places otherwise
+(`dp = 4 if ref_price < 10 else 2`) — before storing them. `ReferenceTrade.
+entry_price`/`exit_price` must be rounded the same way, or a raw
+percentage-derived level (which commonly carries more decimal places than
+either rounding bucket allows) will show as a spurious mismatch against
+production's own rounded fields for every single trade.
 
 **Why both a bar index and a date string:** `entry_bar`/`exit_bar` are this
 module's own primary keys — needed internally to track ladder-rung
@@ -314,6 +353,21 @@ is not None` and an already-queued same-symbol entry). Without this, a
 predicate that stays true for several consecutive bars would open one
 production position but many overlapping reference ones.
 
+**Target-symbol gating.** When `spec.target_symbols` is non-empty, an entry
+rule is evaluated **only** for symbols in that set — mirrors `maybe_emit`'s
+early return (`if self.target_symbols and cur_bar.symbol not in
+self.target_symbols: return`), which skips predicate evaluation entirely,
+before any trigger check, for a symbol outside it. A `bars` mapping that
+happens to include auxiliary symbols beyond `spec.target_symbols` (e.g. a
+benchmark or a signal-only symbol) must not have entries opened against
+those extra symbols by this rule.
+
+**Nonpositive close.** `Bar` does not itself validate OHLC values as
+positive, so a trigger bar with `close <= 0` is not excluded by this
+document's own preconditions. Mirror `_compute_qty`'s own guard: if
+`trigger_bar.close <= 0`, the entry sizes to zero and no position opens —
+never divide by it or produce a negative/undefined quantity.
+
 **Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
 against a running equity figure it tracks itself — seeded at
 `starting_equity`, then marked to market at each entry-sizing decision using
@@ -383,13 +437,45 @@ fixed-notional, volatility-target) — a `FixedNotionalSizing`
 or `VolatilityTargetSizing` result above the cap must be reduced, not passed
 through uncapped.
 
+**Additional admission gates beyond the position-size cap.** `max_position_pct`
+is not the only limit a real entry must clear. `spec.risk_limits` (the same
+model this module already reads `max_position_pct` from) also carries
+`max_open_positions`, `max_gross_leverage`, and `max_symbol_concentration_pct`
+— production applies all of these at fill time via `RiskFilter.can_enter`,
+independently of the sizing-time clamp above. This module must apply the
+same gates before opening an entry, using its own tracked state (currently
+open reference positions, and the running equity figure already tracked for
+sizing): reject the entry (open no position for that trigger) if it would
+push the count of open positions past `max_open_positions`, gross notional
+exposure (`sum(|qty * price|)` across all open positions plus this
+candidate) past `max_gross_leverage * equity`, or this single symbol's
+notional past `max_symbol_concentration_pct` of `equity`.
+
+**Fill-time capital sufficiency.** Beyond sizing and risk-gate checks at the
+trigger bar, production re-checks affordability at the fill bar itself:
+`FillSimulator._fill_entry` rejects an entry when `portfolio.capital <
+filled_qty * reference_price` — the sized notional may no longer be
+affordable by the time the entry actually fills (a gap up from the trigger
+bar's close, or another symbol's entry consuming cash first in the same
+merged walk). This requires tracking a **second** running figure alongside
+equity: available **capital** (cash), separate from equity (cash plus
+unrealized position value) — mirroring `Portfolio.capital` vs.
+`Portfolio.mark_to_market()`. Capital decreases by each entry's filled
+notional and increases by each exit's proceeds; if `capital <
+qty * entry_price` at the entry's actual fill bar, the entry does not open
+(no position, no `ReferenceTrade`), even though the sizing-bar checks above
+already passed.
+
 **Fractionality source.** Whether an asset class trades in fractional units
 is a single flag derived from `spec.asset_class` (not a per-symbol
-setting) via the same predicate production uses: crypto/forex normalize to
-fractional-capable, every other canonical class (stocks, options, futures,
-commodities) normalizes to whole-lot — mirrors `is_fractional_asset_class`,
-which checks the spec's normalized asset class against a fixed whole-lot
-set. This one flag applies uniformly to every symbol `bars` covers, since
+setting) via the same predicate production uses: `is_fractional_asset_class`
+checks the spec's normalized asset class against a fixed whole-lot set,
+`WHOLE_LOT_ASSET_CLASSES = {"stocks", "futures", "commodities"}` — note that
+`"options"` is **not** in this set, so this codebase classifies options as
+fractional-capable, the same as crypto/forex, even though options trade in
+whole contracts in reality; this module must match that classification
+exactly rather than the intuitively-expected whole-lot grouping. This one
+flag applies uniformly to every symbol `bars` covers, since
 `StrategySpec.asset_class` is a single spec-wide field, not indexed by
 symbol.
 
@@ -479,16 +565,74 @@ identical to production, not just directionally similar:
   "queued orders fill before this bar's own checks" as a blanket rule; it
   only holds when nothing has been resting on the book for this position
   already.
+  - **Exception: a resting `style="limit"` stop-loss does not get this FIFO
+    chance at all — it is retired outright the moment any other rule's
+    close is chosen for the same position.** Production excludes a resting
+    limit-style stop from its own exit evaluation once it is resting, so any
+    intent chosen while it rests is necessarily a *different* rule; the
+    moment that different rule's close is decided, production immediately
+    cancels the resting stop-limit (mirrors `_retire_orders_against_closed_
+    position`), before that other rule's close even reaches its own fill
+    bar. So a `style="limit"` stop can never "win FIFO" against a later
+    `signal_exit` close the way a bracket leg or a still-resting `market`-
+    style stop/take-profit/scaled rung can — by the time any competing
+    close would fill, this module must have already removed the
+    `style="limit"` stop from consideration, the same bar the competing
+    rule's intent was chosen.
+
+### Engine-injected short safety stop
+
+Before evaluating any exit rule, this module must reproduce one
+preprocessing step production applies to the spec: for any spec that permits
+short exposure — `spec.entry_rules is None` (the `requires_custom_code`
+signal — excluded from this module's scope per §2's precondition, so in
+practice this means any `EntryRule.side == "short"`) — and that has no
+already-effective short-side stop among its existing exit rules, production
+**appends** a synthetic `StopLossRule(pct=1.0, basis="entry_price")` to the
+working `exit_rules` list, mirroring the same "no effective short stop"
+check production uses (`first_side_stop_factor(exit_rules, "short") is
+None`). This is a **real, indexable** rule once injected — not a
+side-channel default — so a short position that runs to double its entry
+price closes via this synthetic rule in production, with a genuine
+`rule_index` one past the last authored rule
+(`len(spec.exit_rules)`), attributable exactly like any other `stop_loss`.
+This module must perform the same injection into its own working rule list
+before evaluating exits, or it will silently lack a real exit rule that
+production's ledger actually fires.
 
 ### `stop_loss`
 
 Covers all `basis` × `style` combinations from `StopLossRule`. Unlike a
 bracket leg (see `oco_bracket` below), a standalone stop/take-profit's
-`basis="entry_price"` level is anchored to the position's actual
-`ReferenceTrade.entry_price` (the next-bar-open fill from the "Entries"
-subsection above) — these rules evaluate against the live position after it
-has actually filled, not against a signal-time reference resolved before
-fill.
+`basis="entry_price"` level is anchored to the position's actual fill —
+these rules evaluate against the live position after it has actually
+filled, not against a signal-time reference resolved before fill (that's
+what distinguishes them from `oco_bracket`'s trigger-bar-close anchor
+below).
+
+**Anchor price is post-slippage, not `ReferenceTrade.entry_price`.**
+Production's engine computes these levels against `Position.entry_price`,
+which is the **post-slippage** fill (`entry_bid_price × (1 ± slippage_bps /
+10_000)`, sign `+` for a long entry, `-` for a short — the same formula
+`trade_record_schema.md` documents for `entry_fill_price`, with no
+order-type adverse-selection add-on since every entry here is a market
+fill). This module's own `ReferenceTrade.entry_price` output field is the
+**pre-slippage** bid (§3, by design, for direct comparability against
+production's `entry_bid_price`) — so the two must not be conflated. This
+module needs an internal-only `entry_price_basis = entry_bid_price × (1 ±
+entry_slippage_bps / 10_000)` (using the `entry_slippage_bps` parameter,
+§2, applied to the same pre-slippage bid `ReferenceTrade.entry_price`
+itself reports — never re-derived from the emitted field in a way that
+would suggest they're the same thing), and must anchor every
+`basis="entry_price"` level, `take_profit`/
+`scaled_take_profit` target, and the trailing-stop watermark seed below
+against `entry_price_basis` — **never** against the emitted
+`ReferenceTrade.entry_price` value directly. Anchoring against the
+pre-slippage value instead would shift every such level (and potentially
+which bar crosses it) away from where production's real engine actually
+places its resting orders, for no reason other than this module's own
+choice of comparison field — precisely the kind of self-inflicted,
+trivial divergence this reference ledger exists to avoid.
 
 - **`style="market"`** (any `basis`): fires the bar the price level is
   breached. Fill price is the level itself, or — on a gap where the bar's
@@ -502,14 +646,16 @@ fill.
   trailing-low stop) and re-derive the effective stop level from it each
   bar, since the reused decision evaluator is stateless per call and does
   not itself carry this history. **Seed value**: the watermark is
-  initialized to `entry_price` — **not** `entry_bar`'s own high/low —
-  mirroring `_TrackedPosition`'s own initialization (`high_since_entry =
-  low_since_entry = pos.entry_price`); including the entry bar's actual
-  high/low here would be intrabar lookahead the same way including the
-  current bar's would be (see below). Since this kind isn't eligible until
-  `entry_bar + 1` (per "Per-bar evaluation order" above), the first trigger
-  check — on `entry_bar + 1` — runs against this `entry_price` seed, then
-  extends with `entry_bar + 1`'s own high/low for the bar after that.
+  initialized to `entry_price_basis` (the post-slippage anchor defined
+  above) — **not** `ReferenceTrade.entry_price`, and **not** `entry_bar`'s
+  own high/low — mirroring `_TrackedPosition`'s own initialization
+  (`high_since_entry = low_since_entry = pos.entry_price`, production's
+  post-slippage fill); including the entry bar's actual high/low here would
+  be intrabar lookahead the same way including the current bar's would be
+  (see below). Since this kind isn't eligible until `entry_bar + 1` (per
+  "Per-bar evaluation order" above), the first trigger check — on
+  `entry_bar + 1` — runs against this `entry_price_basis` seed, then extends
+  with `entry_bar + 1`'s own high/low for the bar after that.
   **Evaluate-then-extend ordering matters** on every bar thereafter too:
   each bar's trigger check must run against the watermark **as of the prior
   bar** — not yet including this bar's own high/low — and only *after* that
@@ -546,8 +692,10 @@ fill.
 ### `take_profit`
 
 Modeled as a resting limit at the exact target price
-(`entry_price * (1 ± pct)`). Always fills at **exactly** the target — never
-better, never worse, even on a gap through it — which is a deliberate
+(`entry_price_basis * (1 ± pct)` — the post-slippage anchor `stop_loss`
+defines above, not `ReferenceTrade.entry_price`). Always fills at
+**exactly** the target — never better, never worse, even on a gap through
+it — which is a deliberate
 production design choice, not merely "a limit never fills worse than its
 price" (that premise alone would permit *better*-than-target price
 improvement on a gap, which this module must **not** model): the default
@@ -566,8 +714,10 @@ Fill bar is the trigger bar.
 ### `scaled_take_profit`
 
 A ladder of resting limit orders, one per `TakeProfitLevel`, each at
-`entry_price * (1 ± level.pct)` — `level.pct` is a positive magnitude,
-strictly increasing across `levels` by construction (Pydantic-enforced), so
+`entry_price_basis * (1 ± level.pct)` (same post-slippage anchor as
+`take_profit`, not `ReferenceTrade.entry_price`) — `level.pct` is a positive
+magnitude, strictly increasing across `levels` by construction
+(Pydantic-enforced), so
 rung 0 is always the target closest to entry and the last rung the target
 farthest away, on **either** side (a short's targets sit below entry, but
 "closest" still means smallest `pct`, not most negative price). Each rung's
