@@ -90,23 +90,31 @@ def record_resolve_failure(
 
 @timed_query(store=_STORE, op="has_recorded_resolve_failure")
 def has_recorded_resolve_failure(
-    owner: str, repo: str, pr_number: int, thread_id: str, khala_reply_comment_id: int
+    owner: str, repo: str, pr_number: int, thread_id: str, khala_reply_comment_id: Optional[int]
 ) -> bool:
     """Return whether a resolve attempt for THIS thread/reply is on record as failed.
 
     Preconditions:
         - ``khala_reply_comment_id`` is the id of the Khala-generated reply
           currently the thread's latest message (from a fresh
-          ``list_review_comments`` read).
+          ``list_review_comments`` read) — ``Optional`` only to keep this
+          read's signature symmetric with :func:`record_resolve_failure`'s
+          write side (which can store ``NULL`` when the reply's id could not
+          be captured); every current caller passes a real int, since
+          ``_unresolved_comments`` only calls this for an already-fetched
+          comment.
     Postconditions:
         - Returns True only when a row exists for ``(owner, repo, pr_number,
           thread_id)`` AND its recorded ``khala_reply_comment_id`` matches the
-          one given — a row recorded against an older reply (superseded by a
-          newer Khala reply since) does not count as evidence for the current
-          one. Returns False on any Postgres error, when Postgres is disabled,
-          or when no matching row exists — "no evidence" is the safe default,
-          since callers use this to decide whether it is safe to auto-resolve.
-          Never raises.
+          one given, compared NULL-safely (``IS NOT DISTINCT FROM`` — plain
+          ``=`` never matches when either side is ``NULL``, which would
+          silently make a failure recorded with an unknown reply id
+          permanently unreadable) — a row recorded against an older reply
+          (superseded by a newer Khala reply since) does not count as
+          evidence for the current one. Returns False on any Postgres error,
+          when Postgres is disabled, or when no matching row exists — "no
+          evidence" is the safe default, since callers use this to decide
+          whether it is safe to auto-resolve. Never raises.
     """
     if not is_postgres_enabled():
         return False
@@ -115,7 +123,7 @@ def has_recorded_resolve_failure(
             cur.execute(
                 """SELECT 1 FROM address_comments_resolve_attempts
                    WHERE owner = %s AND repo = %s AND pr_number = %s AND thread_id = %s
-                     AND khala_reply_comment_id = %s""",
+                     AND khala_reply_comment_id IS NOT DISTINCT FROM %s""",
                 (owner, repo, pr_number, thread_id, khala_reply_comment_id),
             )
             return cur.fetchone() is not None

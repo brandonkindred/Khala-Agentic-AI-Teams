@@ -91,6 +91,9 @@ interface RunRowVm {
  */
 type RunIdentity = { type: 'issue'; number: number } | { type: 'pr'; number: number };
 
+/** The coding-team page's available sub-views. */
+type CodingTeamPageView = 'chat' | 'github' | 'pulls' | 'jobs' | 'issues';
+
 /**
  * The run identity carried by a job's GitHub context, or null when it carries neither.
  * If both `issue_number` and `pr_number` are present, the issue identity wins so the Runs
@@ -179,13 +182,13 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly notifications = inject(NotificationService);
 
   /** Which single view is visible. The page opens on the job Runs panel. */
-  private _activeView: 'chat' | 'github' | 'pulls' | 'jobs' | 'issues' = 'jobs';
+  private _activeView: CodingTeamPageView = 'jobs';
 
-  get activeView(): 'chat' | 'github' | 'pulls' | 'jobs' | 'issues' {
+  get activeView(): CodingTeamPageView {
     return this._activeView;
   }
 
-  set activeView(view: 'chat' | 'github' | 'pulls' | 'jobs' | 'issues') {
+  set activeView(view: CodingTeamPageView) {
     this._activeView = view;
     // Auto-load out-of-scope issues when switching to the Issues tab with a repo selected.
     if (view === 'issues' && this.selectedRepo && this.oosProposals.length === 0 && !this.oosLoading) {

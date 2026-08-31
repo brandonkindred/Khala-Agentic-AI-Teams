@@ -3079,8 +3079,12 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
     Postconditions:
         - On success returns the started job's id, PR url, unresolved-comment count, and
-          initial status. Every failure path raises ``HTTPException`` with an explanatory
-          detail; no ``httpx`` or ``subprocess`` error escapes unhandled.
+          initial status. Every failure path this function's own code anticipates (lock
+          acquisition, the coding-team admission pre-check, the clone/fetch, and the
+          forward-and-validate call) raises ``HTTPException`` with an explanatory detail.
+          An unexpected exception from an earlier helper (``_resolve_github_target``,
+          ``_require_coding_team_url``, ``_resolve_repo_path``, ``_repo_path_override``)
+          is NOT converted here and propagates as-is (a 500).
         - The checkout is namespaced per-PR (``pr-{pr_number}``, unless the operator
           pins an explicit ``repo_path`` override) and cloned/fetched here before the
           job is forwarded, mirroring ``run_github_issue``: unlike a plain PR review
@@ -3129,11 +3133,25 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
         # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
         # on an existing parent is a no-op needing no write permission, so this
         # stays safe for an operator path under a read-only parent.
-        await loop.run_in_executor(
-            None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
-        )
-        await loop.run_in_executor(None, lock_cm.__enter__)
-        lock_held = True
+        try:
+            await loop.run_in_executor(
+                None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
+            )
+        except OSError as e:
+            if platform_owned:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"could not create checkout parent directory for {owner}/{repo}: {e}",
+                ) from e
+            logger.warning(
+                "github address-comments: could not create checkout parent directory for "
+                "pinned checkout %s: %s",
+                repo_path,
+                e,
+            )
+        else:
+            await loop.run_in_executor(None, lock_cm.__enter__)
+            lock_held = True
     except OSError as e:
         if platform_owned:
             raise HTTPException(

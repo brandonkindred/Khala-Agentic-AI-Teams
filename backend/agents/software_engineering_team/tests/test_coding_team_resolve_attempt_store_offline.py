@@ -112,6 +112,23 @@ def test_has_recorded_resolve_failure_false_when_no_row(monkeypatch) -> None:
     assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is False
 
 
+def test_has_recorded_resolve_failure_uses_null_safe_comparison(monkeypatch) -> None:
+    """P1 regression: a row recorded with `khala_reply_comment_id=None` (the
+    reply's id could not be captured) must remain reachable by a read call
+    that also passes `None` — plain SQL `=` never matches `NULL` on either
+    side, which would otherwise make such a row permanently invisible to
+    `has_recorded_resolve_failure`, silently defeating the ledger for that
+    thread. The query must use a NULL-safe comparison instead."""
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    cursor = _FakeCursor(fetchone_result=(1,))
+    monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
+
+    assert store.has_recorded_resolve_failure("o", "r", 7, "T1", None) is True
+    _query, params = cursor.executed[0]
+    assert "IS NOT DISTINCT FROM" in _query
+    assert params == ("o", "r", 7, "T1", None)
+
+
 def test_record_resolve_failure_upserts_with_expected_params(monkeypatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
     cursor = _FakeCursor()
