@@ -2446,8 +2446,9 @@ def _resolve_repo_path(
           ends in ``pr-{pr_number}``, and two distinct numbers (of the same kind)
           map to two distinct paths.
         - Raises ``HTTPException(400)`` when ``owner``/``repo`` are missing or
-          carry a path separator, ``..`` segment, or null byte, when
-          ``issue_number`` or ``pr_number`` is non-positive, or when both are
+          carry a path separator, ``..`` segment, null byte, or leading/trailing
+          whitespace, when ``issue_number`` or ``pr_number`` is non-positive, or
+          when both are
           set — defense-in-depth so this path builder can't be coerced into
           escaping the workspace root, building a degenerate ``issue-0``/``pr-0``
           segment, or building an ambiguous path, even if a caller skipped
@@ -2889,7 +2890,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     except OSError as e:
         if platform_owned:
             raise HTTPException(
-                status_code=502, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
+                status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
             ) from e
         # Best-effort for an operator-pinned path: degrade to no additional
         # locking rather than failing an otherwise-valid request, matching
@@ -3149,7 +3150,7 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
     except OSError as e:
         if platform_owned:
             raise HTTPException(
-                status_code=502, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
+                status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
             ) from e
         # Best-effort for an operator-pinned path (see Postconditions): degrade to
         # no additional locking rather than failing an otherwise-valid request.

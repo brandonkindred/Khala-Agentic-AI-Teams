@@ -64,14 +64,16 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
 
 # GraphQL query for the FULL review-thread listing (resolution state + the thread's
 # node id + each comment's databaseId). The read-only
-# ``get_resolved_review_thread_comment_ids`` only needs comment ids of resolved
-# threads; addressing unresolved comments needs the thread node ``id`` too so the
-# thread can be resolved via the ``resolveReviewThread`` mutation, and the per-thread
-# comment ids so a REST reply can be posted to the right comment. Kept separate from
-# ``_REVIEW_THREADS_QUERY`` (which also independently gained a nested-page-detection
-# ``pageInfo { hasNextPage }`` inside ``comments`` — the two queries are not identical
-# in shape, only distinct in PURPOSE: this one needs the thread ``id`` and per-comment
-# ``databaseId``, the other needs neither).
+# ``get_resolved_review_thread_comment_ids`` (using ``_REVIEW_THREADS_QUERY`` below)
+# needs each comment's ``databaseId`` too — its own comment-id-set result requires
+# it — but NOT the thread's node ``id``, since it never resolves a thread, only
+# reports resolution state. Addressing unresolved comments needs BOTH: the thread
+# node ``id`` so the thread can be resolved via the ``resolveReviewThread``
+# mutation, and the per-thread comment ids so a REST reply can be posted to the
+# right comment. Kept separate from ``_REVIEW_THREADS_QUERY`` (which also
+# independently gained a nested-page-detection ``pageInfo { hasNextPage }`` inside
+# ``comments`` — the two queries are not identical in shape, only distinct in
+# PURPOSE: this one additionally needs the thread ``id``, the other doesn't).
 _REVIEW_THREADS_FULL_QUERY = f"""
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
   repository(owner: $owner, name: $repo) {{

@@ -200,8 +200,8 @@ def test_wraps_upstream_5xx_error_in_generic_message(
     mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch
 ):
     """A 5xx from the coding-team service is deliberately NOT propagated
-    verbatim (it could carry an internal stack trace) — `_forward_to_coding_
-    team` wraps it in a generic, client-safe message instead."""
+    verbatim (it could carry an internal stack trace) — `_forward_to_coding_team`
+    wraps it in a generic, client-safe message instead."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(502, {"detail": "github api error"}))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -337,13 +337,14 @@ def test_checkout_lock_held_around_the_whole_flow(mock_cfg, mock_cred, mock_path
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget/pr-7")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_502_when_platform_owned_lock_acquisition_fails(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
+def test_503_when_platform_owned_lock_acquisition_fails(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     """Platform-owned checkouts rely on the clone lock for correctness; a
-    failure to acquire it is a hard failure and must surface as 502, not
-    proceed to an unguarded clone."""
+    failure to acquire it is a hard failure and must surface as 503 (a local
+    workspace/serialization problem, not an upstream gateway error), and
+    never proceed to an unguarded clone."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     resp = client.post(_URL, json={})
-    assert resp.status_code == 502
+    assert resp.status_code == 503
     assert "clone lock" in resp.json()["detail"]
     mock_clone.assert_not_called()
 

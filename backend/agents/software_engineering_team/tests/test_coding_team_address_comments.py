@@ -835,6 +835,54 @@ class TestHandleComment:
         assert fake.replies and fake.replies[0][0] == 2
         assert fake.resolved == ["T2"]
 
+    def test_pr_closed_during_dispatch_skips_reply_and_resolve(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The implementation workflow can block for a long time; if the PR
+        is merged or closed while it's running, the fix has already been
+        published by the time `_dispatch_implementation` returns (that
+        can't be undone from here), but replying to and resolving the
+        thread on an already-closed PR must still be skipped."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        calls = {"n": 0}
+        real_pr = fake.pr
+
+        def _get_pull_request(_o, _r, _n):
+            calls["n"] += 1
+            # The post-triage and post-planning freshness checks both see the
+            # PR still open; the NEW post-dispatch check discovers it closed.
+            if calls["n"] <= 2:
+                return real_pr
+            return replace(real_pr, state="closed")
+
+        fake.get_pull_request = _get_pull_request  # type: ignore[assignment]
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "no longer open" in outcome.detail
+        assert address_env["child_jobs"]  # the implementation job DID run
+        assert fake.replies == []  # but no reply or resolve followed
+        assert fake.resolved == []
+
     def test_new_reviewer_feedback_during_workflow_prevents_resolution(
         self, address_env, monkeypatch
     ) -> None:

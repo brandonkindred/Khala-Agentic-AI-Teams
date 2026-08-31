@@ -426,10 +426,14 @@ def _unresolved_comments(
 def _read_cited_code(client: Any, owner: str, repo: str, comment: ReviewComment, ref: str) -> str:
     """Read the file the comment points at (best-effort), for grounding the LLM.
 
+    Preconditions:
+        - ``ref`` is the PR head SHA at which the comment was made — this
+          function reads whatever ``ref`` the caller passes; it does not
+          verify or canonicalize it.
     Postconditions:
-        - Returns the cited file's text at ``ref`` (the PR head SHA) or "" when it
-          cannot be read. Never raises — a missing file just means the triage runs
-          on the comment alone.
+        - Returns the cited file's text at ``ref``, or "" when it cannot be
+          read. Never raises — a missing file just means the triage runs on
+          the comment alone.
     """
     if not comment.path:
         return ""
@@ -946,6 +950,7 @@ def _reply_and_resolve(
           ``comment_ids`` (should also not normally happen — a real thread
           always has at least a root comment).
     """
+    history = thread_history if thread_history is not None else [comment]
     if thread is not None and _thread_has_new_reviewer_feedback(
         client,
         request.owner,
@@ -953,7 +958,7 @@ def _reply_and_resolve(
         request.pr_number,
         thread.id,
         comment.id,
-        thread_history if thread_history is not None else [comment],
+        history,
     ):
         logger.info(
             "address-comments: skipping reply/resolve on thread %s — newer "
@@ -1001,7 +1006,7 @@ def _reply_and_resolve(
             request.pr_number,
             thread.id,
             comment.id,
-            thread_history if thread_history is not None else [comment],
+            history,
         ):
             logger.info(
                 "address-comments: skipping resolve on thread %s — newer reviewer "
@@ -1276,6 +1281,33 @@ def _handle_comment(
             pr_remote,
             token,
         )
+        # `_dispatch_implementation` can block for a long time (an implementation
+        # workflow, possibly reattaching across hours), and by the time it returns
+        # the child workflow has ALREADY published to the PR's branch — that
+        # mutation can't be undone or prevented from here. But the PR can ALSO
+        # have been merged or closed during that same window, and without this
+        # check the reply/resolve below would still fire against it: posting a
+        # "fixed" comment and closing the conversation on a PR that is no longer
+        # open. Best-effort — a failed re-check degrades to proceeding, matching
+        # every other freshness check in this module.
+        try:
+            post_dispatch_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
+        except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block
+            logger.warning(
+                "address-comments: could not re-check PR state after dispatching comment %s's "
+                "implementation: %s",
+                comment.id,
+                scrub_token_from_text(str(e)),
+            )
+        else:
+            if post_dispatch_pr.state != "open":
+                base.detail = (
+                    f"PR {request.owner}/{request.repo}#{request.pr_number} is no longer open "
+                    f"(state={post_dispatch_pr.state}); the fix was published by job "
+                    f"{child_job_id} but the thread was left as-is rather than replying to or "
+                    "resolving a conversation on a closed PR."
+                )
+                return base
         reply = (
             f"Addressed by the software-engineering team in job `{child_job_id}`. "
             f"{plan.chosen_plan}"
