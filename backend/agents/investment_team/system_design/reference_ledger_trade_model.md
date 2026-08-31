@@ -58,7 +58,26 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   reports for a low-liquidity symbol or an outsized order (relative to bar
   volume) should be read as "outside this module's modeled execution
   mechanics," not a rule-evaluation bug the later matching module should
-  flag the same way it would a genuine spec/engine mismatch.
+  flag the same way it would a genuine spec/engine mismatch. The same
+  exclusion covers a second, related mechanic for the same reason: the
+  default `RealisticExecutionModel` layers a participation-dependent
+  **adverse-selection slippage haircut** (`extra_slip_bps`, on top of the
+  base `slippage_bps`) onto `LIMIT`/`STOP_LIMIT` fills specifically —
+  `take_profit`, `scaled_take_profit` rungs, `bracket_take_profit`, and a
+  `style="limit"` `stop_loss`/`bracket_stop_loss` all materialize as one of
+  those two order types in production. This module's internal
+  `entry_price_basis`/`exit_price_basis` capital-ledger formulas (§5's
+  `stop_loss` and "Entries" subsections) use only the base
+  `entry_slippage_bps` input and do not, and cannot, reproduce this haircut
+  — it is participation- and next-bar-dependent, computed inside
+  `execution_model.py`, which §2 already forbids this module from
+  importing. Consequently, this module's tracked capital after a
+  `take_profit`/`scaled_take_profit`/limit-style-stop exit can be higher
+  than production's real (haircut-reduced) capital, and a later entry this
+  module's capital-sufficiency check admits on that basis, while
+  production's real run rejects it for insufficient capital, is an expected
+  divergence attributable to this same excluded mechanic — not a
+  rule-attribution bug.
 - **Cost-aware position sizing.** Entry quantity is resolved from
   `spec.sizing` against a running equity figure this module tracks itself
   (seeded from the `starting_equity` input, marked to market from this
