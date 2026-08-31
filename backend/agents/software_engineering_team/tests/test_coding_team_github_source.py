@@ -43,7 +43,10 @@ from software_engineering_team.github_source.client_http import (
     _parse_next_link,
 )
 from software_engineering_team.models import CodingTeamPlanInput
-from software_engineering_team.tests.conftest import _commit_on_branch, _expected_basic_header
+from software_engineering_team.tests.git_test_helpers import (
+    _commit_on_branch,
+    _expected_basic_header,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
