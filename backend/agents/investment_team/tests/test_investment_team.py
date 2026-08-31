@@ -1264,6 +1264,20 @@ def test_strategy_spec_max_concurrent_positions_rejects_non_positive() -> None:
             )
 
 
+def test_strategy_spec_max_concurrent_positions_accepts_exact_ceiling() -> None:
+    """The documented ceiling (20) itself is accepted, not just values below it."""
+    spec = StrategySpec(
+        strategy_id="s-mcp-at-ceiling",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        max_concurrent_positions=20,
+    )
+    assert spec.max_concurrent_positions == 20
+
+
 def test_strategy_spec_max_concurrent_positions_rejects_above_ceiling() -> None:
     with pytest.raises(ValidationError):
         StrategySpec(
