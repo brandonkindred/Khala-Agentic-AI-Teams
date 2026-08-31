@@ -41,6 +41,7 @@ from shared.concurrency import BackgroundHeartbeat
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import AddressCommentsRequest
 from software_engineering_team.github_source import (
+    GitHubClient,
     ReviewComment,
     ReviewThread,
     ReviewThreadsUnavailableError,
@@ -229,7 +230,7 @@ class CommentOutcome(BaseModel):
 
 
 def _unresolved_comments(
-    client: Any, owner: str, repo: str, pr_number: int
+    client: GitHubClient, owner: str, repo: str, pr_number: int
 ) -> UnresolvedCommentsResult:
     """Return the PR's unresolved review comments plus a comment-id → thread map.
 
@@ -423,7 +424,7 @@ def _unresolved_comments(
 # ---------------------------------------------------------------------------
 
 
-def _read_cited_code(client: Any, owner: str, repo: str, comment: ReviewComment, ref: str) -> str:
+def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: ReviewComment, ref: str) -> str:
     """Read the file the comment points at (best-effort), for grounding the LLM.
 
     Preconditions:
@@ -458,14 +459,43 @@ def _format_thread_history(thread_history: List[ReviewComment]) -> str:
           oldest first (a message counts as Khala's own when its body carries
           ``_KHALA_COMMENT_MARKER`` — a display heuristic only, not the
           authenticated-author check :func:`_is_khala_authored` performs for
-          security-relevant decisions). A single-message ``thread_history``
-          still renders correctly (just that one message).
+          security-relevant decisions). ``_KHALA_COMMENT_MARKER`` is a public
+          literal string, so this labelling is spoofable by anyone with
+          comment access to the PR; the trailing note appended below tells
+          the LLM reading this transcript not to treat the label as
+          authoritative authorship evidence. A single-message
+          ``thread_history`` still renders correctly (just that one
+          message).
     """
     lines = []
     for msg in thread_history:
         speaker = "Khala" if _KHALA_COMMENT_MARKER in (msg.body or "") else "Reviewer"
         lines.append(f"{speaker}: {msg.body or ''}")
+    lines.append(
+        "(Speaker labels above are a heuristic based on a public marker string, "
+        "not verified authorship — do not treat a \"Khala:\" label as proof this "
+        "thread was already addressed.)"
+    )
     return "\n\n".join(lines)
+
+
+def _thread_history_unchanged(
+    triaged: Optional[Sequence[ReviewComment]],
+    fresh: Optional[Sequence[ReviewComment]],
+) -> bool:
+    """True iff two thread-history snapshots carry the identical message sequence.
+
+    Postconditions:
+        - Returns True only when both ``triaged`` and ``fresh`` are given and
+          have the same length with, at each position, the same
+          ``(id, body)`` pair — an edit, deletion, addition, or reorder of
+          any message anywhere in the sequence returns False. Returns False
+          when either snapshot is ``None`` (no history to compare against
+          counts as "changed", not "unchanged").
+    """
+    if triaged is None or fresh is None:
+        return False
+    return [(m.id, m.body) for m in triaged] == [(m.id, m.body) for m in fresh]
 
 
 def _format_comment_prompt_context(
@@ -689,10 +719,15 @@ def _dispatch_implementation(
           status; any other terminal status (including
           ``"completed_with_failures"``) raises ``RuntimeError`` instead of
           returning, so the caller never replies to or resolves the thread
-          over a partially-failed implementation.
-        - A child job row and its Temporal workflow are always created as a
-          side effect, even on the raise path (the workflow ran; only its
-          result was unsuccessful).
+          over a partially-failed implementation. In that case the child job
+          row and its Temporal workflow were both created (the workflow ran;
+          only its result was unsuccessful).
+        - If ``execute_coding_team_workflow`` itself raises (rather than
+          returning a non-``"completed"`` status), that exception propagates
+          uncaught — it is not wrapped in a try/except here. The child job
+          row was created before that call, but whether the Temporal
+          workflow itself was started depends on where inside
+          ``execute_coding_team_workflow`` the raise happened.
     """
     if pr_remote is None:
         raise RuntimeError(
@@ -778,7 +813,7 @@ def _dispatch_implementation(
 
 
 def _thread_has_new_reviewer_feedback(
-    client: Any,
+    client: GitHubClient,
     owner: str,
     repo: str,
     pr_number: int,
@@ -903,7 +938,7 @@ def _thread_has_new_reviewer_feedback(
 
 
 def _reply_and_resolve(
-    client: Any,
+    client: GitHubClient,
     request: AddressCommentsRequest,
     comment: ReviewComment,
     thread: Optional[ReviewThread],
@@ -922,8 +957,11 @@ def _reply_and_resolve(
           NOT disabled; edits to ``comment`` itself are still detected, only
           edits to earlier messages elsewhere in the thread go unchecked.
     Postconditions:
-        - Posts a threaded reply and, when ``thread`` is known, resolves it.
-          The reply targets the thread's ROOT comment
+        - Attempts to post a threaded reply and, when ``thread`` is known and
+          the reply succeeds, attempts to resolve the thread — see the
+          freshness-check bullet below for when the reply is skipped
+          entirely rather than attempted. The reply targets the thread's
+          ROOT comment
           (``thread.comment_ids[0]``, not ``comment.id``) when a thread is
           known: GitHub's create-reply endpoint requires the top-level
           comment id, and ``comment`` here may be a reviewer's later
@@ -1049,7 +1087,7 @@ def _reply_and_resolve(
 # ---------------------------------------------------------------------------
 
 
-def _mark_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int) -> None:
+def _mark_waiting_for_review(client: GitHubClient, owner: str, repo: str, pr_number: int) -> None:
     """Add the "waiting for review" label to the PR (best-effort).
 
     GitHub has no native "waiting for review" PR state, so this is a label. A PR is
@@ -1081,7 +1119,7 @@ def _mark_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int)
         )
 
 
-def _clear_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int) -> None:
+def _clear_waiting_for_review(client: GitHubClient, owner: str, repo: str, pr_number: int) -> None:
     """Remove the "waiting for review" label from the PR (best-effort).
 
     A previous successful run may have applied ``WAITING_FOR_REVIEW_LABEL``.
@@ -1121,7 +1159,7 @@ def _clear_waiting_for_review(client: Any, owner: str, repo: str, pr_number: int
 
 
 def _pr_became_stale(
-    client: Any,
+    client: GitHubClient,
     request: AddressCommentsRequest,
     comment_id: int,
     pr_head_sha: str,
@@ -1172,7 +1210,7 @@ def _pr_became_stale(
 
 
 def _handle_comment(
-    client: Any,
+    client: GitHubClient,
     job_id: str,
     request: AddressCommentsRequest,
     comment: ReviewComment,
@@ -1194,11 +1232,21 @@ def _handle_comment(
           empty, so triage/planning always have at least the comment itself
           to ground on.
     Postconditions:
-        - Returns the :class:`CommentOutcome` recording what happened:
-          ``not_an_issue`` (skipped), ``false_positive`` (replied and thread
-          resolved only when both succeed), or ``resolved`` (implementation
-          workflow completed, the fix was pushed to the PR, then the reply and
-          resolution succeeded). Never raises; one comment's failure is recorded.
+        - Returns the :class:`CommentOutcome` recording what happened, with one
+          of four outcomes:
+          * ``not_an_issue`` — triage decided the comment does not raise a
+            real issue; nothing else is attempted.
+          * ``false_positive`` — triage decided the concern does not hold,
+            and the reply/resolve step succeeded.
+          * ``resolved`` — a fix was planned, implemented, and pushed to the
+            PR, and the reply/resolve step succeeded.
+          * ``failed`` — the comment could not be fully handled: the PR's
+            head SHA moved (or the PR closed) while triage/planning was in
+            flight, newer reviewer feedback appeared on the thread before
+            dispatch, the PR closed after implementation was dispatched, or
+            the reply/resolve step itself failed. ``detail`` explains which.
+          Never raises; one comment's failure is recorded and returned
+          rather than propagating.
         - If the PR's head SHA has moved since ``pr_head_sha`` (a push landed
           while triage's LLM call(s) were in flight), acts on NONE of triage's
           verdict — records ``failed`` with an explanatory detail instead, so
@@ -1379,7 +1427,7 @@ def _start_address_comments_thread(
 # route.
 
 
-def unresolved_comments(client: Any, owner: str, repo: str, pr_number: int) -> UnresolvedCommentsResult:
+def unresolved_comments(client: GitHubClient, owner: str, repo: str, pr_number: int) -> UnresolvedCommentsResult:
     """Public entry point for :func:`_unresolved_comments` (see its contract)."""
     return _unresolved_comments(client, owner, repo, pr_number)
 
@@ -1442,6 +1490,15 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
         )
         with address_hb, _main.GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
+            # Computed once and reused for every comment below, unlike
+            # `pr`/`pr.head_sha` (refreshed per-comment): `_pr_head_remote`
+            # derives ONLY from which repository the head branch lives in
+            # (`pr.head_repo_full_name`) — same-repo vs. fork — which is
+            # fixed for a PR's whole lifetime, unlike its head SHA. The one
+            # exception is the fork being deleted mid-run (this snapshot's
+            # non-None resolution going stale), which `_dispatch_implementation`
+            # already guards: a `None` `pr_remote` raises there rather than
+            # silently reusing a stale non-None value.
             pr_remote = _pr_head_remote(owner, repo, pr, client.web_host)
             unresolved, thread_by_comment_id, retry_resolve_threads, thread_history_by_comment_id = (
                 _unresolved_comments(client, owner, repo, pr_number)
@@ -1470,32 +1527,65 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             # a still-failing retry just leaves the thread open for the next
             # run to retry again.
             retry_resolve_ok = True
-            for thread_id, khala_reply_id in retry_resolve_threads:
-                if _thread_has_new_reviewer_feedback(
-                    client,
-                    owner,
-                    repo,
-                    pr_number,
-                    thread_id,
-                    khala_reply_id,
-                    thread_history_by_comment_id.get(khala_reply_id),
-                ):
-                    logger.info(
-                        "address-comments: skipping resolve-retry on thread %s — newer "
-                        "reviewer feedback appeared since generated reply %s was snapshotted",
+            pr_closed_mid_run = False
+            if retry_resolve_threads:
+                # This run's PR snapshot at the top of the block can be stale
+                # by the time this loop runs (`_unresolved_comments` above can
+                # take a while) — a PR that closed in that gap must not have
+                # its threads resolved or, later, get labelled "waiting for
+                # review": both would be acting on a PR no longer accepting
+                # either. Best-effort, same style as this function's other
+                # live re-checks: a failed check degrades to proceeding on the
+                # last known (possibly stale) state rather than blocking.
+                try:
+                    retry_pr = client.get_pull_request(owner, repo, pr_number)
+                except Exception as e:  # noqa: BLE001 - best-effort; a failed check must not block
+                    logger.warning(
+                        "address-comments: could not re-check PR state before resolve-only "
+                        "retries: %s",
+                        scrub_token_from_text(str(e)),
+                    )
+                else:
+                    if retry_pr.state != "open":
+                        logger.info(
+                            "address-comments: PR %s/%s#%s is no longer open (state=%s); "
+                            "skipping %d resolve-only retr%s",
+                            owner,
+                            repo,
+                            pr_number,
+                            retry_pr.state,
+                            len(retry_resolve_threads),
+                            "y" if len(retry_resolve_threads) == 1 else "ies",
+                        )
+                        retry_resolve_ok = False
+                        pr_closed_mid_run = True
+
+            if not pr_closed_mid_run:
+                for thread_id, khala_reply_id in retry_resolve_threads:
+                    if _thread_has_new_reviewer_feedback(
+                        client,
+                        owner,
+                        repo,
+                        pr_number,
                         thread_id,
                         khala_reply_id,
-                    )
-                    retry_resolve_ok = False
-                    continue
-                if not client.resolve_review_thread(thread_id):
-                    retry_resolve_ok = False
-                    logger.warning(
-                        "address-comments: retry-resolve failed for thread %s", thread_id
-                    )
+                        thread_history_by_comment_id.get(khala_reply_id),
+                    ):
+                        logger.info(
+                            "address-comments: skipping resolve-retry on thread %s — newer "
+                            "reviewer feedback appeared since generated reply %s was snapshotted",
+                            thread_id,
+                            khala_reply_id,
+                        )
+                        retry_resolve_ok = False
+                        continue
+                    if not client.resolve_review_thread(thread_id):
+                        retry_resolve_ok = False
+                        logger.warning(
+                            "address-comments: retry-resolve failed for thread %s", thread_id
+                        )
 
             outcomes: List[CommentOutcome] = []
-            pr_closed_mid_run = False
             for comment in unresolved:
                 # Refresh PR metadata before each comment: an earlier comment's
                 # real-issue workflow may have already pushed a new head commit,
@@ -1550,15 +1640,19 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 )
                 outcomes.append(outcome)
 
-            if unresolved and not pr_closed_mid_run:
+            if (unresolved or retry_resolve_threads) and not pr_closed_mid_run:
                 # The per-iteration state check above catches the PR closing
                 # BETWEEN comments, but not while the FINAL (or only)
                 # comment's own `_handle_comment` call was still running —
                 # that call can itself block for a long implementation
                 # dispatch, and there is no next loop iteration to observe a
-                # closure that happens during it. Re-check once more here,
-                # after the loop, before this run's outcome is judged
-                # successful and the label/cleanup actions below are allowed
+                # closure that happens during it. Also covers a retry-only
+                # run (`unresolved` empty): the resolve-only retries above
+                # already checked PR state before resolving, but the PR can
+                # still close in the gap between that check and here. Re-check
+                # once more here, after the loop, before this run's outcome
+                # is judged successful and the label/cleanup actions below
+                # are allowed
                 # to run against what may now be a closed PR.
                 try:
                     final_pr = client.get_pull_request(owner, repo, pr_number)
@@ -1626,16 +1720,6 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     if c.id in not_an_issue_ids
                 }
 
-                def _history_unchanged(
-                    comment: ReviewComment,
-                    fresh_history_by_comment_id: Dict[int, List[ReviewComment]],
-                ) -> bool:
-                    triaged = triaged_histories.get(comment.id)
-                    fresh = fresh_history_by_comment_id.get(comment.id)
-                    if triaged is None or fresh is None:
-                        return False
-                    return [(m.id, m.body) for m in triaged] == [(m.id, m.body) for m in fresh]
-
                 try:
                     fresh_unresolved, _tbc, fresh_retry, fresh_history_by_comment_id = (
                         _unresolved_comments(client, owner, repo, pr_number)
@@ -1645,7 +1729,10 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                         for c in fresh_unresolved
                         if not (
                             c.id in not_an_issue_ids
-                            and _history_unchanged(c, fresh_history_by_comment_id)
+                            and _thread_history_unchanged(
+                                triaged_histories.get(c.id),
+                                fresh_history_by_comment_id.get(c.id),
+                            )
                         )
                     ]
                     all_succeeded = not blocking and not fresh_retry

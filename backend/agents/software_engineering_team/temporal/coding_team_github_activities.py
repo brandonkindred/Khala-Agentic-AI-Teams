@@ -282,6 +282,10 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
           when the job service does not return one, falls back to a dict
           carrying the SAME just-computed ``status``/``status_text`` (never a
           hardcoded ``"completed"``, which would misreport a partial run).
+    Raises:
+        ValueError: ``request`` is missing any field in
+            ``_PR_PUBLISH_REQUIRED_FIELDS``.
+        RuntimeError: The git fast-forward or the push to ``remote`` fails.
     """
     token = _require_activity_github_token(request)
     missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]

@@ -1549,6 +1549,73 @@ class TestRunAddressComments:
         assert fake.resolved == ["T2"]
         assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
 
+    def test_retry_only_skips_resolve_when_pr_already_closed(self, address_env) -> None:
+        """The PR can already be closed by the time the resolve-only retry
+        loop runs — this run's own pre-loop snapshot can be stale by then,
+        since `_unresolved_comments` above can take a while. Resolving a
+        thread (or, later, labelling the PR waiting-for-review) on a closed
+        PR would be acting on state it no longer accepts. A retry-only run
+        (no fresh `unresolved` comments) has no `_handle_comment` call to
+        catch this via — the per-iteration/post-triage checks only exist
+        inside that loop — so the resolve-only retries need their own
+        check."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _khala_reply(ac, fake, 3),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        calls = {"n": 0}
+        real_pr = fake.pr
+
+        def _get_pull_request(_o, _r, _n):
+            calls["n"] += 1
+            # Call 1: the pre-loop snapshot (still open). Call 2: the
+            # resolve-only retries' own PR-state check, which discovers it
+            # closed and must skip resolving rather than proceed.
+            if calls["n"] <= 1:
+                return real_pr
+            return replace(real_pr, state="closed")
+
+        fake.get_pull_request = _get_pull_request  # type: ignore[assignment]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == []  # never resolved on the closed PR
+        assert fake.labels_set == []
+
+    def test_retry_only_skips_label_when_pr_closes_after_resolving(self, address_env) -> None:
+        """The PR can also close AFTER the resolve-only retries' own
+        PR-state check runs (and the retry succeeds) but BEFORE the run is
+        labelled waiting-for-review — the post-loop re-check must catch that
+        gap too, or a closed PR would get mislabelled ready for review."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _khala_reply(ac, fake, 3),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        calls = {"n": 0}
+        real_pr = fake.pr
+
+        def _get_pull_request(_o, _r, _n):
+            calls["n"] += 1
+            # Calls 1-2 (pre-loop snapshot, retry-loop's own state check) see
+            # it open, so the retry proceeds and resolves. Call 3 (the
+            # post-loop re-check) discovers it closed since.
+            if calls["n"] <= 2:
+                return real_pr
+            return replace(real_pr, state="closed")
+
+        fake.get_pull_request = _get_pull_request  # type: ignore[assignment]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        assert fake.resolved == ["T2"]  # the retry itself succeeded
+        assert fake.labels_set == []  # but never mislabelled on the now-closed PR
+
     def test_retry_resolve_revalidates_freshness_before_resolving(self, address_env) -> None:
         """A reviewer's follow-up posted in the window between the
         `_unresolved_comments` snapshot (which routed this thread to the
@@ -2294,6 +2361,37 @@ class TestAddressCommentsRoute:
         assert body["unresolved_comment_count"] == 1
         assert route_env["started"]  # background hook launched
         assert route_env["jobs"].get_job(body["job_id"])["github_token_encrypted"] == "ciphertext"
+
+    def test_400_when_repo_path_blank_and_comments_unresolved(self, route_env) -> None:
+        """`repo_path` defaults to "" (documented as accepted "for parity with
+        /review-pr", which genuinely never touches a checkout), but a real
+        issue among the PR's unresolved comments needs a checkout to
+        implement and push a fix. An empty path would otherwise canonicalize
+        to the service's own working directory rather than failing loudly,
+        admitting a job that reports "started" but cannot implement any real
+        fix it triages. Must be rejected up front instead."""
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": "", "pr_number": 7},
+        )
+
+        assert resp.status_code == 400
+        assert "repo_path is required" in resp.json()["detail"]
+        assert route_env["started"] == []  # never launched
+
+    def test_repo_path_blank_allowed_when_nothing_unresolved(self, route_env) -> None:
+        """A blank `repo_path` is fine when there is nothing to address — no
+        real-issue fix will ever need a checkout that will never be used."""
+        route_env["fake"].review_comments = []
+        route_env["fake"].threads = []
+
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": "", "pr_number": 7},
+        )
+
+        assert resp.status_code == 200
+        assert route_env["started"]
 
     def test_409_when_sibling_job_running_on_same_checkout_different_pr(
         self, route_env

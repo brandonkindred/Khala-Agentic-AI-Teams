@@ -64,7 +64,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
 
 # GraphQL query for the FULL review-thread listing (resolution state + the thread's
 # node id + each comment's databaseId). The read-only
-# ``get_resolved_review_thread_comment_ids`` (using ``_REVIEW_THREADS_QUERY`` below)
+# ``get_resolved_review_thread_comment_ids`` (using ``_REVIEW_THREADS_QUERY``)
 # needs each comment's ``databaseId`` too — its own comment-id-set result requires
 # it — but NOT the thread's node ``id``, since it never resolves a thread, only
 # reports resolution state. Addressing unresolved comments needs BOTH: the thread
@@ -374,7 +374,10 @@ def _pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
     # deleted; treat that the same as "unknown" (empty string) rather than let a
     # dict-typed .get default mask the distinction from an ordinary same-repo PR.
     head_repo = head.get("repo")
-    head_repo_full_name = (head_repo or {}).get("full_name") or "" if isinstance(head_repo, dict) else ""
+    if isinstance(head_repo, dict):
+        head_repo_full_name = head_repo.get("full_name") or ""
+    else:
+        head_repo_full_name = ""
     return PullRequestDetail(
         number=int(payload["number"]),
         html_url=payload.get("html_url") or "",
@@ -1045,18 +1048,22 @@ class GitHubClient(_GitHubHttpMixin):
             - Returns one :class:`ReviewThread` per thread, in GitHub's response
               order, each carrying its node ``id``, ``is_resolved``, and the
               ordered tuple of its comments' numeric ids — the COMPLETE set of
-              threads.
+              threads, provided every thread's own comments fit within
+              :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` (this method does not
+              paginate WITHIN a thread's comments, only across threads).
             - Fails closed: any GraphQL transport/HTTP error, non-2xx status,
-              GraphQL-level error, unexpected payload shape, or exceeding
-              :data:`MAX_REVIEW_THREADS_TRAVERSED` (i.e. any case where the returned
-              list would be partial or the state unknown) raises
-              :class:`ReviewThreadsUnavailableError` instead of returning a
-              partial/empty list. A caller that classifies "unresolved vs resolved"
-              must not treat unknown state as unresolved, so this never silently
-              degrades. (This differs deliberately from
-              :meth:`get_resolved_review_thread_comment_ids`, which degrades to an
-              empty set because a review only loses de-duplication, not correctness,
-              when resolution state is missing.)
+              GraphQL-level error, unexpected payload shape, exceeding
+              :data:`MAX_REVIEW_THREADS_TRAVERSED`, or any single thread having
+              more than :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` comments (i.e.
+              any case where the returned list would be partial or the state
+              unknown) raises :class:`ReviewThreadsUnavailableError` instead of
+              returning a partial/empty list. A caller that classifies
+              "unresolved vs resolved" must not treat unknown state as
+              unresolved, so this never silently degrades. (This differs
+              deliberately from :meth:`get_resolved_review_thread_comment_ids`,
+              which degrades to an empty set because a review only loses
+              de-duplication, not correctness, when resolution state is
+              missing.)
         """
         threads: list[ReviewThread] = []
         after: Optional[str] = None

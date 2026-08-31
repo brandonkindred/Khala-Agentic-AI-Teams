@@ -601,10 +601,9 @@ class CodingTeamWorkflow:
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
             try:
+                is_existing_pr_publish = github.get("publish_mode") == "existing_pr"
                 publish_activity = (
-                    github_pr_publish_activity
-                    if github.get("publish_mode") == "existing_pr"
-                    else github_publish_activity
+                    github_pr_publish_activity if is_existing_pr_publish else github_publish_activity
                 )
                 publish_request = {
                     "job_id": request["job_id"],
@@ -618,7 +617,7 @@ class CodingTeamWorkflow:
                         github.get("cleanup_checkout_on_success")
                     ),
                 }
-                if github.get("publish_mode") == "existing_pr":
+                if is_existing_pr_publish:
                     publish_request.update(
                         {
                             "pr_number": github["pr_number"],

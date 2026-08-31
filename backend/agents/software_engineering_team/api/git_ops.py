@@ -184,7 +184,7 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
-def _is_deletable_per_issue(target: Path) -> bool:
+def _is_deletable_ephemeral_checkout(target: Path) -> bool:
     """True iff *target* is an ephemeral per-issue OR per-PR git checkout safe to delete.
 
     The three content conditions (2–4) shared by the resolve-time gate in
@@ -258,8 +258,8 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
     # path resolves without raising; passing the already-resolved path to is_within
     # keeps its internal resolve idempotent. Conditions 2–4 are the shared
-    # content gate (see ``_is_deletable_per_issue``).
-    if not _is_deletable_per_issue(resolved):
+    # content gate (see ``_is_deletable_ephemeral_checkout``).
+    if not _is_deletable_ephemeral_checkout(resolved):
         return None
     return resolved
 
@@ -335,7 +335,7 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
         # docstring): rmtree does not follow symlinks *inside* the tree, and the
         # resolved root is never a symlink, so a symlink planted in the checkout
         # can't redirect the delete.
-        if not _is_deletable_per_issue(target):
+        if not _is_deletable_ephemeral_checkout(target):
             logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
             return
         try:

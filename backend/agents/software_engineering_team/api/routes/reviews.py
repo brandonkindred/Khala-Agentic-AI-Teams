@@ -289,12 +289,15 @@ def post_address_comments(
           left without a running worker (which would otherwise block future requests
           for the PR). Returns the job id, PR URL, and the count of unresolved comments
           the job will work through. Poll ``GET /status/{job_id}`` for progress.
-        - A 400 is returned when the PR is not open; a 409 when a job is already
-          running for the PR, OR when another active job (any PR) is already using
-          the SAME ``request.repo_path`` — the latter matters for an operator-pinned
-          checkout, which is shared (unnamespaced) across every PR of that repo, so
-          two DIFFERENT PRs' jobs would otherwise race on the same working tree for
-          each job's entire run, not just at admission. A 502 for a GitHub API error,
+        - A 400 is returned when the PR is not open, or when the PR has unresolved
+          review comments but ``request.repo_path`` is blank (a real-issue fix
+          among them needs a checkout to implement and push to — see below); a
+          409 when a job is already running for the PR, OR when another active
+          job (any PR) is already using the SAME ``request.repo_path`` — the
+          latter matters for an operator-pinned checkout, which is shared
+          (unnamespaced) across every PR of that repo, so two DIFFERENT PRs'
+          jobs would otherwise race on the same working tree for each job's
+          entire run, not just at admission. A 502 for a GitHub API error,
           including when the PR's review-thread state cannot be reliably retrieved
           (the flow fails closed rather than acting on unknown state).
     """
@@ -328,6 +331,25 @@ def post_address_comments(
             ) from e
         except GitHubAPIError as e:
             raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
+
+    if unresolved and not request.repo_path.strip():
+        # repo_path defaults to "" (documented as accepted "for parity with
+        # /review-pr", which genuinely never touches a checkout) but a real
+        # issue among these unresolved comments DOES need one to implement and
+        # push a fix — an empty path would canonicalize to the service's own
+        # working directory (`_checkout_admission`'s `os.path.realpath("")`)
+        # rather than failing loudly, admitting a job that reports "started"
+        # but cannot implement any real fix it triages. Which comments turn
+        # out to be real vs. false-positive is only known once triage runs
+        # inside the job, so this rejects up front whenever ANY unresolved
+        # comment could need it, rather than guessing.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "repo_path is required when the PR has unresolved review comments: "
+                "a real-issue fix needs a local checkout to implement and push to."
+            ),
+        )
 
     # Hold the admission lock across the WHOLE start sequence (create + record + launch)
     # so a persisted job always has a running worker: if record_review_start or the
@@ -452,8 +474,10 @@ def get_address_comments_running(
           route's own admission), or ``running_job_id=None`` when none is
           running.
         - When ``repo_path`` is given, ALSO checks for another active job (any
-          PR) already using that SAME checkout (:func:`_running_sibling_on_checkout`)
-          and returns its job_id too if found — an operator-pinned ``repo_path``
+          PR) already using that SAME checkout (:func:`_main.get_running_job_on_checkout`,
+          the public wrapper over the same ``_running_sibling_on_checkout`` the
+          POST route's own admission check uses) and returns its job_id too
+          if found — an operator-pinned ``repo_path``
           is shared, unnamespaced, across every PR of that repo, so the plain
           PR-scoped check above cannot see a DIFFERENT PR's job already working
           that same checkout. Omitting ``repo_path`` skips this half of the check.
