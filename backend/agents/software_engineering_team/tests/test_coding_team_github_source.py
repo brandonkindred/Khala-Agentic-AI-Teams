@@ -1555,6 +1555,15 @@ class TestEndpointHappyPath:
         assert resp.status_code == 502
         assert "fetch failed" in resp.json()["detail"]
 
+        # The job row was already created before the SHA check ran; it must be
+        # marked failed here or every retry for this issue would 409 forever
+        # against an orphaned 'pending' job that nothing ever dispatched.
+        jobs = patched_app["jobs"].list_jobs()
+        assert len(jobs) == 1
+        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
+        assert job["status"] == "failed"
+        assert "fetch failed" in job["error"]
+
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
             issues=[_issue(11, title="Add feature")],
@@ -2318,6 +2327,39 @@ class TestPrepareIssueBranch:
             text=True,
         ).stdout.strip()
         assert head_after == original_head_on_disk
+
+    def test_stale_expected_base_sha_rejected_before_dirty_tree_recovery(
+        self, api, tmp_path
+    ) -> None:
+        """A stale plan must fail before dirty-tree recovery runs -- recovery can
+        commit WIP and create rescue branches, which must not happen on a job
+        already known to be stale."""
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        with open(f"{repo}/README.md", "a") as fh:
+            fh.write("dirty\n")
+
+        ok, msg, notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha="0" * 40
+        )
+        assert ok is False
+        assert "moved" in (msg or "")
+        assert notes == []
+
+        import subprocess
+
+        # No rescue branch was created and the dirty change is still unstaged.
+        branches = subprocess.run(
+            ["git", "-C", repo, "branch", "--list", "khala/rescue/*"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert branches.strip() == ""
+        status = subprocess.run(
+            ["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip()
+        assert "README.md" in status
 
 
 class TestGitCredentialThreading:

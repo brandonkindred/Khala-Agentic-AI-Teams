@@ -831,6 +831,30 @@ def _prepare_issue_branch(
     if not _is_safe_ref(integration_branch):
         return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
 
+    # `fetch` is the only network op here (the checkouts below are local), so it
+    # needs the credential. The clone was authenticated transiently by the
+    # unified API; that auth is not persisted, so we re-supply it per fetch.
+    auth_env = _git_auth_env(token) if token else None
+    rc, msg = _main._git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
+    if rc != 0:
+        return False, msg, notes
+    base_ref = f"{remote}/{default_branch}"
+    # This freshness check must also precede dirty-tree recovery, same as the
+    # unsafe-ref checks above: a job whose plan is already known stale must
+    # not commit WIP or create rescue branches on its way to being rejected.
+    if expected_base_sha:
+        rc, fetched_sha_or_err = _main._git(repo_path, "rev-parse", base_ref)
+        if rc != 0:
+            return False, fetched_sha_or_err, notes
+        fetched_sha = fetched_sha_or_err.strip()
+        if fetched_sha != expected_base_sha:
+            return (
+                False,
+                f"base branch `{default_branch}` moved from `{expected_base_sha}` to "
+                f"`{fetched_sha}` since triage; plan is stale, re-triage required",
+                notes,
+            )
+
     marker = _read_active_issue(repo_path)
 
     status_ok, dirty, listing = _main._working_tree_dirty(repo_path)
@@ -858,26 +882,6 @@ def _prepare_issue_branch(
     # path's _write_active_issue overwrite; every failure exit retains it
     # so a retry can still attribute and continue the prior work.
 
-    # `fetch` is the only network op here (the checkouts below are local), so it
-    # needs the credential. The clone was authenticated transiently by the
-    # unified API; that auth is not persisted, so we re-supply it per fetch.
-    auth_env = _git_auth_env(token) if token else None
-    rc, msg = _main._git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
-    if rc != 0:
-        return False, msg, notes
-    base_ref = f"{remote}/{default_branch}"
-    if expected_base_sha:
-        rc, fetched_sha_or_err = _main._git(repo_path, "rev-parse", base_ref)
-        if rc != 0:
-            return False, fetched_sha_or_err, notes
-        fetched_sha = fetched_sha_or_err.strip()
-        if fetched_sha != expected_base_sha:
-            return (
-                False,
-                f"base branch `{default_branch}` moved from `{expected_base_sha}` to "
-                f"`{fetched_sha}` since triage; plan is stale, re-triage required",
-                notes,
-            )
     # The issue branch may exist remotely from a previous job that pushed
     # before dying; fetch it as a continuation candidate (absence is fine).
     remote_issue_ref = f"{remote}/{integration_branch}"

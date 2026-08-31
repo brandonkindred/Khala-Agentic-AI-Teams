@@ -138,6 +138,17 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         request.repo_path, request.remote, base, token
     )
     if not sha_ok:
+        # The job row already exists (created above) and _running_job_for_issue
+        # treats a pending job as active, so leaving it pending here would make
+        # every retry for this issue 409 forever with nothing left to
+        # terminalize it. Mark it failed, same as a Temporal dispatch failure.
+        logger.error("Unable to resolve base branch head sha: %s", base_sha_or_err)
+        _main.update_job(
+            job_id,
+            status=JobStatus.FAILED.value,
+            error=f"unable to resolve base branch head sha: {base_sha_or_err}",
+            current_activity=None,
+        )
         raise HTTPException(
             status_code=502,
             detail=f"unable to resolve base branch head sha: {base_sha_or_err}",
