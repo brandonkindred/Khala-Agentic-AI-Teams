@@ -110,9 +110,6 @@ def _design_context_to_checkpoint(context: _DesignPersistContext) -> Dict[str, A
     }
 
 
-_DESIGN_CONTEXT_CHECKPOINT_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
-
-
 def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistContext:
     """Inverse of :func:`_design_context_to_checkpoint` -- rebuilds real ``SpecCritique`` objects.
 
@@ -125,9 +122,20 @@ def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistConte
     instances, or record assembly's ``design_context.critiques[i].model_dump()``
     calls raise ``AttributeError`` deep inside a resumed attempt.
 
-    Mirrors ``temporal.activities._design_context_from_wire``'s validation
-    shape (a separate, Temporal-only wire pair with its own scope); this is
-    a new, independent function scoped to thread-mode's in-process resume.
+    Thin wrapper around ``_orchestrator_helpers.rebuild_design_context`` --
+    the shared validate+rebuild core also used by
+    ``temporal.activities._design_context_from_wire`` (a separate,
+    Temporal-only reconstruction with its own scope) -- so the two can never
+    drift out of sync on what counts as a well-formed ``design_context``
+    payload or how it's rebuilt. This function's own contribution is only
+    its ``data``-must-be-non-empty contract: unlike ``_design_context_from_wire``
+    (where an absent/empty ``design_context`` is a legitimate "no context
+    supplied" case returning ``None``), a checkpoint's ``design_context`` is
+    never legitimately empty here, so this wrapper turns
+    ``rebuild_design_context``'s ``None`` return into a raised ``ValueError``
+    instead of silently propagating it -- a caller checking ``is not None``
+    to decide whether resume succeeded would otherwise wrongly treat "empty
+    context" as success.
 
     Preconditions:
       - ``data`` is a non-empty dict containing every key
@@ -137,37 +145,18 @@ def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistConte
       - Returns a ``_DesignPersistContext`` with ``critiques`` rebuilt as
         real ``SpecCritique`` instances.
     Raises:
-      - ``ValueError`` if a required key is missing.
-      - ``TypeError`` if a present key has the wrong shape.
-      Both signal to the caller that the checkpoint payload is unusable for
-      resume -- the caller is expected to fail open to a full restart rather
-      than propagate either exception.
+      - ``ValueError`` if ``data`` is empty/``None``, or the payload fails
+        the shared shape check (a missing key or a wrong-typed field).
+        Signals to the caller that the checkpoint payload is unusable for
+        resume -- the caller is expected to fail open to a full restart
+        rather than propagate it.
     """
-    from .agents.design_review import SpecCritique
+    from ._orchestrator_helpers import rebuild_design_context
 
-    missing = [key for key in _DESIGN_CONTEXT_CHECKPOINT_KEYS if key not in data]
-    if missing:
-        raise ValueError(f"design_context missing checkpoint fields: {missing}")
-    rounds = data["rounds"]
-    critiques = data["critiques"]
-    stop_reason = data["stop_reason"]
-    loop_telemetry = data["loop_telemetry"]
-    if isinstance(rounds, bool) or not isinstance(rounds, int):
-        raise TypeError(f"design_context.rounds must be int, got {type(rounds).__name__}")
-    if not isinstance(critiques, list):
-        raise TypeError(f"design_context.critiques must be list, got {type(critiques).__name__}")
-    if not isinstance(stop_reason, str):
-        raise TypeError(f"design_context.stop_reason must be str, got {type(stop_reason).__name__}")
-    if not isinstance(loop_telemetry, dict):
-        raise TypeError(
-            f"design_context.loop_telemetry must be dict, got {type(loop_telemetry).__name__}"
-        )
-    return _DesignPersistContext(
-        rounds=rounds,
-        critiques=[SpecCritique.model_validate(c) for c in critiques],
-        stop_reason=stop_reason,
-        loop_telemetry=dict(loop_telemetry),
-    )
+    context = rebuild_design_context(data)
+    if context is None:
+        raise ValueError(f"design_context has an invalid checkpoint shape: {data!r}")
+    return context
 
 
 def _finalize_loop_telemetry(

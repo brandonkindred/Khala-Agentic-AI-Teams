@@ -585,3 +585,88 @@ def resolve_cross_attempt_resume(
     if determine_resume_stage(checkpoint) is not PipelineStage.SYNTHESIS:
         return None
     return checkpoint
+
+
+DESIGN_CONTEXT_WIRE_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
+
+
+def design_context_wire_shape_is_valid(data: Any) -> bool:
+    """Shape-only validation of a ``design_context`` wire/checkpoint dict.
+
+    The single source of truth for what counts as a well-formed
+    ``design_context`` payload -- shared by every reconstruction site that
+    needs this same shape check:
+    ``orchestrator_record_assembly._design_context_from_checkpoint``
+    (thread-mode cross-attempt resume) and
+    ``temporal.activities._design_context_from_wire`` (Temporal-mode
+    reconstruction, both same-attempt ADR-012 and cross-attempt resume).
+    Before this function existed, both duplicated the same key tuple and
+    primitive-type rules independently, risking silent drift between them.
+
+    Preconditions:
+        None -- ``data`` may be any value, not just a dict.
+    Postconditions:
+        Returns ``True`` iff ``data`` is a non-empty dict containing all of
+        ``rounds``/``critiques``/``stop_reason``/``loop_telemetry`` with the
+        matching primitive types (``rounds`` ``int`` and not ``bool``,
+        ``critiques`` ``list``, ``stop_reason`` ``str``, ``loop_telemetry``
+        ``dict``). Returns ``False`` otherwise. Never raises.
+    """
+    if not data or not isinstance(data, dict):
+        return False
+    if any(key not in data for key in DESIGN_CONTEXT_WIRE_KEYS):
+        return False
+    rounds = data["rounds"]
+    if isinstance(rounds, bool) or not isinstance(rounds, int):
+        return False
+    if not isinstance(data["critiques"], list):
+        return False
+    if not isinstance(data["stop_reason"], str):
+        return False
+    return isinstance(data["loop_telemetry"], dict)
+
+
+def drift_histories_past_seed(
+    spec_history: list[Any],
+    code_history: list[Any],
+    gate_timeline: list[Any],
+    *,
+    seed_spec_len: int,
+    seed_code_len: int,
+    seed_gate_len: int,
+) -> tuple[list[Any], list[Any], list[Any]]:
+    """Slice a resumed attempt's drift histories past their seed prefix.
+
+    A cross-attempt resume seeds an attempt's drift with a checkpoint's own
+    ``spec_history``/``code_history``/``gate_timeline``, spliced onto the
+    front before the attempt runs (``orchestrator.py``'s
+    ``resume_drift_seed_for_attempt``, ``temporal/workflows.py``'s
+    ``attempt_drift_seed``). Three independent sites each need to isolate
+    the entries *beyond* that seed -- this attempt's own provenance, not a
+    duplicate of history the parent commit log (or, for a discarded seed, no
+    log at all) already has: thread mode's ``orchestrator.py::run_cycle``
+    (folding a resumed-then-failed attempt's drift into its parent commit
+    log), Temporal mode's ``StrategyLabCycleWorkflow.run`` (the same fold,
+    wire-dict-shaped), and
+    ``temporal.activities._strip_unused_resume_seed_from_record`` (stripping
+    a seed's provenance out of a persisted record when the resume it
+    speculatively seeded was never actually adopted). Generic over element
+    type -- callers pass either wire dicts or live
+    ``SpecRevision``/``CodeRevision``/``GateEvent`` objects; this function
+    only slices, never inspects, each list's elements, so it never needs to
+    import any of those types.
+
+    Preconditions:
+        Each ``seed_*_len`` is between 0 and the length of its corresponding
+        history list, inclusive -- the length of the seed originally
+        spliced onto that same list's front.
+    Postconditions:
+        Returns ``(spec_history[seed_spec_len:], code_history[seed_code_len:],
+        gate_timeline[seed_gate_len:])`` as new lists; never mutates any
+        input list.
+    """
+    return (
+        spec_history[seed_spec_len:],
+        code_history[seed_code_len:],
+        gate_timeline[seed_gate_len:],
+    )

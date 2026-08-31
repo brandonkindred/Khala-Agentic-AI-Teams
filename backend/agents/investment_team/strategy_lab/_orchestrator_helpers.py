@@ -326,6 +326,55 @@ class _DesignPersistContext:
     loop_telemetry: Dict[str, Any] = field(default_factory=dict)
 
 
+def rebuild_design_context(data: Optional[Dict[str, Any]]) -> Optional["_DesignPersistContext"]:
+    """Reconstruct a real ``_DesignPersistContext`` from a wire/checkpoint dict.
+
+    The shared "validate shape, then rebuild" core of two independent
+    reconstruction sites -- ``temporal.activities._design_context_from_wire``
+    (Temporal-mode, both same-attempt ADR-012 and cross-attempt resume) and
+    ``orchestrator_record_assembly._design_context_from_checkpoint``
+    (thread-mode cross-attempt resume) -- each of which previously ran a
+    byte-identical rebuild of its own, risking silent drift between the two
+    modes on a future ``_DesignPersistContext`` field or ``SpecCritique``
+    validation change. Each caller keeps only its own thin None/empty-input
+    contract and error-message wording as a wrapper around this function.
+    Homed here (not ``checkpoints.py``) because the rebuild needs
+    ``agents.design_review.SpecCritique``, whose transitive graph must not
+    be dragged into the temporalio workflow sandbox -- this module is
+    already documented as unsafe to import there, so callers that need to
+    stay sandbox-safe (``workflows.py``) must never call this function,
+    only ``checkpoints.design_context_wire_shape_is_valid``.
+
+    Preconditions:
+        ``data`` is ``None`` or a dict. A nonempty dict must contain every
+        key produced by ``_design_context_to_wire``/``_design_context_to_checkpoint``
+        with the matching types (``rounds`` int, ``critiques`` list,
+        ``stop_reason`` str, ``loop_telemetry`` dict).
+    Postconditions:
+        Returns ``None`` when ``data`` is ``None``/empty. Otherwise returns a
+        ``_DesignPersistContext`` with ``critiques`` rebuilt as real
+        ``SpecCritique`` instances -- not left as plain dicts, which would
+        raise ``AttributeError`` deep inside record assembly. Raises
+        ``ValueError`` when a nonempty payload fails
+        ``checkpoints.design_context_wire_shape_is_valid`` (missing keys or
+        a wrong-typed field), so a caller can fail open to a full restart
+        instead of fabricating default audit fields.
+    """
+    if not data:
+        return None
+    from .agents.design_review import SpecCritique
+    from .checkpoints import design_context_wire_shape_is_valid
+
+    if not design_context_wire_shape_is_valid(data):
+        raise ValueError(f"design_context has an invalid wire shape: {data!r}")
+    return _DesignPersistContext(
+        rounds=data["rounds"],
+        critiques=[SpecCritique.model_validate(c) for c in data["critiques"]],
+        stop_reason=data["stop_reason"],
+        loop_telemetry=dict(data["loop_telemetry"]),
+    )
+
+
 @dataclass
 class _DriftCollector:
     """Mutable accumulator for spec/code revision history and gate events.
