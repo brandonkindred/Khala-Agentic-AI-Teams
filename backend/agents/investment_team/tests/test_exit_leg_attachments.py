@@ -246,15 +246,30 @@ def test_rejects_overflowed_limit_price() -> None:
     to inf (float64 overflow is silent, no exception) — the resolver must catch
     this itself since ``inf <= 0`` is False and would otherwise slip past a bare
     positivity check."""
-    with pytest.raises(ValueError, match="non-finite/non-positive limit_price"):
+    with pytest.raises(ValueError, match="non-finite/non-positive/not-off-reference limit_price"):
         resolve_exit_leg_attachments([_leg(OrderType.LIMIT, pct=0.9)], OrderSide.LONG, 1e308)
 
 
 def test_rejects_overflowed_stop_price() -> None:
     """The same overflow risk applies to the STOP-family branch (a short's
     ref_price * (1 + pct))."""
-    with pytest.raises(ValueError, match="non-finite/non-positive stop_price"):
+    with pytest.raises(ValueError, match="non-finite/non-positive/not-off-reference stop_price"):
         resolve_exit_leg_attachments([_leg(OrderType.STOP, pct=0.9)], OrderSide.SHORT, 1e308)
+
+
+def test_rejects_limit_price_rounded_to_reference() -> None:
+    """A vanishingly small (but valid, pct > 0) percentage can round away
+    entirely in float64, leaving limit_price == ref_price bit-for-bit — a
+    "correct side of ref_price" violation the bare positivity check alone
+    would miss, since the rounded price is still finite and positive."""
+    with pytest.raises(ValueError, match="non-finite/non-positive/not-off-reference limit_price"):
+        resolve_exit_leg_attachments([_leg(OrderType.LIMIT, pct=1e-20)], OrderSide.LONG, 100.0)
+
+
+def test_rejects_stop_price_rounded_to_reference() -> None:
+    """The same float-rounding risk applies to the STOP-family branch."""
+    with pytest.raises(ValueError, match="non-finite/non-positive/not-off-reference stop_price"):
+        resolve_exit_leg_attachments([_leg(OrderType.STOP, pct=1e-20)], OrderSide.LONG, 100.0)
 
 
 # ---------------------------------------------------------------------------

@@ -1526,14 +1526,17 @@ def resolve_exit_leg_attachments(
     Postconditions: returns a list the same length and order as ``legs``;
     each element is a :class:`StopAttachment` (``STOP``/``STOP_LIMIT``/
     ``TRAILING_STOP`` legs) or :class:`LimitAttachment` (``LIMIT`` legs) whose
-    absolute price is finite, strictly positive, and on the correct side of
-    ``ref_price``; empty ``legs`` yields ``[]``.
+    absolute price is finite, strictly positive, and strictly on the correct
+    side of ``ref_price``; empty ``legs`` yields ``[]``.
     Raises:
         ValueError: if ``ref_price`` is non-finite (``NaN``/``inf``) or
-            ``<= 0``, or if a resolved price is non-finite or non-positive —
-            a defensive guard that would only trip if a leg field bound were
-            loosened without updating this math, or an extreme ``ref_price``
-            overflowed the resolved price to ``inf``.
+            ``<= 0``, or if a resolved price is non-finite, non-positive, or
+            not strictly on the correct side of ``ref_price`` — a defensive
+            guard that would only trip if a leg field bound were loosened
+            without updating this math, an extreme ``ref_price`` overflowed
+            the resolved price to ``inf``, or a vanishingly small ``pct``
+            rounded away to nothing in float64 (``ref_price * (1 ± pct) ==
+            ref_price`` bit-for-bit).
     """
     # Explicit raises (not ``assert``, which ``python -O`` strips) so the
     # contract stays enforced in optimized production runs. ``ref_price`` is a
@@ -1553,11 +1556,17 @@ def resolve_exit_leg_attachments(
             # ``ref_price`` times ``1 + pct`` on the long side can overflow a
             # float64 silently — Python floats don't raise on overflow — and
             # ``inf <= 0`` is False, so the bare positivity check alone would
-            # miss it).
-            if not math.isfinite(limit_price) or limit_price <= 0:
+            # miss it). Checking against ``ref_price`` itself (not just ``0``)
+            # catches the opposite extreme: a valid but vanishingly small
+            # ``pct`` (e.g. ``1e-20``) can round away entirely in float64, so
+            # ``ref_price * (1 ± pct) == ref_price`` bit-for-bit — a "correct
+            # side of ref_price" violation that a bare positivity check would
+            # miss (the rounded price is still positive).
+            wrong_side = limit_price <= ref_price if is_long else limit_price >= ref_price
+            if not math.isfinite(limit_price) or limit_price <= 0 or wrong_side:
                 raise ValueError(
-                    f"exit leg resolved non-finite/non-positive limit_price={limit_price!r} "
-                    f"from ref={ref_price!r}, pct={leg.pct!r}"
+                    f"exit leg resolved non-finite/non-positive/not-off-reference "
+                    f"limit_price={limit_price!r} from ref={ref_price!r}, pct={leg.pct!r}"
                 )
             attachments.append(LimitAttachment(limit_price=limit_price))
             continue
@@ -1569,17 +1578,24 @@ def resolve_exit_leg_attachments(
         if leg.kind not in (OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP):
             raise ValueError(f"exit leg has unsupported kind {leg.kind!r}")
         stop_price = ref_price * (1.0 - leg.pct) if is_long else ref_price * (1.0 + leg.pct)
-        # Defense-in-depth postcondition: the resolved price must be finite and
-        # strictly positive. The leg field bound (``pct < 1.0``) already
-        # guarantees positivity for a positive ``ref_price``, so a non-positive
-        # result means the bound was loosened without updating this math; a
-        # non-finite result means the short-side ``ref_price * (1 + pct)``
-        # overflowed (same ``inf`` risk as the LIMIT branch above). Either way,
-        # fail loudly at emit rather than materialize an unfillable child.
-        if not math.isfinite(stop_price) or stop_price <= 0:
+        # Defense-in-depth postcondition: the resolved price must be finite,
+        # strictly positive, and strictly on the protective side of
+        # ``ref_price``. The leg field bound (``pct < 1.0``) already
+        # guarantees positivity for a positive ``ref_price``, so a
+        # non-positive result means the bound was loosened without updating
+        # this math; a non-finite result means the short-side
+        # ``ref_price * (1 + pct)`` overflowed (same ``inf`` risk as the
+        # LIMIT branch above); and a result equal to ``ref_price`` means a
+        # vanishingly small ``pct`` rounded away entirely in float64 (same
+        # rounding risk as the LIMIT branch above, opposite direction). Any
+        # of these means the child would trigger at (or through) the entry
+        # rather than after the requested move — fail loudly at emit rather
+        # than materialize an unfillable/mistimed child.
+        wrong_side = stop_price >= ref_price if is_long else stop_price <= ref_price
+        if not math.isfinite(stop_price) or stop_price <= 0 or wrong_side:
             raise ValueError(
-                f"exit leg resolved non-finite/non-positive stop_price={stop_price!r} "
-                f"from ref={ref_price!r}, pct={leg.pct!r}"
+                f"exit leg resolved non-finite/non-positive/not-off-reference "
+                f"stop_price={stop_price!r} from ref={ref_price!r}, pct={leg.pct!r}"
             )
         # ``limit_offset_pct`` is a fraction of the stop level; the attachment
         # carries an absolute distance. The leg validator bounds it ``< 1.0``,
@@ -1646,13 +1662,13 @@ def resolve_bracket_attachments(
     entry's ``OrderSide``; ``bracket`` is a validated :class:`OcoBracketRule`
     (its leg ``pct`` values lie in ``(0, 1)``).
     Postconditions: returns a ``(StopAttachment, LimitAttachment)`` pair whose
-    absolute prices are finite, strictly positive, and on the correct side of
-    ``ref_price``; a ``limit``-style stop leg additionally carries a positive
-    ``limit_offset``.
+    absolute prices are finite, strictly positive, and strictly on the
+    correct side of ``ref_price``; a ``limit``-style stop leg additionally
+    carries a positive ``limit_offset``.
     Raises:
         ValueError: if ``ref_price`` is non-finite or ``<= 0``, or if a
-            resolved ``stop_price``/``limit_price`` is non-finite or
-            non-positive.
+            resolved ``stop_price``/``limit_price`` is non-finite,
+            non-positive, or not strictly on the correct side of ``ref_price``.
     """
     stop_attachment, limit_attachment = resolve_exit_leg_attachments(
         _bracket_to_leg_specs(bracket), side, ref_price
