@@ -1277,9 +1277,12 @@ document's concern).
 **A `(symbol, entry_date, exit_date, side)` key is not always unique.** On an
 intraday timeframe, one symbol can complete more than one same-side round
 trip within a single calendar day — `entry_date`/`exit_date`'s `[:10]`
-truncation (§3) collapses those to the same key, and neither this schema nor
-production's `TradeRecord` carries a bar index the matching module could
-fall back on. `trade_num` (§3's field, mirroring production's own
+truncation (§3) collapses those to the same key. This schema does carry a
+bar index (`entry_bar`/`exit_bar`, §3) but it is no help here: production's
+`TradeRecord` carries no bar-level field at all, so there is no
+production-side counterpart for the matching module to compare it
+against — the discriminator has to come from somewhere both ledgers
+actually have. `trade_num` (§3's field, mirroring production's own
 same-named, same-semantics field) is the discriminator for that case: both
 ledgers assign it as a single run-wide monotonic sequence in emission order,
 so the matching module needs same-day same-symbol-and-side trades resolved
