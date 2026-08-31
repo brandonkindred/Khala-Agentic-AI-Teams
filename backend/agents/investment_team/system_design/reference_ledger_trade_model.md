@@ -181,6 +181,14 @@ view over the raw `bars` it receives. `predicate_evaluator.py`'s
 `PandasHistoryView` is the natural candidate — it already exists independent
 of the live engine — but the implementation step should confirm it carries
 no import chain back into the excluded modules above before relying on it.
+This does not weaken the Postconditions' no-forbidden-import guarantee below
+into a contingency: if `PandasHistoryView` turns out to carry such a chain,
+the implementation must **not** relax the exclusion list to accommodate it —
+it must instead construct a narrow, local read-only history/indicator view
+over `bars` (reusing only `PandasHistoryView`'s indicator-computation logic,
+not its import) and pass that to `evaluate_signal_exit_rules`. The
+Postconditions' guarantee holds either way; only the concrete history-view
+implementation is left for Step 2 to pick.
 
 ### Contract
 
@@ -252,7 +260,7 @@ inconsistent record silently.
 | `trade_num` | `int` | `trade_num` | 1-based, assigned in emission order. |
 | `symbol` | `str` | `symbol` | Verbatim. |
 | `side` | `Literal["long", "short"]` | `side` | Verbatim (production stores a plain `str`; this is the stricter reference form). |
-| `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Primary key for this module's own bookkeeping (ladder rungs, per-position running state). |
+| `entry_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position opened — one bar after the entry rule's trigger bar (see §5's "Entries" subsection). Unique only **within a symbol**, not globally — together with `symbol`, the key for this module's per-position bookkeeping (ladder-rung state, running aggregates); `trade_num` (below) remains the record's globally unique identifier. |
 | `entry_rule_index` | `int` | *(none — derived from `entry_reason` today)* | Which `spec.entry_rules[i]` matched — mirrors production's `entry_reason = f"engine_entry:entry[{rule_idx}]"`, which (unlike `exit_reason`) passes through to `TradeRecord.entry_reason` unmodified, with no reconciliation step. Lets the later matching module detect a same-looking trade opened by a *different* entry rule when a spec has multiple same-side entry predicates. |
 | `exit_bar` | `int` | *(none — new)* | Index into `bars[symbol]` where the position's **final** closing event occurred. For a position that passed through one or more `scaled_take_profit` rungs before closing, this is the bar of the final close only — never an earlier rung's bar — since the reference model emits one aggregated row per fully closed position (§5's "Exit aggregation" subsection). |
 | `entry_date` | `str` | `entry_date` | `bars[symbol][entry_bar].timestamp[:10]` — truncated to the date portion exactly as production does (`pos.entry_timestamp[:10]`), so an intraday `Bar.timestamp` still matches production's date-only comparison key. |
@@ -561,15 +569,18 @@ flag applies uniformly to every symbol `bars` covers, since
 `StrategySpec.asset_class` is a single spec-wide field, not indexed by
 symbol.
 
-Whole-share handling, applied after the clamp above, mirrors production's
+Whole-lot handling, applied after the clamp above, mirrors production's
 cap-aware floor rather than a blanket skip: a clamped quantity `>= 1` floors
-down to `int(qty)`. A clamped quantity `< 1` on a non-fractional asset class
-is **promoted to one share** if that one share still satisfies
-`max_position_pct` (re-checked at exactly one share, since flooring up can
-itself re-breach the cap), and only **skipped** (no entry) if even one
-share would breach it. A fractional-capable asset class (crypto/forex)
-instead keeps the clamped, unfloored quantity as-is (dropped to zero only
-if the cap itself drove it to zero or below).
+down to `int(qty)`. A clamped quantity `< 1` on a non-fractional
+(`WHOLE_LOT_ASSET_CLASSES`) asset class is **promoted to one whole unit**
+(one share for stocks, one contract for futures/commodities) if that one
+unit still satisfies `max_position_pct` (re-checked at exactly one unit,
+since flooring up can itself re-breach the cap), and only **skipped** (no
+entry) if even one unit would breach it. A fractional-capable asset class
+(per `is_fractional_asset_class` above — crypto, forex, and, per this
+codebase's classification, options) instead keeps the clamped, unfloored
+quantity as-is (dropped to zero only if the cap itself drove it to zero or
+below).
 
 ### Exit aggregation
 
