@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -470,12 +471,18 @@ def resolve_remote_branch_sha(
     remote -- pass ``env`` (e.g. augmented with a transient auth header) when
     one is needed; this function has no opinion on its contents.
 
-    Resolves ``FETCH_HEAD`` rather than ``<remote>/<branch>``: an explicit
-    ``fetch <remote> <branch>`` always updates ``FETCH_HEAD``, but only
-    updates the ``<remote>/<branch>`` tracking ref when it matches the
-    checkout's configured refspec -- a restricted/nonstandard refspec could
-    otherwise leave that tracking ref stale while this call still reports
-    success.
+    Fetches into a fresh, uniquely-named private ref (``<branch>:<private
+    ref>``) rather than relying on ``<remote>/<branch>`` or ``FETCH_HEAD``:
+    the tracking ref only updates when it matches the checkout's configured
+    refspec, and ``FETCH_HEAD`` is a single file shared by every fetch
+    against this checkout -- on an operator-managed checkout where multiple
+    callers (e.g. separate jobs) can fetch concurrently, a second fetch can
+    overwrite ``FETCH_HEAD`` between this call's own fetch and its
+    ``rev-parse``, handing back an unrelated branch's commit. An explicit
+    private destination ref is written by this call's own fetch and read
+    back by name, so a concurrent fetch elsewhere in the same checkout
+    (updating its own distinct ref, or the shared ``FETCH_HEAD``) cannot
+    interleave with it.
 
     Preconditions:
         - ``repo_path`` is a git checkout; ``remote``/``branch`` are
@@ -484,20 +491,26 @@ def resolve_remote_branch_sha(
           untrusted source must validate first.
     Postconditions:
         - On success returns ``(True, <full sha>)`` -- the commit ``branch``
-          on ``remote`` resolved to as of this fetch (via ``FETCH_HEAD``).
+          on ``remote`` resolved to as of this fetch. The private ref used to
+          resolve it is deleted before returning (best-effort; a leftover
+          ref would be harmless garbage, never a correctness problem, so a
+          delete failure does not turn a successful resolution into a
+          reported failure).
         - On failure (not a repo, or a fetch/rev-parse error) returns
           ``(False, message)`` and never a partial/garbage SHA.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return False, "Not a git repository"
-    code, out = _run_git(path, ["git", "fetch", "--", remote, branch], env=env)
+    private_ref = f"refs/khala/resolve-remote-branch-sha/{uuid.uuid4().hex}"
+    code, out = _run_git(path, ["git", "fetch", "--", remote, f"{branch}:{private_ref}"], env=env)
     if code != 0:
         return False, out
-    code, out = _run_git(path, ["git", "rev-parse", "FETCH_HEAD"], merge_stderr=False, env=env)
+    code, sha_out = _run_git(path, ["git", "rev-parse", private_ref], merge_stderr=False, env=env)
+    _run_git(path, ["git", "update-ref", "-d", private_ref], env=env)
     if code != 0:
-        return False, out
-    return True, out.strip()
+        return False, sha_out
+    return True, sha_out.strip()
 
 
 def commit_paths(repo_path: str | Path, paths: List[str], message: str) -> Tuple[bool, str]:
