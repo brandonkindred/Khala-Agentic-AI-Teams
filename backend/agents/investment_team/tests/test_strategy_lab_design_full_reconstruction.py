@@ -95,7 +95,7 @@ def test_round_one_revise_sends_full_spec() -> None:
 
 
 def test_every_subsequent_round_still_sends_the_full_spec() -> None:
-    """A field unchanged since round 1 must still appear verbatim in round 3's prompt.
+    """A field unchanged since round 1 must still appear verbatim in round 2's prompt.
 
     This is the actual reconstruction-fidelity guarantee: nothing here is
     left for the (history-free) model to infer from a diff.
