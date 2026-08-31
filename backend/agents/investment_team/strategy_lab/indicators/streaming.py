@@ -436,7 +436,7 @@ class IndicatorRegistry:
             only consults the batch cache when both a cache is present and
             this is non-empty (bars carry no timeframe of their own).
         """
-        self._state: Dict[Tuple, Dict[str, Any]] = {}
+        self._state: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         self._batch_cache: Optional[BatchIndicatorCache] = (
             batch_cache if _batch_cache_flag_enabled() else None
         )
@@ -469,7 +469,7 @@ class IndicatorRegistry:
         close_val = _normalise_close(_safe_getattr(last, "close"))
         return id(last), len(bars), ts, close_val
 
-    def _peek(self, key: Tuple) -> Optional[Dict[str, Any]]:
+    def _peek(self, key: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
         return self._state.get(key)
 
     @staticmethod
