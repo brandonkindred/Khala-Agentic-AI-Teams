@@ -827,6 +827,69 @@ def _cross_attempt_resume_from_params(
     return spec, params.get("resume_rationale"), design_context
 
 
+def _resolve_resume_state(
+    params: Dict[str, Any],
+    *,
+    run_id: Optional[str],
+    design_attempt_index: int,
+    resume_spec: Optional["StrategySpec"],
+    resume_rationale: Optional[str],
+    resume_design_context: Optional["_DesignPersistContext"],
+    resumed_via_adr012: bool,
+) -> "Tuple[Optional[StrategySpec], Optional[str], Optional[_DesignPersistContext], bool]":
+    """Fold cross-attempt resume into the ADR-012 lookup's result, plus the seed-unused flag.
+
+    Extracted out of ``run_design_attempt_activity`` to stay under the
+    repo's statement-count lint gate. ``resume_spec``/``resume_rationale``/
+    ``resume_design_context``/``resumed_via_adr012`` are that lookup's
+    already-decided result -- this function only adds cross-attempt resume
+    on top, when applicable, and computes ``cross_attempt_seed_unused``.
+
+    Preconditions:
+        ``resumed_via_adr012`` is ``True`` iff ``resume_spec`` was already
+        set from a same-attempt ADR-012 checkpoint (never from this
+        function).
+    Postconditions:
+        When ``resumed_via_adr012``, returns the inputs unchanged for the
+        first three, plus a freshly computed fourth. Otherwise, when
+        ``params["resume_spec"]`` is not ``None``, returns
+        ``_cross_attempt_resume_from_params``'s result for the first three.
+        The fourth (``cross_attempt_seed_unused``) is ``True`` iff the
+        workflow supplied a cross-attempt resume seed
+        (``params["resume_spec"]``, and therefore ``params["drift"]``) that
+        was never legitimately adopted -- reconstruction failed outright,
+        or an ADR-012 same-attempt checkpoint's own drift snapshot was
+        taken after a Phase 1 that itself ran from scratch, even though
+        ADR-012 has since taken over ``resume_spec`` for a strictly more
+        recent, unrelated reason (a crash after that checkpoint write, then
+        a retry). Evaluating ``_cross_attempt_resume_from_params`` even when
+        ``resumed_via_adr012`` is what makes this correct across a crash:
+        it's a pure function of ``params`` alone, so its outcome is
+        identical on every Temporal retry of this same
+        ``design_attempt_index`` -- on the very first (pre-crash)
+        execution, no ADR-012 checkpoint existed yet, so THAT outcome is
+        what actually determined whether Phase 1 ran from the cross-attempt
+        seed or from scratch, and hence whether a later-written ADR-012
+        checkpoint legitimately carries the seed's provenance.
+    """
+    if params.get("resume_spec") is None:
+        return resume_spec, resume_rationale, resume_design_context, False
+    if resumed_via_adr012:
+        # ``_cross_attempt_resume_from_params`` always returns a 3-tuple,
+        # never a bare ``None`` -- ``(None, None, None)`` on failure -- so
+        # adoption is checked on its first element, not the tuple itself.
+        would_be_spec, _would_be_rationale, _would_be_design_context = (
+            _cross_attempt_resume_from_params(
+                params, run_id=run_id, design_attempt_index=design_attempt_index
+            )
+        )
+        return resume_spec, resume_rationale, resume_design_context, would_be_spec is None
+    resume_spec, resume_rationale, resume_design_context = _cross_attempt_resume_from_params(
+        params, run_id=run_id, design_attempt_index=design_attempt_index
+    )
+    return resume_spec, resume_rationale, resume_design_context, resume_spec is None
+
+
 @activity.defn(name="strategy_lab_snapshot_prior_records")
 def snapshot_prior_records_activity(reverse: bool = False) -> List[Dict[str, Any]]:
     """Read the durable strategy-lab record store, sorted by creation time.
@@ -1349,6 +1412,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     resume_spec = None
     resume_rationale = None
     resume_design_context = None
+    resumed_via_adr012 = False
     if checkpoint_enabled:
         checkpoint = load_design_attempt_checkpoint(run_id, cycle_scope, design_attempt_index)
         if checkpoint is not None:
@@ -1407,31 +1471,31 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 resume_spec = checkpoint.spec
                 resume_rationale = checkpoint.rationale
                 resume_design_context = checkpoint_design_context
+                resumed_via_adr012 = True
 
     # Cross-attempt resume (Temporal-mode parity with thread mode's gated
-    # cross-attempt resume): only consulted when the ADR-012 same-attempt
-    # lookup just above found nothing -- the two never actually collide,
-    # since an ADR-012 checkpoint is keyed to THIS exact
+    # cross-attempt resume): only *adopted* into resume_spec/etc. when the
+    # ADR-012 same-attempt lookup just above found nothing -- the two never
+    # actually collide, since an ADR-012 checkpoint is keyed to THIS exact
     # ``design_attempt_index`` crashing mid-execution, while
     # ``params["resume_spec"]`` is supplied by the calling workflow for a
-    # ``design_attempt_index`` that has never run yet. See
-    # ``_cross_attempt_resume_from_params`` for the full contract and its
-    # fail-open discipline.
-    if resume_spec is None and params.get("resume_spec") is not None:
-        resume_spec, resume_rationale, resume_design_context = _cross_attempt_resume_from_params(
-            params, run_id=run_id, design_attempt_index=design_attempt_index
-        )
-    # ``True`` only when the workflow supplied a cross-attempt resume seed
-    # (``params["resume_spec"]``/``params["drift"]``) that this attempt never
-    # actually adopted -- reconstruction just above failed, or an ADR-012
-    # same-attempt checkpoint (a strictly more recent, unrelated seed) won
-    # instead (in which case ``params.get("resume_spec")`` was never even
-    # consulted, so this is trivially ``False``). Consulted only at a
-    # "record" outcome, to strip the discarded seed's provenance out of the
-    # persisted record's own history (see ``_seed_spec_len``'s comment above
+    # ``design_attempt_index`` that has never run yet. ``cross_attempt_seed_unused``
+    # gates stripping a discarded seed's provenance out of a "record"
+    # outcome's persisted history (see ``_seed_spec_len``'s comment above
     # for why a "reentry" outcome's ``drift`` wire dict must NOT be touched
-    # by this).
-    cross_attempt_seed_unused = params.get("resume_spec") is not None and resume_spec is None
+    # by this) -- see ``_resolve_resume_state``'s own docstring for why it's
+    # computed correctly even across a crash-then-ADR-012-wins retry.
+    resume_spec, resume_rationale, resume_design_context, cross_attempt_seed_unused = (
+        _resolve_resume_state(
+            params,
+            run_id=run_id,
+            design_attempt_index=design_attempt_index,
+            resume_spec=resume_spec,
+            resume_rationale=resume_rationale,
+            resume_design_context=resume_design_context,
+            resumed_via_adr012=resumed_via_adr012,
+        )
+    )
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
         """``checkpoint_hook`` passed into ``_run_design_attempt`` (``PhaseCallback`` shape).

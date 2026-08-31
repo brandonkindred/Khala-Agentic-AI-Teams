@@ -1980,6 +1980,109 @@ def test_run_design_attempt_activity_strips_unused_cross_attempt_seed_from_recor
     assert out["drift"]["spec_history"][0]["reason"] == seeded_spec_entry["reason"]
 
 
+def test_run_design_attempt_activity_strips_discarded_seed_even_when_adr012_wins_on_retry(
+    monkeypatch,
+):
+    """Simulates a crash-then-retry: on the (unobserved) first execution of
+    this same design_attempt_index, cross-attempt reconstruction failed
+    (params below carry a resume_design_context that will fail the same
+    way), so Phase 1 ran from scratch -- but not before an ADR-012
+    same-attempt checkpoint was written mid-attempt, capturing
+    drift_collector's then-current state: the discarded seed's entry,
+    followed by that scratch Phase 1's own new entry. On this retry, the
+    ADR-012 checkpoint wins (it reflects strictly more recent state for
+    this exact design_attempt_index) and supplies resume_spec -- but the
+    persisted record must still have the discarded seed's provenance
+    stripped, because the checkpoint's own drift snapshot carries it
+    regardless of ADR-012 having since taken over resume_spec for an
+    unrelated reason. Regression test for the case a shallower
+    `cross_attempt_seed_unused = params.get("resume_spec") is not None and resume_spec is None`
+    check misses entirely -- resume_spec is non-None here (from ADR-012),
+    so that check alone would leave the discarded seed in place."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    seeded_spec_entry = {
+        "phase": "design",
+        "agent": "DesignAgent",
+        "timestamp": "2023-01-01T00:00:00Z",
+        "before_hash": "a" * 64,
+        "after_hash": "b" * 64,
+        "diff": "- old\n+ new",
+        "reason": "checkpointed revision",
+    }
+    scratch_spec_entry = {
+        "phase": "design",
+        "agent": "DesignAgent",
+        "timestamp": "2023-01-02T00:00:00Z",
+        "before_hash": "c" * 64,
+        "after_hash": "d" * 64,
+        "diff": "- a\n+ b",
+        "reason": "scratch Phase 1's own revision, captured into the ADR-012 checkpoint",
+    }
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1",
+        cycle_scope="run-1-c0",
+        design_attempt=1,
+        generation=1,
+        spec_history=[seeded_spec_entry, scratch_spec_entry],
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {
+                "lab_record_id": "rec-1",
+                "spec_history": [seeded_spec_entry, scratch_spec_entry],
+                "code_history": [],
+                "gate_timeline": [],
+            }
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act,
+        "load_design_attempt_checkpoint",
+        lambda run_id, cycle_scope, design_attempt: checkpoint,
+    )
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: None)
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(
+            run_id="run-1",
+            generation=1,
+            design_attempt=1,
+            drift={
+                "spec_history": [seeded_spec_entry],
+                "code_history": [],
+                "gate_timeline": [],
+            },
+            resume_spec=_spec_dict(strategy_id="strat-resumed"),
+            resume_rationale="carried forward from checkpoint",
+            # Fails SpecCritique reconstruction, same as the sibling test --
+            # cross-attempt resume would not have adopted the seed on the
+            # original (pre-crash) execution either.
+            resume_design_context={
+                "rounds": 1,
+                "critiques": [{"rationale": "missing ready field"}],
+                "stop_reason": "x",
+                "loop_telemetry": {},
+            },
+        )
+    )
+
+    assert out["kind"] == "record"
+    # ADR-012 legitimately wins for resume_spec -- it's strictly more recent.
+    assert captured["resume_spec"] == checkpoint.spec
+    # But the discarded cross-attempt seed is still stripped from the
+    # persisted record, since ADR-012's own drift snapshot carries it.
+    assert out["record"]["spec_history"] == [scratch_spec_entry]
+
+
 def test_run_design_attempt_activity_malformed_checkpoint_gate_results_falls_back_to_scratch(
     monkeypatch,
 ):
