@@ -125,11 +125,9 @@ def _design_context_from_checkpoint(data: Dict[str, Any]) -> _DesignPersistConte
     Shape check delegates to ``checkpoints.design_context_wire_shape_is_valid``
     -- the single source of truth for this check, shared with
     ``temporal.activities._design_context_from_wire`` (a separate,
-    Temporal-only reconstruction with its own scope) and
-    ``temporal.dto.design_context_wire_shape_is_valid`` (the sandbox-safe
-    pre-check inside ``StrategyLabCycleWorkflow.run``) -- so the three can
-    never drift out of sync on what counts as a well-formed
-    ``design_context`` payload.
+    Temporal-only reconstruction with its own scope) -- so the two can never
+    drift out of sync on what counts as a well-formed ``design_context``
+    payload.
 
     Preconditions:
       - ``data`` is a non-empty dict containing every key
