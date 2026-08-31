@@ -587,6 +587,42 @@ def test_rule5_concurrency_capped_by_max_open_positions() -> None:
     assert not matches, matches
 
 
+def test_rule5_fixed_fraction_worst_case_accounts_for_whole_lot_flooring() -> None:
+    """The fill engine floors whole-lot orders to whole shares
+    (``_floor_or_skip_whole_share``), so the worst-case-overcommit check
+    must size against each symbol's runtime-realizable (floored) notional,
+    not the raw target. $100k capital, 2 stocks at $40k/share, fraction=0.6:
+    the raw target is $60k/position (1.2x equity uncapped — would be a
+    false critical), but each position floors to 1 share ($40k), and
+    2 × $40k = $80k fits within capital, so no critical should fire."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.6),
+        target_symbols=["AAPL", "MSFT"],
+        asset_class="stocks",
+        risk_limits={"max_position_pct": 60, "max_drawdown_pct": 10},
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: 40_000.0)
+    results = gate.validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "fixed_fraction" in c]
+    assert not matches, matches
+
+
+def test_rule5_fixed_notional_worst_case_accounts_for_whole_lot_flooring() -> None:
+    """Same whole-lot-flooring adjustment for fixed_notional. $100k capital,
+    2 stocks at $40k/share, notional_usd=$60k: the raw target is
+    2 × $60k = $120k (would be a false critical), but each position floors
+    to 1 share ($40k), and 2 × $40k = $80k fits, so no critical."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=60_000.0),
+        target_symbols=["AAPL", "MSFT"],
+        asset_class="stocks",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: 40_000.0)
+    results = gate.validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "fixed_notional" in c]
+    assert not matches, matches
+
+
 def test_rule5_fixed_fraction_leverage_above_one_does_not_expand_cash_bound() -> None:
     """The runtime has no margin facility — entries are fully cash-funded,
     so a configured risk_limits.max_gross_leverage above 1.0 cannot expand
