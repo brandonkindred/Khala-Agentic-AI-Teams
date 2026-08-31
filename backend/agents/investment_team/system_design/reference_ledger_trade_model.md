@@ -39,11 +39,21 @@ It is **not** a fill-cost engine. Explicitly out of scope:
 - **Slippage and transaction costs.** Reference prices are exact bar-derived
   levels (a resting order's authored price, or worse-of-open-and-level on a
   gap), not slippage-adjusted fills. See §3 for exactly which production
-  field this corresponds to. The one exception, scoped narrowly: an
-  `entry_slippage_bps` input is needed purely to anchor `basis="entry_price"`
-  levels where production's real engine actually places them (§5's
-  `stop_loss` subsection) — it never appears in, or adjusts, any output
-  field.
+  field this corresponds to. `entry_slippage_bps` has exactly two uses,
+  both internal — it never appears in, or adjusts, any `ReferenceTrade`
+  field value: (1) anchoring `basis="entry_price"` levels where production's
+  real engine actually places them (§5's `stop_loss` subsection, via the
+  internal `entry_price_basis`), and (2) the internal **capital** (cash)
+  ledger's post-slippage entry/exit accounting (§5's "Entries" subsection,
+  "Fill-time capital sufficiency"), which is deliberately **separate** from
+  the no-slippage **equity** figure sizing is computed against below — the
+  two track different things (cash vs. mark-to-market net worth) at
+  different bases (post-slippage vs. no-slippage) on purpose, mirroring
+  production's own `Portfolio.capital` vs. `Portfolio.mark_to_market()`
+  split, not an inconsistency to reconcile toward one basis. Capital can
+  gate whether a *later* entry is admitted (§5's capital-sufficiency check),
+  so `entry_slippage_bps` does influence which trades this module emits,
+  even though it never touches an emitted trade's own field values.
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
   at a single price. This is a real, deliberate simplification, not an
@@ -196,10 +206,13 @@ implementation is left for Step 2 to pick.
 **Preconditions:**
 - `spec` is a validated `StrategySpec` (Pydantic's own validators already
   enforce its internal invariants — e.g. at most one `OcoBracketRule`,
-  strictly increasing ladder `pct` values, and `sum(qty_fraction) <= 1.0`
-  across a `ScaledTakeProfitRule`'s levels — `simulate` may assume every
-  ladder's rungs never over-close a position and does not need its own
-  defensive check for this).
+  strictly increasing ladder `pct` values, and `sum(qty_fraction) <= 1.0 +
+  LADDER_SUM_TOL` across a `ScaledTakeProfitRule`'s levels, **not** an exact
+  `<= 1.0` bound — the validator's own tolerance permits a sum up to
+  `1.0 + LADDER_SUM_TOL` to absorb float-summation noise. `simulate` must
+  **not** assume the rungs' fixed `qty_fraction * original_qty` slices never
+  over-close a position on their own; see §5's `scaled_take_profit`
+  subsection for the remaining-position clip this requires).
 - `spec.requires_custom_code is False`. A `requires_custom_code=True` spec's
   production entries/quantities come entirely from LLM-authored
   `strategy_code`, not `spec.entry_rules`/`spec.sizing` — the backtest mode
@@ -526,9 +539,17 @@ uniform across the two sides of this check, mirroring production's
 candidate's own pre-slippage fill notional: sum each **existing** open
 reference position's `qty * entry_price_basis` (the internal post-slippage
 anchor, §5's `stop_loss` subsection) for the numerator's existing-exposure
-term, but use the **candidate's** own `qty * entry_price` (the pre-slippage
-`ReferenceTrade` field) for its own contribution — the same asymmetry
-`RiskFilter.can_enter` itself has, not an arbitrary simplification.
+term, but for the candidate's own contribution use `qty *
+bars[symbol][entry_bar].open` — the **raw, unrounded** fill-bar open, not
+the rounded `ReferenceTrade.entry_price` output field — mirroring
+production, which computes this same check from `terms.reference_price`
+(`bar.open` for a market entry, itself never rounded) before `entry_bid_price
+= round(ref_price, dp)` (§3) is even derived. A boundary case (e.g. a raw
+open of `10.004`, stored as `10.00`) can be admitted or rejected differently
+depending on which of the two values is used, so this module must read the
+same unrounded price production's own gate reads, not its own rounded output
+field. This is the same asymmetry `RiskFilter.can_enter` itself has, not an
+arbitrary simplification.
 
 **Fill-time capital sufficiency.** At that same fill bar, production also
 re-checks affordability: `FillSimulator._fill_entry` rejects an entry when
@@ -542,18 +563,20 @@ plus unrealized position value) — mirroring `Portfolio.capital` vs.
 
 The check and the decrement deliberately use **different** bases, mirroring
 production exactly rather than an inconsistency to reconcile: the
-admission check reads `capital < qty * entry_price` (the pre-slippage
-`ReferenceTrade` field — production's `reference_price` is `ref_price`,
-computed before `fill_price` even exists, since `_fill_entry` runs this
-check ahead of applying slippage), but once the entry is admitted, capital
-actually decreases by the **post-slippage** fill notional
-(`qty * entry_price_basis`, mirroring `Portfolio.open`'s
-`capital -= position.position_value` where `position_value` is
-`Position.entry_price * qty` and `Position.entry_price` is itself
-post-slippage) — never by `qty * entry_price`. Exits increase capital by
-their own post-slippage proceeds the same way. If `capital <
-qty * entry_price` at the entry's actual fill bar, the entry does not open
-(no position, no `ReferenceTrade`), even though the sizing-bar checks above
+admission check reads `capital < qty * bars[symbol][entry_bar].open` — the
+**raw, unrounded** fill-bar open (production's `reference_price` is
+`ref_price`, computed before `fill_price` even exists and never rounded,
+since `_fill_entry` runs this check ahead of applying slippage or the
+`entry_bid_price` rounding), **not** the rounded `ReferenceTrade.entry_price`
+output field — but once the entry is admitted, capital actually decreases by
+the **post-slippage** fill notional (`qty * entry_price_basis`, mirroring
+`Portfolio.open`'s `capital -= position.position_value` where
+`position_value` is `Position.entry_price * qty` and `Position.entry_price`
+is itself post-slippage) — never by `qty * entry_price` either. Exits
+increase capital by their own post-slippage proceeds the same way. If
+`capital < qty * bars[symbol][entry_bar].open` at the entry's actual fill
+bar, the entry does not open (no position, no `ReferenceTrade`), even though
+the sizing-bar checks above
 already passed; production's own affordability check is this
 slightly-optimistic pre-slippage estimate, not a false-safety gap this
 module should "fix" by checking the post-slippage figure instead.
@@ -685,6 +708,23 @@ identical to production, not just directionally similar:
     close would fill, this module must have already removed the
     `style="limit"` stop from consideration, the same bar the competing
     rule's intent was chosen.
+- **Exit evaluation for a symbol resolves before entry evaluation for that
+  same symbol on the same bar, and entry suppression reads the
+  post-exit state.** Production's own per-bar pipeline processes a bar's
+  fills first, refreshes the position tracker from that post-fill
+  portfolio, and only then evaluates `_EngineEntryDispatcher.maybe_emit` —
+  so a symbol whose position closes via a fill on `cur_bar` is already flat
+  by the time entry rules are evaluated for `cur_bar`, and a matching entry
+  predicate on that same bar is **not** suppressed by the now-closed
+  position. This module must walk each bar in the same phase order per
+  symbol — resolve every exit-side outcome for that bar (including a
+  resting order that fires and closes the position on its own trigger
+  bar, per this document's target-state modeling) before evaluating that
+  bar's entry rules — and the "Suppression while a position is open or
+  pending" check in the "Entries" subsection above must read the resulting
+  **post-exit** state, not a snapshot taken before this bar's exits were
+  resolved. Getting this backwards would incorrectly drop a legitimate
+  re-entry trigger on the very bar a position closes.
 
 ### Engine-injected short safety stop
 
@@ -707,6 +747,33 @@ price closes via this synthetic rule in production, with a genuine
 This module must perform the same injection into its own working rule list
 before evaluating exits, or it will silently lack a real exit rule that
 production's ledger actually fires.
+
+### Nonpositive exit references
+
+`Bar` does not validate OHLC values as positive (§2's Preconditions only
+require a strictly timestamp-increasing sequence), so a bad bar can make any
+exit kind's computed fill price nonpositive — not just entries (§5's
+"Entries" subsection already guards those two cases): a `signal_exit`'s
+fill-bar open can be `<= 0` the same way an entry's can; a `stop_loss`'s
+gap-through fill (`bar.open` on a gap) can be `<= 0` for a long; a resting
+limit's `entry_price_basis * (1 ± pct)` target could in principle be driven
+non-positive by extreme inputs even off a valid anchor. `exit_price > 0` is a
+`ReferenceTrade` value-object invariant (§3) that production has no
+corresponding runtime guard for (it simply never encounters this in
+practice) — this module cannot construct an invalid `ReferenceTrade` and
+must not let one bad bar crash `simulate()` outright.
+
+The uniform rule, applied by every per-exit-rule-kind subsection below: if
+the fill price a rule would otherwise record for a closing event is `<= 0`,
+that rule does **not** fire on that bar — exactly as if its trigger
+condition had not been met. Evaluation continues normally on subsequent
+bars (other exit rules for the same position may still fire on the same or
+a later bar; the same rule may fire later once it would compute a positive
+price). This mirrors the "Nonpositive fill-bar open" entry guard above: a
+degenerate bar suppresses one candidate fill rather than aborting the run.
+A position that never receives a valid positive closing fill before
+`bars[symbol]` ends produces no `ReferenceTrade`, identically to any other
+position still open at the last bar (§2's Postconditions).
 
 ### `stop_loss`
 
@@ -843,8 +910,17 @@ magnitude, strictly increasing across `levels` by construction
 rung 0 is always the target closest to entry and the last rung the target
 farthest away, on **either** side (a short's targets sit below entry, but
 "closest" still means smallest `pct`, not most negative price). Each rung's
-quantity is `level.qty_fraction * original_qty`, fixed at entry — not a
-fraction of the live (already-reduced) position size. Sequencing mirrors the
+quantity is `min(level.qty_fraction * original_qty, remaining_qty)`, where
+`remaining_qty` is the position's currently-open quantity at the moment the
+rung fires — fixed at entry only in the `level.qty_fraction * original_qty`
+sense, not a fraction of the live (already-reduced) position size, but still
+clipped to what remains open. This clip is not a defensive nicety: a valid
+ladder's `qty_fraction`s need only sum to `<= 1.0 + LADDER_SUM_TOL` (§2's
+Contract), so a ladder whose sum lands fractionally above `1.0` (permitted by
+that tolerance) would, without the clip, have its final rung request
+slightly more quantity than the position has left — mirroring
+`FillSimulator._fill_exit`'s own `fillable_qty = min(target_qty, pos.qty)`,
+which exists for exactly this reason. Sequencing mirrors the
 production ladder cursor's per-rule-index "next un-fired rung" counter: only
 the **un-fired rung closest to entry** — i.e. the next rung in configured
 ladder order, advancing outward — is eligible to trigger on a given bar, and
