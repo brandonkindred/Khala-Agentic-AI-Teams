@@ -11,7 +11,57 @@ can't drift the two test files out of sync with each other.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    import concurrent.futures
+
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+
+def build_strategy_lab_worker(
+    env: "WorkflowEnvironment", activity_executor: "concurrent.futures.ThreadPoolExecutor"
+) -> "Worker":
+    """Build the real ``StrategyLabCycleWorkflow`` / ``run_design_attempt_activity``
+    ``Worker`` shared by every real-``WorkflowEnvironment`` Strategy Lab
+    integration test (``test_strategy_lab_temporal_cancellation.py`` and
+    ``test_strategy_lab_checkpoint_crash_resumption.py``'s two integration
+    tests). Single source of truth for the worker construction so the three
+    call sites can't drift out of sync with each other.
+
+    Preconditions:
+        ``env`` is a live ``WorkflowEnvironment`` (its ``.client`` is used to
+        construct the worker); ``activity_executor`` is a live
+        ``ThreadPoolExecutor`` the caller owns and will tear down.
+    Postconditions:
+        Returns a ``Worker`` registered for ``TASK_QUEUE`` with the genuine,
+        unmodified ``run_design_attempt_activity`` and
+        ``StrategyLabCycleWorkflow`` -- not started; the caller is
+        responsible for ``async with`` (or otherwise starting/stopping) it.
+    """
+    from temporalio.worker import Worker
+
+    from investment_team.strategy_lab.temporal import activities as act
+    from investment_team.strategy_lab.temporal.workflows import (
+        TASK_QUEUE,
+        StrategyLabCycleWorkflow,
+    )
+    from shared.temporal.worker import _build_workflow_runner
+
+    return Worker(
+        env.client,
+        task_queue=TASK_QUEUE,
+        workflows=[StrategyLabCycleWorkflow],
+        activities=[act.run_design_attempt_activity],
+        activity_executor=activity_executor,
+        max_cached_workflows=0,
+        # Without the numpy/pandas passthrough, validating
+        # StrategyLabCycleWorkflow re-imports investment_team's numpy/pandas
+        # transitive chain inside the sandbox's isolated namespace, crashing
+        # numpy's C extension.
+        workflow_runner=_build_workflow_runner(),
+    )
 
 
 def config_dict(**overrides: Any) -> Dict[str, Any]:
