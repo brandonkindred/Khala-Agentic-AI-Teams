@@ -161,6 +161,42 @@ def _is_tool_use_delta(event: Any) -> bool:
     return "toolUse" in _block_delta(event)
 
 
+def _system_with_directive(system_prompt: str | None) -> str:
+    """``system_prompt`` with the budget directive appended.
+
+    Postconditions:
+        - Returns a non-empty string: the directive alone when there is no
+          system prompt, else the prompt and the directive joined by ``"\\n"``
+          -- the same separator Strands' ``split_system_prompt`` uses to
+          derive the string form from system content blocks, so
+          :func:`_kwargs_with_directive` can keep the two views in step.
+    """
+    base = (system_prompt or "").strip()
+    return f"{base}\n{_BUDGET_DIRECTIVE}" if base else _BUDGET_DIRECTIVE
+
+
+def _kwargs_with_directive(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """``kwargs`` with the directive appended to ``system_prompt_content``.
+
+    A real Strands ``Agent`` passes ``system_prompt`` and
+    ``system_prompt_content`` as two views of one value, and the adapter drops
+    the string when it is exactly the ``"\\n"``-join of the content blocks
+    (``strands_adapter._system_prompt_is_redundant_with_content``). Appending
+    the directive to only one view would break that equality and send the
+    whole persona twice, so both are extended in step.
+
+    Postconditions:
+        - Returns a new dict; ``kwargs``, its content list and its blocks are
+          never mutated. When no ``system_prompt_content`` is present, the
+          kwargs are returned unchanged (a copy) and the directive rides on
+          the system prompt string alone.
+    """
+    content = kwargs.get("system_prompt_content")
+    if not isinstance(content, list) or not content:
+        return dict(kwargs)
+    return {**kwargs, "system_prompt_content": [*content, {"text": _BUDGET_DIRECTIVE}]}
+
+
 class ToolCallBudgetModel:
     """Strands model wrapper that hard-stops a run at ``max_tool_calls``.
 
@@ -182,10 +218,11 @@ class ToolCallBudgetModel:
           parallel batch of ``toolUse`` blocks): each further block in that
           turn is dropped whole, so Strands never executes it, while the
           turn's other content passes through untouched.
-        - At/after the cap: exactly one further turn is issued, carrying a
-          directive to answer now (``tool_specs`` is forwarded unchanged --
-          see ``_final_turn`` for why withdrawing it would break the request
-          under Anthropic). Its ``toolUse`` blocks are dropped and a
+        - At/after the cap: exactly one further turn is issued, with a
+          directive to answer now appended to the system prompt (``messages``
+          and ``tool_specs`` are forwarded unchanged -- see ``_final_turn``
+          for why a directive message and withdrawn tools would each break
+          the request under Anthropic). Its ``toolUse`` blocks are dropped and a
           ``tool_use`` stop reason is rewritten to ``end_turn``, so the
           Strands event loop cannot recurse. Any other stop reason passes
           through untouched — it already ends the loop, and a terminal one
@@ -441,9 +478,19 @@ class ToolCallBudgetModel:
         tool_use or tool_result blocks must define tools"). That 400 would
         replace the graceful final answer with an exception.
 
+        The stop directive rides on the system prompt, not the messages. The
+        turn that spends the budget ends with the tool results, which Strands
+        carries as a user message, so any directive message appended after it
+        reaches Anthropic as a second consecutive ``user`` turn no matter how
+        it is packed: ``_strands_messages_to_openai`` splits a
+        ``toolResult``-bearing message into its own ``role="tool"`` message
+        and ``_to_anthropic_messages`` flushes that as ``user(tool_result)``,
+        leaving ``user(directive)`` behind it. The system prompt cannot
+        produce an invalid message shape on any provider.
+
         Postconditions:
-            - A stop directive is added to ``messages`` (a copy — the caller's
-              list is never mutated) and ``tool_specs`` is forwarded as given.
+            - ``messages`` and ``tool_specs`` are forwarded exactly as given;
+              only the system prompt differs from the caller's.
             - ``toolUse`` blocks are dropped (the budget is already spent, so
               ``_within_budget`` drops every one of them) and a
               ``stopReason`` of ``tool_use`` is rewritten to ``end_turn``, so
@@ -460,10 +507,10 @@ class ToolCallBudgetModel:
         saw_stop = False
         async for event in self._within_budget(
             self._inner.stream(
-                self._with_directive(messages),
+                messages,
                 tool_specs=tool_specs,
-                system_prompt=system_prompt,
-                **kwargs,
+                system_prompt=_system_with_directive(system_prompt),
+                **_kwargs_with_directive(kwargs),
             )
         ):
             if _has_text_delta(event):
@@ -497,37 +544,6 @@ class ToolCallBudgetModel:
             {"contentBlockDelta": {"delta": {"text": _NO_OUTPUT_FALLBACK}}},
             {"contentBlockStop": {}},
         ]
-
-    @staticmethod
-    def _with_directive(messages: Any) -> Any:
-        """``messages`` carrying a trailing user directive to answer now.
-
-        The directive is appended *into* the final user message when there is
-        one — the common case, since the turn that spent the budget ends with
-        the tool results, which Strands carries as a user message. Adding a
-        second user message instead would put two consecutive user turns on
-        the wire, which the OpenAI-compatible translator passes straight
-        through and Anthropic can reject. Only when the conversation does not
-        end in a user message is a new one appended.
-
-        Postconditions:
-            - Returns a new list and never mutates ``messages`` or any message
-              or content block inside it (the trailing message is copied, not
-              edited in place). A non-list ``messages`` (a test double's own
-              shape) is returned unchanged rather than coerced.
-            - Exactly one copy of the directive is present, as the last text
-              the model sees.
-        """
-        if not isinstance(messages, list):
-            return messages
-        directive_block = {"text": _BUDGET_DIRECTIVE}
-        last = messages[-1] if messages else None
-        if isinstance(last, dict) and last.get("role") == "user":
-            content = last.get("content")
-            if isinstance(content, list):
-                merged = {**last, "content": [*content, directive_block]}
-                return [*messages[:-1], merged]
-        return [*messages, {"role": "user", "content": [directive_block]}]
 
 
 __all__ = [

@@ -104,7 +104,7 @@ class _AlwaysToolCallsModel:
             for event in _text_events(json.dumps({"verdict": "kept"})):
                 yield event
             return
-        if self._final_text is not None and _sees_budget_directive(messages):
+        if self._final_text is not None and _sees_budget_directive(system_prompt):
             for event in _text_events(self._final_text):
                 yield event
             return
@@ -112,13 +112,14 @@ class _AlwaysToolCallsModel:
             yield event
 
 
-def _sees_budget_directive(messages: Any) -> bool:
-    """Whether the wrapper's "budget exhausted" directive is in `messages`.
+def _sees_budget_directive(system_prompt: Any) -> bool:
+    """Whether the wrapper's "budget exhausted" directive is in `system_prompt`.
 
     This is how a real model tells the final turn apart: the tools stay
-    attached, so their absence is not the signal.
+    attached and the messages are untouched, so the directive on the system
+    prompt is the only signal.
     """
-    return "budget for this task is exhausted" in json.dumps(messages, default=str)
+    return "budget for this task is exhausted" in json.dumps(system_prompt, default=str)
 
 
 def _drain(model: Any, **kwargs: Any) -> List[Dict]:
@@ -169,15 +170,13 @@ def test_at_cap_keeps_tools_and_forces_end_turn() -> None:
     messages = [{"role": "user", "content": [{"text": "Review this"}]}]
     events = _drain(model, messages=messages, tool_specs=[{"name": "read_file"}])
 
-    # Tools stay attached (withdrawing them would break the request under
-    # Anthropic); the directive rides in the trailing user message rather than
-    # a second consecutive user turn, and the caller's list is untouched.
+    # Tools stay attached and the messages are forwarded untouched — both
+    # would otherwise make the request invalid under Anthropic. The directive
+    # rides on the system prompt instead.
     assert inner.calls[1]["tool_specs"] == [{"name": "read_file"}]
+    assert inner.calls[1]["messages"] == messages
     assert messages == [{"role": "user", "content": [{"text": "Review this"}]}]
-    sent = inner.calls[1]["messages"]
-    assert len(sent) == 1
-    assert [block["text"] for block in sent[-1]["content"]][0] == "Review this"
-    assert "budget for this task is exhausted" in sent[-1]["content"][-1]["text"]
+    assert "budget for this task is exhausted" in inner.calls[1]["system_prompt"]
 
     # The model kept asking for a tool; nothing tool-shaped survives, and the
     # turn ends the loop.
@@ -287,7 +286,7 @@ class _ParallelBatchModel:
         return None
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
-        if _sees_budget_directive(messages):
+        if _sees_budget_directive(system_prompt):
             for event in _text_events("done"):
                 yield event
             return
@@ -360,7 +359,7 @@ class _TruncatedFinalTurnModel:
         return None
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
-        if not _sees_budget_directive(messages):
+        if not _sees_budget_directive(system_prompt):
             for event in _tool_use_events("call_0", "read_file", {"path": "app/main.py"}):
                 yield event
             return
@@ -576,3 +575,85 @@ def test_drop_state_is_scoped_to_the_block_that_opened_it() -> None:
     assert stops == [{"contentBlockIndex": 1}]
     # Nothing tool-shaped leaks through, in either shape.
     assert not any("toolUse" in json.dumps(event) for event in events)
+
+
+def test_final_turn_wire_shape_has_no_consecutive_user_turns() -> None:
+    """The final turn must translate to a valid Anthropic message list.
+
+    The turn that spends the budget ends with the tool results, which Strands
+    carries as a user message. Any directive packed into the messages — its own
+    message or an extra block on that one — comes out the other side of the two
+    translators as `user(tool_result)` followed by `user(directive)`, because
+    `_strands_messages_to_openai` splits a toolResult-bearing message into its
+    own `role="tool"` message. Keeping the directive on the system prompt is
+    what avoids that, and this pins it end to end rather than by inspection.
+    """
+    from llm_service.clients.claude import _to_anthropic_messages
+    from llm_service.strands_adapter import _strands_messages_to_openai
+    from software_engineering_team.code_review_agent.tool_call_budget import (
+        _system_with_directive,
+    )
+
+    messages = [
+        {"role": "user", "content": [{"text": "Review this"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"toolUse": {"toolUseId": "t1", "name": "read_file", "input": {"path": "a.py"}}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "toolResult": {
+                        "toolUseId": "t1",
+                        "status": "success",
+                        "content": [{"text": "file body"}],
+                    }
+                }
+            ],
+        },
+    ]
+
+    # The wrapper forwards these messages verbatim; only the system prompt grows.
+    system, anthropic_messages = _to_anthropic_messages(_strands_messages_to_openai(messages))
+    roles = [message["role"] for message in anthropic_messages]
+    assert roles == ["user", "assistant", "user"]
+    assert all(roles[i] != roles[i + 1] for i in range(len(roles) - 1)), (
+        "consecutive same-role turns are not a valid Anthropic message list"
+    )
+
+    directive_system = _system_with_directive("You are a reviewer.")
+    assert directive_system.startswith("You are a reviewer.")
+    assert "budget for this task is exhausted" in directive_system
+
+
+def test_directive_keeps_system_prompt_and_content_in_step() -> None:
+    """Both system views must grow together, or the persona is sent twice.
+
+    The adapter drops the string form when it is exactly the "\\n"-join of the
+    content blocks; extending only one view would break that equality.
+    """
+    from llm_service.strands_adapter import _system_prompt_is_redundant_with_content
+    from software_engineering_team.code_review_agent.tool_call_budget import (
+        _kwargs_with_directive,
+        _system_with_directive,
+    )
+
+    blocks = [{"text": "You are a reviewer."}, {"text": "Follow the contract."}]
+    system_prompt = "\n".join(block["text"] for block in blocks)
+    kwargs = {"system_prompt_content": blocks}
+
+    new_system = _system_with_directive(system_prompt)
+    new_kwargs = _kwargs_with_directive(kwargs)
+    new_blocks = new_kwargs["system_prompt_content"]
+
+    assert _system_prompt_is_redundant_with_content(
+        new_system, [block["text"] for block in new_blocks]
+    )
+    # The caller's list and blocks are untouched.
+    assert kwargs["system_prompt_content"] == blocks
+    assert len(blocks) == 2
+    # With no content blocks, the kwargs come back unchanged.
+    assert _kwargs_with_directive({"invocation_state": {}}) == {"invocation_state": {}}
