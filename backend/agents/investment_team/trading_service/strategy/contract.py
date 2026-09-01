@@ -20,7 +20,7 @@ for future data in this process at all.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -300,8 +300,33 @@ class OrderRequest(BaseModel):
     twap_slices: Optional[int] = None
     attached_stop_loss: Optional[StopAttachment] = None
     attached_take_profit: Optional[LimitAttachment] = None
+    # Additional resting protective/target legs beyond the two fixed bracket
+    # fields above, for entries with more than a stop-loss/take-profit pair
+    # (e.g. multiple independently-attached, non-bracket exits — #7509).
+    # Kept as a separate field rather than folding the bracket pair into it
+    # so existing bracket call sites/tests constructing requests via
+    # ``attached_stop_loss=``/``attached_take_profit=`` are unaffected. Not
+    # yet populated by any production dispatcher/DSL path — that migration
+    # is out of scope here; today only tests exercising the fill simulator
+    # directly populate this.
+    attached_exits: List[Union[StopAttachment, LimitAttachment]] = Field(default_factory=list)
     parent_order_id: Optional[str] = None
     oco_group_id: Optional[str] = None
+
+    @property
+    def has_attached_exits(self) -> bool:
+        """True iff this request carries any protective/target exit leg.
+
+        Covers both the two fixed bracket fields (``attached_stop_loss`` /
+        ``attached_take_profit``) and the generalized ``attached_exits``
+        list, so callers have one predicate instead of duplicating the
+        three-way OR at each materialization/validation call site.
+        """
+        return (
+            self.attached_stop_loss is not None
+            or self.attached_take_profit is not None
+            or bool(self.attached_exits)
+        )
 
     def validate_prices(self) -> None:
         """Enforce order_type / tif / policy / attachment constraints.
@@ -323,27 +348,38 @@ class OrderRequest(BaseModel):
         # ``attached_stop_loss.trail_offset`` are validated by the
         # shape-consistency checks below (``stop_price`` required for
         # standalone TRAILING_STOP; non-negative ``trail_offset``).
-        if self.attached_stop_loss is not None and self.attached_stop_loss.trail_offset is not None:
-            if self.attached_stop_loss.trail_offset < 0:
+        # Applies to every ``StopAttachment`` leg — the fixed
+        # ``attached_stop_loss`` field and each ``StopAttachment`` in the
+        # generalized ``attached_exits`` list (#7509) — so a leg attached
+        # via the list can't skip the offset checks the fixed field
+        # enforces. ``label`` names the offending leg in the error so a
+        # bad ``attached_exits`` entry is as easy to locate as a bad
+        # ``attached_stop_loss``.
+        stop_legs: List[Tuple[str, StopAttachment]] = []
+        if self.attached_stop_loss is not None:
+            stop_legs.append(("attached_stop_loss", self.attached_stop_loss))
+        for idx, leg in enumerate(self.attached_exits):
+            if isinstance(leg, StopAttachment):
+                stop_legs.append((f"attached_exits[{idx}]", leg))
+        for label, sl in stop_legs:
+            if sl.trail_offset is not None and sl.trail_offset < 0:
                 raise ValueError(
-                    "attached_stop_loss.trail_offset must be non-negative, "
-                    f"got {self.attached_stop_loss.trail_offset!r}"
+                    f"{label}.trail_offset must be non-negative, got {sl.trail_offset!r}"
                 )
-        if self.attached_stop_loss is not None and self.attached_stop_loss.limit_offset is not None:
-            if self.attached_stop_loss.limit_offset < 0:
-                raise ValueError(
-                    "attached_stop_loss.limit_offset must be non-negative, "
-                    f"got {self.attached_stop_loss.limit_offset!r}"
-                )
-            # A ratcheting stop-limit child (trailing stop whose limit re-derives
-            # from the moving stop each bar) is out of scope; reject the combo
-            # loudly so it surfaces at submission rather than materializing a
-            # silently-wrong child.
-            if self.attached_stop_loss.trail_offset is not None:
-                raise ValueError(
-                    "attached_stop_loss cannot set both trail_offset and limit_offset "
-                    "(a trailing stop-limit child is not supported)"
-                )
+            if sl.limit_offset is not None:
+                if sl.limit_offset < 0:
+                    raise ValueError(
+                        f"{label}.limit_offset must be non-negative, got {sl.limit_offset!r}"
+                    )
+                # A ratcheting stop-limit child (trailing stop whose limit re-derives
+                # from the moving stop each bar) is out of scope; reject the combo
+                # loudly so it surfaces at submission rather than materializing a
+                # silently-wrong child.
+                if sl.trail_offset is not None:
+                    raise ValueError(
+                        f"{label} cannot set both trail_offset and limit_offset "
+                        "(a trailing stop-limit child is not supported)"
+                    )
         # ``parent_order_id`` / ``oco_group_id`` are engine-internal: the
         # bracket materializer in ``FillSimulator`` calls
         # ``OrderBook.submit_attached`` which clones the request with these
@@ -420,12 +456,6 @@ class OrderRequest(BaseModel):
         elif self.twap_slices is not None:
             raise InvalidTWAPOrderError(
                 "twap_slices may only be set when unfilled_policy is twap_n"
-            )
-        if (
-            self.attached_stop_loss is not None or self.attached_take_profit is not None
-        ) and self.parent_order_id is not None:
-            raise ValueError(
-                "attachments may only be set on entry-creating orders (parent_order_id must be None)"
             )
 
 
