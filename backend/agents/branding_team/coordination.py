@@ -12,10 +12,10 @@ linking a conversation to a brand). That coordination — opening the shared
 transaction and deciding what each store does with it — lives here rather
 than inside either store, so no single-table store class ends up owning
 another store's cross-table orchestration. Each store still owns its own
-table's writes: this module only sequences calls into the public,
-cursor-aware methods (``BrandingConversationStore.attach_locked``,
-``BrandingStore.patch_brand_locked``) that the stores expose for exactly
-this purpose.
+table's writes: this module only opens the shared transaction and sequences
+calls into public methods the stores expose for exactly this purpose —
+``BrandingStore.transaction``/``patch_brand_locked`` and
+``BrandingConversationStore.attach_locked``.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ class _AttachAbort(Exception):
     """Internal control-flow signal: abort the attach transaction with *result*."""
 
     def __init__(self, result: "AttachConversationResult") -> None:
+        super().__init__(result)
         self.result = result
 
 
@@ -57,13 +58,13 @@ def attach_conversation_to_brand(
     brand that never learns its id).
 
     *store* and *conv_store* are the two collaborating stores: this function
-    borrows *store*'s ``_transaction()`` to open one connection/transaction
-    shared by both writes, calls ``conv_store.attach_locked`` for the
-    conversation row (``BrandingConversationStore`` remains the sole owner of
-    ``branding_conversations`` writes), and calls *store*'s
+    opens one connection/transaction shared by both writes via *store*'s
+    public ``transaction()`` method, calls ``conv_store.attach_locked`` for
+    the conversation row (``BrandingConversationStore`` remains the sole
+    owner of ``branding_conversations`` writes), and calls *store*'s
     ``patch_brand_locked`` for the brand row (``BrandingStore`` remains the
-    sole owner of ``branding_brands`` writes) — both are public,
-    cursor-aware methods the stores expose for exactly this cross-store use.
+    sole owner of ``branding_brands`` writes) — all three are public methods
+    the stores expose for exactly this cross-store use.
 
     Preconditions:
         ``client_id``, ``brand_id``, ``conversation_id`` are non-empty
@@ -114,7 +115,7 @@ def attach_conversation_to_brand(
     if mission is not None and not isinstance(mission, BrandingMission):
         raise ValueError("mission must be a BrandingMission")
     try:
-        with store._transaction() as cur:
+        with store.transaction() as cur:
             conv_result = conv_store.attach_locked(cur, conversation_id, brand_id, mission)
             if conv_result is ConversationAttachResult.NOT_FOUND:
                 raise _AttachAbort(AttachConversationResult.CONVERSATION_NOT_FOUND)

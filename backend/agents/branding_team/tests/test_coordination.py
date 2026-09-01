@@ -35,14 +35,14 @@ class _StubConversationStore:
 
 
 class _StubBrandingStore:
-    """``_transaction``/``patch_brand_locked`` stand-in for ``BrandingStore``."""
+    """``transaction``/``patch_brand_locked`` stand-in for ``BrandingStore``."""
 
     def __init__(self, patched_brand: Any = "patched-brand") -> None:
         self._patched_brand = patched_brand
         self.patch_calls: list[tuple] = []
 
     @contextmanager
-    def _transaction(self) -> Iterator[str]:
+    def transaction(self) -> Iterator[str]:
         yield "cursor"
 
     def patch_brand_locked(

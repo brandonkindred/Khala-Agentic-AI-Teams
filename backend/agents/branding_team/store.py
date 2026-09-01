@@ -117,12 +117,11 @@ class BrandingStore(PostgresHelperMixin):
     store itself is stateless; the pool is owned by shared.postgres.
 
     Note for maintainers: ``coordination.attach_conversation_to_brand``
-    borrows ``self._transaction()`` (inherited from ``PostgresHelperMixin``)
-    to open the one transaction it shares with ``BrandingConversationStore``.
-    That's the same primitive every method below uses for its own
-    multi-statement writes, but a rename or signature change here is also a
-    breaking change for that cross-store caller — grep for
-    ``coordination.py`` before touching it.
+    opens its shared transaction via :meth:`transaction`, this class's
+    public wrapper around the inherited ``PostgresHelperMixin._transaction``.
+    A rename or signature change to ``transaction`` is a breaking change for
+    that cross-store caller — grep for ``coordination.py`` before touching
+    it.
     """
 
     def __init__(self) -> None:
@@ -450,6 +449,26 @@ class BrandingStore(PostgresHelperMixin):
             patch["conversation_id"] = conversation_id
         with self._transaction() as cur:
             return _apply_brand_patch(cur, brand_id, client_id, patch)
+
+    def transaction(self):
+        """Public wrapper around ``_transaction()``, for cross-store coordinators.
+
+        ``coordination.attach_conversation_to_brand`` needs to open one
+        transaction shared with ``BrandingConversationStore`` — this method
+        is that entry point, so a caller outside this class never has to
+        reach into the inherited ``PostgresHelperMixin._transaction``
+        directly. Every method on this class still uses ``self._transaction()``
+        for its own single-store multi-statement writes; ``transaction()``
+        exists only for the cross-store case.
+
+        Postconditions:
+            Returns the same context manager ``_transaction()`` produces:
+            entering it yields a ``dict_row`` cursor bound to one
+            connection/transaction, committing on clean exit and rolling
+            back on exception. See ``PostgresHelperMixin._transaction`` for
+            the full contract.
+        """
+        return self._transaction()
 
     @timed_query(store=_STORE, op="patch_brand_locked")
     def patch_brand_locked(
