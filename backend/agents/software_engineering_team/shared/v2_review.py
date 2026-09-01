@@ -60,6 +60,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Tuple, TypeVar, Union
@@ -1063,16 +1064,18 @@ def _run_tool_agents_review(
           independently wrapped in its own ``try`` inside the dispatched unit
           of work. Every agent whose ``build_runner`` is set (it runs a real
           external command against ``repo_path`` in ``review()`` -- e.g. the
-          build specialist, the linter) is folded into one composite dispatch
-          unit that runs them sequentially, in their original relative
-          ``tool_agents`` order, positioned where the first such agent
-          appeared -- so, unlike the fully-concurrent LLM-only agents, they
-          never run at the same time as each other *and* always run in the
-          same relative order as the pre-concurrency sequential loop (e.g.
-          build always finishes before lint starts, matching the wired
-          frontend roster's ``BUILD_SPECIALIST`` before ``LINTER`` order).
-          Agents without ``build_runner`` are unaffected and run fully
-          concurrently, including alongside that composite unit.
+          build specialist, the linter) keeps its own individual dispatched
+          unit -- so its result still lands in its own correct position when
+          folded, even with a non-``build_runner`` agent interleaved between
+          two such agents in ``tool_agents`` -- but a chain of events makes
+          each wait for the previous one to finish before it starts: so,
+          unlike the fully-concurrent LLM-only agents, no two ``build_runner``
+          agents ever run at the same time as each other *and* they always
+          run in the same relative order as the pre-concurrency sequential
+          loop (e.g. build always finishes before lint starts, matching the
+          wired frontend roster's ``BUILD_SPECIALIST`` before ``LINTER``
+          order). Agents without ``build_runner`` are unaffected and run
+          fully concurrently, including alongside any ``build_runner`` agent.
     """
     if not tool_agents:
         return
@@ -1138,48 +1141,51 @@ def _run_tool_agents_review(
             return None
         return local_issues
 
-    def _review_command_agents_in_order(pairs: List[Tuple[Any, Any]]) -> List[ReviewIssue]:
-        """Run `build_runner`-set agents one at a time, in `pairs`' order."""
-        combined: List[ReviewIssue] = []
-        for kind, agent in pairs:
-            result = _review_one(kind, agent)
-            if result is not None:
-                combined.extend(result)
-        return combined
-
     # Agents whose `build_runner` is set execute a real external command against
     # `repo_path` in review() (see BaseReviewToolAgent._build_review) -- e.g. the
     # frontend build specialist's build and the linter's `npx eslint .`. Before
     # concurrent dispatch these ran one at a time, in `tool_agents` order (the old
     # sequential loop), so they never touched the working tree at the same moment and
     # always ran in a fixed relative order (build before lint, so lint never observes a
-    # partial/mid-build tree). A plain mutex only gives mutual exclusion, not that
-    # ordering -- whichever thread happens to acquire it first would run first -- so
-    # instead every `build_runner` agent is folded into a single composite thunk that
-    # runs them sequentially, in their original relative order, positioned where the
-    # first one appeared in `tool_agents`. That single thunk is then just one more unit
-    # dispatched alongside the (fully concurrent) LLM-only agents' individual thunks.
+    # partial/mid-build tree). A plain mutex would give mutual exclusion but not that
+    # ordering (acquisition order isn't FIFO), and clumping every such agent into one
+    # composite dispatch unit would preserve their relative order but lose their
+    # *positions* relative to any non-command agent interleaved between them in
+    # `tool_agents` -- e.g. command, llm-only, command would fold as
+    # command, command, llm-only instead of the original order. So instead each
+    # `build_runner` agent keeps its own individual thunk, in its own original
+    # position, and a chain of events makes command agent N wait for command agent
+    # N-1 to finish before it starts: still never overlapping, still in relative
+    # order, but each one's result lands in its own correct slot when folded below.
     kind_agent_pairs = [
         (kind, agent) for kind, agent in tool_agents.items() if hasattr(agent, "review")
     ]
-    command_pairs = [
-        (kind, agent)
-        for kind, agent in kind_agent_pairs
-        if getattr(agent, "build_runner", None) is not None
+    command_kinds_in_order = [
+        kind for kind, agent in kind_agent_pairs if getattr(agent, "build_runner", None) is not None
     ]
-    command_kinds = {kind for kind, _ in command_pairs}
-    thunks: List[Callable[[], Optional[List[ReviewIssue]]]] = []
-    command_thunk_emitted = False
-    for kind, agent in kind_agent_pairs:
-        if kind in command_kinds:
-            if not command_thunk_emitted:
-                thunks.append(lambda pairs=command_pairs: _review_command_agents_in_order(pairs))
-                command_thunk_emitted = True
-            continue
-        thunks.append(lambda kind=kind, agent=agent: _review_one(kind, agent))
+    command_order = {kind: i for i, kind in enumerate(command_kinds_in_order)}
+    command_done_events = [threading.Event() for _ in command_kinds_in_order]
+
+    def _review_command_agent_in_turn(kind: Any, agent: Any) -> Optional[List[ReviewIssue]]:
+        my_turn = command_order[kind]
+        if my_turn > 0:
+            command_done_events[my_turn - 1].wait()
+        try:
+            return _review_one(kind, agent)
+        finally:
+            command_done_events[my_turn].set()
+
+    thunks: List[Callable[[], Optional[List[ReviewIssue]]]] = [
+        (
+            (lambda kind=kind, agent=agent: _review_command_agent_in_turn(kind, agent))
+            if kind in command_order
+            else (lambda kind=kind, agent=agent: _review_one(kind, agent))
+        )
+        for kind, agent in kind_agent_pairs
+    ]
 
     # Each thunk is fully self-contained (its own try/except, cache read/write, and
-    # local-list fold -- see _review_one/_review_command_agents_in_order above), so they
+    # local-list fold -- see _review_one/_review_command_agent_in_turn above), so they
     # can be fanned out via the same dispatch policy _run_review_steps uses for the
     # code-review/QA/security steps (see _dispatch_review_thunks). Folding into the
     # shared `issues` list happens below, back on this thread, in `thunks` order (which

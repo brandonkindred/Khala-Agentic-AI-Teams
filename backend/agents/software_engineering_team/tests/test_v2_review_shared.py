@@ -1588,6 +1588,59 @@ def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -
     )
 
 
+def test_run_review_interleaved_build_runner_agent_keeps_its_own_position(
+    tmp_path: Path,
+) -> None:
+    """A non-``build_runner`` agent submitted *between* two ``build_runner``
+    agents must fold into ``issues`` at its own original position -- not get
+    pushed after both command agents. Submission order here is
+    build (command) -> middle (LLM-only) -> lint (command); the merged
+    ``issues`` must come back in that same order, matching what the old
+    sequential loop would have produced, even though the two command agents
+    still run serialized relative to each other and never overlap."""
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    class _CommandAgent:
+        build_runner = staticmethod(lambda path: [])
+
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        def review(self, phase_inp):
+            return SimpleNamespace(
+                issues=[ReviewIssue(source=self.source, severity="low", description=self.source)],
+                recommendations=[],
+            )
+
+    class _LlmOnlyAgent:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        def review(self, phase_inp):
+            return SimpleNamespace(
+                issues=[ReviewIssue(source=self.source, severity="low", description=self.source)],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            ToolAgentKind.BUILD_SPECIALIST: _CommandAgent("build"),
+            ToolAgentKind.ACCESSIBILITY: _LlmOnlyAgent("middle"),
+            ToolAgentKind.LINTER: _CommandAgent("lint"),
+        },
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert [i.source for i in result.issues] == ["build", "middle", "lint"]
+
+
 def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
     """The microtask opening INFO line uses the config's ``microtask_intro``."""
     import logging
