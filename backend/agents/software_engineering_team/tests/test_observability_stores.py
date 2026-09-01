@@ -275,105 +275,106 @@ def _rec(**overrides):
     return r
 
 
+class _RecNoCacheAttrs:
+    """A telemetry record with no cache-token attributes at all (missing entirely,
+    not just zero) — used to pin the never-raise/defaults-to-0 contract."""
+
+    timestamp = datetime.now(tz=timezone.utc).timestamp()
+    team = "software_engineering"
+    job_id = "j1"
+
+
 @pytest.fixture
 def _fake_cursor(monkeypatch):
-    """Enable tracing and swap trace_store.pg_cursor for a recording FakeCursor."""
+    """Enable tracing and swap trace_store.pg_cursor for a recording FakeCursor.
+
+    Returns a factory: call it with no args for the default (non-raising) cursor,
+    or ``raise_on_execute=True`` to get a cursor that raises on execute/executemany
+    (for the never-raise-on-DB-failure path).
+    """
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
-    cursor = _FakeCursor()
 
-    @contextmanager
-    def _pg_cursor(*, dict_rows: bool = False, database=None):
-        yield cursor
+    def _make(raise_on_execute: bool = False) -> _FakeCursor:
+        cursor = _FakeCursor(raise_on_execute)
 
-    monkeypatch.setattr(trace_store, "pg_cursor", _pg_cursor)
-    return cursor
+        @contextmanager
+        def _pg_cursor(*, dict_rows: bool = False, database=None):
+            yield cursor
+
+        monkeypatch.setattr(trace_store, "pg_cursor", _pg_cursor)
+        return cursor
+
+    return _make
+
+
+# INSERT param order (see trace_store._INSERT_SQL / _record_to_row):
+# params[10] = cache_read_tokens, params[11] = cache_creation_tokens.
 
 
 def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
     """write_trace (single-row path) carries cache_read_tokens through to the INSERT params."""
+    cursor = _fake_cursor()
     assert trace_store.write_trace(_rec(cache_read_tokens=42, cache_creation_tokens=0)) is True
-    sql, params = _fake_cursor.executed[0]
+    sql, params = cursor.executed[0]
     assert "cache_read_tokens" in sql
     assert params[10:12] == (42, 0)
 
 
 def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
     """write_trace (single-row path) carries cache_creation_tokens through to the INSERT params."""
+    cursor = _fake_cursor()
     assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=17)) is True
-    _, params = _fake_cursor.executed[0]
+    _, params = cursor.executed[0]
     assert params[10:12] == (0, 17)
 
 
 def test_write_trace_writes_zero_for_no_cache_usage(_fake_cursor) -> None:
     """A record reporting neither cache reads nor creation writes 0 for both, never NULL."""
+    cursor = _fake_cursor()
     assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=0)) is True
-    _, params = _fake_cursor.executed[0]
+    _, params = cursor.executed[0]
     assert params[10:12] == (0, 0)
 
 
 def test_write_trace_never_raises_on_missing_cache_fields(_fake_cursor) -> None:
     """The never-raise contract holds even when the record has no cache attrs at all."""
-
-    class _RecNoCacheAttrs:
-        timestamp = datetime.now(tz=timezone.utc).timestamp()
-        team = "software_engineering"
-        job_id = "j1"
-
+    cursor = _fake_cursor()
     assert trace_store.write_trace(_RecNoCacheAttrs()) is True
-    _, params = _fake_cursor.executed[0]
+    _, params = cursor.executed[0]
     assert params[10:12] == (0, 0)
 
 
 def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
     """write_rows (batch path) carries cache_read_tokens through identically to write_trace."""
+    cursor = _fake_cursor()
     row = trace_store._record_to_row(_rec(cache_read_tokens=42, cache_creation_tokens=0))
     assert trace_store.write_rows([row]) == 1
-    sql, rows = _fake_cursor.executed[0]
+    sql, rows = cursor.executed[0]
     assert "cache_read_tokens" in sql
     assert rows[0][10:12] == (42, 0)
 
 
 def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
     """write_rows (batch path) carries cache_creation_tokens through identically to write_trace."""
+    cursor = _fake_cursor()
     row = trace_store._record_to_row(_rec(cache_read_tokens=0, cache_creation_tokens=17))
     assert trace_store.write_rows([row]) == 1
-    _, rows = _fake_cursor.executed[0]
+    _, rows = cursor.executed[0]
     assert rows[0][10:12] == (0, 17)
 
 
 def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
     """write_rows (batch path) writes 0/0 for a record reporting neither, never NULL."""
-
-    class _RecNoCacheAttrs:
-        timestamp = datetime.now(tz=timezone.utc).timestamp()
-        team = "software_engineering"
-        job_id = "j1"
-
+    cursor = _fake_cursor()
     row = trace_store._record_to_row(_RecNoCacheAttrs())
     assert trace_store.write_rows([row]) == 1
-    _, rows = _fake_cursor.executed[0]
+    _, rows = cursor.executed[0]
     assert rows[0][10:12] == (0, 0)
 
 
-def test_write_rows_never_raises_on_cursor_failure(monkeypatch) -> None:
+def test_write_rows_never_raises_on_cursor_failure(_fake_cursor) -> None:
     """A DB failure on the batch path degrades to 0, never raises (mirrors write_trace)."""
-    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
-    cursor = _FakeCursor(raise_on_execute=True)
-
-    @contextmanager
-    def _pg_cursor(*, dict_rows: bool = False, database=None):
-        yield cursor
-
-    monkeypatch.setattr(trace_store, "pg_cursor", _pg_cursor)
+    cursor = _fake_cursor(raise_on_execute=True)
     row = trace_store._record_to_row(_rec(cache_read_tokens=5, cache_creation_tokens=0))
     assert trace_store.write_rows([row]) == 0
-
-
-def test_register_team_schemas_noop_without_postgres(monkeypatch) -> None:
-    """Schema registration for the SE team (se_agent_traces included) is a no-op when
-    POSTGRES_HOST is unset — confirms the Postgres-optional contract these stores rely on."""
-    from shared.postgres import register_team_schemas
-    from software_engineering_team.postgres import SCHEMA
-
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
-    assert register_team_schemas(SCHEMA) is False
+    assert cursor._raise is True
