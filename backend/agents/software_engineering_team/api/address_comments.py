@@ -690,7 +690,15 @@ def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: Revie
         raise CitedCodeUnavailableError(
             f"could not read cited file {comment.path}@{ref}: {scrub_token_from_text(str(e))}"
         ) from e
-    return content or ""
+    if content is None:
+        # get_file_contents returns None (no exception) for a 404, a directory,
+        # or an undecodable payload. That is a fetch failure, not "the file is
+        # empty" — collapsing it to "" would let triage proceed on prose alone.
+        raise CitedCodeUnavailableError(
+            f"could not read cited file {comment.path}@{ref}: file not found, is a directory, "
+            "or its content could not be decoded"
+        )
+    return content
 
 
 def _format_thread_history(thread_history: List[ReviewComment]) -> str:
@@ -1886,24 +1894,33 @@ def _handle_comment(
             return base
         if published is not None:
             child_job_id, chosen_plan = published
+            # Reuse the SAME fail-closed freshness check the fresh-triage path
+            # runs (see the "triaged"/"planned" call sites below) instead of
+            # the narrower, best-effort open-state-only check this branch used
+            # to do inline: a force-push/rebase/revert since this run's
+            # snapshot was taken can move the head just as easily on this
+            # shortcut path as on the fresh-triage path, and a failed re-fetch
+            # here is "unknown", not "still open" — proceeding on the old
+            # best-effort None would have silently accepted a stale PR state.
+            # This does NOT verify that the specific commit the historical
+            # child job pushed is still an ancestor of the (possibly
+            # unchanged) current head — that needs an actual git/GitHub
+            # ancestry check beyond what this drift check does, which round 6
+            # finding #6 already looked at and found too large for a
+            # mechanical fix; this only closes the gap where the shortcut
+            # skipped even the existing drift/closed check entirely.
             try:
-                post_dispatch_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
-            except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block
-                logger.warning(
-                    "address-comments: could not re-check PR state before retrying reply/resolve "
-                    "for comment %s's already-published fix: %s",
-                    comment.id,
-                    scrub_token_from_text(str(e)),
+                stale_detail = _pr_became_stale(client, request, comment.id, pr_head_sha, "reviewed")
+            except PrFreshnessUnknownError as e:
+                base.detail = str(e)
+                return base
+            if stale_detail is not None:
+                base.detail = (
+                    f"{stale_detail} A fix was already published by job {child_job_id} but the "
+                    "thread was left as-is rather than replying to or resolving it against "
+                    "possibly-stale PR state."
                 )
-            else:
-                if post_dispatch_pr.state != "open":
-                    base.detail = (
-                        f"PR {request.owner}/{request.repo}#{request.pr_number} is no longer open "
-                        f"(state={post_dispatch_pr.state}); a fix was already published by job "
-                        f"{child_job_id} but the thread was left as-is rather than replying to or "
-                        "resolving a conversation on a closed PR."
-                    )
-                    return base
+                return base
             reply = f"Addressed by the software-engineering team in job `{child_job_id}`. {chosen_plan}"
             ok = _reply_and_resolve(client, request, comment, thread, reply, thread_history)
             base.outcome = "resolved" if ok else "failed"
