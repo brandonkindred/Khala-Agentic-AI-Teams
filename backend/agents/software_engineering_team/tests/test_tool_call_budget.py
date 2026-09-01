@@ -657,3 +657,35 @@ def test_directive_keeps_system_prompt_and_content_in_step() -> None:
     assert len(blocks) == 2
     # With no content blocks, the kwargs come back unchanged.
     assert _kwargs_with_directive({"invocation_state": {}}) == {"invocation_state": {}}
+
+
+def test_directive_preserves_a_real_persona_verbatim() -> None:
+    """The equality is exact, so surrounding whitespace must survive.
+
+    Every review persona in this package ends with a newline. Stripping it
+    (or any other normalization) breaks the adapter's exact-equality check
+    and sends the whole persona twice on the final turn — the case a
+    whitespace-clean fixture cannot catch.
+    """
+    from llm_service.strands_adapter import _system_prompt_is_redundant_with_content
+    from software_engineering_team.code_review_agent.scope_filter import (
+        SCOPE_VERIFY_REASONING_SYSTEM_PROMPT as persona,
+    )
+    from software_engineering_team.code_review_agent.tool_call_budget import (
+        _kwargs_with_directive,
+        _system_with_directive,
+    )
+
+    assert persona != persona.strip(), "fixture must carry the real surrounding whitespace"
+
+    # The shape Strands' split_system_prompt hands the model.
+    new_system = _system_with_directive(persona)
+    new_blocks = _kwargs_with_directive({"system_prompt_content": [{"text": persona}]})[
+        "system_prompt_content"
+    ]
+
+    assert _system_prompt_is_redundant_with_content(
+        new_system, [block["text"] for block in new_blocks]
+    )
+    assert new_system.startswith(persona)
+    assert new_system.count("budget for this task is exhausted") == 1

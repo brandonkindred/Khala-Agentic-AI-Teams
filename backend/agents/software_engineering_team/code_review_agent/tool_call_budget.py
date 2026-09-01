@@ -170,8 +170,13 @@ def _system_with_directive(system_prompt: str | None) -> str:
           -- the same separator Strands' ``split_system_prompt`` uses to
           derive the string form from system content blocks, so
           :func:`_kwargs_with_directive` can keep the two views in step.
+        - ``system_prompt`` is used verbatim, never stripped. The adapter
+          compares the string form to the ``"\\n"``-join of the content blocks
+          for EXACT equality; trimming whitespace here (the review personas
+          end with a newline) would break that equality and send the whole
+          persona twice on the final turn.
     """
-    base = (system_prompt or "").strip()
+    base = system_prompt or ""
     return f"{base}\n{_BUDGET_DIRECTIVE}" if base else _BUDGET_DIRECTIVE
 
 
