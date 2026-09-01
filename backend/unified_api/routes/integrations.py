@@ -1358,7 +1358,10 @@ def _validate_base_branch_field(value: str | None) -> str | None:
     externally-influenced value before it reaches git/filesystem ops).
 
     Preconditions: ``value`` is the raw field value pydantic is validating
-        (``None`` when the field was omitted).
+        (``None`` when the field was explicitly set to ``null`` — in Pydantic
+        v2, a field validator does not run at all when the field is simply
+        omitted from the request; this only sees ``None`` for an explicit
+        ``null``).
     Postconditions: returns ``value`` unchanged when it is ``None`` or passes
         every check. Raises ``ValueError`` (pydantic wraps this as a 422) for:
         a value that is empty/whitespace-only after stripping, one whose
@@ -2464,11 +2467,19 @@ def _resolve_repo_path(
     so multiple coding-team jobs can run on different issues of the same
     repository in true filesystem isolation, concurrently. ``pr_number`` is the
     equivalent namespacing for the address-comments flow, using a distinct
-    ``pr-{N}`` segment — a separate prefix is required, not stylistic, because
-    GitHub issues and pull requests share one numbering sequence per repository,
-    so ``issue-42`` and PR #42 would otherwise collide on the same checkout. An
-    operator override is returned verbatim — the operator manages that checkout
-    themselves, so it is neither namespaced nor auto-cleaned.
+    ``pr-{N}`` segment — a separate prefix is required, not stylistic. GitHub
+    issues and pull requests actually share one numbering sequence per
+    repository, so ``issue-42`` and PR #42 can never simultaneously exist —
+    the risk a distinct prefix guards against is not a same-number collision.
+    It is (a) classification/cleanup logic downstream needing to tell an
+    issue checkout from a PR checkout apart by path alone, and (b) a GitHub
+    issue-to-PR conversion, which keeps the issue's original number: without
+    a distinct prefix, PR #42 (converted from issue #42) could otherwise
+    resolve to the SAME path as the stale ``issue-42`` checkout left behind
+    by the issue-driven run, reusing (and potentially corrupting) it instead
+    of getting its own isolated checkout. An operator override is returned
+    verbatim — the operator manages that checkout themselves, so it is
+    neither namespaced nor auto-cleaned.
 
     Preconditions:
         - ``owner`` and ``repo`` are the non-empty target repository (the run

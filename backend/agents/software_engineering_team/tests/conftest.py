@@ -50,16 +50,6 @@ from llm_service.interface import (  # noqa: E402
     reset_complete_json_observer_state as _reset_json_obs,
 )
 
-# Re-exported for other test modules that still import these two from
-# conftest (e.g. test_coding_team_github_branch_prep_activity.py); the
-# helpers themselves live in git_test_helpers.py, not here — pytest
-# discourages using conftest as a shared library rather than for fixture
-# discovery.
-from software_engineering_team.tests.git_test_helpers import (  # noqa: F401, E402
-    _commit_on_branch,
-    _expected_basic_header,
-)
-
 # The coordinator's caches exist once per module identity: production code
 # imports the dotted ``software_engineering_team.code_review_agent`` package,
 # while some tests still drive the bare ``code_review_agent`` name (resolved

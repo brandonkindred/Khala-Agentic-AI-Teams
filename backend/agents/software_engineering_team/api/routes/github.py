@@ -36,6 +36,50 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _fail_new_job(
+    job_id: str,
+    http_status: int,
+    error: str,
+    *,
+    detail: str | None = None,
+    cause: Exception | None = None,
+) -> None:
+    """Terminalize a freshly-created job as failed and raise the matching HTTPException.
+
+    Shared by ``post_run_from_github``'s admission block for the three ways a
+    job that was already created (and so already counts as active for
+    ``_running_job_for_issue``/checkout-admission purposes) can fail before a
+    workflow is actually dispatched: an unresolvable base branch, an
+    unresolvable base-branch head SHA, and a Temporal dispatch failure.
+    Leaving the row 'pending' in any of these cases would make every retry
+    409 forever with nothing left to terminalize it, and could wedge the
+    checkout admission lock the caller holds. Callers are expected to log
+    their own context (``logger.error``/``logger.exception``) BEFORE calling
+    this, since the right log level and message differ per site.
+
+    Preconditions:
+        - ``job_id`` names a job row this request already created.
+        - ``detail``, when given, is the (possibly friendlier/less internal)
+          HTTP response detail to use instead of ``error`` — e.g. to avoid
+          echoing an internal exception's ``str()`` straight into the
+          response body.
+        - ``cause``, when given, is chained onto the raised ``HTTPException``
+          via ``raise ... from cause``, matching the original site's own
+          exception-chaining.
+    Postconditions:
+        - The job is marked ``FAILED`` with ``error`` and ``current_activity``
+          cleared. Always raises ``HTTPException(status_code=http_status,
+          detail=detail or error)`` — never returns normally.
+    """
+    _main.update_job(
+        job_id,
+        status=JobStatus.FAILED.value,
+        error=error,
+        current_activity=None,
+    )
+    raise HTTPException(status_code=http_status, detail=detail or error) from cause
+
+
 @router.post("/run-from-github", response_model=RunFromGitHubResponse)
 def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse:
     """Discover (or verify) a ready GitHub issue and start a coding job for it.
@@ -156,16 +200,8 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # terminalize it, and would also wedge the checkout admission lock
             # this route just took above. Mark it failed, same as the base-sha
             # and Temporal-dispatch failure handlers below.
-            _main.update_job(
-                job_id,
-                status=JobStatus.FAILED.value,
-                error="unable to resolve base branch for GitHub-issue run",
-                current_activity=None,
-            )
-            raise HTTPException(
-                status_code=500,
-                detail="unable to resolve base branch for GitHub-issue run",
-            )
+            logger.error("Unable to resolve base branch for GitHub-issue run job_id=%s", job_id)
+            _fail_new_job(job_id, 500, "unable to resolve base branch for GitHub-issue run")
         # Pin branch prep to the exact commit the plan above was grounded on: if
         # `base` moves between now and when the Temporal branch-prep activity
         # actually runs (queueing, retries, worker restarts), that activity must
@@ -179,16 +215,7 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # every retry for this issue 409 forever with nothing left to
             # terminalize it. Mark it failed, same as a Temporal dispatch failure.
             logger.error("Unable to resolve base branch head sha: %s", base_sha_or_err)
-            _main.update_job(
-                job_id,
-                status=JobStatus.FAILED.value,
-                error=f"unable to resolve base branch head sha: {base_sha_or_err}",
-                current_activity=None,
-            )
-            raise HTTPException(
-                status_code=502,
-                detail=f"unable to resolve base branch head sha: {base_sha_or_err}",
-            )
+            _fail_new_job(job_id, 502, f"unable to resolve base branch head sha: {base_sha_or_err}")
         integration_branch = f"khala/issue-{issue.number}"
         try:
             start_coding_team_workflow(
@@ -212,16 +239,13 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # the freshly-created row failed so it is not orphaned in 'pending',
             # and surface a retryable error instead of an opaque 500.
             logger.exception("Coding team Temporal dispatch failed: %s", e)
-            _main.update_job(
+            _fail_new_job(
                 job_id,
-                status=JobStatus.FAILED.value,
-                error=f"Temporal dispatch failed: {e}",
-                current_activity=None,
-            )
-            raise HTTPException(
-                status_code=503,
+                503,
+                f"Temporal dispatch failed: {e}",
                 detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
-            ) from e
+                cause=e,
+            )
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
 
 

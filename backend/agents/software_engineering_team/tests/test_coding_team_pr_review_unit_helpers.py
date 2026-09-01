@@ -16,6 +16,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from unittest.mock import ANY
 
 import pytest
 
@@ -198,10 +199,16 @@ class TestRunningReviewForPrUnit:
         monkeypatch.setattr(
             main, "update_job", lambda job_id, **kw: job_updates.append({"job_id": job_id, **kw})
         )
-        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+        review_updates: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            main,
+            "update_review",
+            lambda *a, **kw: review_updates.append({"args": a, "kwargs": kw}),
+        )
 
         assert pr_review._running_review_for_pr("acme", "widgets", 7) == "job-1"
         assert job_updates == []  # the stale child was never touched
+        assert review_updates == []  # the review record was never marked failed either
 
 
 # ---------------------------------------------------------------------------
@@ -292,15 +299,24 @@ class TestRunningSiblingOnCheckoutUnit:
         assert kwargs.get("status") == "failed"
         assert kwargs.get("error")
 
-    def test_orphaned_child_with_missing_parent_is_skipped(self, monkeypatch, tmp_path) -> None:
+    def test_orphaned_child_with_missing_parent_is_marked_failed_and_not_reported(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A child whose parent lookup succeeds but returns None (parent gone) is
+        crash-orphaned: it is not reported as a live sibling AND is
+        best-effort marked failed (unlike the lookup-FAILS case in
+        test_child_with_unlookupable_parent_is_reported_as_sibling_not_failed,
+        where the child is left untouched and reported as a live sibling)."""
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
         child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
         monkeypatch.setattr(main, "get_job", lambda job_id: None)
-        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: None)
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
 
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+        assert updates == [("child-1", {"status": "failed", "error": ANY})]
 
     def test_child_with_live_parent_is_still_reported_as_sibling(self, monkeypatch, tmp_path) -> None:
         repo_dir = tmp_path / "repo"

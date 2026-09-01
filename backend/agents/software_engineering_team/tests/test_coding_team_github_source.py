@@ -2984,12 +2984,22 @@ class TestBusyCheckoutGuard:
     during branch prep (the old post-hoc dirty-guard behavior). Crashed-job
     leftovers (no running sibling) still recover during prep, unaffected."""
 
+    def _stub_blocked_admission(self, patched_app, monkeypatch, prep_calls: list) -> None:
+        """Stub the two hooks a blocked-admission test must never actually reach:
+        `_prepare_issue_branch` (would mutate the sibling's working tree if the
+        409 guard ever failed open) and `_clear_active_issue_if_matches` (the
+        publish-time marker clear, irrelevant to admission itself)."""
+        api = patched_app["api"]
+        monkeypatch.setattr(
+            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
+        )
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+
     def test_running_sibling_on_same_checkout_blocks_admission(
         self, patched_app, monkeypatch
     ) -> None:
         from software_engineering_team.job_store import create_job, update_job
 
-        api = patched_app["api"]
         repo_path = patched_app["repo_path"]
         create_job(job_id="sibling-1", repo_path=repo_path, plan_input=None)
         update_job(
@@ -2998,10 +3008,7 @@ class TestBusyCheckoutGuard:
             github_context={"owner": "o", "repo": "r", "issue_number": 99},
         )
         prep_calls: list = []
-        monkeypatch.setattr(
-            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
-        )
-        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        self._stub_blocked_admission(patched_app, monkeypatch, prep_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
         jobs_before = len(patched_app["jobs"].list_jobs())
@@ -3020,7 +3027,6 @@ class TestBusyCheckoutGuard:
         guard matters."""
         from software_engineering_team.job_store import create_job, update_job
 
-        api = patched_app["api"]
         repo_path = patched_app["repo_path"]
         alias = os.path.join(os.path.dirname(repo_path), "repo-alias")
         os.symlink(repo_path, alias)
@@ -3031,10 +3037,7 @@ class TestBusyCheckoutGuard:
             github_context={"owner": "o", "repo": "r", "issue_number": 99},
         )
         prep_calls: list = []
-        monkeypatch.setattr(
-            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
-        )
-        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        self._stub_blocked_admission(patched_app, monkeypatch, prep_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
         jobs_before = len(patched_app["jobs"].list_jobs())
@@ -3069,7 +3072,6 @@ class TestBusyCheckoutGuard:
         an unrelated issue on that same checkout."""
         from software_engineering_team.job_store import create_job, update_job
 
-        api = patched_app["api"]
         repo_path = patched_app["repo_path"]
         create_job(job_id="pr-sibling", repo_path=repo_path, plan_input=None)
         update_job(
@@ -3082,10 +3084,7 @@ class TestBusyCheckoutGuard:
         # assertion below rather than actually run the real issue workflow
         # against the sibling's working tree.
         prep_calls: list = []
-        monkeypatch.setattr(
-            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
-        )
-        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        self._stub_blocked_admission(patched_app, monkeypatch, prep_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
         jobs_before = len(patched_app["jobs"].list_jobs())

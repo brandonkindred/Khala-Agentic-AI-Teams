@@ -343,6 +343,10 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
 
     # The branch is now durable on the existing PR. Clear the prep marker and
     # make the child job terminal before the parent resolves the review thread.
+    # Despite its name, the marker is keyed generically by "the driving number"
+    # (issue or PR share one number sequence per repo) — branch prep for this
+    # PR-remediation flow wrote it with this same pr_number, so clearing by
+    # pr_number here matches the write side. See _clear_active_issue_if_matches.
     _main._clear_active_issue_if_matches(repo_path, request["pr_number"])
     update_fields: dict[str, Any] = {
         "status": status,

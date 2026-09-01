@@ -16,7 +16,9 @@ from pathlib import Path
 
 import pytest
 
+import shared.concurrency.checkout_lock as checkout_lock_module
 from shared.concurrency.checkout_lock import held_checkout_lock
+from shared.concurrency.flock_lock import flock_lock
 
 
 def test_lock_is_held_around_the_body_and_released_after(tmp_path: Path) -> None:
@@ -33,8 +35,6 @@ def test_lock_is_held_around_the_body_and_released_after(tmp_path: Path) -> None
 
     # A second, independent acquisition must succeed immediately if the first
     # call actually released the flock rather than leaking it.
-    from shared.concurrency.flock_lock import flock_lock
-
     entered = False
     with flock_lock(lock_path):
         entered = True
@@ -53,8 +53,6 @@ def test_body_exception_still_releases_the_lock(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         asyncio.run(_run())
-
-    from shared.concurrency.flock_lock import flock_lock
 
     entered = False
     with flock_lock(lock_path):
@@ -115,9 +113,10 @@ def test_cancellation_during_acquisition_does_not_leak_the_lock(tmp_path: Path) 
     A slow, instrumented stand-in for ``flock_lock`` blocks ``__enter__`` on a
     threading.Event so the test can cancel the awaiting task while acquisition
     is provably still in progress in the executor thread, then release the
-    Event so acquisition actually completes, then prove the lock was still
-    released (via a subsequent, real, uncontended acquisition succeeding
-    immediately with a bounded wait).
+    Event so acquisition actually completes. Release is proven by asserting
+    ``exited_calls == [1]`` on the instrumented stand-in itself (its
+    ``__exit__`` was actually invoked) -- not via a subsequent real
+    acquisition.
     """
     lock_path = tmp_path / ".test.lock"
     proceed = threading.Event()
@@ -139,8 +138,6 @@ def test_cancellation_during_acquisition_does_not_leak_the_lock(tmp_path: Path) 
         def __exit__(self, *exc_info) -> bool:
             exited_calls.append(1)
             return False
-
-    import shared.concurrency.checkout_lock as checkout_lock_module
 
     original_flock_lock = checkout_lock_module.flock_lock
     checkout_lock_module.flock_lock = lambda p: _SlowLock(p)

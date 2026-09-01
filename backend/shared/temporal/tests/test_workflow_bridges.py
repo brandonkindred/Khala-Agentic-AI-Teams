@@ -436,7 +436,16 @@ def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
     reattach_on_timeout never gives up early — and does so by re-polling ONE
     scheduled ``handle.result()`` coroutine across every window, not by
     abandoning a still-running waiter and scheduling a fresh one each time
-    (which would leak concurrent waiters for a long-running workflow)."""
+    (which would leak concurrent waiters for a long-running workflow).
+
+    ``execute_workflow_sync`` is called on a background thread with a bounded
+    ``join`` rather than directly on the test's own thread: a regression that
+    made reattach give up too early would still pass eventually if it instead
+    hung forever (e.g. re-polling the same already-cancelled waiter), and a
+    bare hanging call here would only fail at CI's own global timeout with no
+    clue which test caused it. The bound below fails fast with a clear
+    message instead.
+    """
     captured: dict = {}
     sentinel = {"ok": True}
     # Outlives several short client-side polling windows before resolving.
@@ -444,13 +453,30 @@ def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
     client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
     client_mod.set_temporal_loop(running_loop)
 
-    out = runner.execute_workflow_sync(
-        object(),
-        workflow_id="wid",
-        task_queue="q",
-        execute_timeout_s=0.02,
-        reattach_on_timeout=True,
+    result_box: dict = {}
+
+    def _call() -> None:
+        try:
+            result_box["out"] = runner.execute_workflow_sync(
+                object(),
+                workflow_id="wid",
+                task_queue="q",
+                execute_timeout_s=0.02,
+                reattach_on_timeout=True,
+            )
+        except BaseException as exc:  # noqa: BLE001 - surfaced via result_box, not lost silently
+            result_box["exc"] = exc
+
+    worker = threading.Thread(target=_call, daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive(), (
+        "execute_workflow_sync(reattach_on_timeout=True) did not return within the 5s bound -- "
+        "reattach appears to have hung instead of giving up early or completing"
     )
+    if "exc" in result_box:
+        raise result_box["exc"]
+    out = result_box["out"]
 
     assert out is sentinel
     # Exactly one handle lookup and one result() coroutine for the whole

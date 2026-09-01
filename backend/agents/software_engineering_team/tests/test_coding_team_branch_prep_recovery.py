@@ -1290,7 +1290,7 @@ class TestPushBranchToFork:
         """`_push_branch` registers a fork URL as the `khala-pr-head` remote
         and pushes the current local branch to it, making the commit
         available on the fork rather than the base repo's `origin`."""
-        remote, clone, fork = fork_pair
+        _, clone, fork = fork_pair
         fork_url = f"file://{fork}"
         # A branch name absent from the fork, so --force-with-lease has no
         # existing remote-tracking state to worry about.

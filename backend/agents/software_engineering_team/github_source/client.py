@@ -980,16 +980,28 @@ class GitHubClient(_GitHubHttpMixin):
               consumed or (``strict=False`` only) an anomaly ends the walk
               early. ``thread_id`` is ``None`` unless ``query`` requested it
               and it parsed as a non-empty string.
-            - ``strict=True`` raises :class:`ReviewThreadsUnavailableError` on
-              a GraphQL transport/HTTP error, non-2xx status, GraphQL-level
-              error, an unexpected payload shape, exceeding
+            - ``strict=True`` raises :class:`ReviewThreadsUnavailableError`
+              itself only for GraphQL-level errors and payload-shape
+              anomalies: an unexpected payload shape, exceeding
               :data:`MAX_REVIEW_THREADS_TRAVERSED`, a thread missing/invalid
               ``id``, or a thread with more than
-              :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` comments.
-            - ``strict=False`` never raises for those same shape anomalies
-              (a genuine transport/HTTP error or malformed JSON response
-              still propagates as an ordinary exception, for the caller's own
-              broad ``except`` to catch).
+              :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` comments. A genuine
+              GraphQL transport/HTTP error (a non-2xx status from the initial
+              ``self._check(self._request(...))`` call) is NOT caught here in
+              either mode — it propagates as ``GitHubAPIError``/an ordinary
+              exception, per this client's established non-2xx contract.
+              :meth:`list_review_threads`, the ``strict=True`` caller, wraps
+              its own call to this generator in a broad ``except`` that
+              re-raises any such exception as ``ReviewThreadsUnavailableError``,
+              so from that caller's perspective the fail-closed contract
+              still holds end-to-end — it is just enforced one level up, not
+              inside this generator.
+            - ``strict=False`` never raises for shape anomalies (an unexpected
+              payload shape, a malformed node, etc.) — those degrade to
+              whatever was accumulated so far. A genuine transport/HTTP error
+              or malformed JSON response still propagates as an ordinary
+              exception in this mode too, for the caller's own broad
+              ``except`` to catch.
         """
         after: Optional[str] = None
         seen = 0
@@ -1064,8 +1076,12 @@ class GitHubClient(_GitHubHttpMixin):
                 if seen > MAX_REVIEW_THREADS_TRAVERSED:
                     if not strict:
                         logger.warning(
-                            "_iter_review_thread_nodes hit MAX_REVIEW_THREADS_TRAVERSED=%d; stopping",
+                            "_iter_review_thread_nodes hit MAX_REVIEW_THREADS_TRAVERSED=%d for "
+                            "%s/%s#%s; stopping",
                             MAX_REVIEW_THREADS_TRAVERSED,
+                            owner,
+                            repo,
+                            number,
                         )
                         return
                     # Exceeding the cap means the listing is incomplete; fail closed

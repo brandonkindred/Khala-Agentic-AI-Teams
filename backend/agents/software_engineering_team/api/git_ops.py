@@ -284,7 +284,7 @@ def _checkout_remote_matches(
 
 def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     """Resolve ``repo_path`` and return it iff it is a platform-owned per-issue
-    git checkout safe to delete; otherwise ``None``.
+    or per-PR git checkout safe to delete; otherwise ``None``.
 
     Resolving here (and handing the resolved ``Path`` back) means the path that is
     *validated* is the exact symlink-collapsed path the caller then deletes,

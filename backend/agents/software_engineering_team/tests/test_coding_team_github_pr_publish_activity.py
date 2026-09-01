@@ -114,16 +114,26 @@ class TestGithubPrPublishActivityGitFailures:
 
 
 class TestGithubPrPublishActivityStatusMapping:
-    def _stub_git_ok(self, monkeypatch: pytest.MonkeyPatch, api: Any) -> None:
+    def _stub_git_ok(
+        self, monkeypatch: pytest.MonkeyPatch, api: Any, clear_active_issue_calls: list | None = None
+    ) -> None:
         monkeypatch.setattr(api, "_fast_forward", lambda *a, **kw: (True, None))
         monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: (True, None))
-        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a, **kw: None)
+        if clear_active_issue_calls is None:
+            monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a, **kw: None)
+        else:
+            monkeypatch.setattr(
+                api,
+                "_clear_active_issue_if_matches",
+                lambda *a, **kw: clear_active_issue_calls.append((a, kw)),
+            )
 
     def test_all_tasks_passed_yields_completed(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
         _stub_token(monkeypatch, api)
-        self._stub_git_ok(monkeypatch, api)
+        clear_active_issue_calls: list = []
+        self._stub_git_ok(monkeypatch, api, clear_active_issue_calls)
         job_row = {
             "job_id": "job-1",
             "task_graph_snapshot": [{"id": "t1", "status": "merged"}],
@@ -137,11 +147,18 @@ class TestGithubPrPublishActivityStatusMapping:
 
         monkeypatch.setattr(api, "update_job", _update_job)
 
-        result = _pr_publish()(_base_request())
+        request = _base_request()
+        result = _pr_publish()(request)
 
         assert update_calls[0][1]["status"] == JobStatus.COMPLETED.value
         assert "failed task" not in update_calls[0][1]["status_text"]
         assert result["status"] == JobStatus.COMPLETED.value
+        # The prep marker is cleared exactly once, keyed by this PR's own number
+        # (see _clear_active_issue_if_matches -- the marker is generically keyed
+        # by "the driving number", issue or PR).
+        assert clear_active_issue_calls == [
+            ((request["repo_path"], request["pr_number"]), {})
+        ]
 
     def test_failed_task_yields_completed_with_failures(
         self, monkeypatch: pytest.MonkeyPatch, api: Any

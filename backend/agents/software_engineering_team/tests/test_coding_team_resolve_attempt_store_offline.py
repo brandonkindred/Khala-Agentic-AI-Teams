@@ -8,6 +8,8 @@ database.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 import software_engineering_team.resolve_attempt_store as store
@@ -48,26 +50,29 @@ class _FakeConn:
 def test_writes_are_noop_when_postgres_disabled(monkeypatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
 
-    def _no_conn(*_a, **_kw):
-        raise AssertionError("get_conn must not be called when Postgres is disabled")
-
-    monkeypatch.setattr(store, "get_conn", _no_conn)
+    # A MagicMock (rather than a raising stub) proves get_conn was never
+    # called via `.assert_not_called()` below — a raising stub only proves it
+    # wasn't called IF the store's own best-effort exception handling doesn't
+    # swallow the resulting AssertionError, which would make the check
+    # vacuous in a regression.
+    no_conn = MagicMock(side_effect=AssertionError("get_conn must not be called"))
+    monkeypatch.setattr(store, "get_conn", no_conn)
     # None of these touch the database and none raise.
     store.record_resolve_failure("o", "r", 7, "T1", 3)
     store.clear_resolve_attempt("o", "r", 7, "T1")
     store.clear_resolve_attempts_for_pr("o", "r", 7)
+    no_conn.assert_not_called()
 
 
 def test_has_recorded_resolve_failure_false_when_postgres_disabled(monkeypatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
 
-    def _no_conn(*_a, **_kw):
-        raise AssertionError("get_conn must not be called when Postgres is disabled")
-
-    monkeypatch.setattr(store, "get_conn", _no_conn)
+    no_conn = MagicMock(side_effect=AssertionError("get_conn must not be called"))
+    monkeypatch.setattr(store, "get_conn", no_conn)
     # "No evidence" is the safe default — routes the caller away from
     # auto-resolving a possibly reviewer-reopened thread.
     assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is False
+    no_conn.assert_not_called()
 
 
 def test_writes_swallow_db_errors(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:

@@ -226,8 +226,12 @@ def _running_sibling_on_checkout(
         - A candidate job carrying ``parent_job_id`` (an address-comments
           child implementation job — see :func:`_running_review_for_pr`,
           which excludes it from ITS OWN scan for the same reason) is only
-          reported as a sibling while its PARENT is still non-terminal. A
-          child whose parent has terminalized or no longer exists is
+          reported as a sibling while its PARENT is still non-terminal. It
+          is also reported as a sibling when the PARENT LOOKUP ITSELF fails
+          (job service unreachable, etc.) — fail-closed, since a lookup
+          failure does not prove the parent is gone. A child whose parent
+          has terminalized or no longer exists (and whose lookup actually
+          succeeded) is
           crash-orphaned — nothing will ever terminalize the child itself,
           since only the parent runs a heartbeat — so treating it as a live
           sibling would wedge this checkout's admission forever. Such an
@@ -255,7 +259,19 @@ def _running_sibling_on_checkout(
         if not j or j.get("job_id") == own_job_id:
             continue
         sibling_path = j.get("repo_path")
-        if not (sibling_path and os.path.realpath(sibling_path) == target):
+        if not sibling_path:
+            continue
+        try:
+            same_checkout = os.path.realpath(sibling_path) == target
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "could not resolve repo_path for job %s during sibling scan on checkout %s: %s",
+                j.get("job_id"),
+                repo_path,
+                scrub_token_from_text(str(exc)),
+            )
+            continue
+        if not same_checkout:
             continue
         parent_job_id = j.get("parent_job_id")
         if parent_job_id:

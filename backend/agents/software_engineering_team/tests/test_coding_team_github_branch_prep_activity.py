@@ -20,10 +20,12 @@ from typing import Any, Optional
 import pytest
 
 from software_engineering_team.tests.conftest import (
-    _commit_on_branch,
     _ensure_real_modules,
-    _expected_basic_header,
     _stub_orchestrator_only,
+)
+from software_engineering_team.tests.git_test_helpers import (
+    _commit_on_branch,
+    _expected_basic_header,
 )
 
 

@@ -159,8 +159,9 @@ def start_coding_team_workflow(
           included on the payload under ``"github"``; otherwise that key is
           omitted.
     Raises:
-        ValueError: ``job_id`` or ``repo_path`` is empty, or ``github``
-            contains a ``"token"``-like key at any nesting depth (see
+        ValueError: ``job_id`` or ``repo_path`` is empty; ``github`` is
+            truthy but not a ``dict``; or ``github`` contains a
+            ``"token"``-like key at any nesting depth (see
             :func:`_contains_token_key`).
         RuntimeError: the worker's Temporal client never becomes available
             within the wait window.
@@ -240,5 +241,5 @@ def execute_coding_team_workflow(
     )
     logger.info("CodingTeamWorkflow id=%s reached terminal result", workflow_id)
     if not isinstance(result, dict):
-        raise RuntimeError("CodingTeamWorkflow returned a non-object result")
+        raise RuntimeError("CodingTeamWorkflow returned a non-dict result")
     return result

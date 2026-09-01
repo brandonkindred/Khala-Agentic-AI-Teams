@@ -49,16 +49,26 @@ def _commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> s
     branch moving to a known SHA.
     """
 
-    def _run(*args: str) -> None:
-        subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True, text=True)
+    def _run(*args: str) -> str:
+        """Run ``git -C repo <args>``, returning stdout stripped.
+
+        Unlike a bare ``subprocess.run(..., check=True)``, a failure raises an
+        ``AssertionError`` that includes the command and stderr — a plain
+        ``CalledProcessError`` only shows the exit code, which makes a failing
+        test hard to diagnose from CI output alone.
+        """
+        result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise AssertionError(
+                f"git -C {repo} {' '.join(args)} failed (exit {result.returncode}): {result.stderr}"
+            )
+        return result.stdout.strip()
 
     _run("checkout", "-q", "-B", branch)
     with open(f"{repo}/{filename}", "w") as fh:
         fh.write(contents)
     _run("add", filename)
     _run("commit", "-q", "--no-gpg-sign", "-m", f"{branch}: {filename}")
-    sha = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
+    sha = _run("rev-parse", "HEAD")
     _run("checkout", "-q", "main")
     return sha

@@ -537,15 +537,23 @@ class CodingTeamWorkflow:
             if publish_mode not in (None, "existing_pr"):
                 raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
             is_existing_pr_publish = publish_mode == "existing_pr"
-            owner = github["owner"]
-            repo = github["repo"]
-            base = github["base"]
-            integration_branch = github["integration_branch"]
-            if is_existing_pr_publish:
-                pr_number = github["pr_number"]
-            else:
-                issue_number = github["issue_number"]
-                issue_title = github["issue_title"]
+            # A missing required key here is a caller-contract violation, exactly
+            # like the publish_mode check above: it fails the workflow task
+            # directly (ValueError, not terminalize-with-notice) rather than being
+            # treated as a runtime/activity failure worth posting a notice about —
+            # deliberately NOT wrapped in terminalization to match that convention.
+            try:
+                owner = github["owner"]
+                repo = github["repo"]
+                base = github["base"]
+                integration_branch = github["integration_branch"]
+                if is_existing_pr_publish:
+                    pr_number = github["pr_number"]
+                else:
+                    issue_number = github["issue_number"]
+                    issue_title = github["issue_title"]
+            except KeyError as exc:
+                raise ValueError(f"github payload missing required key: {exc}") from exc
 
         if isinstance(github, dict) and github:
             try:
