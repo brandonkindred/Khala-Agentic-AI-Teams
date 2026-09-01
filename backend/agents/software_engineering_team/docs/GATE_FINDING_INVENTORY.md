@@ -1,0 +1,299 @@
+# SE Review Gate Finding Inventory
+
+## Purpose
+
+Step 1 of 4 in the golden-set evaluation harness epic. Before the corpus and
+label schema (step 2) can define a closed defect-class vocabulary, that
+vocabulary has to be justified against what the review gates actually emit —
+not against a plausible taxonomy invented for the corpus.
+
+This document catalogues the finding shapes produced today by the four
+finding-producing gates in `software_engineering_team`: the code-review
+coordinator, the QA agent, the security agent, and `false_positive_filter`.
+Every field, severity value, and defect category below is drawn from the
+current model definitions, prompts, and test fixtures — not inferred from
+prompts alone. No production code changes accompany this document.
+
+## 1. Code Review Coordinator (`code_review_agent/`)
+
+### Finding models
+
+**`CodeReviewIssue`** — `code_review_agent/models.py:385-482` — the canonical,
+persisted finding record returned in `CodeReviewOutput.issues`.
+
+| field | type | default |
+|---|---|---|
+| `severity` | `str` | `"high"` |
+| `category` | `str` | `"general"` |
+| `file_path` | `str` | `""` |
+| `line` | `Optional[int]` | `None` |
+| `start_line` | `Optional[int]` | `None` |
+| `title` | `str` | `""` |
+| `description` | `str` | `""` |
+| `suggestion` | `str` | `""` |
+| `pre_existing` | `bool` | `True` |
+| `omission` | `bool` | `False` |
+
+A model validator (`_omission_implies_in_scope`, models.py:465) rejects
+`omission=True` combined with `pre_existing=True`.
+
+**`ChunkReviewIssueLLM`** — `code_review_agent/models.py:523-640` — the
+strictly-typed schema the LLM must emit per chunk, coerced into
+`CodeReviewIssue` downstream. Same field set as above, but:
+- `severity: CodeReviewIssueSeverity` — `Literal["critical", "high", "medium", "low", "info"]`
+- `category: _ChunkReviewIssueCategory` — a closed `Literal` of 13 values (below)
+- `pre_existing` / `omission` are `StrictBool`
+
+**`ArchitectureConsistencyFindingLLM`** — `code_review_agent/models.py:734-819`
+(architecture-consistency pass) and **`SideEffectImpactFindingLLM`** —
+`code_review_agent/models.py:822-911` (side-effect/blast-radius pass) share a
+reduced shape: `severity`, `category` (restricted to 2 values each, see
+below), `file_path`, `line` (no `start_line`, no `title` — these passes never
+anchor multi-line findings).
+
+**`CodeReviewOutput`** — `code_review_agent/models.py:1106-1134` — top-level
+output: `approved: bool`, `issues: List[CodeReviewIssue]`,
+`not_reviewed_ranges: List[str]`, `summary: str`, `spec_compliance_notes: str`.
+
+### Severity values
+
+`Literal["critical", "high", "medium", "low", "info"]`
+(`CodeReviewIssueSeverity`, models.py:489; mirrored by
+`_VALID_SEVERITIES` in `chunking.py:57`). `critical` and `high` are the two
+severities that force `approved=False`
+(`ChunkReviewLLMResponse._require_approval_consistent_with_issues`,
+models.py:693-727).
+
+### Defect categories actually named
+
+Closed 13-value enum (`_ChunkReviewIssueCategory`, models.py:506-520;
+mirrored by `_VALID_CATEGORIES`, chunking.py:62-76):
+
+`naming`, `structure`, `logic`, `spec-compliance`, `standards`,
+`integration`, `testing`, `architecture`, `refactor`, `maintainability`,
+`side-effects`, `documentation`, `general`.
+
+The architecture-consistency pass is restricted to `architecture` (a stated
+architecture boundary/pattern/decision the change contradicts) or `refactor`
+(a capability re-implemented that already exists elsewhere) —
+`prompts.py:154-167`. The side-effect pass is restricted to `side-effects`
+(a real caller-breaking side effect) or `documentation` (a docstring/comment
+that no longer matches the implementation) — `models.py:850-853`.
+
+Concrete defect content named in the prompt (`prompts.py:42-47`): undefined
+or unimported names, missing test coverage, missing error
+handling/validation/null checks, duplicate/unused/dead code, a
+file/module claimed not to exist, unclear/unresolved relative imports.
+
+### Location fields
+
+`CodeReviewIssue` / `ChunkReviewIssueLLM`: `file_path: str` (always present,
+may be blank for file-wide findings) + `line: Optional[int]` +
+`start_line: Optional[int]` (set only for multi-line spans; `line` then acts
+as the end line). The architecture/side-effect passes have `file_path` +
+`line` only — no `start_line`. All numeric line fields are optional; `None`
+denotes a structural/file-wide finding with no single anchor line.
+
+### Example findings (from tests)
+
+- `{"severity": "critical", "category": "logic", "file_path": "app/main.py", "description": "SQL injection risk", "suggestion": "Use parameterized queries"}` — `tests/test_code_review_coordinator.py:511-518`
+- `{"severity": "high", "category": "logic", "file_path": "app/main.py", "line": 10, "description": "duplicate string literal", "suggestion": "extract a constant"}` — `tests/test_code_review_coordinator.py:557-564`
+
+## 2. QA Agent (`qa_agent/`)
+
+### Finding model
+
+**`BugReport`** — `qa_agent/models.py:10-37` — the single finding shape used
+across all four request modes (default review, `fix_build`, `write_tests`,
+`acceptance_evidence`).
+
+| field | type | default |
+|---|---|---|
+| `severity` | `str` | required, no default |
+| `description` | `str` | required |
+| `location` | `str` | `""` |
+| `file_path` | `str` | `""` |
+| `line_or_section` | `str` | `""` |
+| `steps_to_reproduce` | `str` | `""` |
+| `expected_vs_actual` | `str` | `""` |
+| `recommendation` | `str` | `""` |
+
+A model validator (`_collapse_location`, models.py:30-37) auto-populates
+`location` from `file_path`/`line_or_section` when `location` is blank.
+
+`QAOutput` (models.py:81-149) carries `bugs_found: List[BugReport]` plus
+mode-specific fields (`quality_gates`, `acceptance_trace`,
+`validation_evidence`) that are populated only in `acceptance_evidence` mode
+and are not finding shapes.
+
+### Severity values
+
+Plain `str`, **not enum-enforced**. Documented set (comment at models.py:13,
+prompt at prompts.py:71): `critical, high, medium, low`. A test fixture uses
+`"info"` (`tests/test_qa_agent.py:53`), confirming there is no runtime
+validation of this set — any string is accepted.
+
+### Defect categories actually named
+
+**No `category`/taxonomy field exists on `BugReport` at all.** The QA prompt
+names bug *patterns* in prose only (`qa_agent/prompts.py:39-48`): off-by-one
+errors, race conditions, resource leaks, null/None dereferencing, integer
+overflow/type coercion, SQL injection via string formatting, unvalidated
+external input, missing I/O error handling, inconsistent state after partial
+failure. In `fix_build` mode, root causes named are: missing import, wrong
+path, type error, syntax error (`prompts.py:100`).
+
+### Location fields — gap flagged
+
+`BugReport` has **no numeric line field**. Location is carried by up to
+three overlapping string fields:
+- `location: str` — free text ("file path, function name, or line
+  reference"), the field populated directly in default/general-review mode.
+- `file_path: str` — populated only in `fix_build` mode.
+- `line_or_section: str` — a **string**, not an int; may hold a line number
+  as text (`"42"`) or a function name (`"def health"`), also `fix_build`-mode
+  only.
+
+**Constraint on matching:** outside `fix_build` mode, QA findings carry only
+the free-text `location` string with no structured file path or numeric
+line — they cannot be matched by file+line without parsing free text, and
+even `fix_build` mode's `line_or_section` may not be a line number at all.
+
+### Example findings (from tests)
+
+- `BugReport(severity="high", description="missing import", file_path="app/main.py", line_or_section="42")` → `location` collapses to `"app/main.py:42"` — `tests/test_qa_agent.py:23-29`
+- `{"severity": "critical", "description": "NPE in /auth"}` (no location at all) — `tests/test_qa_agent_cache.py:162`
+
+## 3. Security Agent (`security_agent/`)
+
+### Finding model
+
+**`SecurityVulnerability`** — `security_agent/models.py:10-17`.
+
+| field | type | default |
+|---|---|---|
+| `severity` | `str` | required, no default |
+| `category` | `str` | required, no default |
+| `description` | `str` | required |
+| `location` | `str` | `""` |
+| `recommendation` | `str` | `""` |
+
+`SecurityLLMResponse` (models.py:49-79) is the schema actually validated
+against the LLM reply: `vulnerabilities: List[SecurityVulnerability]`,
+`summary: str`, `remediations: List[dict]` (all required). It has no
+`approved` field — `CybersecurityExpertAgent.run` always re-derives
+`approved` via `derive_approved` (`security_agent/agent.py:227`).
+
+### Severity values
+
+Plain `str`, not enum-enforced. Documented set (models.py:13,
+prompts.py:63): `critical, high, medium, low, info`. Blocking rule is shared
+platform-wide: `BLOCKING_SEVERITIES = frozenset({"critical", "high"})`
+(`shared/security_service.py:42`), applied case-insensitively via
+`is_blocking`/`any_blocking`/`derive_approved` (security_service.py:136-208).
+
+### Defect categories actually named
+
+`category` is a **free-text string, not a closed enum** — the prompt gives
+only examples: `"category": string (e.g. injection, xss, auth, crypto)"`
+(prompts.py:64). No CWE or OWASP-ID field exists. The prompt's methodology
+additionally names: injection (SQL/NoSQL/command), XSS, CSRF,
+authentication/authorization flaws, cryptographic issues (weak
+algorithms, hardcoded secrets), insecure deserialization, SSRF, dependency
+CVEs.
+
+### Location fields — gap flagged
+
+`SecurityVulnerability` has **only `location: str = ""`** — free text ("file
+path, function name, or line reference", prompts.py:66). **No structured
+`file_path` field and no numeric line/line-range field exist at all.**
+
+**Constraint on matching:** security findings cannot be matched by file+line
+without parsing free text, and that text is not guaranteed to contain a
+parseable line number.
+
+### Example findings (from tests)
+
+- `{"severity": "critical", "category": "injection", "description": "Command injection in run()", "location": "run:3", "recommendation": "Use subprocess with shell=False"}` — `tests/test_security_agent.py:66-73`
+- `{"severity": "low", "category": "style", "description": "nitpick", "recommendation": "rename var"}` (location omitted entirely) — `tests/test_security_agent.py`
+
+## 4. `false_positive_filter` (`code_review_agent/false_positive_filter.py`)
+
+### Behavior: removal-only, never a transform
+
+`false_positive_filter` does not define its own finding shape — it filters
+`CodeReviewIssue` records (the code-review coordinator's shape, above) and
+never relabels or modifies a surviving finding. It returns the input list
+minus zero or more entries, in original order
+(`filter_false_positives`, false_positive_filter.py:2214-2232;
+`_verify_and_filter`, 2253-2422).
+
+Internally it uses a `_Verdict` dataclass (false_positive_filter.py:1721-1741,
+`is_false_positive: bool`, `confidence: str` (`high`/`medium`/`low`),
+`reasoning: str`) that is **never persisted to the output** — it exists only
+to drive the drop decision.
+
+### Decision rule (allowlist, not denylist)
+
+A finding is dropped only when all of the following hold:
+- the verifier agent returns `is_real_issue: false` for that finding, and
+- confidence is `high` or `medium` (never `low`) — enforced both in
+  `_Verdict.__post_init__` (raises on `is_false_positive=True` with `low`
+  confidence) and in verdict coercion:
+  `is_false_positive = is_real is False and confidence in ("high", "medium")`
+  (false_positive_filter.py:1766), and
+- the verifier agent is confirmed to have performed a **successful full
+  `read_file`** of the cited file before that verdict is honored
+  (`_agent_read_the_cited_file`, false_positive_filter.py:1932ff); otherwise
+  any false-positive verdicts from that batch are discarded and a warning is
+  logged, keeping the findings (false_positive_filter.py:2175-2187).
+
+Any ambiguity — no file path, an unresolved path, an unparsable verdict, a
+verifier error/timeout, or an ungrounded read — keeps the finding. This is a
+deliberate fail-safe design (module docstring, false_positive_filter.py:16-47).
+
+The filter is severity-agnostic: it never inspects `severity` to decide
+drop/keep (the only use of `severity` in the removal path is in a log line,
+false_positive_filter.py:2405-2412).
+
+### What it emits when it drops a finding
+
+**Nothing structured.** A dropped finding disappears entirely from the
+returned list — there is no suppressed-record object, no separate
+"dropped findings" output field, and no marker left on any surviving
+finding. The only trace is a `logger.info` call
+(false_positive_filter.py:2405-2412) recording severity, `file:line`, a
+truncated description, and truncated reasoning, plus a summary count log
+line. The filter can be disabled entirely via the
+`CODE_REVIEW_FALSE_POSITIVE_FILTER=false/0/no` environment variable
+(`_FILTER_ENV`, false_positive_filter.py:99-102), in which case the input
+list is returned unchanged.
+
+### Example finding it evaluates (from tests)
+
+```python
+CodeReviewIssue(
+    severity="high",
+    category="logic",
+    file_path="app/main.py",
+    line=1,
+    description="foo is never defined",
+    suggestion="define foo",
+)
+```
+— `tests/test_false_positive_filter.py:54-71`
+
+## 5. Cross-gate comparison
+
+| Gate | Finding model | Severity typing | Category typing | Numeric line? | Structured `file_path`? |
+|---|---|---|---|---|---|
+| Code review | `CodeReviewIssue` / `ChunkReviewIssueLLM` | Closed `Literal` (5 values) at the LLM boundary; plain `str` on the persisted record | Closed 13-value enum (2-value subsets for the architecture/side-effect passes) | Yes — `line` + `start_line` | Yes — always present, may be blank |
+| QA | `BugReport` | Plain `str`, unenforced (test fixture uses `"info"`, outside the documented set) | **None** — no category field | No — `line_or_section` is a string, may hold non-numeric text | Only in `fix_build` mode |
+| Security | `SecurityVulnerability` | Plain `str`, unenforced | Free-text `str`, not a closed set | No — no line field of any kind | No — `location` is a single free-text field |
+| `false_positive_filter` | N/A — filters `CodeReviewIssue`; never emits its own shape | N/A (severity-agnostic) | N/A | N/A | N/A |
+
+Code review is the only gate whose findings are structurally matchable by
+file path + numeric line without free-text parsing. QA and security both
+depend on a free-text location string, and QA has no defect-category field
+at all — both are direct constraints on what the step-2 label schema and
+step-3 matching rule can cover for those two gates.
