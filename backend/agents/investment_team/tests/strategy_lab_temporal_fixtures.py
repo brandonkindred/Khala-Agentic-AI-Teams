@@ -136,7 +136,12 @@ def record_outcome(**overrides: Any) -> Dict[str, Any]:
 
 
 def checkpoint_json(
-    checkpoint_cls, *, run_id: str = "run-1", generation: int = 1, **overrides: Any
+    checkpoint_cls,
+    *,
+    run_id: str = "run-1",
+    generation: int = 1,
+    cycle_index: int = 0,
+    **overrides: Any,
 ) -> Dict[str, Any]:
     """Build one real ``PipelineCheckpoint`` subclass instance -- with the
     identity fields matching the ``run_id``/``generation`` convention used
@@ -145,9 +150,18 @@ def checkpoint_json(
     (``model_dump(mode="json")``) form, exactly as ``activities.py``'s
     ``_pipeline_checkpoints_to_wire`` produces it. Building from the real
     Pydantic classes (rather than hand-rolled dicts) means this fixture can't
-    drift from the real wire shape. ``cycle_scope`` (default
-    ``"cycle-scope-1"``) and every stage-specific field are overridable via
-    ``**overrides`` like any other key.
+    drift from the real wire shape.
+
+    ``cycle_scope`` defaults to ``f"{run_id}-c{cycle_index}"`` -- the id the
+    batch workflow starts a ``StrategyLabCycleWorkflow`` child under, and
+    therefore the ``workflow_id`` every activity dispatched from that child
+    reports (which is exactly what ``run_design_attempt_activity`` stamps
+    onto the checkpoints it captures). Defaulting to the real convention,
+    rather than an arbitrary literal, keeps these fixtures matchable by
+    ``StrategyLabCycleWorkflow.run``'s own scope filter. ``cycle_scope`` and
+    every stage-specific field remain overridable via ``**overrides`` like
+    any other key -- pass a deliberately mismatched one to exercise the
+    filter's reject path.
     """
     from investment_team.models import StrategySpec
     from investment_team.strategy_lab import phases
@@ -166,7 +180,7 @@ def checkpoint_json(
     code = overrides.pop("code", "def run(): pass")
     base: Dict[str, Any] = {
         "run_id": run_id,
-        "cycle_scope": "cycle-scope-1",
+        "cycle_scope": f"{run_id}-c{cycle_index}",
         "design_attempt": 0,
         "generation": generation,
         "spec_hash": phases.hash_spec(spec),

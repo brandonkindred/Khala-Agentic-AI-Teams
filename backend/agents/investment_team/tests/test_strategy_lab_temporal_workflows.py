@@ -127,7 +127,13 @@ def test_run_returns_skipped_outcome_immediately():
                 "convergence_tracker_state": {},
             }
         )
-    assert result == {"kind": "skipped", "convergence_tracker_state": {"trial_count": 1}}
+    assert result == {
+        "kind": "skipped",
+        "convergence_tracker_state": {"trial_count": 1},
+        # Present on EVERY terminal return, per ``run``'s Postconditions --
+        # empty here because this cycle skipped without ever re-entering.
+        "resume_stage_determinations": [],
+    }
     assert "record" not in result
     assert calls.count("run_design_attempt_activity") == 1
     assert "build_short_circuit_record_activity" not in calls
@@ -656,11 +662,11 @@ def test_signal_brief_activity_timeout_deduplicates_the_exclude_list():
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint-lookup and resume-point determination (first step
-# of #7282 — Temporal-mode parity with thread mode's #7309/#7315). The
-# workflow computes ``resume_stage_determinations`` per re-entry but does not
-# yet act on it (that lands with the resume plumbing) -- surfaced only on the "record" and
-# short-circuit return dicts for test observability.
+# Checkpoint-lookup and resume-point determination -- Temporal-mode parity
+# with thread mode's own resume-point determination in
+# ``orchestrator.run_cycle``. The workflow computes
+# ``resume_stage_determinations`` per re-entry and surfaces it on every
+# terminal return dict for test observability.
 # ---------------------------------------------------------------------------
 
 
@@ -681,6 +687,7 @@ def _run_with_reentry_then_record(pipeline_checkpoints: List[Dict[str, Any]]) ->
                 "config": _config_dict(),
                 "convergence_tracker_state": {},
                 "run_id": "run-1",
+                "cycle_index": 0,
                 "generation": 1,
             }
         )
@@ -751,6 +758,87 @@ def test_resume_determination_after_alignment_checkpoint_is_none():
     assert result["resume_stage_determinations"] == [None]
 
 
+def test_undeserializable_checkpoint_fails_open_instead_of_wedging_the_cycle():
+    """A checkpoint payload this worker cannot parse is SKIPPED, not raised.
+
+    The checkpoint models are ``extra="forbid"``, so a payload minted by a
+    differently-shaped worker (schema change deployed mid-batch, or an older
+    payload replayed out of history) makes ``parse_checkpoint`` raise. Letting
+    that escape would fail the workflow task, which Temporal retries forever
+    -- wedging the cycle and stalling its parent batch over a value that only
+    feeds an optimization. Fail open instead: the cycle completes, reporting
+    "no usable checkpoint".
+    """
+    from investment_team.strategy_lab.checkpoints import DesignCheckpoint
+
+    poisoned = _checkpoint_json(DesignCheckpoint)
+    poisoned["a_field_this_worker_has_never_heard_of"] = True
+
+    result = _run_with_reentry_then_record([poisoned])
+    assert result["resume_stage_determinations"] == [None]
+    assert result["record"] == {"lab_record_id": "rec-1"}
+
+
+def test_one_unparseable_checkpoint_does_not_discard_its_readable_siblings():
+    """Skipping is per-payload, not per-list, so a partially-upgraded batch
+    still resumes off whatever this worker CAN read."""
+    from investment_team.strategy_lab.checkpoints import DesignCheckpoint, ReviewCheckpoint
+
+    poisoned = _checkpoint_json(ReviewCheckpoint, review_rounds_completed=2)
+    poisoned["a_field_this_worker_has_never_heard_of"] = True
+
+    result = _run_with_reentry_then_record([_checkpoint_json(DesignCheckpoint), poisoned])
+    # The unreadable ReviewCheckpoint (which would have won, being further
+    # along) is dropped; the readable DesignCheckpoint still resolves.
+    assert result["resume_stage_determinations"] == ["review"]
+
+
+def test_checkpoint_from_a_different_cycle_scope_is_rejected():
+    """The scope filter is real: a checkpoint carrying another cycle's
+    correlation id must not be resumed from, even though it matches on
+    ``run_id``/``design_attempt``/``generation``.
+
+    Two cycles of the same run can race ``run_design_attempt_activity`` at
+    ``design_attempt=0`` concurrently within one wave, so ``cycle_scope`` is
+    the only field distinguishing their checkpoints.
+    """
+    from investment_team.strategy_lab.checkpoints import DesignCheckpoint
+
+    foreign = _checkpoint_json(DesignCheckpoint, cycle_scope="run-1-c99")
+    result = _run_with_reentry_then_record([foreign])
+    assert result["resume_stage_determinations"] == [None]
+
+
+def test_reentry_then_skip_still_reports_its_determinations():
+    """A cycle that re-enters and THEN skips keeps the determinations it
+    already accumulated -- the skipped return is a terminal return like any
+    other, not an exception to ``run``'s Postconditions."""
+    from investment_team.strategy_lab.checkpoints import DesignCheckpoint
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": mock.Mock(
+            side_effect=[
+                _reentry_outcome(pipeline_checkpoints=[_checkpoint_json(DesignCheckpoint)]),
+                _skipped_outcome(),
+            ]
+        ),
+    }
+    with _patch_execute(handlers):
+        result = _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "run_id": "run-1",
+                "cycle_index": 0,
+                "generation": 1,
+            }
+        )
+    assert result["kind"] == "skipped"
+    assert result["resume_stage_determinations"] == ["review"]
+
+
 def test_resume_determination_is_none_when_no_checkpoint_exists():
     result = _run_with_reentry_then_record([])
     assert result["resume_stage_determinations"] == [None]
@@ -759,8 +847,10 @@ def test_resume_determination_is_none_when_no_checkpoint_exists():
 def test_resume_determination_computed_but_not_acted_on_across_reentries_to_short_circuit():
     """Every re-entry appends its own determination, in order, and nothing
     about the short-circuit path's existing fields changes: the workflow
-    still fully re-runs every attempt from scratch (this step doesn't wire
-    resume_spec/resume_design_context yet -- that lands with the resume plumbing)."""
+    still fully re-runs every attempt from scratch whenever the cross-attempt
+    resume gate is not activated (the ``spec_implicated=False`` AND
+    converged-through-REVIEW conjunction in ``resolve_cross_attempt_resume``,
+    which no production raise site satisfies today)."""
     from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
 
     def _attempt(a):
@@ -788,6 +878,7 @@ def test_resume_determination_computed_but_not_acted_on_across_reentries_to_shor
                 "config": _config_dict(),
                 "convergence_tracker_state": {},
                 "run_id": "run-1",
+                "cycle_index": 0,
                 "generation": 1,
             }
         )
@@ -852,6 +943,7 @@ def _run_reentry_then_record_capturing_params(
                 "config": _config_dict(),
                 "convergence_tracker_state": {},
                 "run_id": "run-1",
+                "cycle_index": 0,
                 "generation": 1,
             }
         )
@@ -1003,6 +1095,7 @@ def test_repeated_resume_does_not_duplicate_seeded_drift_history_in_short_circui
                 "config": _config_dict(),
                 "convergence_tracker_state": {},
                 "run_id": "run-1",
+                "cycle_index": 0,
                 "generation": 1,
             }
         )
