@@ -46,10 +46,16 @@ strictly-typed schema the LLM must emit per chunk, coerced into
 
 **`ArchitectureConsistencyFindingLLM`** — `code_review_agent/models.py:734-819`
 (architecture-consistency pass) and **`SideEffectImpactFindingLLM`** —
-`code_review_agent/models.py:822-911` (side-effect/blast-radius pass) share a
-reduced shape: `severity`, `category` (restricted to 2 values each, see
-below), `file_path`, `line` (no `start_line`, no `title` — these passes never
-anchor multi-line findings).
+`code_review_agent/models.py:822-911` (side-effect/blast-radius pass) share
+the same field set as `CodeReviewIssue` minus `title` and `start_line`:
+`severity`, `category` (restricted to 2 values each, see below), `file_path`,
+`line`, `description`, `suggestion`, `pre_existing` (`StrictBool`), `omission`
+(`StrictBool`, with the same `_omission_implies_in_scope` invariant as
+`CodeReviewIssue`). `start_line` is omitted because these passes never anchor
+multi-line findings; `title` is omitted because their prompts never populate
+one. Each pass's own `_coerce_finding` propagates `description`, `suggestion`,
+`pre_existing`, and `omission` onto the resulting `CodeReviewIssue`, so none
+of this content is lost for a corpus schema built against these two shapes.
 
 **`CodeReviewOutput`** — `code_review_agent/models.py:1106-1134` — top-level
 output: `approved: bool`, `issues: List[CodeReviewIssue]`,
@@ -258,13 +264,27 @@ false_positive_filter.py:2405-2412).
 
 ### What it emits when it drops a finding
 
-**Nothing structured.** A dropped finding disappears entirely from the
-returned list — there is no suppressed-record object, no separate
-"dropped findings" output field, and no marker left on any surviving
-finding. The only trace is a `logger.info` call
-(false_positive_filter.py:2405-2412) recording severity, `file:line`, a
-truncated description, and truncated reasoning, plus a summary count log
-line. The filter can be disabled entirely via the
+**No first-class suppressed-finding output.** A dropped finding disappears
+entirely from the returned `List[CodeReviewIssue]` — there is no
+suppressed-record object, no separate "dropped findings" output field, and
+no marker left on any surviving finding. The immediate trace at the drop
+site is a `logger.info` call (false_positive_filter.py:2405-2412) recording
+severity, `file:line`, a truncated description, and truncated reasoning,
+plus a summary count log line.
+
+Separately, when a job is running with a bound `job_id` and Postgres
+enabled, `_verify_group` also calls `record_reasoning_transcript_turns` and
+`record_formatting_transcript_turns` (false_positive_filter.py:2154-2174),
+which persist the verifier's LLM turns — including the formatted JSON
+verdict per finding index (`is_real_issue`, `confidence`, `reasoning`) — as
+durable `false_positive_filter`-stage transcript entries
+(`code_review_agent/transcript.py:325`). This is a durable but unstructured
+record (raw prompt/response text keyed by stage and file, not a queryable
+per-finding suppression record) and is a no-op when no `job_id` is bound
+(most tests and any caller that never opened an `llm_attribution` block) or
+Postgres is unavailable — it should not be conflated with a first-class
+suppressed-finding output, but it may be a usable source for the evaluation
+harness. The filter can be disabled entirely via the
 `CODE_REVIEW_FALSE_POSITIVE_FILTER=false/0/no` environment variable
 (`_FILTER_ENV`, false_positive_filter.py:99-102), in which case the input
 list is returned unchanged.
