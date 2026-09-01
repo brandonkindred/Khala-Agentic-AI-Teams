@@ -232,6 +232,14 @@ class _FakeCursor:
     fake would happily accept a row that real psycopg rejects, and since both
     write paths swallow exceptions (DEBUG log, no raise) the drift would surface
     only as silently-dropped trace rows in production.
+
+    Prior art: ``llm_service/tests/test_usage_store.py`` carries a near-identical
+    recording cursor + ``pg_cursor``-patching fixture. The shared scaffold in
+    ``shared.postgres.fake`` does not cover this need — it is dispatch-table
+    style, patches ``get_conn`` rather than ``pg_cursor``, and offers neither
+    call recording nor raise injection — which is why both suites hand-roll a
+    spy. If a third copy is ever needed, converge them into a shared recording
+    cursor rather than adding another.
     """
 
     def __init__(self, raise_on_execute: bool = False) -> None:
@@ -355,7 +363,8 @@ def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
     """write_trace (single-row path) carries cache_creation_tokens through to the INSERT params."""
     cursor = _fake_cursor()
     assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=17)) is True
-    _, params = cursor.executed[0]
+    sql, params = cursor.executed[0]
+    assert "cache_creation_tokens" in sql
     assert params[10:12] == (0, 17)
 
 
@@ -391,7 +400,8 @@ def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
     cursor = _fake_cursor()
     row = trace_store._record_to_row(_rec(cache_read_tokens=0, cache_creation_tokens=17))
     assert trace_store.write_rows([row]) == 1
-    _, rows = cursor.executed[0]
+    sql, rows = cursor.executed[0]
+    assert "cache_creation_tokens" in sql
     assert rows[0][10:12] == (0, 17)
 
 
