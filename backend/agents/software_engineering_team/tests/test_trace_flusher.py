@@ -45,7 +45,9 @@ class _Rec:
 def _reset_flusher(monkeypatch):
     """Start each test with an empty buffer, no registered observer/heartbeat,
     and the trace sink enabled (SE_TRACE_TO_POSTGRES=1) so the observer exercises
-    the enqueue path by default; tests that want the disabled-sink path delenv it."""
+    the enqueue path by default; tests that want the disabled-sink path
+    setenv it to an explicit falsy value (e.g. "false") — the sink now
+    defaults on, so delenv no longer reaches the disabled path."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "1")
     trace_flusher._reset_for_test()
     yield

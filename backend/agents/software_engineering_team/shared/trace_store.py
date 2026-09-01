@@ -1,4 +1,4 @@
-"""Optional Postgres sink for per-LLM-call traces (``se_agent_traces``).
+"""Postgres sink for per-LLM-call traces (``se_agent_traces``), enabled by default.
 
 Unless ``SE_TRACE_TO_POSTGRES`` is explicitly disabled, an :mod:`llm_service`
 call observer persists every SE-attributed LLM call as a row in
