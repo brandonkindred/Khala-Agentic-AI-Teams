@@ -159,7 +159,7 @@ def test_passthrough_below_cap_is_unchanged() -> None:
     assert inner.calls[0]["tool_specs"] == [{"name": "read_file"}]
 
 
-def test_at_cap_withdraws_tools_and_forces_end_turn() -> None:
+def test_at_cap_keeps_tools_and_forces_end_turn() -> None:
     inner = _AlwaysToolCallsModel()
     model = ToolCallBudgetModel(inner, 1)
 
@@ -461,3 +461,118 @@ def test_strands_model_defaults_are_bound_to_the_wrapper() -> None:
 
     tokens = asyncio.run(model.count_tokens([{"role": "user", "content": [{"text": "hi"}]}]))
     assert isinstance(tokens, int)
+
+
+def test_default_hard_cap_exceeds_advisory_tool_budget() -> None:
+    """The hard cap must sit above the tools' own advisory budget.
+
+    The two live in different modules and only a comment used to connect
+    them: if the advisory budget ever rose above the default cap, a
+    cooperating model would be cut off before it ever saw the "stop and
+    answer now" nudge, and nothing would fail.
+    """
+    from software_engineering_team.code_review_agent import false_positive_filter
+
+    assert DEFAULT_AGENT_TOOL_CALL_CAP > false_positive_filter._MAX_TOTAL_TOOL_CALLS
+
+
+class _TextAndToolUseInOneBlockModel:
+    """Puts real text and a tool use in a single content block."""
+
+    stateful = False
+
+    def get_config(self) -> Dict[str, Any]:
+        return {}
+
+    def update_config(self, **overrides: Any) -> None:
+        return None
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        yield {"messageStart": {"role": "assistant"}}
+        yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
+        yield {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"text": "Verdict: finding 0 is real."},
+            },
+        }
+        yield {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"toolUse": {"toolUseId": "c1", "name": "read_file", "input": "{}"}},
+            },
+        }
+        yield {"contentBlockStop": {"contentBlockIndex": 0}}
+        yield {"messageStop": {"stopReason": "tool_use"}}
+
+
+def test_dropped_tool_use_keeps_its_block_stop_when_text_shares_the_block() -> None:
+    """A block carrying both text and an over-cap tool use must still close.
+
+    Strands commits a block's accumulated text on `contentBlockStop`, so
+    swallowing that stop would discard the model's real answer and leave an
+    empty assistant message — which `_require_reasoning_prose` then turns into
+    a semantic-exhaustion error instead of a graceful degrade.
+    """
+    model = ToolCallBudgetModel(_TextAndToolUseInOneBlockModel(), 1)
+    model._tool_calls_used = 1  # budget already spent: this is the final turn
+
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    assert not any("toolUse" in json.dumps(event) for event in events)
+    assert any(_has_text_delta(event) for event in events)
+    # The block closes, so Strands commits the text.
+    assert any("contentBlockStop" in event for event in events)
+    # Real text came back, so no placeholder is synthesized.
+    assert "No conclusion was reached" not in json.dumps(events)
+    assert [event["messageStop"] for event in events if "messageStop" in event] == [
+        {"stopReason": "end_turn"}
+    ]
+
+
+def test_drop_state_is_scoped_to_the_block_that_opened_it() -> None:
+    """Another block's stop must neither end the drop nor be swallowed by it."""
+
+    class _InterleavedModel:
+        stateful = False
+
+        def get_config(self) -> Dict[str, Any]:
+            return {}
+
+        def update_config(self, **overrides: Any) -> None:
+            return None
+
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+            yield {"messageStart": {"role": "assistant"}}
+            # Over-cap tool use opens block 0 and is dropped...
+            yield {
+                "contentBlockStart": {
+                    "contentBlockIndex": 0,
+                    "start": {"toolUse": {"toolUseId": "c1", "name": "read_file"}},
+                },
+            }
+            # ...while an unrelated text block opens, runs and closes.
+            yield {"contentBlockStart": {"contentBlockIndex": 1, "start": {}}}
+            yield {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"text": "hello"}}}
+            yield {"contentBlockStop": {"contentBlockIndex": 1}}
+            # Block 0's own input delta and stop still belong to the dropped use.
+            yield {
+                "contentBlockDelta": {
+                    "contentBlockIndex": 0,
+                    "delta": {"toolUse": {"input": "{}"}},
+                },
+            }
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": "tool_use"}}
+
+    model = ToolCallBudgetModel(_InterleavedModel(), 1)
+    model._tool_calls_used = 1
+
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    # The text block survives intact, including its own stop.
+    assert any(_has_text_delta(event) for event in events)
+    stops = [event["contentBlockStop"] for event in events if "contentBlockStop" in event]
+    assert stops == [{"contentBlockIndex": 1}]
+    # Nothing tool-shaped leaks through, in either shape.
+    assert not any("toolUse" in json.dumps(event) for event in events)

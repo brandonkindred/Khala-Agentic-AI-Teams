@@ -15,8 +15,10 @@ each time.
 :class:`ToolCallBudgetModel` closes that loop at the layer that can end it
 unilaterally, whatever the caller configures: the model. It counts the tool
 uses a run has emitted and, once the cap is reached, drops every further
-tool-use block and rewrites a ``tool_use`` stop reason to ``end_turn`` — so
-the Strands event loop terminates no matter what the model emits.
+tool-use block and rewrites a ``tool_use`` stop reason (only that one --
+every other stop reason is terminal already, and relabelling one would
+suppress the handling it exists for) to ``end_turn`` — so the Strands event
+loop terminates no matter what the model emits.
 
 Invariants:
     - The wrapper never increases the number of tool calls a run makes and
@@ -31,7 +33,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator
 
 from strands.models.model import Model as _StrandsModel
 
@@ -41,11 +43,12 @@ logger = logging.getLogger(__name__)
 
 _MISSING = object()
 
-# Hard stop on total tool calls one Strands agent run may make. Deliberately
+# Hard stop on total tool calls one Strands agent run may make. Must stay
 # above ``false_positive_filter._MAX_TOTAL_TOOL_CALLS`` (the advisory budget
 # baked into the tools themselves) so a cooperating model still gets its
 # "stop and answer now" nudge and a few turns to act on it; this cap only
-# catches the model that ignores it.
+# catches the model that ignores it. The ordering is locked by
+# ``test_default_hard_cap_exceeds_advisory_tool_budget``.
 DEFAULT_AGENT_TOOL_CALL_CAP = 50
 
 _CAP_ENV = "CODE_REVIEW_AGENT_TOOL_CALL_CAP"
@@ -91,7 +94,7 @@ def _is_tool_use_start(event: Any) -> bool:
     return isinstance(inner, dict) and "toolUse" in inner
 
 
-def _block_delta(event: Any) -> Dict[str, Any]:
+def _block_delta(event: Any) -> dict[str, Any]:
     """The ``contentBlockDelta.delta`` mapping of ``event``, or ``{}``.
 
     Postconditions:
@@ -105,6 +108,37 @@ def _block_delta(event: Any) -> Dict[str, Any]:
         return {}
     delta = block.get("delta")
     return delta if isinstance(delta, dict) else {}
+
+
+def _block_index(event: Any) -> Any:
+    """The ``contentBlockIndex`` an event carries, or ``_MISSING``.
+
+    Postconditions:
+        - Returns the index found under whichever block key the event uses;
+          ``_MISSING`` when the event carries none. Never raises.
+    """
+    if not isinstance(event, dict):
+        return _MISSING
+    for key in ("contentBlockStart", "contentBlockDelta", "contentBlockStop"):
+        block = event.get(key)
+        if isinstance(block, dict) and "contentBlockIndex" in block:
+            return block["contentBlockIndex"]
+    return _MISSING
+
+
+def _same_block(index: Any, event: Any) -> bool:
+    """Whether ``event`` belongs to the block identified by ``index``.
+
+    Postconditions:
+        - ``True`` when the indices match, and when either side carries no
+          index at all (a stream that omits ``contentBlockIndex`` is treated
+          as strictly sequential, which is how Strands reads it). Never
+          raises.
+    """
+    if index is _MISSING:
+        return True
+    other = _block_index(event)
+    return other is _MISSING or other == index
 
 
 def _has_text_delta(event: Any) -> bool:
@@ -254,9 +288,9 @@ class ToolCallBudgetModel:
         self,
         output_model: type,
         prompt: Any,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         **kwargs: Any,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Pass structured-output calls straight through (they use no tools)."""
         async for event in self._inner.structured_output(
             output_model, prompt, system_prompt=system_prompt, **kwargs
@@ -266,10 +300,10 @@ class ToolCallBudgetModel:
     async def stream(
         self,
         messages: Any,
-        tool_specs: Optional[List[Any]] = None,
-        system_prompt: Optional[str] = None,
+        tool_specs: list[Any] | None = None,
+        system_prompt: str | None = None,
         **kwargs: Any,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream one turn, enforcing the run's tool-call cap.
 
         Postconditions:
@@ -305,8 +339,8 @@ class ToolCallBudgetModel:
         )
 
     async def _within_budget(
-        self, stream: AsyncGenerator[Dict[str, Any], None]
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+        self, stream: AsyncGenerator[dict[str, Any], None]
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Forward ``stream``, counting tool uses and dropping over-budget ones.
 
         A single assistant turn may carry several ``toolUse`` blocks (a
@@ -316,12 +350,24 @@ class ToolCallBudgetModel:
 
         Postconditions:
             - Yields every event unchanged until ``tool_calls_used`` reaches
-              the cap; from then on, each complete ``toolUse`` block (start,
-              input deltas, stop) is dropped so Strands never executes it.
-              Non-tool content in the same turn is untouched.
-            - ``tool_calls_used`` never exceeds ``max_tool_calls``.
+              the cap; from then on, each over-budget ``toolUse`` is dropped
+              (its opening event and input deltas) so Strands never executes
+              it. ``tool_calls_used`` never exceeds ``max_tool_calls``.
+            - A block's ``contentBlockStop`` is swallowed only when nothing
+              from that block was forwarded. A block that also carried
+              content this wrapper passed through -- a model may put text and
+              a tool use in ONE block -- keeps its stop, because Strands
+              commits a block's accumulated text on ``contentBlockStop``:
+              swallowing it there would silently discard the model's answer
+              and leave an empty assistant message.
+            - Drop state is scoped to the block that opened it: the stop is
+              matched by ``contentBlockIndex`` when both carry one, so a
+              differently-indexed block's stop can neither end the drop early
+              nor be swallowed by it.
         """
         dropping = False
+        dropping_index: Any = _MISSING
+        forwarded_from_block = False
         counted_block = False
         async for event in stream:
             # A tool use normally opens with ``contentBlockStart``, but Strands
@@ -338,32 +384,50 @@ class ToolCallBudgetModel:
                 if self._tool_calls_used >= self._max_tool_calls:
                     self._note_cap_reached()
                     dropping = True
+                    # A delta-announced tool use opens no block of its own, so
+                    # anything already forwarded from the block it rides in
+                    # stays forwarded and its stop must survive.
+                    if _is_tool_use_start(event):
+                        forwarded_from_block = False
+                    dropping_index = _block_index(event)
                     counted_block = False
                     continue
                 self._tool_calls_used += 1
                 dropping = False
+                dropping_index = _MISSING
                 counted_block = True
                 yield event
                 continue
-            if dropping and _is_tool_use_delta(event):
+            if dropping and _is_tool_use_delta(event) and _same_block(dropping_index, event):
                 continue
             if isinstance(event, dict) and "contentBlockStop" in event:
-                # The block ends here either way: stop dropping, and let the
-                # next tool use (in whichever shape it arrives) count again.
-                was_dropping = dropping
-                dropping = False
-                counted_block = False
-                if was_dropping:
+                if dropping and _same_block(dropping_index, event):
+                    dropping = False
+                    dropping_index = _MISSING
+                    counted_block = False
+                    if not forwarded_from_block:
+                        # Nothing of this block reached Strands; its stop would
+                        # commit an empty block.
+                        forwarded_from_block = False
+                        continue
+                    forwarded_from_block = False
+                    yield event
                     continue
+                counted_block = False
+                forwarded_from_block = False
+                yield event
+                continue
+            if _block_delta(event):
+                forwarded_from_block = True
             yield event
 
     async def _final_turn(
         self,
         messages: Any,
-        tool_specs: Optional[List[Any]],
-        system_prompt: Optional[str],
-        kwargs: Dict[str, Any],
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+        tool_specs: list[Any] | None,
+        system_prompt: str | None,
+        kwargs: dict[str, Any],
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Yield one guaranteed-terminal turn.
 
         ``tool_specs`` is passed through unchanged rather than withdrawn. What
@@ -426,7 +490,7 @@ class ToolCallBudgetModel:
             yield {"messageStop": {"stopReason": "end_turn"}}
 
     @staticmethod
-    def _fallback_text_events() -> List[Dict[str, Any]]:
+    def _fallback_text_events() -> list[dict[str, Any]]:
         """Events for the synthesized "no conclusion" answer."""
         return [
             {"contentBlockStart": {"start": {}}},
