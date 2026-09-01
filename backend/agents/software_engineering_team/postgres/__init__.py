@@ -47,6 +47,8 @@ SCHEMA = TeamSchema(
             input_tokens  INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens  INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             cost_usd      DOUBLE PRECISION NOT NULL DEFAULT 0,
             latency_ms    INTEGER NOT NULL DEFAULT 0,
             status        TEXT NOT NULL DEFAULT '',
@@ -57,6 +59,12 @@ SCHEMA = TeamSchema(
         "CREATE INDEX IF NOT EXISTS idx_se_agent_traces_job ON se_agent_traces(job_id)",
         "CREATE INDEX IF NOT EXISTS idx_se_agent_traces_ts ON se_agent_traces(ts)",
         "CREATE INDEX IF NOT EXISTS idx_se_agent_traces_phase ON se_agent_traces(phase)",
+        # Idempotent migration for tables created before these columns existed: the
+        # CREATE TABLE above is a no-op against an existing table, so without this,
+        # inserts referencing the new columns would fail on deployments upgrading
+        # an existing database.
+        "ALTER TABLE se_agent_traces ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE se_agent_traces ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS se_events (
             id         BIGSERIAL PRIMARY KEY,
             ts         TIMESTAMPTZ NOT NULL,

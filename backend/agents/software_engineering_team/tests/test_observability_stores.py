@@ -178,6 +178,38 @@ def test_trace_observer_ignores_non_se(monkeypatch) -> None:
     trace_flusher._reset_for_test()
 
 
+def test_record_to_row_cache_tokens() -> None:
+    """_record_to_row carries cache_read/cache_creation tokens, defaulting to 0 not NULL."""
+
+    class _RecWithRead:
+        timestamp = 0.0
+        team = "software_engineering"
+        job_id = "j"
+        cache_read_tokens = 42
+        cache_creation_tokens = 0
+
+    class _RecWithCreation:
+        timestamp = 0.0
+        team = "software_engineering"
+        job_id = "j"
+        cache_read_tokens = 0
+        cache_creation_tokens = 17
+
+    class _RecWithNeither:
+        timestamp = 0.0
+        team = "software_engineering"
+        job_id = "j"
+
+    row_read = trace_store._record_to_row(_RecWithRead())
+    row_creation = trace_store._record_to_row(_RecWithCreation())
+    row_neither = trace_store._record_to_row(_RecWithNeither())
+
+    # Column order: ..., total_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, ...
+    assert row_read[10:12] == (42, 0)
+    assert row_creation[10:12] == (0, 17)
+    assert row_neither[10:12] == (0, 0)  # missing attrs -> 0, never NULL
+
+
 def test_trace_retention_days_env(monkeypatch) -> None:
     """_retention_days defaults to 30, parses overrides, and falls back on garbage."""
     monkeypatch.delenv("SE_TRACE_RETENTION_DAYS", raising=False)

@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 # positional tuple. Keeping both on this string means a column change is one edit.
 _INSERT_SQL = (
     "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
-    "input_tokens, output_tokens, total_tokens, cost_usd, latency_ms, status, outcome, "
-    "objective, request_id) VALUES "
-    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, "
+    "cost_usd, latency_ms, status, outcome, objective, request_id) VALUES "
+    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 
@@ -40,7 +40,7 @@ def _retention_days() -> float:
 
 
 def _record_to_row(record: Any) -> tuple:
-    """Build the 16-element positional tuple for ``_INSERT_SQL`` from a record.
+    """Build the 18-element positional tuple for ``_INSERT_SQL`` from a record.
 
     Pure (no I/O): used both by :func:`write_trace` (single INSERT) and by the
     batched trace flusher (``executemany``) so the two paths cannot drift on
@@ -53,7 +53,9 @@ def _record_to_row(record: Any) -> tuple:
           attributes (``timestamp``, ``team``, ``model``, token counts, etc.);
           missing numeric fields default to 0/0.0, missing strings to "".
     Postconditions:
-        - Returns a 16-element tuple in ``_INSERT_SQL`` column order.
+        - Returns an 18-element tuple in ``_INSERT_SQL`` column order. A record
+          reporting no cache usage (missing or falsy ``cache_read_tokens`` /
+          ``cache_creation_tokens``) writes 0, never NULL.
     """
     # Use the record's own timestamp; fall back to *now* (not the 1970 epoch) for
     # a missing/invalid value so the row stays inside cost-query windows.
@@ -71,6 +73,8 @@ def _record_to_row(record: Any) -> tuple:
         int(getattr(record, "prompt_tokens", 0) or 0),
         int(getattr(record, "completion_tokens", 0) or 0),
         int(getattr(record, "total_tokens", 0) or 0),
+        int(getattr(record, "cache_read_tokens", 0) or 0),
+        int(getattr(record, "cache_creation_tokens", 0) or 0),
         float(getattr(record, "cost_usd", 0.0) or 0.0),
         int(getattr(record, "latency_ms", 0) or 0),
         getattr(record, "status", "") or "",
@@ -112,7 +116,7 @@ def write_rows(rows: Sequence[tuple]) -> int:
     DEBUG) — a flush failure never raises into the flusher thread.
 
     Preconditions:
-        - Every element of ``rows`` is a 16-element tuple in ``_INSERT_SQL``
+        - Every element of ``rows`` is an 18-element tuple in ``_INSERT_SQL``
           column order (build them with :func:`_record_to_row`).
     Postconditions:
         - Returns the number of rows written; 0 when the sink or Postgres is
