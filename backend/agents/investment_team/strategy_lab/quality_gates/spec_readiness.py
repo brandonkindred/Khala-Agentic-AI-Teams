@@ -1024,9 +1024,14 @@ class SpecReadinessGate(GateResultsMixin):
         # future wording change is a one-line edit instead of a
         # multi-template drift risk.
         slippage_bps_display = (slippage_multiplier - 1) * 10_000
+        # Guard against the *rounded* display value, not the raw one: a
+        # configured slippage_bps in (0, 0.05) is still positive but rounds
+        # to "0.0" at the message's one-decimal precision, which would
+        # reproduce the misleading "inflated 0.0bps" phrasing this note
+        # exists to avoid.
         slippage_note = (
             f", inflated {slippage_bps_display:.1f}bps for configured slippage"
-            if worst_case_concurrent > 1 and slippage_bps_display > 0
+            if worst_case_concurrent > 1 and round(slippage_bps_display, 1) > 0
             else ""
         )
 

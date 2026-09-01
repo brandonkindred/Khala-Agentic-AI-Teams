@@ -1046,6 +1046,24 @@ def test_rule5_volatility_target_worst_case_fits_with_slippage_headroom() -> Non
     assert not matches, matches
 
 
+def test_rule5_slippage_note_suppressed_for_sub_rounding_slippage_bps() -> None:
+    """A configured slippage_bps that's positive but rounds to "0.0" at the
+    note's one-decimal precision (e.g. 0.01) must not reproduce the
+    misleading "inflated 0.0bps" phrasing — the guard must check the
+    *rounded* display value, not just whether the raw value is positive."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 25, "max_drawdown_pct": 10},
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01", slippage_bps=0.01)
+    results = SpecReadinessGate().validate(spec, backtest_config=config)
+    matches = [c for c in _critical(results) if "volatility_target" in c]
+    assert matches, _critical(results)
+    assert not any("0.0bps" in c for c in matches), matches
+
+
 @pytest.mark.parametrize(
     "sizing_factory,max_open_positions,expect_critical",
     [
