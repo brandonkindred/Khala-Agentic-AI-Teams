@@ -138,7 +138,9 @@ def _reset_for_test() -> None:
     if hb is not None:
         try:
             hb.stop()
-        except Exception:  # pragma: no cover - BackgroundHeartbeat.stop never raises; defensive only
+        except (
+            Exception
+        ):  # pragma: no cover - BackgroundHeartbeat.stop never raises; defensive only
             pass
     _registered = False
 
