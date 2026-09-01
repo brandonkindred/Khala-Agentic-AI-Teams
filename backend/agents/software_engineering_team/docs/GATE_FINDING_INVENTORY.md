@@ -17,8 +17,8 @@ code changes accompany this document.
 
 **Out of scope:** the linting gate (`linting_tool_agent`) is a fifth
 finding-producing gate not inventoried here. It runs on the frontend
-code-review gate via `run_microtask_review` *and* on the `run_review` path
-(`shared/v2_review.py:1130-1136`, `1303-1314`) — it is deliberately not part
+code-review gate via `run_microtask_review` (`shared/v2_review.py:1303-1314`)
+*and* on the `run_review` path (`v2_review.py:1130-1136`) — it is deliberately not part
 of the shared code-review phase impl, per
 `docs/GATE_DEPENDENCY_GRAPH.md:34-36`. It emits its own structured shape, `LintIssue`
 (`linting_tool_agent/models.py:12-23`: `file_path: str`, `line: int`,
@@ -176,8 +176,9 @@ It is requested in the default review, `fix_build`, and `write_tests` modes,
 but **not** in `acceptance_evidence` mode: that mode's prompt is built from
 `ACCEPTANCE_EVIDENCE_FIELD_NAMES` (`qa_agent/models.py:151-157` — `approved`,
 `quality_gates`, `acceptance_trace`, `validation_evidence`, `summary`) via
-`AcceptanceEvidenceModel` (`agent.py:368-388`), which omits `bugs_found`
-entirely. So an `acceptance_evidence` run produces evidence records, not
+`AcceptanceEvidenceModel` (`qa_agent/models.py:167`), which omits
+`bugs_found` entirely; the prompt builder reads that model's field names at
+`qa_agent/agent.py:382`. So an `acceptance_evidence` run produces evidence records, not
 findings — a corpus case cannot expect findings from that mode.
 
 | field | type | default |
@@ -307,18 +308,23 @@ minus zero or more entries, in original order
 (`filter_false_positives`, false_positive_filter.py:2214-2232;
 `_verify_and_filter`, 2253-2422).
 
-Internally it uses a `_Verdict` dataclass (false_positive_filter.py:1721-1741,
-`is_false_positive: bool`, `confidence: str` (`high`/`medium`/`low`),
-`reasoning: str`) that is **never persisted to the output** — it exists only
-to drive the drop decision.
+Internally it uses a `_Verdict` dataclass (false_positive_filter.py:1721-1741:
+`is_false_positive: bool = False`, `confidence: str = ""`,
+`reasoning: str = ""`) that is **never persisted to the output** — it exists
+only to drive the drop decision. `confidence` is an unconstrained `str`
+defaulting to `""`, not a closed enum; the constraint lives in
+`__post_init__`, which raises when `is_false_positive` is True and
+`confidence` is anything other than `"high"` or `"medium"` — blank, missing,
+`"low"`, and any unrecognized token alike.
 
 ### Decision rule (allowlist, not denylist)
 
 A finding is dropped only when all of the following hold:
 - the verifier agent returns `is_real_issue: false` for that finding, and
-- confidence is `high` or `medium` (never `low`) — enforced both in
-  `_Verdict.__post_init__` (raises on `is_false_positive=True` with `low`
-  confidence) and in verdict coercion:
+- confidence is exactly `high` or `medium` — anything else (`low`, blank,
+  missing, or an unrecognized token) fails the check. Enforced both in
+  `_Verdict.__post_init__` (raises on `is_false_positive=True` with any
+  confidence outside that pair) and in verdict coercion:
   `is_false_positive = is_real is False and confidence in ("high", "medium")`
   (false_positive_filter.py:1766), and
 - the verifier agent is confirmed to have performed a **successful full
