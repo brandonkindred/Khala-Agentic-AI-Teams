@@ -23,7 +23,9 @@ from software_engineering_team.api import coding_team_main as _main  # noqa: F40
 from software_engineering_team.api import git_ops
 
 
-def _patch_git(monkeypatch, responses: Dict[Tuple[str, ...], Tuple[int, str]]) -> List[Tuple[str, ...]]:
+def _patch_git(
+    monkeypatch, responses: Dict[Tuple[str, ...], Tuple[int, str]]
+) -> List[Tuple[str, ...]]:
     """Stub `git_ops._git` to answer canned ``args -> (rc, out)`` responses.
 
     Returns the list of ``args`` tuples the stub was called with, in order,
@@ -45,7 +47,10 @@ def test_matching_fetch_and_push_url_passes(monkeypatch) -> None:
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "--all", "origin"): (0, "https://github.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://github.com/acme/widget.git",
+            ),
         },
     )
 
@@ -61,7 +66,10 @@ def test_mismatched_push_url_fails_even_when_fetch_url_matches(monkeypatch) -> N
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "--all", "origin"): (0, "https://github.com/evil/other.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://github.com/evil/other.git",
+            ),
         },
     )
 
@@ -86,7 +94,10 @@ def test_push_url_lookup_failure_fails_closed(monkeypatch) -> None:
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "--all", "origin"): (1, "fatal: no such remote 'origin'"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                1,
+                "fatal: no such remote 'origin'",
+            ),
         },
     )
 
@@ -100,7 +111,10 @@ def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://ghes.example.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "--all", "origin"): (0, "https://ghes.example.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://ghes.example.com/acme/widget.git",
+            ),
         },
     )
 
@@ -132,6 +146,46 @@ def test_second_pushurl_pointing_elsewhere_fails(monkeypatch) -> None:
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
     assert ("remote", "get-url", "--push", "--all", "origin") in calls
+
+
+def test_ssh_fetch_and_https_push_url_both_match(monkeypatch) -> None:
+    """`_checkout_remote_matches` delegates to `remote_url_matches`, which is
+    format-agnostic (scp-style SSH vs. HTTPS) as long as host/owner/repo agree
+    -- so a fetch URL in one form and a push URL in the other, both naming the
+    same repo, must still validate. This pins that real behavior rather than
+    guessing it: every other test in this file happens to use byte-identical
+    fetch/push URLs, which can't distinguish exact-string comparison from this
+    owner/repo-aware comparison."""
+    _patch_git(
+        monkeypatch,
+        {
+            ("remote", "get-url", "origin"): (0, "git@github.com:acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://github.com/acme/widget.git",
+            ),
+        },
+    )
+
+    assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is True
+
+
+def test_missing_git_suffix_on_push_url_still_matches(monkeypatch) -> None:
+    """`remote_url_matches` strips a trailing `.git` before comparing, so a
+    push URL configured without the suffix (some tooling omits it) must still
+    validate against a fetch URL that has it."""
+    _patch_git(
+        monkeypatch,
+        {
+            ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://github.com/acme/widget",
+            ),
+        },
+    )
+
+    assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is True
 
 
 def test_multiple_matching_pushurls_pass(monkeypatch) -> None:

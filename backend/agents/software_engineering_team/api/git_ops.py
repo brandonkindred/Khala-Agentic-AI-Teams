@@ -227,6 +227,12 @@ def _is_deletable_ephemeral_checkout(target: Path) -> bool:
     )
 
 
+# Both git subprocess calls in _checkout_remote_matches query the local git
+# config (no network round-trip), so this is generous headroom, not a tuned
+# network timeout; named so the two call sites can't drift independently.
+_REMOTE_QUERY_TIMEOUT_S = 10.0
+
+
 def _checkout_remote_matches(
     repo_path: str, owner: str, repo: str, *, expected_host: Optional[str] = None
 ) -> bool:
@@ -277,12 +283,14 @@ def _checkout_remote_matches(
           treated the same as a mismatched one, never assumed to match.
     """
     kwargs = {} if expected_host is None else {"expected_host": expected_host}
-    rc, out = _git(repo_path, "remote", "get-url", "origin", timeout=10.0)
+    rc, out = _git(repo_path, "remote", "get-url", "origin", timeout=_REMOTE_QUERY_TIMEOUT_S)
     if rc != 0:
         return False
     if not remote_url_matches(out, owner, repo, **kwargs):
         return False
-    rc, push_out = _git(repo_path, "remote", "get-url", "--push", "--all", "origin", timeout=10.0)
+    rc, push_out = _git(
+        repo_path, "remote", "get-url", "--push", "--all", "origin", timeout=_REMOTE_QUERY_TIMEOUT_S
+    )
     if rc != 0:
         return False
     push_urls = [line for line in push_out.splitlines() if line.strip()]
@@ -908,7 +916,9 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
     # the `fetch` calls below rather than relying on that invariant alone.
     rc, add_msg = _main._git(repo_path, "remote", "add", "--", _FORK_REMOTE_NAME, remote)
     if rc != 0:
-        rc, set_url_msg = _main._git(repo_path, "remote", "set-url", "--", _FORK_REMOTE_NAME, remote)
+        rc, set_url_msg = _main._git(
+            repo_path, "remote", "set-url", "--", _FORK_REMOTE_NAME, remote
+        )
         if rc != 0:
             # `add` can fail for reasons OTHER than "already exists" (a
             # corrupted .git dir, a config permission error, an invalid
@@ -929,7 +939,9 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
         # to that stale destination even though `get-url` now reports the
         # freshly-set fetch URL. Reset the push URL to match so push and
         # fetch never diverge for this remote.
-        rc, push_set_url_msg = _main._git(repo_path, "remote", "set-url", "--push", "--", _FORK_REMOTE_NAME, remote)
+        rc, push_set_url_msg = _main._git(
+            repo_path, "remote", "set-url", "--push", "--", _FORK_REMOTE_NAME, remote
+        )
         if rc != 0:
             return (
                 remote,
@@ -1083,7 +1095,9 @@ def _prepare_issue_branch(
     # exact commit -- immune to a concurrent fetch on a shared checkout (e.g.
     # another job's own base-SHA resolution) moving the tracking ref again
     # before seed selection/checkout consume it.
-    ok, base_ref = _main.resolve_remote_branch_sha(repo_path, default_branch_remote, default_branch, token)
+    ok, base_ref = _main.resolve_remote_branch_sha(
+        repo_path, default_branch_remote, default_branch, token
+    )
     if not ok:
         return False, base_ref, notes
     # This freshness check must also precede dirty-tree recovery, same as the

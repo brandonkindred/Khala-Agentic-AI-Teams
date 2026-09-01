@@ -89,12 +89,19 @@ class _FakeAsyncClient:
     """
 
     def __init__(
-        self, *, result=None, exc=None, repo_access_status=200, checkout_running_job_id=None
+        self,
+        *,
+        result=None,
+        exc=None,
+        repo_access_status=200,
+        checkout_running_job_id=None,
+        checkout_running_malformed=False,
     ):
         self._result = result
         self._exc = exc
         self._repo_access_status = repo_access_status
         self._checkout_running_job_id = checkout_running_job_id
+        self._checkout_running_malformed = checkout_running_malformed
         self.calls = []
         self.repo_checks = []
         self.checkout_checks = []
@@ -112,6 +119,8 @@ class _FakeAsyncClient:
     async def get(self, url, params=None, headers=None):
         if url.endswith("/checkout/running"):
             self.checkout_checks.append((url, params))
+            if self._checkout_running_malformed:
+                return _FakeResp(200, json_data={"status": "ok"})
             return _FakeResp(200, json_data={"running_job_id": self._checkout_running_job_id})
         self.repo_checks.append(url)
         return _FakeResp(self._repo_access_status, json_data={"full_name": "acme/widget"})
@@ -232,6 +241,25 @@ def test_run_issue_409_and_no_checkout_touched_when_already_running(
     checkout_url, checkout_params = fake.checkout_checks[0]
     assert checkout_url.endswith("/checkout/running")
     assert checkout_params == {"repo_path": "/tmp/acme_widget"}
+
+
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta")
+def test_run_issue_502_on_malformed_admission_precheck(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
+    """A malformed GET /checkout/running response (missing running_job_id) is the ONLY
+    admission guard this route has -- it must fail closed with a 502 and never proceed
+    to clone/dispatch, rather than silently treating the checkout as free."""
+    mock_cfg.return_value = dict(_GH_CFG)
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_ok_resp(), checkout_running_malformed=True)
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    assert resp.status_code == 502
+    assert "admission pre-check" in resp.json()["detail"]
+    mock_clone.assert_not_called()
+    assert fake.calls == []  # never forwarded to run-from-github
 
 
 # ---------------------------------------------------------------------------
@@ -730,9 +758,7 @@ def test_resolve_repo_path_operator_override_returned_verbatim():
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(
-    mock_cfg, mock_cred, mock_clone, monkeypatch, tmp_path
-):
+def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch, tmp_path):
     """An auto-derived run clones the per-issue folder and forwards repo_path +
     cleanup_checkout_on_success=True to the coding team."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -834,7 +860,6 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     mock_clone.assert_called_once_with(
         "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False, acquire_lock=False
     )
-
 
 
 def test_ensure_repo_clone_rejects_substring_remote(tmp_path):

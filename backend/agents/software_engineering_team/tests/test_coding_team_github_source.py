@@ -45,8 +45,8 @@ from software_engineering_team.github_source.client_http import (
 )
 from software_engineering_team.models import CodingTeamPlanInput
 from software_engineering_team.tests.git_test_helpers import (
-    _commit_on_branch,
-    _expected_basic_header,
+    commit_on_branch,
+    expected_basic_header,
 )
 
 # ---------------------------------------------------------------------------
@@ -981,18 +981,50 @@ class TestClientCreateLabel:
         assert seen["method"] == "POST"
         assert seen["path"] == "/repos/acme/widget/labels"
         assert seen["body"]["name"] == "waiting for review"
+        # Pins the actual default color create_label sends (its `color: str =
+        # "ededed"` parameter default) -- this test's name promises exactly
+        # this, but previously never asserted it.
+        assert seen["body"]["color"] == "ededed"
         assert result is None
 
     def test_already_exists_422_is_swallowed(self) -> None:
-        """GitHub responds 422 when a label with this name already exists --
-        this is treated as success (idempotent create-if-missing), not
-        re-raised, so callers can call this unconditionally as a guard."""
+        """GitHub responds 422 with an `already_exists` error code when a label
+        with this name already exists -- this is treated as success (idempotent
+        create-if-missing), not re-raised, so callers can call this
+        unconditionally as a guard. Uses a realistic already-exists payload
+        (GitHub's actual shape for this case), not a generic 422 body, so this
+        test can't pass merely because ANY 422 was swallowed."""
 
         def handler(_req: httpx.Request) -> httpx.Response:
-            return httpx.Response(422, json={"message": "Validation Failed"})
+            return httpx.Response(
+                422,
+                json={
+                    "message": "Validation Failed",
+                    "errors": [{"resource": "Label", "code": "already_exists", "field": "name"}],
+                },
+            )
 
         result = _client_with(handler).create_label("acme", "widget", "waiting for review")
         assert result is None
+
+    def test_non_already_exists_422_still_raises(self) -> None:
+        """A 422 for a genuine validation failure (e.g. an invalid `color`,
+        not a name conflict) must still raise -- create_label only swallows
+        the specific `already_exists` case, not every 422."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422,
+                json={
+                    "message": "Validation Failed",
+                    "errors": [{"resource": "Label", "code": "invalid", "field": "color"}],
+                },
+            )
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).create_label(
+                "acme", "widget", "waiting for review", color="zzzzzz"
+            )
 
     def test_other_error_raises(self) -> None:
         def handler(_req: httpx.Request) -> httpx.Response:
@@ -2451,7 +2483,7 @@ class TestPrepareIssueBranch:
         reports as the branch's live tip, prep proceeds exactly as without the
         check (proving the check does not misfire on the ordinary case)."""
         repo = self._init_repo(tmp_path)
-        live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        live_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
 
         ok, msg, _notes = api._prepare_issue_branch(
             repo, "origin", "main", "khala/issue-9", expected_head_sha=live_sha
@@ -2527,8 +2559,8 @@ class TestPrepareIssueBranch:
         apply the caller's plan to code newer than what it was grounded on --
         and must not touch the checkout on its way to failing."""
         repo = self._init_repo(tmp_path)
-        stale_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
-        live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+        stale_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        live_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
         assert stale_sha != live_sha
 
         import subprocess
@@ -2583,8 +2615,8 @@ class TestPrepareIssueBranch:
         the check is actually skipped, not just trivially unexercised because
         the tip never moved."""
         repo = self._init_repo(tmp_path)
-        _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
-        _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+        commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
 
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
@@ -2710,6 +2742,7 @@ class TestPrepareIssueBranch:
         assert final_dev_sha == original_sha
         assert final_dev_sha != concurrent_sha
 
+
 class TestGitCredentialThreading:
     """The token must reach the network git ops (fetch/push) transiently.
 
@@ -2734,7 +2767,7 @@ class TestGitCredentialThreading:
         assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
         # GitHub's git smart-HTTP endpoint rejects `Bearer` (401) even for a
         # valid token — only Basic with the x-access-token username works.
-        assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("secret-tok")
+        assert env["GIT_CONFIG_VALUE_0"] == expected_basic_header("secret-tok")
         # Disable interactive prompts so a bad credential fails fast.
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         # Inherits the parent environment (PATH etc. survive).
@@ -2772,7 +2805,7 @@ class TestGitCredentialThreading:
         assert len(fetches) == 1
         for _args, env in fetches:
             assert env is not None
-            assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
+            assert env["GIT_CONFIG_VALUE_0"] == expected_basic_header("tok-123")
         # Local-only git ops never carry the credential.
         assert all(env is None for args, env in calls if args[0] != "fetch")
 
@@ -2809,7 +2842,7 @@ class TestGitCredentialThreading:
         ok, msg = api._push_branch("/repo", "origin", "khala/issue-1", "tok-xyz")
         assert ok is True, msg
         assert captured["args"][0] == "push"
-        assert captured["env"]["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-xyz")
+        assert captured["env"]["GIT_CONFIG_VALUE_0"] == expected_basic_header("tok-xyz")
 
     def test_push_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
         captured = {}
@@ -3578,9 +3611,7 @@ class TestFileContentsAndTree:
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=[{"type": "file", "name": "a.py"}])
 
-        content, missing = _client_with(handler).get_file_contents_detailed(
-            "o", "r", "pkg", "sha1"
-        )
+        content, missing = _client_with(handler).get_file_contents_detailed("o", "r", "pkg", "sha1")
         assert content is None
         assert missing is False
 
@@ -3591,7 +3622,9 @@ class TestFileContentsAndTree:
         encoded = base64.b64encode(body.encode()).decode()
 
         def handler(_req: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"type": "file", "encoding": "base64", "content": encoded})
+            return httpx.Response(
+                200, json={"type": "file", "encoding": "base64", "content": encoded}
+            )
 
         client = _client_with(handler)
         assert client.get_file_contents("o", "r", "a.py", "sha1") == body

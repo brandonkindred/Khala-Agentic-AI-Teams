@@ -123,16 +123,12 @@ def _format_existing_issues(issues: list[Issue], max_issues: int = 30) -> str:
             body = body[:500] + "..."
         labels_str = ", ".join(issue.labels) if issue.labels else "none"
         lines.append(
-            f"### Issue #{issue.number}: {title}\n"
-            f"**Labels:** {labels_str}\n"
-            f"**Body:** {body}\n"
+            f"### Issue #{issue.number}: {title}\n**Labels:** {labels_str}\n**Body:** {body}\n"
         )
     return "\n".join(lines)
 
 
-def _find_similar_issue_via_llm(
-    proposal: dict[str, Any], open_issues: list[Issue]
-) -> Issue | None:
+def _find_similar_issue_via_llm(proposal: dict[str, Any], open_issues: list[Issue]) -> Issue | None:
     """Use an LLM to determine if a proposal duplicates an existing open issue.
 
     Makes a single structured LLM call with the proposal details and a summary
@@ -178,9 +174,7 @@ def _find_similar_issue_via_llm(
         # Any LLM failure (not configured, parse error, etc.) degrades to
         # "no match found" — the issue will be created as new, which is the
         # safe default (a duplicate is better than a lost finding).
-        logger.warning(
-            "LLM similarity check failed; treating as no duplicate", exc_info=True
-        )
+        logger.warning("LLM similarity check failed; treating as no duplicate", exc_info=True)
         return None
 
     if not verdict.is_duplicate or verdict.matched_issue_number is None:
@@ -291,9 +285,12 @@ def post_address_comments(
         - Creates a job, records the review start, and starts the address-comments
           hook — all while holding the admission lock, so a persisted job can never be
           left without a running worker (which would otherwise block future requests
-          for the PR). Returns the job id, PR URL, and the count of unresolved comments
-          at admission time (the background worker re-snapshots when it starts, so the
-          actual set processed may differ). Poll ``GET /status/{job_id}`` for progress.
+          for the PR). Returns the job id, PR URL, and ``unresolved_comment_count`` —
+          the combined count of unresolved comments AND retry-eligible resolved
+          threads (one already replied to but whose resolve mutation is on record as
+          failed), both from this same admission-time snapshot (the background
+          worker re-snapshots when it starts, so the actual set processed may
+          differ). Poll ``GET /status/{job_id}`` for progress.
         - A 400 is returned when the PR is not open, when ``request.repo_path`` is
           blank or not an existing git checkout (a real-issue fix — even one from
           feedback posted after this admission-time snapshot — needs a checkout
@@ -335,11 +332,12 @@ def post_address_comments(
                 )
             # This route needs the unresolved-comment count AND the
             # retry-resolve count for its response (see the return below);
-            # the other two return values exist only for the background
-            # worker's own retry-resolve/re-triage logic
-            # (address_comments._run_address_comments), not this admission check.
-            unresolved, _threads, retry_resolve, _history, _ambiguous = _address.unresolved_comments(
-                client, request.owner, request.repo, pr_number
+            # the other three return values (_threads, _history, _ambiguous)
+            # exist only for the background worker's own retry-resolve/
+            # re-triage logic (address_comments._run_address_comments), not
+            # this admission check.
+            unresolved, _threads, retry_resolve, _history, _ambiguous = (
+                _address.unresolved_comments(client, request.owner, request.repo, pr_number)
             )
         except ReviewThreadsUnavailableError as e:
             # Fail closed: without reliable resolved/unresolved state the flow would
@@ -361,7 +359,18 @@ def post_address_comments(
     # real issue it cannot implement a fix for. Require a usable checkout
     # unconditionally instead of guessing from a snapshot that can go stale.
     stripped = request.repo_path.strip()
-    if not stripped or not (Path(stripped) / ".git").exists():
+    has_git = False
+    if stripped:
+        try:
+            has_git = (Path(stripped) / ".git").exists()
+        except (ValueError, OSError):
+            # An embedded null byte raises ValueError, other unusable paths
+            # (e.g. one exceeding the platform's path-length limit) can raise
+            # OSError -- both mean "not a usable checkout", same as `.git`
+            # genuinely not existing, so this falls into the 400 branch below
+            # instead of surfacing as an unhandled 500.
+            has_git = False
+    if not stripped or not has_git:
         # A non-empty path naming a non-existent directory or an ordinary
         # (non-git) folder is exactly as unusable to every real-issue child as
         # an empty one — `(path / ".git").exists()` matches this codebase's
@@ -447,7 +456,12 @@ def post_address_comments(
                     job_fields["github_token_encrypted"] = encrypted
                 _main.update_job(job_id, **job_fields)
                 created_at = _main.record_review_start(
-                    job_id, request.owner, request.repo, pr_number, pr.html_url, _main._review_author()
+                    job_id,
+                    request.owner,
+                    request.repo,
+                    pr_number,
+                    pr.html_url,
+                    _main._review_author(),
                 )
                 _address.start_address_comments_thread(job_id, request, token)
             except Exception as e:
@@ -856,9 +870,15 @@ def post_file_out_of_scope_issues(
                                 for loc in locations:
                                     fp = str(loc.get("file_path") or "unknown")
                                     ln = loc.get("line")
-                                    loc_text = f"`{fp}:{ln}`" if isinstance(ln, int) and ln > 0 else f"`{fp}`"
+                                    loc_text = (
+                                        f"`{fp}:{ln}`"
+                                        if isinstance(ln, int) and ln > 0
+                                        else f"`{fp}`"
+                                    )
                                     loc_desc = str(loc.get("description") or "").strip()
-                                    update_section += f"  - {loc_text} — {loc_desc or '_No description._'}\n"
+                                    update_section += (
+                                        f"  - {loc_text} — {loc_desc or '_No description._'}\n"
+                                    )
                             update_section += (
                                 f"\n**Description:** {proposal.get('description', '')}\n\n"
                                 f"**Suggested fix:** {proposal.get('suggestion', 'N/A')}"
@@ -866,7 +886,9 @@ def post_file_out_of_scope_issues(
                             updated_body = existing_body + update_section
 
                             client.update_issue(
-                                request.owner, request.repo, match.number,
+                                request.owner,
+                                request.repo,
+                                match.number,
                                 body=scrub_token_from_text(updated_body),
                             )
                             # Mark the proposal as filed (merged into existing)

@@ -162,4 +162,12 @@ async def held_checkout_lock(
             # acquired it (or from a coroutine that never itself observed the
             # acquisition) is safe.
             exc_type, exc_val, exc_tb = sys.exc_info()
-            await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
+            # Hardened the same way as acquisition above: tracked as its own
+            # Future and retried under shield until done(), so a repeat
+            # cancellation while awaiting release cannot abandon the executor
+            # work item before __exit__ actually runs (which would leak the
+            # flock).
+            release_future = loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
+            while not release_future.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(release_future)

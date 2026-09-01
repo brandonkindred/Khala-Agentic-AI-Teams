@@ -24,8 +24,8 @@ from software_engineering_team.tests.conftest import (
     _stub_orchestrator_only,
 )
 from software_engineering_team.tests.git_test_helpers import (
-    _commit_on_branch,
-    _expected_basic_header,
+    commit_on_branch,
+    expected_basic_header,
 )
 
 
@@ -144,7 +144,7 @@ def test_branch_prep_activity_expected_head_sha_match_succeeds(api, monkeypatch,
 
     _seed_job_token(monkeypatch, api, "job-1")
     repo = _init_repo(tmp_path)
-    live_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+    live_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
 
     out = github_branch_prep_activity(
         {
@@ -181,8 +181,8 @@ def test_branch_prep_activity_expected_head_sha_mismatch_fails_closed(
 
     _seed_job_token(monkeypatch, api, "job-1")
     repo = _init_repo(tmp_path)
-    stale_sha = _commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
-    _commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+    stale_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+    commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
 
     out = github_branch_prep_activity(
         {
@@ -326,7 +326,7 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
     assert len(fetches) == 1
     for _args, env in fetches:
         assert env is not None
-        assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
+        assert env["GIT_CONFIG_VALUE_0"] == expected_basic_header("tok-123")
     assert all(env is None for args, env in calls if args[0] != "fetch")
 
 

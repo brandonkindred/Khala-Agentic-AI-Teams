@@ -11,7 +11,7 @@ import base64
 import subprocess
 
 
-def _expected_basic_header(token: str) -> str:
+def expected_basic_header(token: str) -> str:
     """Expected git auth header for a fake token, built at runtime so a
     credential-shaped Base64 literal never appears in source — secret
     scanners (GitGuardian etc.) flag the pattern regardless of how fake
@@ -20,7 +20,7 @@ def _expected_basic_header(token: str) -> str:
     return f"Authorization: Basic {encoded}"
 
 
-def _commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> str:
+def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> str:
     """Commit ``contents`` to ``filename`` on ``branch`` in the on-disk git repo
     at ``repo``, and return the resulting commit SHA, leaving the checkout back
     on ``main``.
@@ -65,7 +65,7 @@ def _commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> s
         return result.stdout.strip()
 
     _run("checkout", "-q", "-B", branch)
-    with open(f"{repo}/{filename}", "w") as fh:
+    with open(f"{repo}/{filename}", "w", encoding="utf-8") as fh:
         fh.write(contents)
     _run("add", filename)
     _run("commit", "-q", "--no-gpg-sign", "-m", f"{branch}: {filename}")

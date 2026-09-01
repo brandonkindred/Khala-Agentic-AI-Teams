@@ -1329,6 +1329,7 @@ def _github_api_base() -> str:
     """
     return (os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL).rstrip("/")
 
+
 # GitHub's issues endpoint returns at most 100 items per page; we request the max
 # and follow the Link header so the panel shows every open issue, not just page one.
 _GITHUB_ISSUES_PER_PAGE = 100
@@ -2959,19 +2960,26 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             if isinstance(running, dict) and "running_job_id" in running:
                 running_job_id = running.get("running_job_id")
             else:
-                running_job_id = None
                 # This pre-check is the ONLY admission guard this route has (see the
-                # docstring above); a malformed response silently disables it, so
-                # make that observable rather than proceeding unblocked in silence.
-                # A legitimate idle response is {"running_job_id": None} -- the
-                # coding-team route has no response_model_exclude_none, so the key
-                # is always present even when null; only a response missing the
-                # key entirely (or not a dict) is malformed.
+                # docstring above); a malformed response means this checkout's
+                # freedom was never actually confirmed, so fail closed instead of
+                # silently proceeding unblocked. A legitimate idle response is
+                # {"running_job_id": None} -- the coding-team route has no
+                # response_model_exclude_none, so the key is always present even
+                # when null; only a response missing the key entirely (or not a
+                # dict) is malformed.
                 logger.warning(
                     "github run-issue: admission pre-check returned unexpected payload %r for "
-                    "%s; proceeding without admission check",
+                    "%s; refusing to start a job without a confirmed-free checkout",
                     running,
                     repo_path,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Coding team service returned an unexpected admission pre-check "
+                        "response; refusing to start a job without a confirmed-free checkout."
+                    ),
                 )
             if running_job_id:
                 raise HTTPException(

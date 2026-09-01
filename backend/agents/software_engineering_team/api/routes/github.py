@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -43,7 +43,7 @@ def _fail_new_job(
     *,
     detail: str | None = None,
     cause: Exception | None = None,
-) -> None:
+) -> NoReturn:
     """Terminalize a freshly-created job as failed and raise the matching HTTPException.
 
     Shared by ``post_run_from_github``'s admission block for the three ways a

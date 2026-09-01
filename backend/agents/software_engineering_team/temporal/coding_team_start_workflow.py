@@ -78,6 +78,29 @@ def _validate_common_args(job_id: str, repo_path: str, caller: str) -> None:
         raise ValueError(f"{caller} requires a non-empty repo_path")
 
 
+def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: str) -> None:
+    """Shared ``plan_input`` token-leak validation for both dispatchers.
+
+    ``plan_input`` is serialized into the same durable Temporal workflow
+    payload as ``github`` (see :func:`_build_workflow_payload`), so it needs
+    the identical no-embedded-token guarantee that :func:`_validate_github_arg`
+    already enforces for ``github`` — there is nothing about ``plan_input``'s
+    provenance that makes it contractually token-free by construction.
+
+    Preconditions:
+        - ``caller`` is the calling function's name, used verbatim in the
+          raised message.
+    Postconditions:
+        - Returns None when ``plan_input`` is ``None`` or contains no
+          ``"token"``-like key at any nesting depth.
+    Raises:
+        ValueError: ``plan_input`` contains a ``"token"``-like key at any
+            nesting depth (see :func:`_contains_token_key`).
+    """
+    if plan_input and _contains_token_key(plan_input):
+        raise ValueError(f"{caller} requires plan_input to not include a token")
+
+
 def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, required: bool) -> None:
     """Shared ``github`` argument validation for both dispatchers.
 
@@ -116,7 +139,10 @@ def _workflow_id(job_id: str) -> str:
 
 
 def _build_workflow_payload(
-    job_id: str, repo_path: str, plan_input: Optional[Dict[str, Any]], github: Optional[Dict[str, Any]]
+    job_id: str,
+    repo_path: str,
+    plan_input: Optional[Dict[str, Any]],
+    github: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Build the ``CodingTeamWorkflow.run`` argument dict shared by both dispatchers.
 
@@ -147,7 +173,10 @@ def start_coding_team_workflow(
         - ``job_id`` is a non-empty str whose job row already exists (the API
           called ``create_job`` before dispatching).
         - ``repo_path`` is a non-empty str; ``plan_input`` is a JSON-serializable
-          plan dict (a run with no plan has nothing to execute).
+          plan dict (a run with no plan has nothing to execute) that must not
+          contain a plaintext token at any nesting depth (see
+          :func:`_contains_token_key`) — it is serialized into the same
+          durable Temporal payload as ``github``.
         - ``github``, when provided, is a dict of GitHub-issue run metadata for
           the workflow (owner/repo/issue/base/integration_branch/expected_base_sha/...).
           It must not contain a plaintext token — activities resolve tokens
@@ -160,14 +189,15 @@ def start_coding_team_workflow(
           omitted.
     Raises:
         ValueError: ``job_id`` or ``repo_path`` is empty; ``github`` is
-            truthy but not a ``dict``; or ``github`` contains a
-            ``"token"``-like key at any nesting depth (see
+            truthy but not a ``dict``; or ``github`` or ``plan_input``
+            contains a ``"token"``-like key at any nesting depth (see
             :func:`_contains_token_key`).
         RuntimeError: the worker's Temporal client never becomes available
             within the wait window.
     """
     _validate_common_args(job_id, repo_path, "start_coding_team_workflow")
     _validate_github_arg(github, caller="start_coding_team_workflow", required=False)
+    _validate_plan_input_arg(plan_input, caller="start_coding_team_workflow")
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
     workflow_id = _workflow_id(job_id)
     start_workflow_sync(
@@ -199,7 +229,9 @@ def execute_coding_team_workflow(
           must not contain a plaintext token; activities resolve credentials
           from the child job's encrypted token or ``GITHUB_TOKEN`` instead.
         - ``plan_input``, when not ``None``, is a JSON-serializable plan dict
-          (it is sent verbatim as a Temporal workflow argument).
+          (it is sent verbatim as a Temporal workflow argument) that must not
+          contain a plaintext token at any nesting depth (see
+          :func:`_contains_token_key`).
     Postconditions:
         - Blocks until ``CodingTeamWorkflow`` reaches a terminal result and returns
           that result. A pause remains durable in Temporal and is resumed through
@@ -214,8 +246,9 @@ def execute_coding_team_workflow(
           keep blocking — there is no request deadline to respect here.
     Raises:
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
-            non-empty dict, or ``github`` contains a ``"token"``-like key at
-            any nesting depth (see :func:`_contains_token_key`).
+            non-empty dict, or ``github`` or ``plan_input`` contains a
+            ``"token"``-like key at any nesting depth (see
+            :func:`_contains_token_key`).
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result.
         Exception: Any other exception ``execute_workflow_sync`` itself raises
             (a Temporal RPC error, the workflow's own failure exception, a
@@ -226,10 +259,13 @@ def execute_coding_team_workflow(
     """
     _validate_common_args(job_id, repo_path, "execute_coding_team_workflow")
     _validate_github_arg(github, caller="execute_coding_team_workflow", required=True)
+    _validate_plan_input_arg(plan_input, caller="execute_coding_team_workflow")
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
     workflow_id = _workflow_id(job_id)
     logger.info(
-        "Executing CodingTeamWorkflow id=%s (timeout_s=%s)", workflow_id, _COMMENT_WORKFLOW_TIMEOUT_S
+        "Executing CodingTeamWorkflow id=%s (timeout_s=%s)",
+        workflow_id,
+        _COMMENT_WORKFLOW_TIMEOUT_S,
     )
     result = execute_workflow_sync(
         CodingTeamWorkflow.run,

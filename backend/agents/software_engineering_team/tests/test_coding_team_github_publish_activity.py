@@ -219,10 +219,28 @@ def _stub_push_paths(
     monkeypatch.setattr(
         api,
         "_push_branch",
-        lambda path, remote, branch, token: pushes.append((path, remote, branch, token))
-        or (True, None),
+        lambda path, remote, branch, token: (
+            pushes.append((path, remote, branch, token)) or (True, None)
+        ),
     )
     return fast_forwards, pushes
+
+
+def _publish_request() -> dict[str, Any]:
+    """The ``github_pr_publish_activity`` request payload shared by the
+    existing-head-push happy-path and partial-failure tests below — both
+    exercise the same PR/branch/remote, differing only in the job's
+    task_graph_snapshot."""
+    return {
+        "job_id": "job-1",
+        "owner": "acme",
+        "repo": "widgets",
+        "repo_path": "/repo",
+        "pr_number": 7,
+        "pr_url": "https://example/pull/7",
+        "integration_branch": "feature/pr-7",
+        "remote": "origin",
+    }
 
 
 @pytest.mark.parametrize(
@@ -614,18 +632,7 @@ def test_pr_publish_activity_pushes_existing_head_and_completes_child(
     store, _ = _install(monkeypatch, api, "job-1")
     fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
 
-    out = github_pr_publish_activity(
-        {
-            "job_id": "job-1",
-            "owner": "acme",
-            "repo": "widgets",
-            "repo_path": "/repo",
-            "pr_number": 7,
-            "pr_url": "https://example/pull/7",
-            "integration_branch": "feature/pr-7",
-            "remote": "origin",
-        }
-    )
+    out = github_pr_publish_activity(_publish_request())
 
     assert fast_forwards == [("/repo", "feature/pr-7", api.DEVELOPMENT_BRANCH)]
     assert pushes == [("/repo", "origin", "feature/pr-7", "tok-123")]
@@ -656,18 +663,7 @@ def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
     )
     fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
 
-    out = github_pr_publish_activity(
-        {
-            "job_id": "job-1",
-            "owner": "acme",
-            "repo": "widgets",
-            "repo_path": "/repo",
-            "pr_number": 7,
-            "pr_url": "https://example/pull/7",
-            "integration_branch": "feature/pr-7",
-            "remote": "origin",
-        }
-    )
+    out = github_pr_publish_activity(_publish_request())
 
     assert out["status"] == "completed_with_failures"
     assert store.cleared_markers == [("/repo", 7)]

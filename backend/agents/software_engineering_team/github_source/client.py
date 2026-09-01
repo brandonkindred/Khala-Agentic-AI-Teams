@@ -254,7 +254,9 @@ class ReviewThreadsUnavailableError(GitHubAPIError):
               HTTP status applies — the failure may be transport-level or a GraphQL
               body error) and a message identifying the PR and the underlying detail.
         """
-        super().__init__(0, f"review-thread state unavailable for {owner}/{repo}#{number}: {detail}")
+        super().__init__(
+            0, f"review-thread state unavailable for {owner}/{repo}#{number}: {detail}"
+        )
 
 
 @dataclass(frozen=True)
@@ -417,6 +419,45 @@ def _issue_comment_from_payload(payload: dict[str, Any]) -> IssueComment:
         body=payload.get("body") or "",
         html_url=payload.get("html_url") or "",
     )
+
+
+def _is_already_exists_422(response: httpx.Response) -> bool:
+    """True when a 422 ``response`` body reports GitHub's "already exists" error.
+
+    GitHub returns 422 both for genuine "resource already exists" conflicts
+    (e.g. creating a label whose name is taken) AND for ordinary validation
+    failures (e.g. an invalid label ``color``) — the status code alone cannot
+    tell the two apart, so callers that want to swallow only the former must
+    inspect the body first.
+
+    Preconditions:
+        - ``response`` is the raw ``httpx.Response`` for a request that
+          returned status 422 (this function does not itself check the status).
+    Postconditions:
+        - Returns ``True`` when the response body is JSON containing an
+          ``errors`` list with at least one entry whose ``code`` field is
+          exactly ``"already_exists"`` (GitHub's documented error code for
+          this case), OR whose top-level ``message`` field contains the
+          substring "already exist" (case-insensitive), covering endpoints
+          that report this case as free text instead of a structured code.
+          Returns ``False`` for any other 422 body,
+          including one that fails to parse as JSON — never raises.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    errors = body.get("errors")
+    if isinstance(errors, list):
+        for err in errors:
+            if isinstance(err, dict) and err.get("code") == "already_exists":
+                return True
+    message = body.get("message")
+    if isinstance(message, str) and "already exist" in message.lower():
+        return True
+    return False
 
 
 def web_host_for_api_base_url(base_url: str) -> str:
@@ -729,20 +770,25 @@ class GitHubClient(_GitHubHttpMixin):
         Postconditions:
             - The repository has a label named ``name`` (freshly created with
               ``color``/``description``, or already present from before this call —
-              both are treated as success). GitHub responds 422 when a label with
-              this name already exists; that specific status is swallowed here so
-              callers can call this unconditionally as a create-if-missing guard
-              before applying a label, without first doing a separate existence
-              check. Raises ``GitHubAPIError`` for any other non-2xx (auth, rate
-              limit, invalid color, server error) — those are real failures, not
-              "already exists".
+              both are treated as success). GitHub responds 422 with an
+              ``already_exists`` error code when a label with this name already
+              exists; that specific case is swallowed here so callers can call
+              this unconditionally as a create-if-missing guard before applying a
+              label, without first doing a separate existence check. GitHub also
+              returns 422 for other validation failures (e.g. an invalid
+              ``color``) — those are inspected for the ``already_exists`` code
+              first and, when absent, still raise ``GitHubAPIError`` via
+              ``_check``, matching this docstring's contract that an invalid
+              color raises rather than being swallowed as "already exists".
+              Raises ``GitHubAPIError`` for any other non-2xx (auth, rate limit,
+              server error) as well.
         """
         response = self._request(
             "POST",
             f"/repos/{owner}/{repo}/labels",
             json={"name": name, "color": color, "description": description},
         )
-        if response.status_code == 422:
+        if response.status_code == 422 and _is_already_exists_422(response):
             return
         self._check(response)
 
@@ -1051,14 +1097,7 @@ class GitHubClient(_GitHubHttpMixin):
                 "number": number,
                 "after": after,
             }
-            response = self._check(
-                self._request(
-                    "POST",
-                    "/graphql",
-                    json={"query": query, "variables": variables},
-                )
-            )
-            payload = response.json()
+            payload = self._execute_graphql(query, variables)
             if not isinstance(payload, dict):
                 if not strict:
                     logger.warning(
@@ -1085,7 +1124,9 @@ class GitHubClient(_GitHubHttpMixin):
                 raise ReviewThreadsUnavailableError(
                     owner, repo, number, f"GraphQL errors: {payload['errors']}"
                 )
-            pr_data = ((payload.get("data") or {}).get("repository") or {}).get("pullRequest")
+            data = payload.get("data")
+            repository = data.get("repository") if isinstance(data, dict) else None
+            pr_data = repository.get("pullRequest") if isinstance(repository, dict) else None
             if not isinstance(pr_data, dict):
                 if not strict:
                     logger.warning(
@@ -1095,7 +1136,9 @@ class GitHubClient(_GitHubHttpMixin):
                         number,
                     )
                     return
-                raise ReviewThreadsUnavailableError(owner, repo, number, "missing pullRequest payload")
+                raise ReviewThreadsUnavailableError(
+                    owner, repo, number, "missing pullRequest payload"
+                )
             review_threads = pr_data.get("reviewThreads")
             if not isinstance(review_threads, dict) or not isinstance(
                 review_threads.get("nodes"), list
@@ -1109,7 +1152,9 @@ class GitHubClient(_GitHubHttpMixin):
                         review_threads,
                     )
                     return
-                raise ReviewThreadsUnavailableError(owner, repo, number, "invalid reviewThreads payload")
+                raise ReviewThreadsUnavailableError(
+                    owner, repo, number, "invalid reviewThreads payload"
+                )
             for node in review_threads["nodes"]:
                 seen += 1
                 if seen > MAX_REVIEW_THREADS_TRAVERSED:
@@ -1135,7 +1180,9 @@ class GitHubClient(_GitHubHttpMixin):
                 if not isinstance(node, dict):
                     if not strict:
                         continue
-                    raise ReviewThreadsUnavailableError(owner, repo, number, "invalid review-thread node")
+                    raise ReviewThreadsUnavailableError(
+                        owner, repo, number, "invalid review-thread node"
+                    )
                 thread_id = node.get("id")
                 if not isinstance(thread_id, str) or not thread_id:
                     if strict:
@@ -1193,7 +1240,9 @@ class GitHubClient(_GitHubHttpMixin):
                         page_info,
                     )
                     return
-                raise ReviewThreadsUnavailableError(owner, repo, number, "invalid reviewThreads pageInfo")
+                raise ReviewThreadsUnavailableError(
+                    owner, repo, number, "invalid reviewThreads pageInfo"
+                )
             if not page_info.get("hasNextPage"):
                 return
             after = page_info.get("endCursor")
@@ -1358,6 +1407,31 @@ class GitHubClient(_GitHubHttpMixin):
         )
         return r.json()
 
+    def _execute_graphql(self, query: str, variables: dict[str, Any]) -> Any:
+        """POST a GraphQL document and return the raw, parsed response payload.
+
+        Shared transport plumbing for :meth:`resolve_review_thread` and
+        :meth:`_iter_review_thread_nodes`, which otherwise hand-roll the same
+        ``POST /graphql`` + JSON-decode pattern independently.
+
+        Preconditions:
+            - ``query`` is a GraphQL document string; ``variables`` is its
+              variables mapping.
+        Postconditions:
+            - Returns ``response.json()`` for the request. Raises
+              ``GitHubAPIError`` on transport/HTTP failure (a non-2xx status),
+              via the same ``self._check(self._request(...))`` contract every
+              other method in this client uses. Callers own the
+              payload-level contract entirely: this helper does not inspect
+              ``payload.get("errors")`` or unwrap ``payload["data"]`` — each
+              call site keeps its own distinct failure semantics (fail-closed
+              vs. degrade-and-log) for those.
+        """
+        response = self._check(
+            self._request("POST", "/graphql", json={"query": query, "variables": variables})
+        )
+        return response.json()
+
     def resolve_review_thread(self, thread_id: str) -> bool:
         """Mark a review thread resolved (GitHub's "Resolve conversation", GraphQL).
 
@@ -1373,17 +1447,9 @@ class GitHubClient(_GitHubHttpMixin):
               change already landed).
         """
         try:
-            response = self._check(
-                self._request(
-                    "POST",
-                    "/graphql",
-                    json={
-                        "query": _RESOLVE_REVIEW_THREAD_MUTATION,
-                        "variables": {"threadId": thread_id},
-                    },
-                )
+            payload = self._execute_graphql(
+                _RESOLVE_REVIEW_THREAD_MUTATION, {"threadId": thread_id}
             )
-            payload = response.json()
             if payload.get("errors"):
                 logger.warning(
                     "resolve_review_thread: GraphQL errors for thread %s: %s",
@@ -1432,13 +1498,16 @@ class GitHubClient(_GitHubHttpMixin):
         Postconditions:
             - Returns ``(content, missing)``. ``content`` follows exactly the same
               rules as :meth:`get_file_contents`. ``missing`` is ``True`` only when
-              the API confirmed the path does not exist at ``ref`` (a 404 response)
-              — the one case a caller can safely read as "this path is not present
-              at this ref" rather than "unreadable for some other reason" (a
-              directory, a non-file entry, or an undecodable payload, all of which
-              report ``missing=False`` alongside ``content=None`` since GitHub gave
-              no confirmation the path itself is absent). Raises ``GitHubAPIError``
-              only for a non-404 error status, same as :meth:`get_file_contents`.
+              GitHub responded 404 to this exact ``(path, ref)`` request — which
+              does NOT prove the path itself is absent: GitHub also 404s when
+              ``ref`` itself doesn't resolve (a branch/tag/SHA that doesn't
+              exist) or when the repository is inaccessible, and this method
+              cannot distinguish those cases from a genuinely-missing path.
+              Callers that need to tell them apart must verify ``ref`` resolves
+              separately. Directory/non-file entries and undecodable payloads
+              report ``missing=False`` alongside ``content=None`` (GitHub gave
+              no 404 for those). Raises ``GitHubAPIError`` only for a non-404
+              error status, same as :meth:`get_file_contents`.
         """
         response = self._request(
             "GET", f"/repos/{owner}/{repo}/contents/{path}", params={"ref": ref}
