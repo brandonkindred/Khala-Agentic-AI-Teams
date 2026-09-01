@@ -25,9 +25,20 @@ inventoried here. It emits its own structured shape, `LintIssue`
 findings are structurally matchable by file path + numeric line, which the
 step-2/3 corpus work should account for alongside code review. The
 `devops_team`'s `change_review_agent` also emits review findings within this
-team package, but reuses the code-review shapes directly
-(`code_review_agent/models.py:485-488`) rather than defining its own, so it
-is not a distinct shape to catalogue.
+team package. It runs the code-review engine internally (`devops_maintainability`
+profile) but is not a passthrough: `agent.py::_to_finding` translates each
+engine `CodeReviewIssue` into a distinct `ReviewFinding` shape
+(`devops_team/models.py:160-169`: `finding_id: str`, `severity:
+Literal["critical","high","medium","low","minor","nit"]`, `area: str`,
+`file_ref: str`, `issue: str`, `rationale: str`, `recommended_fix: str`,
+`blocking: bool`, `exploitability: str`), remapping `category`→`area`,
+`file_path`→`file_ref`, `description`→`issue`, `suggestion`→`recommended_fix`,
+computing `blocking` from `is_blocking(severity)`, and remapping the engine's
+`info` severity to `low` (`change_review_agent/agent.py:38-99`) since
+`ReviewFinding`'s severity literal has no `info` member. This translated
+shape is a sixth finding shape not catalogued in depth here, alongside the
+lint gate above — both are out of scope for the four gates named in the
+originating issue but should be accounted for in the step-2/3 corpus work.
 
 ## 1. Code Review Coordinator (`code_review_agent/`)
 
@@ -61,16 +72,28 @@ strictly-typed schema the LLM must emit per chunk, coerced into
 
 **`ArchitectureConsistencyFindingLLM`** — `code_review_agent/models.py:734-819`
 (architecture-consistency pass) and **`SideEffectImpactFindingLLM`** —
-`code_review_agent/models.py:822-911` (side-effect/blast-radius pass) share
-the same field set as `CodeReviewIssue` minus `title` and `start_line`:
+`code_review_agent/models.py:822-911` (side-effect/blast-radius pass) are
+**target-only schemas, not the shape actually validated at runtime today.**
+Both classes' own docstrings say so, and the merged in-process pass
+(`merged_architecture_side_effect_pass.py::_parse_batch_reply`, lines
+211-239) confirms it: each half of the LLM reply is parsed via the
+standalone passes' own `parse_findings`/`_coerce_finding` helpers, not by
+Pydantic-validating against these classes. They document the *intended*
+field set — the same as `CodeReviewIssue` minus `title` and `start_line`:
 `severity`, `category` (restricted to 2 values each, see below), `file_path`,
 `line`, `description`, `suggestion`, `pre_existing` (`StrictBool`), `omission`
 (`StrictBool`, with the same `_omission_implies_in_scope` invariant as
-`CodeReviewIssue`). `start_line` is omitted because these passes never anchor
-multi-line findings; `title` is omitted because their prompts never populate
-one. Each pass's own `_coerce_finding` propagates `description`, `suggestion`,
-`pre_existing`, and `omission` onto the resulting `CodeReviewIssue`, so none
-of this content is lost for a corpus schema built against these two shapes.
+`CodeReviewIssue`) — and each pass's own `_coerce_finding` does propagate
+`description`, `suggestion`, `pre_existing`, and `omission` onto the
+resulting `CodeReviewIssue`, so no field is lost in practice. But the
+*active* coercion contract is looser than the `StrictBool` schema implies:
+`_coerce_finding` accepts recognized string/numeric boolean tokens for
+`pre_existing`/`omission` (via `chunking._coerce_scope_tags`) and repairs a
+conflicting `omission`+`pre_existing` pairing rather than rejecting it,
+where `ChunkReviewIssueLLM`'s `StrictBool` fields would reject a non-bool
+token outright and drive a corrective retry. A step-2 corpus schema should
+treat these two classes as documentation of the target field set, not proof
+that malformed booleans are rejected at this boundary today.
 
 **`CodeReviewOutput`** — `code_review_agent/models.py:1106-1134` — top-level
 output: `approved: bool`, `issues: List[CodeReviewIssue]`,
