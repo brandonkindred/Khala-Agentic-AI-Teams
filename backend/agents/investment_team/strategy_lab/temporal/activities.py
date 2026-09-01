@@ -768,7 +768,11 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
 
 
 def _cross_attempt_resume_from_params(
-    params: Dict[str, Any], *, run_id: Optional[str], design_attempt_index: int
+    params: Dict[str, Any],
+    *,
+    run_id: Optional[str],
+    design_attempt_index: int,
+    probe_only: bool = False,
 ) -> "Tuple[Optional[StrategySpec], Optional[str], Optional[_DesignPersistContext]]":
     """Reconstruct ``run_design_attempt_activity``'s cross-attempt resume state from ``params``.
 
@@ -789,7 +793,10 @@ def _cross_attempt_resume_from_params(
 
     Preconditions:
         ``params["resume_spec"]`` is not ``None`` (the caller's own
-        precondition for calling this at all).
+        precondition for calling this at all). ``probe_only`` is ``True``
+        only when the caller discards the reconstruction and keeps just
+        whether it succeeded (``_resolve_resume_state``'s ADR-012 branch),
+        which changes nothing but the log level of a failure.
     Postconditions:
         Reconstructs into temporaries first and only returns them together
         on success -- mirrors the ADR-012 block's own fail-open discipline
@@ -815,14 +822,30 @@ def _cross_attempt_resume_from_params(
                 "resume without a valid design context"
             )
     except Exception as exc:  # noqa: BLE001 -- fail open, see docstring above
-        logger.warning(
-            "cross-attempt resume params for run %s attempt %s failed to "
-            "reconstruct (treating as no resume): %s",
-            run_id,
-            design_attempt_index,
-            exc,
-            exc_info=True,
-        )
+        # A probe is not resuming from these params: ADR-012 already supplied
+        # the resume state and this call only re-derives whether the seed was
+        # ever adopted. A failure there changes nothing about what this run
+        # does, so it is logged as information rather than as a warning with a
+        # traceback — that pairing reads as "this run just lost its resume",
+        # which is exactly what did NOT happen.
+        if probe_only:
+            logger.info(
+                "cross-attempt resume params for run %s attempt %s do not "
+                "reconstruct (%s); ADR-012 resume is in effect, so this only "
+                "marks the cross-attempt seed as unadopted",
+                run_id,
+                design_attempt_index,
+                exc,
+            )
+        else:
+            logger.warning(
+                "cross-attempt resume params for run %s attempt %s failed to "
+                "reconstruct (treating as no resume): %s",
+                run_id,
+                design_attempt_index,
+                exc,
+                exc_info=True,
+            )
         return None, None, None
     return spec, params.get("resume_rationale"), design_context
 
@@ -880,7 +903,12 @@ def _resolve_resume_state(
         # adoption is checked on its first element, not the tuple itself.
         would_be_spec, _would_be_rationale, _would_be_design_context = (
             _cross_attempt_resume_from_params(
-                params, run_id=run_id, design_attempt_index=design_attempt_index
+                params,
+                run_id=run_id,
+                design_attempt_index=design_attempt_index,
+                # Only the adoption boolean is consumed here; this run resumes
+                # from the ADR-012 checkpoint either way.
+                probe_only=True,
             )
         )
         return resume_spec, resume_rationale, resume_design_context, would_be_spec is None

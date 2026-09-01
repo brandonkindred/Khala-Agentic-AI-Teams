@@ -1539,6 +1539,10 @@ def test_process_one_bar_binds_engine_exit_to_entry() -> None:
         unfilled_policy=None,
         attached_stop_loss=None,
         attached_take_profit=None,
+        # `_process_one_bar` reads OrderRequest's own `has_attached_exits`
+        # predicate (which also covers the generalized `attached_exits` list),
+        # not the two bracket fields directly — so the stand-in has to carry it.
+        has_attached_exits=False,
         symbol="AAPL",
         side=SimpleNamespace(value="buy"),
         order_type=SimpleNamespace(value="market"),

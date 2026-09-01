@@ -19,13 +19,16 @@ class DbcCommentsStatus(str, Enum):
 
     Every member here is actually emitted by ``DbcCommentsAgent.run()`` --
     there is no ``COMMITTING``/persistence-phase status because ``run()``
-    never persists anything itself; it only returns the merged result.
+    never persists anything itself; it only returns the merged result, and no
+    ``NEEDS_RETRY`` because the agent makes exactly one ``complete_validated``
+    call per chunk and relies on that function's own correction retry: there
+    is no longer an agent-level attempt that can fail and be re-tried, so a
+    status announcing one would never be emitted.
     """
 
     STARTING = "starting"
     ANALYZING_CODE = "analyzing_code"
     ADDING_COMMENTS = "adding_comments"
-    NEEDS_RETRY = "needs_retry"
     COMPLETE = "complete"
     FAILED = "failed"
 

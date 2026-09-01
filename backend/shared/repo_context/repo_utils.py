@@ -1,8 +1,8 @@
 """Shared utilities for reading repository code and environment helpers.
 
 Consolidates ``_read_repo_code``, ``_truncate_for_context``, and ``_int_env``
-that were previously duplicated across backend_agent, orchestrator,
-and documentation_agent modules.
+that were previously duplicated across the backend_agent, orchestrator, and
+technical-writer modules.
 """
 
 from __future__ import annotations

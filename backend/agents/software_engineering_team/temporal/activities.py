@@ -585,7 +585,12 @@ def _plan_project_activity_body(
 
     resume_token = resume_token or mint_resume_token(job_id)
     answer_callback = build_temporal_planning_answer_callback(
-        resume_token, submitted_answers=submitted_answers
+        resume_token,
+        submitted_answers=submitted_answers,
+        # A resumed run can still hit a question batch these answers were not
+        # submitted for; that pauses again, and a pause round needs its own
+        # token (mint_resume_token: never reused across rounds).
+        next_resume_token=lambda: mint_resume_token(job_id),
     )
 
     try:

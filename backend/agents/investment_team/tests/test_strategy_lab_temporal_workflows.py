@@ -656,10 +656,10 @@ def test_signal_brief_activity_timeout_deduplicates_the_exclude_list():
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint-lookup and resume-point determination (issue #7312, first step
+# Checkpoint-lookup and resume-point determination (first step
 # of #7282 — Temporal-mode parity with thread mode's #7309/#7315). The
 # workflow computes ``resume_stage_determinations`` per re-entry but does not
-# yet act on it (that's #7318) -- surfaced only on the "record" and
+# yet act on it (that lands with the resume plumbing) -- surfaced only on the "record" and
 # short-circuit return dicts for test observability.
 # ---------------------------------------------------------------------------
 
@@ -760,7 +760,7 @@ def test_resume_determination_computed_but_not_acted_on_across_reentries_to_shor
     """Every re-entry appends its own determination, in order, and nothing
     about the short-circuit path's existing fields changes: the workflow
     still fully re-runs every attempt from scratch (this step doesn't wire
-    resume_spec/resume_design_context yet -- that's #7318)."""
+    resume_spec/resume_design_context yet -- that lands with the resume plumbing)."""
     from investment_team.strategy_lab.checkpoints import ReviewCheckpoint
 
     def _attempt(a):

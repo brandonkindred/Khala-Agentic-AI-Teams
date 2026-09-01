@@ -1,14 +1,14 @@
 """
 Shared structured-output call for the top-level persona agents.
 
-``security_agent``, ``qa_agent``, ``accessibility_agent``, and
-``integration_team`` each build a fresh Strands ``Agent`` per ``run()`` call
+``security_agent``, ``qa_agent``, and ``accessibility_agent`` each build a
+fresh Strands ``Agent`` per ``run()`` call
 (required — reusing one instance across calls breaks
 ``structured_output_model``'s forced tool choice, since Strands accumulates
 message history), call it with ``structured_output_model=<their Output type>``,
 and fall back to a safe default whenever the model/validation fails. That
 three-step incantation — build, call, coerce-or-fallback — was duplicated
-verbatim across all four; this module collapses it to one definition. Each
+verbatim across each of them; this module collapses it to one definition. Each
 agent keeps its own log messages, system prompt (or per-mode prompt
 selection), and fallback field values as call-site data.
 

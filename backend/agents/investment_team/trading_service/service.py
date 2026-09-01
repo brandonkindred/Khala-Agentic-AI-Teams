@@ -3168,10 +3168,11 @@ class TradingService:
                         # Register the parent as eligible to carry bracket
                         # children when the strategy attached protective legs;
                         # non-bracket entries pay zero overhead (flag is False).
-                        expect_brackets=(
-                            req.attached_stop_loss is not None
-                            or req.attached_take_profit is not None
-                        ),
+                        # One predicate, not a hand-rolled OR: an entry whose
+                        # exit legs live only in `attached_exits` must register
+                        # as bracket-eligible too, or materializing its children
+                        # on fill raises "not a known top-level order id".
+                        expect_brackets=req.has_attached_exits,
                     )
                     # Pin engine-emitted exits to the Position they target so
                     # the fill simulator's stale-continuation guard drops them

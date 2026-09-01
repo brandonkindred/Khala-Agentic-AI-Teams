@@ -48,6 +48,7 @@ SUBMIT_PLANNING_ANSWERS_SIGNAL = "submit_planning_answers"
 def build_temporal_planning_answer_callback(
     resume_token: str,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
+    next_resume_token: Optional[Callable[[], str]] = None,
 ) -> Callable[[list], list]:
     """Build a ``Callable[[list], list]`` satisfying Planning's ``answer_callback``
     contract (``planning_team.orchestrator.resolve_pra_answers``), backed by the
@@ -62,6 +63,12 @@ def build_temporal_planning_answer_callback(
           ``submit_planning_answers`` signal) — dicts shaped
           ``{"question_id": ..., "selected_option_id": ...}``, matching what
           thread-mode's ``_build_planning_answer_callback`` already returns.
+        - ``next_resume_token``, when given, mints a FRESH token per call (see
+          ``pause_cycle.mint_resume_token``: a token is unique per pause round
+          and never reused), for the case below where a resumed run has to
+          pause again. Omitted, a re-pause reuses ``resume_token``, which is
+          still preferable to answering a batch silently but leaves the two
+          rounds sharing one token.
     Postconditions:
         - Returns a callable ``cb(questions) -> list``.
         - When ``submitted_answers`` is ``None``: calling ``cb`` never returns —
@@ -73,7 +80,18 @@ def build_temporal_planning_answer_callback(
           ``questions``' ``id`` values, preserving ``submitted_answers``'
           order. Never fabricates an answer for a question with no matching
           entry, and never returns a default — a question with no matching
-          submitted answer is simply absent from the result. A non-dict entry
+          submitted answer is simply absent from the result.
+        - Exception: a NON-EMPTY batch where NOTHING matches raises
+          ``PlanningAnswerPauseSignal`` rather than returning ``[]``. Such a
+          batch is not the one these answers were submitted for (Planning
+          re-runs from scratch on resume, and its questions are LLM-driven, so
+          a re-run can re-identify them or open a further round), and
+          answering it with nothing is exactly the silent auto-answer both
+          modes exist to prevent — thread mode re-pauses on every batch. A
+          batch where SOME answer matches is treated as that same batch,
+          partially answered, and returns the matches: re-pausing there would
+          re-ask questions the user has already answered, with nothing new to
+          add on the second pass. A non-dict entry
           in ``submitted_answers`` (a malformed signal's ``answers`` list is
           validated as a list, not as a list-of-dicts) is skipped rather than
           raising — fails closed instead of an ``AttributeError`` surfacing
@@ -101,13 +119,26 @@ def build_temporal_planning_answer_callback(
         question_ids = {
             q.get("id") for q in questions if isinstance(q, dict) and isinstance(q.get("id"), str)
         }
-        return [
+        matched = [
             a
             for a in resolved
             if isinstance(a, dict)
             and isinstance(a.get("question_id"), str)
             and a.get("question_id") in question_ids
         ]
+        if questions and not matched:
+            # This batch is not the one these answers were submitted for:
+            # Planning re-runs from scratch on resume and its questions are
+            # LLM-driven, so a re-run can ask differently-identified questions
+            # or open a second clarification round once the first is satisfied.
+            # Returning [] here would answer that batch with nothing and let
+            # Planning proceed — the silent auto-answer both modes exist to
+            # prevent. Pause again instead, exactly as the first round did.
+            raise PlanningAnswerPauseSignal(
+                next_resume_token() if next_resume_token is not None else resume_token,
+                list(questions),
+            )
+        return matched
 
     return _resolved_cb
 

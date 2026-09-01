@@ -824,6 +824,21 @@ calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
 dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
+### SE_COMMAND_AGENT_CHAIN_TIMEOUT_S
+Int (default `1800`, floor `1`). Seconds one command-running review tool agent
+waits for the previous one to finish before skipping its own review
+(`shared/v2_review.py::_review_command_agent_in_turn`). Agents with a
+`build_runner` (the frontend build specialist, the linter) execute real external
+commands against the working tree, so they are chained to run one at a time in
+roster order rather than concurrently. That chain used an unbounded wait: a build
+wedged on a stuck subprocess held every command agent behind it — and their worker
+threads — for the life of the process. On expiry the queued agent is skipped
+rather than started, since a predecessor that has not reported may still be
+mid-build and would hand the queued agent a partial tree; the skip is reported
+like any other failed review, never as a pass. Raise it if a legitimate build
+routinely exceeds it (the whole review then just takes longer); lower it to fail
+faster in an environment where builds are quick and hangs are the likelier cause.
+
 ### CODE_REVIEW_AGENT_TOOL_CALL_CAP
 Int (default `50`, floor `1`). Hard cap on the total tool calls a single
 code-review Strands agent run may make (`tool_call_budget.ToolCallBudgetModel`,

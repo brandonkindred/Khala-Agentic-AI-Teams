@@ -1465,6 +1465,61 @@ class TestEndpointHappyPath:
         assert "token" not in started["github"]
         assert gh.get_repo_calls == 1
 
+    def test_run_from_github_rejects_a_hostile_remote_before_fetching(
+        self, patched_app, monkeypatch, tmp_path
+    ) -> None:
+        """A caller-supplied remote reaches `git fetch` with the GitHub PAT attached.
+
+        `resolve_remote_branch_sha` runs `git fetch -- <remote> ...` with the
+        token in `http.extraHeader`, and its own contract says a caller taking
+        the remote from an untrusted source must validate it first. `--` stops
+        git treating the value as an option, but not as a URL or an `ext::`
+        transport — so without the check the token goes wherever the caller
+        names. It is a remote NAME here (default "origin"), never a URL.
+        """
+        import software_engineering_team.api.routes.github as gh_routes
+
+        fetched: list = []
+
+        def _never(repo_path, remote, base, token):  # pragma: no cover - must not run
+            fetched.append(remote)
+            return True, "deadbeef"
+
+        monkeypatch.setattr(gh_routes._main, "resolve_remote_branch_sha", _never)
+
+        for hostile in ("https://attacker.example/x.git", "ext::sh -c id", "--upload-pack=id"):
+            resp = patched_app["client"].post(
+                "/run-from-github",
+                json=_body(repo_path=str(tmp_path), remote=hostile),
+            )
+            assert resp.status_code == 400, hostile
+            assert "unsafe remote" in resp.json()["detail"]
+
+        assert fetched == [], "an unvalidated remote reached the authenticated fetch"
+
+    def test_run_from_github_rejects_a_hostile_base_branch(
+        self, patched_app, monkeypatch, tmp_path
+    ) -> None:
+        """`base_branch` rides the same authenticated fetch as `remote`."""
+        import software_engineering_team.api.routes.github as gh_routes
+
+        fetched: list = []
+
+        def _never(repo_path, remote, base, token):  # pragma: no cover - must not run
+            fetched.append(base)
+            return True, "deadbeef"
+
+        monkeypatch.setattr(gh_routes._main, "resolve_remote_branch_sha", _never)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(repo_path=str(tmp_path), base_branch="--upload-pack=id"),
+        )
+
+        assert resp.status_code == 400
+        assert "unsafe base_branch" in resp.json()["detail"]
+        assert fetched == []
+
     def test_run_from_github_skips_get_repo_when_base_branch_supplied(
         self, patched_app, monkeypatch
     ) -> None:

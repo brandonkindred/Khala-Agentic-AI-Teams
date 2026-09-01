@@ -20,7 +20,6 @@ calls into public methods the stores expose for exactly this purpose —
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from .assistant.store import BrandingConversationStore, ConversationAttachResult
@@ -103,7 +102,12 @@ def attach_conversation_to_brand(
     # attach_conversation_to_brand and this module needs AttachConversationResult,
     # so at least one side has to stay function-scoped to avoid a load-order
     # cycle; both sides do, so neither import order is load-bearing.
-    from .store import AttachConversationResult
+    # ``_now_iso`` is taken from store.py rather than re-implemented here:
+    # every other write path stamps ``updated_at`` with it, and a second
+    # hand-rolled formatter would drift the moment that one changes (a
+    # ``timespec``, a ``Z`` suffix), leaving rows written through this path
+    # formatted differently from every other row in the same column.
+    from .store import AttachConversationResult, _now_iso
 
     for name, value in (
         ("client_id", client_id),
@@ -126,7 +130,7 @@ def attach_conversation_to_brand(
 
             patch = {
                 "conversation_id": conversation_id,
-                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+                "updated_at": _now_iso(),
             }
             brand = store.patch_brand_locked(cur, brand_id, client_id, patch)
             if brand is None:

@@ -102,7 +102,7 @@ def test_run_team_workflow_v2_forwards_sprint_id_to_parse_spec_activity():
 def test_run_team_workflow_v2_pauses_and_resumes_on_planning_answer_signal():
     """Phase 2 durably waits for a ``submit_planning_answers`` signal instead of
     proceeding to Phase 3 with no answer, when ``plan_project_activity`` reports a
-    pause -- the workflow-side half of issue #7446's wiring (the activity-side half,
+    pause -- the workflow-side half of that wiring (the activity-side half,
     catching ``PlanningAnswerPauseSignal``, is covered in ``test_temporal_activities.py``).
     Mirrors ``CodingTeamWorkflow``'s equivalent pause-loop test but through
     ``PlanningAnswerSignalMixin``'s ``submit_planning_answers``/``wait_for_planning_answers``

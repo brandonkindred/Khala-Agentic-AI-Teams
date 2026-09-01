@@ -29,6 +29,8 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import MagicMock
 
+import pytest
+
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import ReviewContext, SystemArchitecture
 from software_engineering_team.code_review_agent.repo_reader import DiskRepoReader
@@ -1586,6 +1588,69 @@ def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -
     assert started_order == ["build", "lint"], (
         "build_runner agents did not run in their original tool_agents relative order"
     )
+
+
+def test_run_review_hung_command_agent_does_not_block_the_chain_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged command agent must not pin every command agent behind it.
+
+    The chain that keeps ``build_runner`` agents off each other's working tree
+    used an unbounded ``Event.wait()``: a build hung on a stuck subprocess
+    never set its event, so the linter's thunk waited for the life of the
+    process, holding its worker thread and never returning a review. The wait
+    is bounded now — and on expiry the queued agent SKIPS rather than running,
+    because a predecessor that has not reported may still be mid-build.
+    """
+    import threading
+
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    monkeypatch.setenv("SE_COMMAND_AGENT_CHAIN_TIMEOUT_S", "1")
+    release = threading.Event()
+    ran: list = []
+
+    class _HungCommandAgent:
+        build_runner = staticmethod(lambda path: [])
+
+        def review(self, phase_inp):
+            ran.append("build")
+            # Held well past the chain timeout; released by the test either way.
+            release.wait(8)
+            return SimpleNamespace(issues=[], recommendations=[])
+
+    class _QueuedCommandAgent:
+        build_runner = staticmethod(lambda path: [])
+
+        def review(self, phase_inp):  # pragma: no cover - must never run
+            ran.append("lint")
+            return SimpleNamespace(
+                issues=[ReviewIssue(source="lint", severity="low", description="lint")],
+                recommendations=[],
+            )
+
+    try:
+        result = run_review(
+            config=_build_config(),
+            llm=MagicMock(),
+            task=_task(),
+            execution_result=_execution_result({"x.py": "code"}),
+            repo_path=tmp_path,
+            tool_agents={
+                ToolAgentKind.BUILD_SPECIALIST: _HungCommandAgent(),
+                ToolAgentKind.LINTER: _QueuedCommandAgent(),
+            },
+            language="python",
+            **_noop_runners(),
+        )
+    finally:
+        release.set()
+
+    assert result is not None
+    # The queued agent gave up its turn instead of waiting on the hang, and did
+    # not run alongside the agent that never reported. Before the wait was
+    # bounded it sat in `Event.wait()` for as long as the hang lasted.
+    assert ran == ["build"]
 
 
 def test_run_review_interleaved_build_runner_agent_keeps_its_own_position(

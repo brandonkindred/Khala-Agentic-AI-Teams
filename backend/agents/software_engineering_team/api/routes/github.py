@@ -22,6 +22,7 @@ from software_engineering_team.github_source import (
     issue_to_plan_input,
     pick_ready_issue,
 )
+from software_engineering_team.github_source.client import _is_safe_ref
 from software_engineering_team.models import JobStatus
 from software_engineering_team.temporal.coding_team_start_workflow import (
     start_coding_team_workflow,
@@ -50,6 +51,18 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     token = resolve_github_token(request)
     if not Path(request.repo_path).is_dir():
         raise HTTPException(status_code=400, detail=f"repo_path not found: {request.repo_path}")
+    # `remote` is caller-supplied and reaches `git fetch` with the GitHub PAT in
+    # `http.extraHeader` (see `resolve_remote_branch_sha` below). `--` stops git
+    # parsing it as an option but not as a URL or transport, so an unvalidated
+    # value could send the token to an arbitrary host, or run a command via an
+    # `ext::` transport. It is a remote NAME here (default "origin"), never a
+    # URL, so the same ref-shape check every other git_ops caller applies fits.
+    if not _is_safe_ref(request.remote):
+        raise HTTPException(status_code=400, detail=f"unsafe remote name: {request.remote!r}")
+    if request.base_branch and not _is_safe_ref(request.base_branch):
+        raise HTTPException(
+            status_code=400, detail=f"unsafe base_branch ref: {request.base_branch!r}"
+        )
 
     with _main.GitHubClient(token=token) as client:
         try:
@@ -130,6 +143,18 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             status_code=500,
             detail="unable to resolve base branch for GitHub-issue run",
         )
+    # `base` may be the repo's default branch straight from the GitHub API
+    # rather than the request, so it is checked here too — the fetch below
+    # hands it to git with the token attached, and `_prepare_issue_branch`'s
+    # own `_is_safe_ref` gate runs later, in the branch-prep activity.
+    if not _is_safe_ref(base):
+        _main.update_job(
+            job_id,
+            status=JobStatus.FAILED.value,
+            error=f"unsafe base branch ref: {base!r}",
+            current_activity=None,
+        )
+        raise HTTPException(status_code=400, detail=f"unsafe base branch ref: {base!r}")
     # Pin branch prep to the exact commit the plan above was grounded on: if
     # `base` moves between now and when the Temporal branch-prep activity
     # actually runs (queueing, retries, worker restarts), that activity must

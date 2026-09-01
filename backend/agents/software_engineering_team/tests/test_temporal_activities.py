@@ -986,7 +986,7 @@ def test_plan_project_activity_pauses_on_planning_clarification_question(
 ) -> None:
     """A fresh clarification question durably pauses instead of blocking or auto-answering.
 
-    Regression guard for the Temporal-mode HITL gap (issue #7446): when Planning's
+    Regression guard for the Temporal-mode HITL gap: when Planning's
     ``answer_callback`` is invoked with no ``submitted_answers`` yet, the primitive from
     ``planning_team.temporal.answer_signal`` raises ``PlanningAnswerPauseSignal`` instead of
     returning a default. The activity must catch it, persist the question via

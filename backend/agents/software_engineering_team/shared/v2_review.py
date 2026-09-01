@@ -76,6 +76,7 @@ from software_engineering_team.code_review_agent.previous_content import (
     resolve_previous_content,
 )
 from software_engineering_team.shared.agent_review import AgentReviewCache
+from software_engineering_team.shared.env_config import env_int
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -874,6 +875,24 @@ def _security_review_step(
         )
 
 
+# Cap on how long one command-running tool agent waits for the previous one to
+# finish before skipping its own review (see _review_command_agent_in_turn).
+# Generous by default — a real frontend build is minutes, not seconds — since
+# this exists to break a hang, not to bound normal runtime.
+_COMMAND_CHAIN_TIMEOUT_ENV = "SE_COMMAND_AGENT_CHAIN_TIMEOUT_S"
+_DEFAULT_COMMAND_CHAIN_TIMEOUT_S = 1_800
+
+
+def _command_agent_chain_timeout_s() -> int:
+    """Seconds a command agent waits its turn before skipping.
+
+    Postconditions:
+        - Returns an int >= 1; unset or unparseable env yields
+          ``_DEFAULT_COMMAND_CHAIN_TIMEOUT_S``.
+    """
+    return env_int(_COMMAND_CHAIN_TIMEOUT_ENV, _DEFAULT_COMMAND_CHAIN_TIMEOUT_S, 1)
+
+
 def _dispatch_review_thunks(thunks: List[Callable[[], Any]], *, llm: LLMClient) -> List[Any]:
     """Run zero-arg thunks sequentially, unless ``llm`` allows concurrent fan-out.
 
@@ -1169,7 +1188,26 @@ def _run_tool_agents_review(
     def _review_command_agent_in_turn(kind: Any, agent: Any) -> Optional[List[ReviewIssue]]:
         my_turn = command_order[kind]
         if my_turn > 0:
-            command_done_events[my_turn - 1].wait()
+            # Bounded, not `wait()`: the predecessor runs an external command
+            # (a build, `npx eslint .`) that can wedge on a hung subprocess,
+            # and an unbounded wait would hold this worker thread — and every
+            # command agent behind it — for the life of the process. On expiry
+            # this agent does NOT run: the chain exists so two command agents
+            # never touch the working tree at once, and a predecessor that has
+            # not reported is exactly one that may still be mid-build. Skipping
+            # is reported like any other failed review (None), never as a pass.
+            if not command_done_events[my_turn - 1].wait(_command_agent_chain_timeout_s()):
+                logger.warning(
+                    "[%s] Tool agent %s skipped: the command agent before it did not "
+                    "finish within %ss (%s), and running concurrently with it could "
+                    "observe a partial working tree",
+                    task_id,
+                    kind.value,
+                    _command_agent_chain_timeout_s(),
+                    _COMMAND_CHAIN_TIMEOUT_ENV,
+                )
+                command_done_events[my_turn].set()
+                return None
         try:
             return _review_one(kind, agent)
         finally:

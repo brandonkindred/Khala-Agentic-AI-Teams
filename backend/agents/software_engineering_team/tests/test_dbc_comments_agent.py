@@ -216,7 +216,9 @@ def test_dbc_run_llm_failure_surfaces_as_non_compliant_single_attempt() -> None:
     )
     assert out.already_compliant is False
     assert "failed" in out.summary.lower()
-    assert DbcCommentsStatus.NEEDS_RETRY not in statuses
+    # No retry status exists to emit (NEEDS_RETRY was retired with the outer
+    # attempt loop); a failed chunk goes straight to FAILED, once.
+    assert not any(s.value == "needs_retry" for s in statuses)
     assert statuses.count(DbcCommentsStatus.FAILED) == 1
     assert len(client.calls) == 1  # no outer retry -- exactly one raw LLM call
 

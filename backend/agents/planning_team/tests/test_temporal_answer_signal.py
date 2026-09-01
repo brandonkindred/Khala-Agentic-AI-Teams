@@ -289,11 +289,69 @@ def test_callback_returns_resolved_answers_filtered_by_question_id() -> None:
 
 
 def test_callback_never_fabricates_an_answer_for_an_unmatched_question() -> None:
+    """An unmatched question is never given an answer — and never given nothing.
+
+    Answering a batch with `[]` lets Planning proceed unanswered, which is the
+    silent auto-answer both modes exist to prevent (thread mode re-pauses on
+    every batch). A batch nothing matches is a batch these answers were not
+    submitted for, so it pauses again instead.
+    """
     cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[])
 
-    result = cb([{"id": "q1"}])
+    with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
+        cb([{"id": "q1"}])
 
-    assert result == []
+    assert excinfo.value.pending_questions == [{"id": "q1"}]
+
+
+def test_callback_pauses_again_on_a_batch_from_a_later_round() -> None:
+    """Planning re-runs from scratch on resume and can re-identify its questions."""
+    submitted = [{"question_id": "q1", "selected_option_id": "opt-a"}]
+    cb = build_temporal_planning_answer_callback(
+        "tok-1", submitted_answers=submitted, next_resume_token=lambda: "tok-2"
+    )
+
+    # The batch these answers belong to still resolves normally.
+    assert cb([{"id": "q1"}]) == submitted
+
+    # A batch with entirely different ids pauses, on a FRESH token — a pause
+    # round never reuses one (see pause_cycle.mint_resume_token).
+    with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
+        cb([{"id": "q2"}, {"id": "q3"}])
+
+    assert excinfo.value.resume_token == "tok-2"
+    assert excinfo.value.pending_questions == [{"id": "q2"}, {"id": "q3"}]
+
+
+def test_callback_reuses_its_token_when_no_minter_is_given() -> None:
+    """Without a minter a re-pause still happens — sharing the round's token."""
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[])
+
+    with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
+        cb([{"id": "q1"}])
+
+    assert excinfo.value.resume_token == "tok-1"
+
+
+def test_callback_returns_partial_matches_without_pausing() -> None:
+    """A partially answered batch is that same batch, not a later round.
+
+    Re-pausing here would re-ask what the user already answered, with nothing
+    new for them to add on the second pass.
+    """
+    submitted = [{"question_id": "q1", "selected_option_id": "opt-a"}]
+    cb = build_temporal_planning_answer_callback(
+        "tok-1", submitted_answers=submitted, next_resume_token=lambda: "tok-2"
+    )
+
+    assert cb([{"id": "q1"}, {"id": "q2"}]) == submitted
+
+
+def test_callback_answers_an_empty_batch_with_nothing() -> None:
+    """No questions asked, nothing to pause for."""
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[])
+
+    assert cb([]) == []
 
 
 def test_callback_ignores_malformed_question_entries() -> None:

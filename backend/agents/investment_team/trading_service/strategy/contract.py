@@ -302,7 +302,7 @@ class OrderRequest(BaseModel):
     attached_take_profit: Optional[LimitAttachment] = None
     # Additional resting protective/target legs beyond the two fixed bracket
     # fields above, for entries with more than a stop-loss/take-profit pair
-    # (e.g. multiple independently-attached, non-bracket exits — #7509).
+    # (e.g. multiple independently-attached, non-bracket exits).
     # Kept as a separate field rather than folding the bracket pair into it
     # so existing bracket call sites/tests constructing requests via
     # ``attached_stop_loss=``/``attached_take_profit=`` are unaffected. Not
@@ -350,7 +350,7 @@ class OrderRequest(BaseModel):
         # standalone TRAILING_STOP; non-negative ``trail_offset``).
         # Applies to every ``StopAttachment`` leg — the fixed
         # ``attached_stop_loss`` field and each ``StopAttachment`` in the
-        # generalized ``attached_exits`` list (#7509) — so a leg attached
+        # generalized ``attached_exits`` list — so a leg attached
         # via the list can't skip the offset checks the fixed field
         # enforces. ``label`` names the offending leg in the error so a
         # bad ``attached_exits`` entry is as easy to locate as a bad

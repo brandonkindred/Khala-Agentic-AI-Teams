@@ -1,14 +1,13 @@
-"""Multi-leg resting-exit materialization tests (issue #7509 step 2, extended
-for issue #7524 step 3 of 3).
+"""Multi-leg resting-exit materialization tests.
 
-Step 1 (#7494) generalized the pure ``resolve_exit_leg_attachments`` helper
+An earlier step generalized the pure ``resolve_exit_leg_attachments`` helper
 to resolve an arbitrary ordered list of leg specs into ``StopAttachment`` /
-``LimitAttachment`` objects. Step 2 (#7509) extends ``OrderRequest`` with a
+``LimitAttachment`` objects. This step extends ``OrderRequest`` with a
 generic ``attached_exits`` list and the fill simulator's materialization
 step (``FillSimulator._materialize_attached_exit_children``) to submit an
 arbitrary number of those as resting OCO children — not just the two fixed
 ``attached_stop_loss``/``attached_take_profit`` bracket fields. Step 3
-(#7524) closes the remaining coverage on that plumbing: every leg *kind*
+closes the remaining coverage on that plumbing: every leg *kind*
 (not just LIMIT) independently firing and cancelling its siblings, an
 all-stop-family group with no LIMIT leg at all, and the ``"bps"``
 ``trail_offset_kind`` pre-seed path for a generalized trailing leg (the
@@ -436,7 +435,7 @@ def test_twap_age_out_materializes_attached_exits_legs_for_open_position() -> No
 
 
 # ---------------------------------------------------------------------------
-# Issue #7524, step 3: independent fill/cancel for every leg kind, an
+# Independent fill/cancel for every leg kind, an
 # all-stop-family group with no LIMIT sibling, and the "bps" trailing
 # pre-seed path.
 # ---------------------------------------------------------------------------
@@ -596,3 +595,49 @@ def test_attached_exits_bps_trailing_leg_preseeds_and_ratchets_to_fill() -> None
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
     assert order_book.all_pending() == []
+
+
+# ---------------------------------------------------------------------------
+# The submit-side eligibility flag the service computes
+# ---------------------------------------------------------------------------
+
+
+def test_attached_exits_only_entry_is_registered_as_a_bracket_parent() -> None:
+    """`expect_brackets` must be derived from `has_attached_exits`, not a hand-rolled OR.
+
+    `OrderBook.submit` only registers an id as an eligible bracket parent when
+    `expect_brackets` is True, and `submit_attached` rejects anything else. Every
+    other test in this file passes the flag by hand, so an entry whose exit legs
+    live *only* in `attached_exits` — the shape this module generalized to — has
+    no coverage of the service's own computation of that flag. Deriving it from
+    the two fixed bracket fields alone leaves such an entry unregistered, and
+    materializing its children on fill raises "not a known top-level order id".
+    """
+    sim, order_book, _portfolio = _make_simulator()
+    request = OrderRequest(
+        client_order_id="entry-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        attached_exits=[StopAttachment(stop_price=90.0)],
+    )
+    # No fixed bracket fields at all — the legs are in `attached_exits`.
+    assert request.attached_stop_loss is None
+    assert request.attached_take_profit is None
+    assert request.has_attached_exits is True
+
+    parent = order_book.submit(
+        request,
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        # Exactly what TradingService passes at its submit call site.
+        expect_brackets=request.has_attached_exits,
+    )
+
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 1
+    assert children[0].request.parent_order_id == parent.order_id
