@@ -631,6 +631,19 @@ class CitedCodeUnavailableError(RuntimeError):
     """
 
 
+class PrFreshnessUnknownError(RuntimeError):
+    """Raised when a PR-freshness re-check's live re-fetch itself fails.
+
+    Distinct from "the re-check ran and found nothing changed": a transient
+    GitHub error here means whether the PR head moved or the PR closed is
+    genuinely unknown, not that it didn't happen. Proceeding on the original
+    snapshot in that case risks replying to or resolving a thread — or
+    dispatching an implementation — against state that may already be stale
+    or gone. The caller must fail the comment closed instead, the same way
+    :class:`CitedCodeUnavailableError` fails triage closed on a fetch failure.
+    """
+
+
 def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: ReviewComment, ref: str) -> str:
     """Read the file the comment points at, for grounding the LLM.
 
@@ -1228,21 +1241,43 @@ def _dispatch_implementation(
         repo_path=request.repo_path,
         plan_input=plan_input_dict,
     )
-    child_fields: Dict[str, Any] = {
-        "parent_job_id": parent_job_id,
-        "chosen_plan": plan.chosen_plan,
-        "github_context": {
-            "owner": request.owner,
-            "repo": request.repo,
-            "pr_number": request.pr_number,
-            "pr_url": pr_url,
-            "review_comment_id": comment.id,
-        },
-    }
-    encrypted = _main.encrypt_token(token)
-    if encrypted:
-        child_fields["github_token_encrypted"] = encrypted
-    _main.update_job(child_job_id, **child_fields)
+    try:
+        child_fields: Dict[str, Any] = {
+            "parent_job_id": parent_job_id,
+            "chosen_plan": plan.chosen_plan,
+            "github_context": {
+                "owner": request.owner,
+                "repo": request.repo,
+                "pr_number": request.pr_number,
+                "pr_url": pr_url,
+                "review_comment_id": comment.id,
+            },
+        }
+        encrypted = _main.encrypt_token(token)
+        if encrypted:
+            child_fields["github_token_encrypted"] = encrypted
+        _main.update_job(child_job_id, **child_fields)
+    except Exception as e:
+        # `create_job` above already landed the child job row as "pending", which
+        # `_ACTIVE_JOB_STATUSES` treats as active — if metadata persistence (token
+        # encryption, `update_job`) raises before the Temporal workflow is ever
+        # dispatched, leaving the row at "pending" would permanently block every
+        # later run from overwriting this comment's job id (see the "Raises
+        # RuntimeError" postcondition above). Terminalize it here, best-effort, so
+        # a future run can retry this comment instead of finding it wedged.
+        try:
+            _main.update_job(
+                child_job_id,
+                status=JobStatus.FAILED.value,
+                phase="completed",
+                error=f"Failed to persist child job metadata before dispatch: {scrub_token_from_text(str(e))}",
+            )
+        except Exception:  # noqa: BLE001 - best-effort terminalization; must not mask the original error
+            logger.exception(
+                "address-comments: could not terminalize child job %s after metadata persistence failure",
+                child_job_id,
+            )
+        raise
 
     result = _main.execute_coding_team_workflow(
         child_job_id,
@@ -1711,21 +1746,29 @@ def _pr_became_stale(
           reported by GitHub for a merged PR does not change, but false-
           positive replies/resolves and real-issue implementation dispatch
           must not proceed against a PR no longer accepting either.
-        - Returns ``None`` when neither happened, or when the re-fetch
-          itself fails — a failed check is best-effort and must not block
-          the run, so it degrades to proceeding on the original snapshot
-          rather than raising.
+        - Returns ``None`` when the re-fetch succeeds and finds neither
+          changed.
+        - Raises :class:`PrFreshnessUnknownError` when the re-fetch itself
+          fails — this is deliberately NOT folded into the ``None`` case:
+          "nothing changed" and "couldn't check" are different states, and
+          conflating them would let the caller proceed on a stale snapshot
+          whose currency is actually unknown. The caller must fail this
+          comment closed instead, the same way :func:`_read_cited_code`
+          fails triage closed via :class:`CitedCodeUnavailableError`.
     """
     try:
         current_pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
-    except Exception as e:  # noqa: BLE001 - best-effort; a failed re-check must not block the run
+    except Exception as e:  # noqa: BLE001 - reraised as a distinguishable, typed failure
         logger.warning(
             "address-comments: could not re-check PR state after comment %s was %s: %s",
             comment_id,
             stage,
             scrub_token_from_text(str(e)),
         )
-        return None
+        raise PrFreshnessUnknownError(
+            f"could not re-check PR {request.owner}/{request.repo}#{request.pr_number} state "
+            f"after comment {comment_id} was {stage}: {scrub_token_from_text(str(e))}"
+        ) from e
     if current_pr.state != "open":
         return (
             f"PR {request.owner}/{request.repo}#{request.pr_number} is no longer open "
@@ -1859,10 +1902,14 @@ def _handle_comment(
         # verdict grounded on code that is no longer current — a false-positive
         # would then resolve the thread over an obsolete read, and a real-issue
         # plan could recommend a change that no longer applies or is already
-        # redundant with what the newer commit did. Best-effort: a failed
-        # re-fetch degrades to proceeding on the original verdict rather than
-        # blocking indefinitely on a transient API issue.
-        stale_detail = _pr_became_stale(client, request, comment.id, pr_head_sha, "triaged")
+        # redundant with what the newer commit did. A failed re-fetch fails
+        # closed instead of proceeding on the original verdict: whether the
+        # PR moved on is unknown in that case, not "no".
+        try:
+            stale_detail = _pr_became_stale(client, request, comment.id, pr_head_sha, "triaged")
+        except PrFreshnessUnknownError as e:
+            base.detail = str(e)
+            return base
         if stale_detail is not None:
             base.detail = stale_detail
             return base
@@ -1896,8 +1943,13 @@ def _handle_comment(
         # another LLM round-trip on top of triage, so a push can land during
         # this window too, not just during triage. Without this second check,
         # a plan built for pre-triage code could still be dispatched even
-        # though the post-triage check above already passed.
-        stale_detail = _pr_became_stale(client, request, comment.id, pr_head_sha, "planned")
+        # though the post-triage check above already passed. Same fail-closed
+        # handling as the post-triage check above.
+        try:
+            stale_detail = _pr_became_stale(client, request, comment.id, pr_head_sha, "planned")
+        except PrFreshnessUnknownError as e:
+            base.detail = str(e)
+            return base
         if stale_detail is not None:
             base.detail = stale_detail
             return base
@@ -2316,7 +2368,13 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     thread_history_by_comment_id.get(comment.id, [comment]),
                     pr.head,
                     pr.head_sha,
-                    pr.base,
+                    # `request.base_branch or pr.base` mirrors the same
+                    # override convention already used by
+                    # RunFromGithubRequest.base_branch (see
+                    # `orchestration.py`/`routes/github.py`) -- the documented
+                    # override is honored here rather than the PR's live base
+                    # being unconditionally used.
+                    request.base_branch or pr.base,
                     pr.html_url,
                     pr_remote,
                     token,

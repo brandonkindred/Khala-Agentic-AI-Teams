@@ -53,7 +53,14 @@ def remote_url_matches(
           just the ``owner/repo`` path segments alone would accept
           ``https://evil.example.com/owner/repo.git`` as a match for
           ``owner/repo``, since only the LAST two path segments were ever
-          compared; checking the host closes that gap; (b) the URL's last two
+          compared; checking the host closes that gap. When ``expected_host``
+          itself carries NO port, an explicit port on the URL's host segment
+          (e.g. ``ssh://git@github.com:22/owner/repo.git``, or an HTTPS
+          equivalent) is stripped before this comparison — it is incidental
+          (a default or custom SSH/HTTPS port), not part of the identity
+          being checked. When ``expected_host`` DOES carry a port (the GHES
+          case above), the comparison stays exact and no stripping happens;
+          (b) the URL's last two
           ``/``-separated path segments equal ``owner``/``repo``
           case-insensitively (GitHub owner/repo names are case-insensitive)
           after stripping a trailing ``.git`` — a substring match would give
@@ -109,6 +116,17 @@ def remote_url_matches(
     if len(segments) < 3:
         return False
     host = segments[0].split("@")[-1]  # strip a "user@" prefix (e.g. "git@")
+    # A URL-form remote's host segment can carry an explicit port
+    # (`host:port`) whether or not that port is meaningful to the caller.
+    # `expected_host` itself carrying a colon (a GHES caller pinning an exact
+    # host:port) means the port IS meaningful, so the comparison above is
+    # left exact. Otherwise -- the common case, `expected_host` bare like
+    # "github.com" -- a port on the URL is incidental (an explicit default,
+    # or a custom SSH/HTTPS port) and must be stripped before comparing, or a
+    # perfectly valid `ssh://git@github.com:22/owner/repo.git` (or an HTTPS
+    # equivalent) would spuriously fail to match a bare expected host.
+    if ":" not in expected_host and ":" in host:
+        host = host.rsplit(":", 1)[0]
     if host.casefold() != expected_host.casefold():
         return False
     return segments[-2].casefold() == owner.casefold() and segments[-1].casefold() == repo.casefold()

@@ -43,6 +43,7 @@ from software_engineering_team.clone_workspace import (
     clone_lock_path,
 )
 from software_engineering_team.github_source.client import (
+    DEFAULT_BASE_URL,
     _pr_detail_from_payload,
     configured_web_host,
 )
@@ -1310,7 +1311,20 @@ async def medium_clear_session() -> MediumConfigResponse:
 # ---------------------------------------------------------------------------
 
 _GITHUB_SERVICE = "github"
-_GITHUB_API_BASE = "https://api.github.com"
+
+
+def _github_api_base() -> str:
+    """Return the configured GitHub API base URL (GHES-aware).
+
+    Postconditions:
+        - Returns ``GITHUB_API_URL`` when set (e.g. a GitHub Enterprise Server
+          API host), else :data:`DEFAULT_BASE_URL` (``https://api.github.com``) —
+          mirroring the derivation ``GitHubClient.__init__`` and
+          ``configured_web_host`` already use, so every GitHub API call in this
+          module targets the same configured host rather than a hardcoded one.
+    """
+    return os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL
+
 # GitHub's issues endpoint returns at most 100 items per page; we request the max
 # and follow the Link header so the panel shows every open issue, not just page one.
 _GITHUB_ISSUES_PER_PAGE = 100
@@ -1880,7 +1894,7 @@ async def _fetch_blocked_by(
     """
     # The blocked_by endpoint returns standard issue objects, so the default
     # ``application/vnd.github+json`` Accept header (already in ``headers``) is correct.
-    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
+    url = f"{_github_api_base()}/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
     params: dict[str, Any] | None = {"per_page": _GITHUB_DEPENDENCY_PER_PAGE}
     out: list[dict[str, Any]] = []
     try:
@@ -2119,7 +2133,7 @@ async def _assert_pat_can_reach_repo(owner: str, repo: str, token: str) -> None:
           invalid/expired token, 502 for any other upstream status, and 504/502 for a
           timeout/transport error. No ``httpx`` error escapes unhandled.
     """
-    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}"
+    url = f"{_github_api_base()}/repos/{owner}/{repo}"
     headers = _github_api_headers(token)
     try:
         async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
@@ -2239,7 +2253,7 @@ async def list_github_repos() -> list[GitHubRepoItem]:
 
     params: dict[str, Any] = {"per_page": _GITHUB_REPOS_PER_PAGE, "sort": "pushed"}
     headers = _github_api_headers(token)
-    base_url = f"{_GITHUB_API_BASE}/user/repos"
+    base_url = f"{_github_api_base()}/user/repos"
 
     async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_repos, has_more = await _collect_github_pages(
@@ -2310,7 +2324,7 @@ async def list_github_issues(
     if use_label:
         params["labels"] = use_label
     headers = _github_api_headers(token)
-    base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
+    base_url = f"{_github_api_base()}/repos/{owner}/{repo}/issues"
 
     async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pages, has_more = await _collect_github_pages(
@@ -2400,7 +2414,7 @@ async def list_github_pulls(
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_PRS_PER_PAGE}
     headers = _github_api_headers(token)
-    base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
+    base_url = f"{_github_api_base()}/repos/{owner}/{repo}/pulls"
 
     async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pulls, has_more = await _collect_github_pages(

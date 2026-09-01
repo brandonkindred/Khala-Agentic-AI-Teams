@@ -76,12 +76,26 @@ async def held_checkout_lock(
           flight (see module docstring): the acquisition is tracked as its
           own ``Future`` via :func:`asyncio.shield`, so a cancellation of
           *this* coroutine does not cancel the underlying acquisition; the
-          ``finally`` below always awaits that future (unshielded, since by
-          then this coroutine is already unwinding) to learn whether it
-          actually completed, and releases the flock if so. A flock that
-          never completes acquisition (mkdir failed, or the executor thread's
-          ``__enter__`` itself raised) is correctly never "released" since it
-          was never held.
+          ``finally`` below always awaits that future (ALSO shielded -- see
+          below) to learn whether it actually completed, and releases the
+          flock if so. A flock that never completes acquisition (mkdir
+          failed, or the executor thread's ``__enter__`` itself raised) is
+          correctly never "released" since it was never held.
+        - The ``finally`` block's own await of ``acquire_future`` is itself
+          wrapped in :func:`asyncio.shield`, and retried in a loop until the
+          future is actually ``done()``: without the loop, a SECOND
+          cancellation delivered to this coroutine while it is in the middle
+          of that cleanup await would abort just that one shielded await
+          (shielding protects the wrapped future from being cancelled, not
+          the awaiting coroutine from being cancelled again) and unwind this
+          coroutine with ``lock_acquired`` still False -- even though the
+          executor thread can still go on to actually acquire the flock
+          moments later, with no code left anywhere to release it. This is
+          the same underlying hazard the module docstring describes for the
+          initial acquisition, one level deeper: a single shielded await is
+          not enough once a caller can be cancelled repeatedly; only looping
+          until the future is genuinely done makes cleanup itself
+          cancellation-safe against any number of repeat cancellations.
         - A ``CancelledError`` raised while awaiting acquisition propagates
           to the caller as normal (this helper does not suppress
           cancellation); only the release bookkeeping is cancellation-safe.
@@ -116,9 +130,24 @@ async def held_checkout_lock(
             # branch above already consumed a synchronous failure -- either
             # way, wait for the (possibly still-running) executor thread to
             # actually finish so a completed acquisition is never leaked.
-            with contextlib.suppress(OSError, asyncio.CancelledError):
-                await acquire_future
-                lock_acquired = True
+            #
+            # Looped rather than a single shielded await: asyncio.shield
+            # protects the WRAPPED future from being cancelled, not this
+            # coroutine from being cancelled again while awaiting it -- a
+            # repeat cancellation here aborts only that one await, leaving
+            # acquire_future still running in the background with nothing
+            # left to observe it. Retrying the shielded await until the
+            # future is genuinely `done()` makes this robust to any number
+            # of repeat cancellations.
+            while not acquire_future.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(acquire_future)
+            if not acquire_future.cancelled():
+                exc = acquire_future.exception()
+                if exc is None:
+                    lock_acquired = True
+                elif not isinstance(exc, OSError):
+                    raise exc
         if lock_acquired:
             # Pass the ACTIVE exception info (not a hardcoded None, None, None)
             # so a context manager that inspects it (e.g. to log what error was

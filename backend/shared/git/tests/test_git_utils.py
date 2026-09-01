@@ -694,6 +694,50 @@ def test_remote_url_matches_rejects_at_sign_inside_repo_name() -> None:
     assert remote_url_matches("https://github.com/acme/w@idget", "acme", "widget") is False
 
 
+def test_remote_url_matches_accepts_ssh_url_with_incidental_port_on_bare_host() -> None:
+    """P2 regression: a valid URL-form SSH remote with an explicit port that is
+    NOT part of `expected_host` (e.g. the standard `ssh://.../owner/repo.git:22`
+    form) must still match a bare expected host -- the port here is incidental
+    (SSH's default port spelled out explicitly, or a custom one), not part of
+    the host identity being checked."""
+    assert (
+        remote_url_matches(
+            "ssh://git@github.com:22/acme/widget.git", "acme", "widget", expected_host="github.com"
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_accepts_https_url_with_incidental_port_on_bare_host() -> None:
+    """Same incidental-port case as above, for an HTTPS remote."""
+    assert (
+        remote_url_matches(
+            "https://github.com:443/acme/widget.git", "acme", "widget", expected_host="github.com"
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_accepts_https_url_with_incidental_port_and_userinfo() -> None:
+    """The incidental-port case combined with embedded HTTPS credentials --
+    the userinfo strip must still leave the port stripping able to run
+    afterward."""
+    not_a_real_credential = "placeholder"
+    url = f"https://x-access-token:{not_a_real_credential}@github.com:443/acme/widget.git"
+    assert remote_url_matches(url, "acme", "widget", expected_host="github.com") is True
+
+
+def test_remote_url_matches_rejects_incidental_port_wrong_host() -> None:
+    """An incidental port must not accidentally widen the match to the wrong
+    host -- only the port is forgiven, not the host itself."""
+    assert (
+        remote_url_matches(
+            "https://evil.example.com:443/acme/widget.git", "acme", "widget", expected_host="github.com"
+        )
+        is False
+    )
+
+
 def _self_alias_origin(repo: Path) -> None:
     """Add ``origin`` pointing at ``repo`` itself, so fetch works without a real remote."""
     subprocess.run(

@@ -333,11 +333,12 @@ def post_address_comments(
                         "only open PRs can be addressed."
                     ),
                 )
-            # This route only needs the unresolved-comment COUNT for its response
-            # (see the return below); the other three return values exist for the
-            # background worker's own retry-resolve/re-triage logic
+            # This route needs the unresolved-comment count AND the
+            # retry-resolve count for its response (see the return below);
+            # the other two return values exist only for the background
+            # worker's own retry-resolve/re-triage logic
             # (address_comments._run_address_comments), not this admission check.
-            unresolved, _threads, _retry_resolve, _history, _ambiguous = _address.unresolved_comments(
+            unresolved, _threads, retry_resolve, _history, _ambiguous = _address.unresolved_comments(
                 client, request.owner, request.repo, pr_number
             )
         except ReviewThreadsUnavailableError as e:
@@ -484,7 +485,18 @@ def post_address_comments(
         job_id=job_id,
         pr_number=pr_number,
         pr_url=pr.html_url,
-        unresolved_comment_count=len(unresolved),
+        # Includes retry-resolve threads (a Khala reply already landed but its
+        # own resolve mutation is on record as failed) alongside genuinely
+        # unresolved comments: both represent real work the background job
+        # will do, and a count excluding the former under-reports it.
+        unresolved_comment_count=len(unresolved) + len(retry_resolve),
+        # The model's own default carries an unsubstituted "{job_id}"
+        # placeholder (it has no job id to fill in at class-definition time);
+        # mirroring the pattern other routes already use to format one
+        # (e.g. user_agent_founder's StartRunResponse), substitute the real
+        # id here so the message is directly actionable rather than a
+        # literal, un-fillable placeholder.
+        message=f"Addressing unresolved comments. Poll GET /status/{job_id} for progress.",
         created_at=created_at,
     )
 

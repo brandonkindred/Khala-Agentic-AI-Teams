@@ -263,18 +263,33 @@ class AddressCommentsRequest(BaseModel):
         default="",
         description="Local checkout path, accepted for parity with /review-pr.",
     )
-    pr_number: int = Field(
-        ...,
+    pr_number: Optional[int] = Field(
+        default=None,
         gt=0,
         description=(
-            "Pull request number whose comments to address. The route's path "
-            "pr_number is authoritative -- the route coerces this field to match "
-            "it via model_copy before use, so a divergent body value is silently "
-            "overridden rather than causing ambiguity."
+            "Pull request number whose comments to address. Optional in the request "
+            "body: the route's path pr_number is authoritative and the route "
+            "unconditionally coerces this field to match it via model_copy before "
+            "use, so a caller sending only {owner, repo, repo_path} (relying on the "
+            "path parameter alone) is not forced to redundantly repeat it here, and "
+            "a divergent body value is silently overridden rather than causing "
+            "ambiguity."
         ),
     )
     github_token: Optional[str] = Field(
         default=None, description="Overrides GITHUB_TOKEN env var for this request."
+    )
+    base_branch: Optional[str] = Field(
+        default=None,
+        description=(
+            "Overrides the PR's own base branch for branch preparation, mirroring "
+            "RunFromGithubRequest.base_branch's `request.base_branch or default_branch` "
+            "convention. When omitted (the common case), the PR's actual base (as "
+            "reported by GitHub) is used, which is correct for almost every caller "
+            "since an open PR already has a fixed base -- this exists only for the "
+            "rare case where a caller deliberately wants branch prep to compare "
+            "against a different branch."
+        ),
     )
     cleanup_checkout_on_success: bool = Field(
         default=False,

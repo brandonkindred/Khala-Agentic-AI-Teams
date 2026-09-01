@@ -184,3 +184,79 @@ def test_cancellation_during_acquisition_does_not_leak_the_lock(tmp_path: Path) 
         "a __enter__ that completes after the awaiting coroutine was cancelled must still be released "
         "-- this is the exact HIGH-severity leak this helper exists to prevent"
     )
+
+
+def test_second_cancellation_during_cleanup_await_does_not_leak_the_lock(tmp_path: Path) -> None:
+    """Reproduces the deeper variant of the same bug: a SECOND cancellation
+    delivered while the ``finally`` block is itself awaiting the (shielded)
+    acquisition future must not abandon that await either.
+
+    Without shielding that second await too, this second cancellation would
+    be swallowed by the surrounding ``contextlib.suppress(asyncio.CancelledError)``,
+    leaving ``lock_acquired`` False and the task unwinding -- while the
+    executor thread goes on to complete ``__enter__`` moments later with no
+    code left anywhere to call ``__exit__``.
+    """
+    lock_path = tmp_path / ".test.lock"
+    proceed = threading.Event()
+    entered_calls: list[int] = []
+    exited_calls: list[int] = []
+
+    class _SlowLock:
+        def __init__(self, path: Path) -> None:
+            self._path = path
+
+        def __enter__(self) -> "_SlowLock":
+            proceed.wait(timeout=5)
+            entered_calls.append(1)
+            return self
+
+        def __exit__(self, *exc_info) -> bool:
+            exited_calls.append(1)
+            return False
+
+    original_flock_lock = checkout_lock_module.flock_lock
+    checkout_lock_module.flock_lock = lambda p: _SlowLock(p)
+    try:
+
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            async with held_checkout_lock(
+                loop, lock_path, platform_owned=True, owner="acme", repo="widget", log_prefix="test"
+            ):
+                pytest.fail("body must not run before this task is cancelled mid-acquisition")
+
+        async def _drive() -> None:
+            task = asyncio.ensure_future(_run())
+            # Let the executor thread actually start __enter__ and block.
+            await asyncio.sleep(0.05)
+            # First cancellation: reaches the initial (shielded) acquisition
+            # await, unwinds into the `finally` block, which starts its own
+            # (also shielded) await of the still in-flight acquisition future.
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not entered_calls
+            assert not exited_calls
+            # Second cancellation: delivered while the task is suspended at
+            # the `finally` block's cleanup await. Before this fix, this
+            # would be caught by `contextlib.suppress(asyncio.CancelledError)`
+            # and the task would unwind with `lock_acquired` still False.
+            task.cancel()
+            await asyncio.sleep(0.05)
+            # __enter__ is still blocked -- neither cancellation should have
+            # released anything, since nothing was actually acquired yet.
+            assert not entered_calls
+            assert not exited_calls
+            # Now let the executor thread's __enter__ actually complete.
+            proceed.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_drive())
+    finally:
+        checkout_lock_module.flock_lock = original_flock_lock
+
+    assert entered_calls == [1], "the executor thread's __enter__ should have completed exactly once"
+    assert exited_calls == [1], (
+        "a __enter__ that completes after a SECOND cancellation during cleanup must still be released"
+    )
