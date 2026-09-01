@@ -1730,6 +1730,24 @@ this contract:
   immediately (no re-poll, no re-assembly, no new claim attempt) — the same "reload and re-emit
   whatever the winner actually recorded" rule above, applied as the activity's very first check
   rather than only as a losing-claim fallback.
+
+  **Making the completion-marker check the activity's very first check, unconditionally, reopens the
+  exact terminal-state-clobbering problem the `skipped_terminal` requirement above exists to close.**
+  If the atomic output/marker write succeeds and the process then crashes before returning, and the
+  job is *subsequently* cancelled or interrupted before the next `SAFE_RETRY` re-entry runs, an
+  entry-order that checks the marker before checking active status finds the marker, reconstructs the
+  cached success result, and returns it — without ever observing that the job is no longer
+  `pending`/`running`. The workflow, seeing an ordinary successful return rather than
+  `skipped_terminal`, proceeds to schedule downstream work (`sub_agent_provisioning`,
+  `finalize_planning_activity`) for a job that should have stopped — silently resurrecting exactly
+  the class of bug the terminal-status check earlier in this section was written to prevent, just
+  triggered through the marker path instead of the ordinary-work path. **Contract requirement,
+  ordering the two checks:** check the job's active status *first* — before the completion-marker
+  check, and before any checkpoint-based `wait_pra`/document-production work — and return
+  `skipped_terminal` immediately for a job that is not `pending`/`running`, exactly as required
+  elsewhere in this section; only once status is confirmed active does the marker check run, ahead of
+  any re-poll or re-assembly work, per the requirement above. The marker check stays ahead of the
+  PRA/document-production work; the status check stays ahead of the marker check.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
@@ -1953,13 +1971,60 @@ this contract:
   for a rejected submission (already established above) — polling simply stalls until `MAX_POLL_WAIT`
   expires rather than surfacing a clean error. **Contract requirement:** the reconciliation equality
   check must compare a canonical form of the *complete* question shape — `id`, `question_text`,
-  *and* the full `options` list (each option's `id` and `label`, in a canonicalized/sorted order so
-  option ordering isn't itself treated as a difference — mirroring this contract's own canonicalization
-  requirement for answer batches, §4.3), and `allow_multiple` — not only the `(id, question_text)`
+  *and* the full `options` list (each option's `id` and `label`, **preserving each option's original
+  position** — see the order-sensitivity correction below, which supersedes any earlier notion of
+  canonicalizing/sorting option order here), and `allow_multiple` — not only the `(id, question_text)`
   pair. Any difference in any of these fields, for any question in the round, must be treated as
   advancement exactly like an id/text change is treated above: proceed straight to step (2),
   submitting nothing, rather than resubmitting a selection that may no longer correspond to what the
   new round actually offers.
+
+  **Correction — option order is not safe to canonicalize away; it is semantically load-bearing for
+  default resolution.** An earlier draft of this requirement suggested sorting the `options` list
+  before comparing, mirroring this contract's own canonicalization of *answer batches* elsewhere
+  (§4.3) — but that mirroring is wrong here: an answer batch's ordering is genuinely arbitrary
+  (nothing reads meaning from *which* entry a client listed first), while a question's *options*
+  ordering is not. `get_default_option` (`user_communication.py:265-280`, already cited in this
+  contract for the synthesized-default requirement above) returns the *first* `is_default`-flagged
+  option via `next((opt for opt in q.options if opt.is_default), None)` — and PRA's own option parser
+  permits more than one option to carry `is_default: true` (an existing multi-select question
+  definition already relies on exactly this shape). When two rounds carry the identical set of
+  options — same ids, same labels, same `is_default` flags — but in a different order, sorting them
+  into a canonical order before comparing would correctly call them "identical" by every field-level
+  check above, while the *actual* default PRA applies (first `is_default` in *its* current order) and
+  the default this contract's own reconciliation/synthesis logic would compute (first `is_default` in
+  whatever order this comparison canonicalized to) can silently diverge — the same
+  `resolved_questions`-misrepresents-what-PRA-decided failure mode the `is_default`/`confidence`
+  correction above exists to prevent, reopened by canonicalizing away the one signal (order) that
+  disambiguates which of several `is_default` options actually wins. **Contract requirement,
+  superseding the sorted-order suggestion above:** compare the `options` list *positionally* — option
+  *N* in the persisted round must equal option *N* in the current round (id, label, `is_default`,
+  `confidence`, in that same position) — not as a canonicalized/sorted set. A reordering of otherwise
+  identical options is itself a difference and must be treated as advancement, exactly like every
+  other field change this comparison already treats that way.
+
+  **The canonical identity must also cover every other field this contract's own pending-question
+  shape exposes to the client, not only the fields already named above.** PRA's status response —
+  the same shape this reconciliation already reads from — additionally carries each question's
+  `context` and `recommendation`, and each option's `rationale` (`convert_to_pending_questions`,
+  `user_communication.py:109-157`, already cited in this contract as the shape this pause envelope
+  persists). None of these change which option a client is structurally permitted to select, but all
+  three are exactly the explanatory text a human reads *before* choosing — the context framing the
+  question, the recommendation nudging toward an option, the rationale justifying a specific choice.
+  A later round can keep every field already covered by this comparison identical while silently
+  rewriting any of these three — the retry then classifies the round as unchanged and resubmits a
+  decision that was genuinely made (by whatever answered the *original* round, human or default)
+  under explanatory text the current round no longer shows. This is a narrower harm than a
+  structurally wrong answer (the selected option id is still valid against the current round), but it
+  is real: the persisted `resolved_questions` record misattributes a decision to reasoning the human
+  never actually saw. **Contract requirement:** include `context`, `recommendation`, and each
+  option's `rationale` in the canonical comparison alongside every field already required above — a
+  difference in any of them is advancement, exactly as for every other field this section covers.
+  Where a durable PRA-side round/version identifier becomes available (§5's open risks already flag
+  this as the only complete closure for the underlying ambiguity), it would replace this whole
+  field-by-field comparison outright rather than requiring yet more fields enumerated by hand; until
+  then, this contract's position is that every client-visible semantic field belongs in the identity,
+  not a hand-picked subset of it.
 
   **`required` and the option metadata default-selection depends on must also be part of this
   canonical identity — a round can keep `id`/`question_text`/`options`/`allow_multiple` unchanged
@@ -2014,20 +2079,50 @@ this contract:
   duplicate-question-id check above — so a round with an internally ambiguous question never reaches
   a client as answerable in the first place.
 
-  **This is not a complete fix.**
-  `question_text`
-  has the identical fallback problem as `id`:
-  `_require_string_field(q_data, "question_text", "")` (`question_processing.py:822`) defaults a
-  missing `question_text` to `""`, exactly as `id` defaults to `q{index}` — so two consecutive
-  rounds can in principle share the *same* `(id, question_text)` pair (e.g., both malformed-parse
-  fallbacks, or coincidentally identical LLM output), and no client-side comparison over PRA's
-  reported fields can distinguish that case from a genuine still-pending question. Comparing the
-  full pair is strictly better than comparing `id` alone — it catches every collision where the two
-  rounds' `question_text` actually differ, which is the common case — but it is a harm-reduction
-  measure, not a proof. This folds into, rather than sits beside, the open risk already flagged
-  below: **only a durable PRA-side round/version identifier or delivery receipt closes this
-  completely**, and that is out of `planning_team`'s boundary to provide. #7445-B inherits this
-  residual risk knowingly; it is not resolved by this spec.
+  **Rejecting duplicates alone still permits an explicit blank option id, which is structurally
+  unanswerable for a different reason.** `parse_question_option`'s own fallback only applies when the
+  `id` key is *absent* — an explicit `id: ""` is a valid string and passes through unchanged
+  (`_require_string_field`, above), so a question can offer a displayed option whose id is the empty
+  string, unique among its siblings and therefore invisible to the duplicate check just added. For a
+  single-select question, selecting that option produces `selected_option_id=""`; the shared
+  validator's own falsy check (`validation.py:86-100`: `"other"` branch, `elif` non-blank-`selected_option_id`
+  branch, `elif not other_text` reject-as-no-decision branch) treats an empty string exactly like "no
+  option selected" and rejects the submission as incomplete rather than recognizing it as a
+  deliberate choice of that specific (blank-id) option — the option is displayed but structurally
+  impossible to select. **Contract requirement:** reject a question whose `options` list contains any
+  option with a missing or blank (empty-after-stripping) `id`, at the same pause-assembly validation
+  boundary as the duplicate checks above.
+
+  **A missing or blank `question_text` is not merely a reconciliation-collision risk (§4.3's own
+  citation of this same fallback) — it can also reach a client as a pause round with no
+  human-readable prompt at all.** `_require_string_field(q_data, "question_text", "")`
+  (`question_processing.py:822`) defaults an absent `question_text` to `""`, and an explicit `""` is
+  equally valid — either way the question can be persisted and exposed to the client carrying no
+  prompt text whatsoever, alongside whatever options and metadata it does have. A human confronted
+  with an unintelligible, textless question has nothing to answer meaningfully; the workflow then
+  waits on `wait_condition` indefinitely (§5 risk 1's already-flagged unbounded wait) for a decision
+  no one can actually make. **Contract requirement:** reject a question whose `question_text` is
+  missing or blank (empty-after-stripping) at the same pause-assembly validation boundary as the
+  duplicate-id and blank-option-id checks above, rather than merely treating the fallback as a
+  reconciliation-comparison hazard once it has already been published.
+
+  **This is not a complete fix.** `id` still has an unaddressed fallback problem the
+  blank-`question_text` rejection above does not reach: `_require_string_field(q_data, "id",
+  f"q{index}")` (`question_processing.py:821`) defaults a *missing* `id` to a positional `q{index}`
+  — a non-blank string this contract's own uniqueness/blank checks above happily accept — so two
+  separate rounds can independently fall back to the *same* `q{index}` id at the same position while
+  each carrying a distinct (and, after the fix above, always non-blank) `question_text`. This
+  contract's blank-`question_text` rejection closes the narrower case where both fields *also*
+  independently defaulted to an empty/generated value in a way that made the pair trivially
+  identical; it does not close the case where two rounds' genuinely different, non-blank
+  `question_text` values coincide by LLM happenstance while sharing a fallback `id` — no client-side
+  comparison over PRA's reported fields can distinguish that from a genuinely still-pending question.
+  Comparing the full pair (and now the wider canonical shape above) is strictly better than comparing
+  `id` alone — it catches every collision where any covered field actually differs, which is the
+  common case — but it is a harm-reduction measure, not a proof. This folds into, rather than sits
+  beside, the open risk already flagged below: **only a durable PRA-side round/version identifier or
+  delivery receipt closes this completely**, and that is out of `planning_team`'s boundary to
+  provide. #7445-B inherits this residual risk knowingly; it is not resolved by this spec.
 
 **A failed status read is not confirmation.** `get_product_analysis_status` returns `None` on
 *any* GET failure (`adapters/product_analysis.py:51-58` — "Returns `None` on failure"), not only
@@ -2267,6 +2362,30 @@ no persisted pause to resume from, silently hanging the job.
   each batch with `resume_token` at write time — no schema-change-avoidance shortcut — so its
   reconciliation activity can look up "the batch for this token" exactly as Planning's does, not
   merely "a batch that happens to still mention these ids."
+
+  **`workflow.patched` alone cannot gate this migration — the persist path this requirement changes
+  runs outside workflow code entirely, and a pre-existing paused job doesn't know to expect the new
+  shape.** `workflow.patched` governs *workflow* replay determinism; it has no effect on
+  `coding_team_hitl.submit_pending_answers` (`api/routes/coding_team_hitl.py:21-64`), the HTTP route
+  that actually calls `_main.store_append_submitted_answers` to persist each batch — that route runs
+  once, synchronously, outside any workflow's history, for *every* job regardless of which patch
+  version the target workflow execution itself is on. If this route switches to writing the new
+  token-keyed shape unconditionally at deploy time, a `CodingTeamWorkflow` execution that was already
+  paused *before* deployment — whose activity, on resume, expects to read the legacy flat
+  `submitted_answers` list (`hitl.py:352-377`'s `answers_to_resolved`, `pause_cycle.py:212,380`) —
+  receives an answer written in a shape its own pre-patch re-entry reader cannot parse. That job stays
+  paused forever (the reader finds nothing matching in the shape it knows how to read) or errors,
+  regardless of what the client's HTTP response claimed. **Contract requirement:** the persist path
+  and the read paths must support both shapes for the duration of the rollout — either (a) dual-write
+  (append to both the legacy flat list *and* a new token-keyed structure on every submission) and
+  dual-read (each re-entry reader — the pre-patch flat-list reader and the new token-keyed
+  reconciliation activity — checks its own expected shape, falling back to filtering the flat list by
+  currently-pending question ids exactly as today when no token-keyed entry exists for a given job),
+  or (b) a persisted per-job schema/version marker the route and every reader inspect to decide which
+  shape that specific job's `submitted_answers` is in, set once and never changed for that job's
+  lifetime. Either shape is acceptable; unconditionally switching the route's write format at deploy
+  time, relying solely on `workflow.patched` to protect in-flight executions, is not — that patch
+  marker protects none of this migration's actual failure surface.
 
 **Open risks, not resolved by this spec:**
 1. *Carried over from `hitl_pause_resume_contract.md` §4:* `workflow.wait_condition` here is
