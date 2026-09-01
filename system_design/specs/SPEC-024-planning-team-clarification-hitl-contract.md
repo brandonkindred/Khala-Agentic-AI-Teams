@@ -250,6 +250,24 @@ whose persisted `allow_multiple` is falsy, and reject (400) a submission that se
 two fields are mutually exclusive per answer, selected by the question's own `allow_multiple`, not
 freely combinable by the client.
 
+**Rejecting simultaneous singular/plural selections (above) does not catch a contradictory
+`other_text` alongside a non-`"other"` selection.** A submission like `selected_option_id="postgres"`
+with a non-blank `other_text="mysql"` passes every check above — `selected_option_id` is a valid,
+non-`"other"` option id, and `selected_option_ids` is empty, so the mutual-exclusion rule has nothing
+to reject. But PRA's `apply_answers` (`user_communication.py:227-231`, already cited above) resolves
+this as `selected_answer = opt.label` (the `"postgres"` option's label), silently discarding
+`other_text` — while `other_text` itself remains durably persisted alongside the answer and available
+to any other consumer that renders it directly rather than through `apply_answers`'s own resolution
+(this contract's own resume-time conversion, §4.3, reads the raw `AnswerSubmission` fields, not
+PRA's derived `selected_answer`). Two different downstream readers of the *same* stored answer can
+therefore report two different decisions — one honoring the selected option, one honoring the
+leftover free text — with nothing in this contract's validation ever having flagged the submission as
+contradictory. **Contract requirement:** `validate_answers` must additionally reject (400) a
+submission whose `other_text` is non-blank unless `"other"` is actually present in the answer's
+active selection — `selected_option_id == "other"` for a single-select answer, or `"other"` a member
+of `selected_option_ids` for a multi-select one; a non-blank `other_text` alongside any other
+selection is a malformed, contradictory request, not free-form annotation to carry along silently.
+
 **Duplicate ids within `selected_option_ids` must also be rejected, not silently accepted.**
 Per-id membership validation (above) accepts `selected_option_ids=["postgres", "postgres"]` without
 complaint — each id individually is a valid option — but PRA's own `apply_answers`
@@ -461,6 +479,28 @@ workflow (which is asleep waiting on the *current* token, not the stale one). **
 requirement:** a missing or mismatched `resume_token` must be rejected with `409` before any write,
 exactly as the coding team's route already does.
 
+**A strict "must match the *currently active* token" guard makes an ordinary transport retry of an
+already-successful submission indistinguishable from a genuinely stale one — it is not, by itself,
+end-to-end idempotent.** The persist-then-signal write and the signal delivery can both succeed while
+the HTTP response carrying that success back to the client is lost (a network blip, a client timeout
+that fires just after the server committed). If the workflow then consumes that round — clears the
+pause envelope and, per this contract's round-scoped persistence, advances `resume_token` to the next
+round's value (or the job simply completes with no next round) — before the client's automatic retry
+of the *identical* request arrives, the token check above now finds no active pause matching the
+retry's `resume_token` and returns `409`, even though that exact answer was already durably applied
+and the workflow already acted on it. A client whose retry logic treats `409` as a hard failure
+(reasonably, since this contract also uses `409` for genuinely stale/conflicting submissions) has no
+way to distinguish "you're too late, this round moved on" from "you already succeeded, nothing more
+to do." **Contract requirement:** retain a small, durable per-token receipt (the consumed token and
+the content that was accepted for it — this contract's own write-once slot, §4.4, may already be
+enough of a record if it survives the resume-path clear rather than being deleted by it) so that a
+request whose `resume_token` matches an *already-consumed* round, with content identical to what was
+accepted for it, returns success (not `409`) — an idempotent no-op reporting the prior outcome —
+while a request against an already-consumed token with *different* content is still rejected as
+genuinely stale/conflicting. This is additive to, not a replacement for, the strict-match `409` above:
+the 409 path still governs any token that was never valid or whose content doesn't match what this
+job's history actually recorded for it.
+
 **The token check and the answer write must be one atomic conditional operation, not read-then-write.**
 Checking the active `resume_token` and then separately persisting the batch leaves a race: between
 the read and the write, a *different*, faster submission for the same round can complete, wake the
@@ -602,12 +642,29 @@ preserve insertion order) and still be logically the identical answer batch. Com
 incoming values as raw JSONB arrays treats list order as significant, so this retry would compare
 "different" from what's already persisted and be rejected outright by the write-once guard above —
 silently dropping the re-signal this correction exists to guarantee, and leaving the workflow asleep
-on a durable answer it will never receive notice of. **Contract requirement:** canonicalize each
-answer batch before storing it and before every equality comparison against it — sort entries by
-`question_id` (each `question_id` appears at most once per batch, per this contract's own duplicate-id
-rejection, §4.1) and canonicalize each entry's own `selected_option_ids` list (e.g. sorted) before
-comparing, since multi-select order is equally not meaningful to answer identity. Store and compare
-the canonical form throughout, not the client's as-submitted ordering.
+on a durable answer it will never receive notice of. **Contract requirement:** derive a canonical
+comparison key for each answer batch — sort entries by `question_id` (each `question_id` appears at
+most once per batch, per this contract's own duplicate-id rejection, §4.1) and canonicalize each
+entry's own `selected_option_ids` list (e.g. sorted) *within that key only* — and use this key for
+every equality check the write-once guard performs, both for the initial write and for every retry
+comparison against it.
+
+**Correction — canonicalizing is for comparison only; the batch actually stored and forwarded must
+keep the client's original order.** `selected_option_ids` order is not semantically inert the way
+this correction's own wording ("multi-select order is equally not meaningful to answer identity")
+claims: PRA's `apply_answers` (`user_communication.py:206-222`, already cited elsewhere in this
+contract) joins `selected_labels` in the list's own order to build the human-readable
+`selected_answer`, and sets `primary_selected_id = selected_ids[0]` — the *first* entry specifically,
+for backward compatibility with the singular `selected_option_id` field. Sorting `selected_option_ids`
+before persisting the batch (rather than only within a derived comparison key) silently changes both
+of these: `["z", "a"]` submitted becomes primary id `"a"` instead of `"z"` once sorted, and the
+human-readable decision text reorders to match — a real, client-visible change to what was actually
+selected and in what priority, not a cosmetic normalization. **Contract requirement, superseding
+"store... the canonical form" above:** the durable batch persisted and later forwarded to PRA
+(step (1) of the resume path, §4.3) must retain the client's original submitted order exactly as
+received — sorting/canonicalizing is confined to the derived comparison key described above, computed
+transiently for the write-once equality check and never written in place of, or used to reorder, the
+actual stored/forwarded batch.
 
 **Persisted answers must be scoped to the active question round, not accumulated across rounds.**
 Unlike the coding team's single Tech-Lead clarify loop, a single `document_production_activity`
@@ -1270,6 +1327,28 @@ The primitive #7445-B builds must satisfy:
   this contract with no retry cushion at all. Extending the same backstop to the pre-existing
   per-phase activities is a legitimate follow-up but out of this story's scope; it does not block
   this contract, since those activities' existing behavior is unmodified by it.
+
+  **Correction — `document_production_activity` is not "pre-existing, unmodified behavior" this
+  contract can defer, and it is just as exposed to a hard-crash-on-final-attempt as the zero-cushion
+  submit activity is.** The scoping above reasons that only the `NO_RETRY` submit activity needs this
+  backstop because `SAFE_RETRY` phases "get a further chance to run `_guarded` to completion" on a
+  non-final-attempt crash — but that reasoning only protects a crash on a *non-final* attempt; the
+  *final* `SAFE_RETRY` attempt has exactly the same zero-cushion exposure the submit activity has at
+  every attempt, since there is no next attempt for Temporal to retry into. `document_production_activity`
+  is precisely the activity this contract substantially rewrites — new active-status checks, the
+  generation-guarded pause/completion claims, the completion-marker short-circuit, the checkpoint-based
+  retry/continuation loop — so treating it as unmodified, deferrable "existing behavior" is no longer
+  accurate once this contract ships; a hard crash (OOM, pod eviction, heartbeat timeout) on its own
+  final `SAFE_RETRY` attempt defeats `_guarded` exactly as described above, Temporal fails the
+  workflow, and the job record is left claiming `pending`/`running` (or a stale pause) indefinitely —
+  the same silent-hang failure mode, on the activity this contract most changes. **Contract
+  requirement, superseding the scoping-out above:** apply the same workflow-level `try/except`
+  backstop to the workflow's `execute_activity(document_production_activity, ...)` call(s) — both the
+  initial call and every re-invocation inside the §4.3 retry/continuation loop — invoking the same
+  conditional `mark_planning_job_failed_activity` on any exception surfacing to the workflow, exactly
+  as required for the submit activity above. Extending this same backstop to the *other*, genuinely
+  unmodified per-phase activities (synthesis, intake, etc.) remains a legitimate, out-of-scope
+  follow-up; `document_production_activity` itself does not qualify for that deferral.
 
   **Correction — the `except` block must call a Temporal *activity*, never `mark_job_failed`/
   `update_job` directly from workflow code.** `planning_team/temporal/workflows.py`'s own module
@@ -2020,6 +2099,16 @@ this contract:
   never actually saw. **Contract requirement:** include `context`, `recommendation`, and each
   option's `rationale` in the canonical comparison alongside every field already required above — a
   difference in any of them is advancement, exactly as for every other field this section covers.
+
+  **`source` is part of the same shape and equally omitted so far.** The status route's own
+  reconstruction of `PendingQuestion` also sets `source=q.get("source", "spec_review")`
+  (`api/routes/product_analysis.py:211`, the same shared `PendingQuestion` shape §4.1 already treats
+  as this reconciliation's data source) — a field this comparison has not named at all. A later round
+  that changes only a question's origin (e.g. `spec_review` to some other source PRA's own logic can
+  assign) while keeping every field already covered identical is, by this comparison, indistinguishable
+  from the original round, even though the client-visible question record has genuinely advanced.
+  **Contract requirement:** include `source` in the canonical comparison alongside every field already
+  required above, for the same reason and with the same treatment — a difference is advancement.
   Where a durable PRA-side round/version identifier becomes available (§5's open risks already flag
   this as the only complete closure for the underlying ambiguity), it would replace this whole
   field-by-field comparison outright rather than requiring yet more fields enumerated by hand; until
@@ -2092,6 +2181,33 @@ this contract:
   impossible to select. **Contract requirement:** reject a question whose `options` list contains any
   option with a missing or blank (empty-after-stripping) `id`, at the same pause-assembly validation
   boundary as the duplicate checks above.
+
+  **A blank id is not the only structurally reserved value — `"other"` is a synthetic, validator-owned
+  identifier that pause assembly can still publish as a real option's id.** §4.1's validator treats
+  any `selected_option_id`/`selected_option_ids` entry equal to `"other"` as the synthetic free-text
+  choice — special-cased to require `other_text` rather than being checked against the question's
+  stored options at all (§4.1, above). Nothing in PRA's own option parser or this contract's
+  pause-assembly checks stops a question from offering a *real*, displayed option whose explicit `id`
+  also happens to be `"other"`. A client selecting that displayed option produces
+  `selected_option_id="other"` — which the validator now treats as the synthetic choice, unexpectedly
+  requiring `other_text` to be non-blank even though the human selected a labeled option, not free
+  text — and PRA's `apply_answers` applies the free-text branch (or rejects the answer as incomplete
+  if `other_text` is blank) rather than resolving the option the human actually picked. **Contract
+  requirement:** reject a question whose `options` list contains an explicit option with `id ==
+  "other"` at the same pause-assembly validation boundary as the checks above — `"other"` is reserved
+  for the validator's own synthetic free-text path and must never be assignable to a real, displayed
+  option.
+
+  **Rejecting blank option ids does nothing for a blank option label — PRA's parser accepts an
+  explicit empty label just as readily as an empty id.** `parse_question_option` applies the same
+  `_require_string_field` pattern to `label` as it does to `id` (`question_processing.py:874-883`),
+  so an option can carry a valid, unique, non-blank `id` while its `label` is missing or an explicit
+  `""`. Such an option is uniquely selectable — it passes every id-based check above — but displays no
+  text a human can evaluate, the same unintelligible-choice failure mode the blank-`question_text`
+  rejection below exists to prevent, just one level down at the option rather than the question.
+  **Contract requirement:** reject a question whose `options` list contains any option with a missing
+  or blank (empty-after-stripping) `label`, at the same pause-assembly validation boundary as every
+  other check in this section.
 
   **A missing or blank `question_text` is not merely a reconciliation-collision risk (§4.3's own
   citation of this same fallback) — it can also reach a client as a pause round with no
@@ -2227,6 +2343,30 @@ no persisted pause to resume from, silently hanging the job.
   match exactly as if the corresponding signal had already arrived (setting `_submitted_answers`
   directly) so `wait_condition` returns immediately rather than blocking on a signal that will never
   come.
+
+  **This activity's own failure is undefined — an unconditional `await` on it can fail the workflow
+  while the durable row still advertises an active, answerable pause.** If
+  `check_submitted_answers_activity` exhausts its own retry policy (e.g. the job service is
+  unavailable for the duration of that policy), an unconditional `await
+  workflow.execute_activity(...)` propagates that failure and fails the *workflow* before it ever
+  reaches `wait_condition` — but nothing about that failure touches the job record: `waiting_for_answers`
+  is still `True`, `resume_token` still matches what the client was told, and the answer-submission
+  route still accepts and durably persists submissions against it, for a workflow execution that no
+  longer exists to ever act on them. This is the same class of "job record doesn't reflect the
+  workflow's true state" gap this contract has already corrected for the submit activity's own
+  crash/failure paths (§4.3.1) — silent from the job record's perspective, regardless of how loudly
+  Temporal itself reports the failure. **Contract requirement:** this activity call must not be left
+  to fail the workflow unconditionally. Either (a) wrap it the same way the submit activity's
+  no-retry-cushion crash is wrapped — a bounded retry policy, and a `try/except` around the
+  `execute_activity` call that, on exhaustion, invokes the same conditional `mark_planning_job_failed_activity`
+  backstop (§4.3.1) before re-raising, so the job record is left `failed` (guarded by the same
+  active-status conditional write, not resurrecting a state that moved on in the meantime) rather than
+  stuck claiming an active pause nothing will ever resume; or (b) treat this specific activity's
+  failure as non-fatal to the workflow — log it and proceed directly into `wait_condition` without the
+  eviction-recovery benefit this round would have provided, relying on a subsequent signal (or this
+  same check retried on the next pause round) rather than failing the whole execution over one
+  reconciliation lookup. This contract does not mandate which; it requires the gap be closed, not left
+  to an unconditional `await` whose failure mode was never specified.
 
   **A signal carrying a matching `resume_token` is not, by itself, proof a durable answer batch
   exists — the signal handler's own precondition is "none on the caller."** §4.2 states the signal
