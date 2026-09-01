@@ -18,10 +18,11 @@ Invariants:
       the oldest row and logs at WARNING once per sustained burst (throttled so
       a DB outage or sustained burst cannot flood the log; bounded memory,
       never blocks callers).
-    - When the Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` off,
-      the default) the observer enqueues nothing — the drain would drop these
-      rows anyway, so buffering them only adds per-call work and can fill the
-      buffer with never-persisted rows.
+    - When the Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES``
+      explicitly set to a falsy value; enabled by default) the observer
+      enqueues nothing — the drain would drop these rows anyway, so buffering
+      them only adds per-call work and can fill the buffer with
+      never-persisted rows.
     - A flush failure never raises into the heartbeat thread or the caller; it
       is logged at DEBUG and the rows are dropped (telemetry must not break the
       LLM call path or the flusher).
@@ -84,10 +85,11 @@ def _trace_observer(record: Any) -> None:
     mutation of the record by the caller cannot corrupt the buffered row.
 
     Skips the per-call ``_record_to_row`` + enqueue work entirely when the
-    Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` off, the default):
-    the background drain would drop these rows anyway (``write_rows`` re-checks
-    the flag), and on a high-throughput job buffering them would fill the buffer
-    and emit drop warnings for rows that are never persisted.
+    Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` explicitly set to
+    a falsy value; enabled by default): the background drain would drop these
+    rows anyway (``write_rows`` re-checks the flag), and on a high-throughput
+    job buffering them would fill the buffer and emit drop warnings for rows
+    that are never persisted.
     """
     global _overflow_warned
     if not trace_store._trace_enabled():
@@ -152,9 +154,10 @@ def drain() -> int:
 def register_trace_flusher() -> None:
     """Register the observer + start the background drain heartbeat (idempotent).
 
-    The observer and the batched write are both no-ops unless
-    ``SE_TRACE_TO_POSTGRES`` is set, so registering unconditionally at startup
-    is safe and cheap. Safe to call from app startup more than once.
+    The observer and the batched write are both no-ops when
+    ``SE_TRACE_TO_POSTGRES`` is explicitly disabled (or Postgres is
+    unconfigured), so registering unconditionally at startup is safe and
+    cheap. Safe to call from app startup more than once.
     """
     global _heartbeat, _registered
     with _register_lock:

@@ -86,12 +86,12 @@ def test_observer_ignores_non_se_and_missing_job() -> None:
 
 
 def test_observer_skips_when_sink_disabled(monkeypatch) -> None:
-    """When SE_TRACE_TO_POSTGRES is off (the default), the observer skips the
+    """When SE_TRACE_TO_POSTGRES is explicitly opted out, the observer skips the
     per-call _record_to_row + enqueue work — the drain would drop these rows
     anyway (write_rows re-checks the flag), and on a high-throughput job
     buffering them would fill the buffer and emit drop warnings for rows that
     are never persisted."""
-    monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "false")
     trace_flusher._trace_observer(_Rec())
     assert trace_flusher._buffer_size() == 0
 
