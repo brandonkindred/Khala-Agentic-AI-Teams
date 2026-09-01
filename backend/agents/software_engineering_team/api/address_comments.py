@@ -660,6 +660,26 @@ class PublishedFixLookupUnavailableError(RuntimeError):
     """
 
 
+class ExistingJobLookupUnavailableError(RuntimeError):
+    """Raised when checking for an already-active child job for a comment fails.
+
+    Distinct from "the lookup ran and found no active job": a transient
+    lookup failure (job-store/service error) means whether a child job for
+    this comment is currently active (``"pending"``, ``"running"``, or
+    ``"waiting_for_user"``) is genuinely unknown, not "no". Treating it as
+    "no" — the old behavior — lets :func:`_dispatch_implementation` fall
+    through to ``create_job``'s upsert and ``execute_coding_team_workflow``'s
+    dispatch on top of a job that may still be actively running, corrupting
+    or orphaning real in-flight work. The caller must fail this comment
+    closed instead, the same way :class:`PublishedFixLookupUnavailableError`,
+    :class:`CitedCodeUnavailableError`, and :class:`PrFreshnessUnknownError`
+    fail closed on their own lookup/fetch failures. Unlike those, this
+    failure happens before any child job row or Temporal workflow is
+    created, so it does not imply unpublished work was left on the shared
+    `development` branch (contrast ``CommentOutcome.left_unpublished_work``).
+    """
+
+
 def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: ReviewComment, ref: str) -> str:
     """Read the file the comment points at, for grounding the LLM.
 
@@ -1253,6 +1273,12 @@ def _dispatch_implementation(
           ``"completed_with_failures"``, ``"cancelled"``) is safe to reset
           and retry — that is the common, intended case a comment resurfaces
           for re-dispatch at all.
+        - Raises :class:`ExistingJobLookupUnavailableError` (before creating
+          or touching anything) when the lookup above itself fails
+          (job-store/service error). Whether an active child job exists is
+          genuinely unknown in that case, not "no" — the caller must fail
+          this comment closed instead of falling through to ``create_job``'s
+          upsert on an assumed-absent job that might still be running.
     """
     if pr_remote is None:
         raise RuntimeError(
@@ -1263,14 +1289,17 @@ def _dispatch_implementation(
     child_job_id = _child_job_id_for_comment(comment.id)
     try:
         existing_job = _main.get_job(child_job_id)
-    except Exception as e:  # noqa: BLE001 - best-effort; a failed lookup must not block dispatch
+    except Exception as e:  # noqa: BLE001 - reraised as a distinguishable, typed failure
         logger.warning(
             "address-comments: could not check for an existing job before dispatching "
             "comment %s's implementation: %s",
             comment.id,
             scrub_token_from_text(str(e)),
         )
-        existing_job = None
+        raise ExistingJobLookupUnavailableError(
+            f"could not check for an existing job before dispatching comment {comment.id}'s "
+            f"implementation: {scrub_token_from_text(str(e))}"
+        ) from e
     if existing_job and existing_job.get("status") in _ACTIVE_JOB_STATUSES:
         raise RuntimeError(
             f"a job already exists for comment {comment.id} (id {child_job_id!r}, status "
@@ -2084,6 +2113,17 @@ def _handle_comment(
                 pr_remote,
                 token,
             )
+        except ExistingJobLookupUnavailableError as e:
+            # Whether an active child job already exists for this comment is
+            # genuinely unknown here, not "no" — nothing was created (the
+            # raise happens before create_job's upsert), so this is unlike
+            # the general except-Exception case below: no job row or
+            # Temporal workflow exists to leave unpublished work behind, so
+            # `left_unpublished_work` must stay False. Fail this comment
+            # closed instead of risking a double-dispatch over a job that
+            # may still be running.
+            base.detail = str(e)
+            return base
         except Exception as e:
             # Usually a non-"completed" workflow result surfaced as a
             # RuntimeError (see _dispatch_implementation's own

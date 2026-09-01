@@ -1245,6 +1245,63 @@ class TestHandleComment:
         assert fake.replies == []  # but no reply or resolve followed
         assert fake.resolved == []
 
+    def test_existing_job_lookup_failure_fails_closed_without_dispatching(
+        self, address_env, monkeypatch
+    ) -> None:
+        """P1 regression: `_dispatch_implementation`'s own "is there already an
+        ACTIVE child job for this comment?" lookup (distinct from
+        `_previously_published_fix`'s own lookup, which round 7 already
+        hardened) must fail this comment closed — not silently treat a
+        transient lookup failure as "no active job" and fall through to
+        `create_job`'s upsert, which could double-dispatch on top of a child
+        job that is genuinely still running."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
+        thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
+        fake.review_comments = [_comment(2)]
+        fake.threads = [thread]
+
+        child_job_id = ac._child_job_id_for_comment(2)
+        calls = {"n": 0}
+
+        def _get_job(job_id):
+            if job_id == child_job_id:
+                calls["n"] += 1
+                # 1st call: `_previously_published_fix`'s own lookup -- no
+                # prior job (normal fresh-triage path). 2nd call:
+                # `_dispatch_implementation`'s active-job guard -- fails.
+                if calls["n"] == 1:
+                    return None
+                raise RuntimeError("job service unavailable")
+            return dict(address_env["job_state"])
+
+        monkeypatch.setattr(address_env["main"], "get_job", _get_job)
+
+        outcome = ac._handle_comment(
+            fake,
+            "parent",
+            req,
+            _comment(2),
+            thread,
+            [_comment(2)],
+            "feature",
+            "sha1",
+            "main",
+            fake.pr.html_url,
+            "origin",
+            "tok",
+        )
+
+        assert outcome.outcome == "failed"
+        assert "could not check for an existing job" in outcome.detail
+        # Nothing was created or dispatched, so there is no leftover
+        # unpublished work on the shared `development` branch to flag.
+        assert outcome.left_unpublished_work is False
+        assert address_env["child_jobs"] == []
+        assert address_env["executions"] == []
+        assert fake.replies == []
+        assert fake.resolved == []
+
     def test_previously_published_fix_retries_reply_resolve_without_redispatching(
         self, address_env, monkeypatch
     ) -> None:
