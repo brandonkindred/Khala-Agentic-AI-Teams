@@ -207,6 +207,10 @@ def _running_sibling_on_checkout(
           Omit it (``None``) for a pure pre-check with no job created yet —
           there is nothing to exclude, so callers no longer need a sentinel
           string like ``"<not-yet-created>"`` to stand in for one.
+        - Callers needing atomicity against a concurrent admission (another
+          worker starting a job on the same checkout between this scan and
+          the caller's own job creation) must hold :func:`_checkout_admission`
+          around scan + job creation, mirroring :func:`_running_review_for_pr`.
     Postconditions:
         - Returns the sibling job dict when one exists with a non-terminal
           status and the same checkout; None otherwise. Paths are compared
@@ -254,7 +258,19 @@ def _running_sibling_on_checkout(
             continue
         parent_job_id = j.get("parent_job_id")
         if parent_job_id:
-            parent = _main.get_job(parent_job_id)
+            try:
+                parent = _main.get_job(parent_job_id)
+            except Exception as exc:  # noqa: BLE001 - fail-closed: cannot verify parent is gone
+                logger.warning(
+                    "could not look up parent job %s for sibling check on checkout %s: %s",
+                    parent_job_id,
+                    repo_path,
+                    scrub_token_from_text(str(exc)),
+                )
+                # Lookup failure does not prove the parent is gone; treat the
+                # child as a live sibling (fail closed / checkout busy) rather
+                # than risk marking a still-live child's job failed.
+                return j
             if parent is None or (parent.get("status") not in NON_TERMINAL_STATUSES):
                 # Crash-orphaned child: the parent that alone could terminalize
                 # it is gone or already done. Unblock the checkout and

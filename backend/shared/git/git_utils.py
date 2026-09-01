@@ -41,6 +41,12 @@ def remote_url_matches(
 
     Preconditions:
         - ``owner`` and ``repo`` are non-empty repository coordinates.
+        - ``expected_host`` must NOT include a port (e.g. ``"host:8080"``):
+          the scp-colon normalization below runs unconditionally and turns
+          ANY colon into a path separator, including one that was actually
+          part of a port rather than the scp form's host separator, so a
+          port-bearing ``expected_host`` could never match the host segment
+          this function actually extracts.
     Postconditions:
         - Returns True iff ALL of: (a) the URL's host segment equals
           ``expected_host`` case-insensitively — a substring/suffix match on

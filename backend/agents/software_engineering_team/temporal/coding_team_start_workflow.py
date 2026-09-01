@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _COMMENT_WORKFLOW_TIMEOUT_S = 4 * 60 * 60
 
 
-def _contains_token_key(value: Any) -> bool:
+def _contains_token_key(value: Any, _seen: Optional[set[int]] = None) -> bool:
     """True iff ``value`` (recursively) contains a dict with a ``"token"`` key.
 
     A plain top-level ``"token" in github`` check only catches a token stored
@@ -30,18 +30,32 @@ def _contains_token_key(value: Any) -> bool:
     the Temporal workflow's durable event history, exactly the leakage the
     no-token contract exists to prevent.
 
+    Preconditions:
+        - ``_seen``, when passed, is a set of ``id()`` values of dicts/lists/
+          tuples already visited on the CURRENT recursion path; it is an
+          internal recursion parameter, not for callers to populate.
     Postconditions:
         - Returns True iff any dict reachable from ``value`` (through nested
           dicts, lists, or tuples) has a key that is, or case-insensitively
           contains, the substring ``"token"`` (e.g. ``"token"``,
           ``"github_token"``, ``"auth_token"``, ``"TOKEN"``).
+        - Never raises ``RecursionError``: a container already on the current
+          recursion path (identity-compared via ``id()``, so this only guards
+          against a genuine reference cycle, not merely equal-valued sibling
+          containers) is treated as containing no token key and not
+          traversed again.
     """
-    if isinstance(value, dict):
-        return any(
-            "token" in str(k).lower() or _contains_token_key(v) for k, v in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_token_key(v) for v in value)
+    if isinstance(value, (dict, list, tuple)):
+        seen = _seen if _seen is not None else set()
+        marker = id(value)
+        if marker in seen:
+            return False
+        seen = seen | {marker}
+        if isinstance(value, dict):
+            return any(
+                "token" in str(k).lower() or _contains_token_key(v, seen) for k, v in value.items()
+            )
+        return any(_contains_token_key(v, seen) for v in value)
     return False
 
 

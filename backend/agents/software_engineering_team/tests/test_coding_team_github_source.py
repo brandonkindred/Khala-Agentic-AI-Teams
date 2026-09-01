@@ -374,17 +374,26 @@ class TestClientWebHost:
     def test_default_api_host_maps_to_github_com(self, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
         client = GitHubClient(token="t", sleep=lambda _s: None)
-        assert client.web_host == "github.com"
+        try:
+            assert client.web_host == "github.com"
+        finally:
+            client._client.close()  # type: ignore[attr-defined]
 
     def test_ghes_api_host_is_returned_unchanged(self, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
         client = GitHubClient(token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None)
-        assert client.web_host == "ghes.example.com"
+        try:
+            assert client.web_host == "ghes.example.com"
+        finally:
+            client._client.close()  # type: ignore[attr-defined]
 
     def test_honors_github_api_url_env_var(self, monkeypatch) -> None:
         monkeypatch.setenv("GITHUB_API_URL", "https://ghes.other.com/api/v3")
         client = GitHubClient(token="t", sleep=lambda _s: None)
-        assert client.web_host == "ghes.other.com"
+        try:
+            assert client.web_host == "ghes.other.com"
+        finally:
+            client._client.close()  # type: ignore[attr-defined]
 
 
 class TestClientTransportErrorRetry:
@@ -680,7 +689,10 @@ class TestAbsoluteUrl:
         case needed there."""
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
         client = GitHubClient(token="t", sleep=lambda _s: None)
-        assert client._absolute_url("/graphql") == "https://api.github.com/graphql"  # type: ignore[attr-defined]
+        try:
+            assert client._absolute_url("/graphql") == "https://api.github.com/graphql"  # type: ignore[attr-defined]
+        finally:
+            client._client.close()  # type: ignore[attr-defined]
 
     def test_graphql_url_derived_separately_for_ghes(self) -> None:
         """GitHub Enterprise Server's REST base is "https://host/api/v3", but
@@ -690,7 +702,10 @@ class TestAbsoluteUrl:
         client = GitHubClient(
             token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None
         )
-        assert client._absolute_url("/graphql") == "https://ghes.example.com/api/graphql"  # type: ignore[attr-defined]
+        try:
+            assert client._absolute_url("/graphql") == "https://ghes.example.com/api/graphql"  # type: ignore[attr-defined]
+        finally:
+            client._client.close()  # type: ignore[attr-defined]
 
 
 class TestClientIssueCommentMarker:

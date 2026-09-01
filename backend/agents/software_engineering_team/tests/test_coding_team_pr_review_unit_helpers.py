@@ -286,7 +286,11 @@ class TestRunningSiblingOnCheckoutUnit:
         monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
 
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
-        assert updates == [("child-1", {"status": "failed", "error": updates[0][1]["error"]})]
+        assert len(updates) == 1
+        job_id, kwargs = updates[0]
+        assert job_id == "child-1"
+        assert kwargs.get("status") == "failed"
+        assert kwargs.get("error")
 
     def test_orphaned_child_with_missing_parent_is_skipped(self, monkeypatch, tmp_path) -> None:
         repo_dir = tmp_path / "repo"
@@ -304,6 +308,27 @@ class TestRunningSiblingOnCheckoutUnit:
         child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
         monkeypatch.setattr(main, "get_job", lambda job_id: {"job_id": "parent-1", "status": "running"})
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") == child
+        assert updates == []
+
+    def test_child_with_unlookupable_parent_is_reported_as_sibling_not_failed(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A transient job-service failure on the PARENT lookup must fail closed
+        (treat the child as a live sibling) rather than assume the parent is
+        gone and mark a possibly still-running child job failed."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+
+        def _boom(job_id):
+            raise RuntimeError("job service unreachable")
+
+        monkeypatch.setattr(main, "get_job", _boom)
         updates = []
         monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
 

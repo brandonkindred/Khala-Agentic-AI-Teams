@@ -407,7 +407,7 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
             return
         try:
             shutil.rmtree(target)
-            logger.info("Removed ephemeral per-issue checkout at %s", target)
+            logger.info("Removed ephemeral per-issue or per-PR checkout at %s", target)
         except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
             # exc_info so a partial-rmtree failure (the non-atomic case) is
             # diagnosable from the traceback, not just the message.
@@ -951,7 +951,7 @@ def _prepare_issue_branch(
         - ``expected_head_sha``, when provided, is the ``integration_branch``
           head SHA a caller's plan was grounded on (e.g. review-comment
           remediation, which triages and plans against a specific PR head
-          before this ever runs — see ``address_comments._pr_became_stale``
+          before this ever runs -- see ``address_comments._pr_became_stale``
           for the same freshness concern applied earlier in that flow). This
           activity can run long after that snapshot was taken (queued behind
           other Temporal work), so the branch may have moved again in the
@@ -981,10 +981,10 @@ def _prepare_issue_branch(
           remote's live ``integration_branch`` tip does not resolve to that
           exact SHA (a newer commit landed, or the branch is gone), returns
           ``False`` with an explanatory message BEFORE any checkout/reset of
-          ``integration_branch`` runs — dirty-tree recovery may already have
+          ``integration_branch`` runs -- dirty-tree recovery may already have
           committed WIP to a rescue branch by this point (no work is lost,
           per the failure postcondition above), but the seed/checkout that
-          would apply the caller's plan to the branch has not — the plan was
+          would apply the caller's plan to the branch has not -- the plan was
           grounded on stale code and must not be applied to newer state.
         - When ``expected_base_sha`` is provided and the freshly-fetched
           ``default_branch`` HEAD no longer matches it, fails closed with an

@@ -620,17 +620,33 @@ class CodingTeamWorkflow:
             if publish_mode not in (None, "existing_pr"):
                 raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
             is_existing_pr_publish = publish_mode == "existing_pr"
+            # Required github-payload keys are a caller-contract concern (a
+            # wiring bug), not an orchestrator/activity failure worth posting
+            # to the issue/PR as a "publish failed" notice -- same reasoning
+            # as the publish_mode check above. Extracted before the try below
+            # so a KeyError fails the workflow task directly instead of being
+            # caught by the broad `except Exception` and misreported as a
+            # publish failure.
+            owner = github["owner"]
+            repo = github["repo"]
+            base = github["base"]
+            integration_branch = github["integration_branch"]
+            if is_existing_pr_publish:
+                pr_number = github["pr_number"]
+            else:
+                issue_number = github["issue_number"]
+                issue_title = github["issue_title"]
             try:
                 publish_activity = (
                     github_pr_publish_activity if is_existing_pr_publish else github_publish_activity
                 )
                 publish_request = {
                     "job_id": request["job_id"],
-                    "owner": github["owner"],
-                    "repo": github["repo"],
+                    "owner": owner,
+                    "repo": repo,
                     "repo_path": request["repo_path"],
-                    "base": github["base"],
-                    "integration_branch": github["integration_branch"],
+                    "base": base,
+                    "integration_branch": integration_branch,
                     "remote": github.get("remote") or "origin",
                     "cleanup_checkout_on_success": bool(
                         github.get("cleanup_checkout_on_success")
@@ -639,15 +655,15 @@ class CodingTeamWorkflow:
                 if is_existing_pr_publish:
                     publish_request.update(
                         {
-                            "pr_number": github["pr_number"],
+                            "pr_number": pr_number,
                             "pr_url": github.get("pr_url"),
                         }
                     )
                 else:
                     publish_request.update(
                         {
-                            "issue_number": github["issue_number"],
-                            "issue_title": github["issue_title"],
+                            "issue_number": issue_number,
+                            "issue_title": issue_title,
                         }
                     )
                 return await workflow.execute_activity(

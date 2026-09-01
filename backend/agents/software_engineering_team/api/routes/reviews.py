@@ -515,14 +515,19 @@ def get_address_comments_running(
           via :func:`_main.get_running_review_for_pr`, the public wrapper over
           the same ``_running_review_for_pr`` the POST route's own admission
           uses), or ``running_job_id=None`` when none is running.
-        - When ``repo_path`` is given, ALSO checks for another active job (any
-          PR) already using that SAME checkout (:func:`_main.get_running_job_on_checkout`,
-          the public wrapper over the same ``_running_sibling_on_checkout`` the
-          POST route's own admission check uses) and returns its job_id too
-          if found — an operator-pinned ``repo_path``
-          is shared, unnamespaced, across every PR of that repo, so the plain
-          PR-scoped check above cannot see a DIFFERENT PR's job already working
-          that same checkout. Omitting ``repo_path`` skips this half of the check.
+        - When ``repo_path`` is given AND the PR-scoped check above found
+          nothing (``running_job_id is None``), ALSO checks for another active
+          job (any PR) already using that SAME checkout
+          (:func:`_main.get_running_job_on_checkout`, the public wrapper over
+          the same ``_running_sibling_on_checkout`` the POST route's own
+          admission check uses) and returns its job_id if found — an
+          operator-pinned ``repo_path`` is shared, unnamespaced, across every
+          PR of that repo, so the plain PR-scoped check above cannot see a
+          DIFFERENT PR's job already working that same checkout. This
+          checkout-scoped check is SKIPPED entirely once the PR-scoped check
+          already found a job — the PR-scoped result always takes precedence
+          and is returned as-is. Omitting ``repo_path`` skips this half of
+          the check.
         - Read-only: takes no lock, creates no job. Best-effort only — a job can
           start or finish between this call returning and the caller's next
           action, the same TOCTOU window every other admission check in this

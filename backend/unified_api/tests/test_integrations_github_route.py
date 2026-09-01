@@ -80,9 +80,10 @@ class _FakeAsyncClient:
     than indexing the tuple structure directly. ``get`` branches on the URL:
     a URL ending in ``/checkout/running`` is the admission pre-check, answered
     with ``checkout_running_job_id`` (``None`` by default, i.e. nothing
-    running); every OTHER ``get`` is treated as the ``_assert_pat_can_reach_repo``
-    reachability probe — answered with ``repo_access_status`` (200 by default,
-    i.e. "reachable") so routes that don't exercise that gate are unaffected —
+    running) and its URL/params recorded in ``checkout_checks``; every OTHER
+    ``get`` is treated as the ``_assert_pat_can_reach_repo`` reachability
+    probe — answered with ``repo_access_status`` (200 by default, i.e.
+    "reachable") so routes that don't exercise that gate are unaffected —
     and its URL is recorded separately in ``repo_checks``, not ``calls``.
     """
 
@@ -95,6 +96,7 @@ class _FakeAsyncClient:
         self._checkout_running_job_id = checkout_running_job_id
         self.calls = []
         self.repo_checks = []
+        self.checkout_checks = []
 
     def last_payload(self):
         """Return the JSON payload of the most recent post (the tuple's [1])."""
@@ -108,6 +110,7 @@ class _FakeAsyncClient:
 
     async def get(self, url, params=None, headers=None):
         if url.endswith("/checkout/running"):
+            self.checkout_checks.append((url, params))
             return _FakeResp(200, json_data={"running_job_id": self._checkout_running_job_id})
         self.repo_checks.append(url)
         return _FakeResp(self._repo_access_status, json_data={"full_name": "acme/widget"})
@@ -222,6 +225,12 @@ def test_run_issue_409_and_no_checkout_touched_when_already_running(
     assert "existing-job" in resp.json()["detail"]
     mock_clone.assert_not_called()
     assert fake.calls == []  # never forwarded to run-from-github
+    # The route actually queried the admission pre-check against THIS checkout,
+    # not merely got lucky with a default fake response.
+    assert len(fake.checkout_checks) == 1
+    checkout_url, checkout_params = fake.checkout_checks[0]
+    assert checkout_url.endswith("/checkout/running")
+    assert checkout_params == {"repo_path": "/tmp/acme_widget"}
 
 
 # ---------------------------------------------------------------------------

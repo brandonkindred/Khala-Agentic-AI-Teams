@@ -21,10 +21,20 @@ def _expected_basic_header(token: str) -> str:
 
 
 def _commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> str:
-    """Commit ``contents`` to ``filename`` on ``branch`` (created via
-    ``checkout -B`` if it doesn't exist yet) in the on-disk git repo at
-    ``repo``, and return the resulting commit SHA, leaving the checkout back
+    """Commit ``contents`` to ``filename`` on ``branch`` in the on-disk git repo
+    at ``repo``, and return the resulting commit SHA, leaving the checkout back
     on ``main``.
+
+    Preconditions:
+        - ``repo`` is an existing on-disk git checkout with a ``main`` branch
+          already checked out (or at least existing) — this helper always
+          returns to ``main`` afterwards, so a repo without one leaves the
+          checkout in an unexpected state.
+
+    Uses ``git checkout -B <branch>``, which creates ``branch`` if it does not
+    already exist but, when it DOES exist, resets it to the current HEAD
+    (``main``, per the precondition above) rather than leaving its prior tip
+    alone — this is not conditional on the branch being new.
 
     Shared by ``test_coding_team_github_source.py``'s ``TestPrepareIssueBranch``
     and ``test_coding_team_github_branch_prep_activity.py``'s

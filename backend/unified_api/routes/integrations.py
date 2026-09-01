@@ -33,7 +33,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from shared.concurrency import flock_lock
 from shared.git.git_utils import remote_url_matches
@@ -1345,6 +1345,40 @@ _GITHUB_HTTP_TIMEOUT = 15.0
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
+def _validate_base_branch_field(value: str | None) -> str | None:
+    """Reject a caller-supplied ``base_branch`` shaped to look like a git option.
+
+    Unlike ``owner``/``repo`` (validated by :func:`_validate_repo_component`
+    against an allowlist), ``base_branch`` is a real ref name and can
+    legitimately contain characters outside that allowlist (e.g. ``feature/x``),
+    so this is a narrower blocklist: it only rejects shapes that could be
+    misparsed once this value reaches a git subprocess call downstream (this
+    file's own doctrine — see ``_resolve_repo_path`` — validates every
+    externally-influenced value before it reaches git/filesystem ops).
+
+    Preconditions: ``value`` is the raw field value pydantic is validating
+        (``None`` when the field was omitted).
+    Postconditions: returns ``value`` unchanged when it is ``None`` or passes
+        every check. Raises ``ValueError`` (pydantic wraps this as a 422) for:
+        a value that is empty/whitespace-only after stripping, one whose
+        stripped form differs from the original (leading/trailing whitespace,
+        rejected outright rather than silently normalized), one starting with
+        ``-`` (would be parsed as a git option/flag instead of a ref name,
+        e.g. ``--upload-pack=...`` argument injection), or one containing a
+        NUL, CR, or LF byte.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or stripped != value:
+        raise ValueError("base_branch must not be blank or have leading/trailing whitespace")
+    if stripped.startswith("-"):
+        raise ValueError("base_branch must not start with '-'")
+    if any(ch in stripped for ch in ("\x00", "\r", "\n")):
+        raise ValueError("base_branch must not contain control characters")
+    return stripped
+
+
 def _parse_dependency_concurrency(raw: str | None) -> int:
     """Parse the ``GITHUB_DEPENDENCY_CONCURRENCY`` knob.
 
@@ -1453,6 +1487,8 @@ class RunGitHubIssueRequest(BaseModel):
     owner: str = ""
     repo: str = ""
 
+    _validate_base_branch = field_validator("base_branch")(_validate_base_branch_field)
+
 
 class RunGitHubIssueResponse(BaseModel):
     job_id: str
@@ -1482,6 +1518,8 @@ class RunPrReviewRequest(BaseModel):
     # the PAT's own authorization decides whether the repository is actually reachable.
     owner: str = ""
     repo: str = ""
+
+    _validate_base_branch = field_validator("base_branch")(_validate_base_branch_field)
 
 
 class RunPrReviewResponse(BaseModel):
@@ -1513,6 +1551,8 @@ class AddressPrCommentsRequest(BaseModel):
     base_branch: str | None = None
     owner: str = ""
     repo: str = ""
+
+    _validate_base_branch = field_validator("base_branch")(_validate_base_branch_field)
 
 
 class AddressPrCommentsResponse(BaseModel):
@@ -2875,35 +2915,42 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     # off this event (set from inside the executor thread itself) instead
     # guarantees a completed __enter__ is always paired with an __exit__.
     entered_lock = threading.Event()
+    # Acquisition and the work that follows share ONE try/finally (rather than
+    # two sequential ones) so a CancelledError raised while awaiting
+    # `_enter_lock` -- e.g. a client disconnect -- still reaches the finally
+    # below. A cancellation there does not stop the executor thread: it can
+    # still complete `lock_cm.__enter__()` (setting `entered_lock`) after this
+    # coroutine has already been torn down, and a finally scoped only around
+    # the *later* work block would never run to release it.
     try:
-        # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
-        # on an existing parent is a no-op needing no write permission, so this
-        # stays safe for an operator path under a read-only parent.
-        await loop.run_in_executor(
-            None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
-        )
+        try:
+            # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
+            # on an existing parent is a no-op needing no write permission, so this
+            # stays safe for an operator path under a read-only parent.
+            await loop.run_in_executor(
+                None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
+            )
 
-        def _enter_lock() -> None:
-            lock_cm.__enter__()
-            entered_lock.set()
+            def _enter_lock() -> None:
+                lock_cm.__enter__()
+                entered_lock.set()
 
-        await loop.run_in_executor(None, _enter_lock)
-        lock_held = True
-    except OSError as e:
-        if platform_owned:
-            raise HTTPException(
-                status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
-            ) from e
-        # Best-effort for an operator-pinned path: degrade to no additional
-        # locking rather than failing an otherwise-valid request, matching
-        # address_github_pr_comments' identical fallback.
-        logger.warning(
-            "github run-issue: could not acquire serialization lock for pinned checkout %s: %s",
-            repo_path,
-            e,
-        )
+            await loop.run_in_executor(None, _enter_lock)
+            lock_held = True
+        except OSError as e:
+            if platform_owned:
+                raise HTTPException(
+                    status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
+                ) from e
+            # Best-effort for an operator-pinned path: degrade to no additional
+            # locking rather than failing an otherwise-valid request, matching
+            # address_github_pr_comments' identical fallback.
+            logger.warning(
+                "github run-issue: could not acquire serialization lock for pinned checkout %s: %s",
+                repo_path,
+                e,
+            )
 
-    try:
         running = await _forward_to_coding_team(
             coding_team_url,
             "checkout/running",
@@ -3169,53 +3216,59 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
     lock_path = clone_lock_path(repo_path)
     lock_cm = flock_lock(lock_path)
     lock_held = False
-    # See the identical pattern in post_run_from_github's admission lock:
-    # tracks whether lock_cm.__enter__ actually completed inside the executor
+    # Tracks whether lock_cm.__enter__ actually completed inside the executor
     # thread, independent of whether this coroutine resumes to see it, so a
     # cancellation mid-acquisition can't leave the flock released only by GC.
     entered_lock = threading.Event()
+    # Acquisition and the work that follows share ONE try/finally (rather than
+    # two sequential ones) so a CancelledError raised while awaiting
+    # `_enter_lock` -- e.g. a client disconnect -- still reaches the finally
+    # below. A cancellation there does not stop the executor thread: it can
+    # still complete `lock_cm.__enter__()` (setting `entered_lock`) after this
+    # coroutine has already been torn down, and a finally scoped only around
+    # the *later* work block would never run to release it.
     try:
-        # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
-        # on an existing parent is a no-op needing no write permission, so this
-        # stays safe for an operator path under a read-only parent.
         try:
-            await loop.run_in_executor(
-                None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
-            )
+            # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
+            # on an existing parent is a no-op needing no write permission, so this
+            # stays safe for an operator path under a read-only parent.
+            try:
+                await loop.run_in_executor(
+                    None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
+                )
+            except OSError as e:
+                if platform_owned:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"could not create checkout parent directory for {owner}/{repo}: {e}",
+                    ) from e
+                logger.warning(
+                    "github address-comments: could not create checkout parent directory for "
+                    "pinned checkout %s: %s",
+                    repo_path,
+                    e,
+                )
+            else:
+
+                def _enter_lock() -> None:
+                    lock_cm.__enter__()
+                    entered_lock.set()
+
+                await loop.run_in_executor(None, _enter_lock)
+                lock_held = True
         except OSError as e:
             if platform_owned:
                 raise HTTPException(
-                    status_code=503,
-                    detail=f"could not create checkout parent directory for {owner}/{repo}: {e}",
+                    status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
                 ) from e
+            # Best-effort for an operator-pinned path (see Postconditions): degrade to
+            # no additional locking rather than failing an otherwise-valid request.
             logger.warning(
-                "github address-comments: could not create checkout parent directory for "
-                "pinned checkout %s: %s",
+                "github address-comments: could not acquire serialization lock for pinned checkout %s: %s",
                 repo_path,
                 e,
             )
-        else:
 
-            def _enter_lock() -> None:
-                lock_cm.__enter__()
-                entered_lock.set()
-
-            await loop.run_in_executor(None, _enter_lock)
-            lock_held = True
-    except OSError as e:
-        if platform_owned:
-            raise HTTPException(
-                status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
-            ) from e
-        # Best-effort for an operator-pinned path (see Postconditions): degrade to
-        # no additional locking rather than failing an otherwise-valid request.
-        logger.warning(
-            "github address-comments: could not acquire serialization lock for pinned checkout %s: %s",
-            repo_path,
-            e,
-        )
-
-    try:
         running = await _forward_to_coding_team(
             coding_team_url,
             f"pulls/{pr_number}/address-comments/running",

@@ -4,6 +4,7 @@ and previously untested (see the module's own docstring contracts)."""
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -50,8 +51,6 @@ def _base_request(**overrides: Any) -> dict[str, Any]:
 
 def _stub_token(monkeypatch: pytest.MonkeyPatch, api: Any) -> None:
     monkeypatch.setattr(api, "get_job", lambda job_id, cache_dir=None: {"job_id": job_id})
-    import os
-
     monkeypatch.setenv("GITHUB_TOKEN", "env-pat")
     monkeypatch.delenv("INTEGRATION_ENCRYPTION_KEY", raising=False)
     assert os.environ["GITHUB_TOKEN"] == "env-pat"

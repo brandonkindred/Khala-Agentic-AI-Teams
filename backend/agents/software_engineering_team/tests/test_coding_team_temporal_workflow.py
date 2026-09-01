@@ -1036,7 +1036,7 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
     )
 
     github = {**_GITHUB, "publish_mode": "existing-pr"}
-    with pytest.raises(ValueError, match="unsupported github.publish_mode"):
+    with pytest.raises(ValueError, match=r"unsupported github\.publish_mode: 'existing-pr'"):
         asyncio.run(workflow_obj.run(_github_request(github=github)))
 
     assert calls == [github_branch_prep_activity, run_pipeline_activity]

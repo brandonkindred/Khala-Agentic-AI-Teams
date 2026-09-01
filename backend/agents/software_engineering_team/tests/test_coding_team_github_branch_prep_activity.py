@@ -67,6 +67,16 @@ def _git(repo: str, *args: str) -> None:
     subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True, text=True)
 
 
+def _checked_out_branch(repo: str) -> str:
+    """Return the name of the branch currently checked out in ``repo``."""
+    return subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _init_repo(path: pathlib.Path) -> str:
     """Create a temporary git repo under ``path / "repo"`` and return its path.
 
@@ -119,12 +129,7 @@ def test_branch_prep_activity_clean_checkout_returns_ok_true(api, monkeypatch, t
     )
 
     assert out == {"ok": True, "error": None, "notes": []}
-    head = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head = _checked_out_branch(repo)
     assert head == "khala/issue-9"
 
 
@@ -155,12 +160,7 @@ def test_branch_prep_activity_expected_head_sha_match_succeeds(api, monkeypatch,
     # prep actually ran" from "the parameter was silently ignored" — both
     # produce True. Pin the observable postcondition: prep actually checked
     # out the integration branch.
-    head = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head = _checked_out_branch(repo)
     assert head == "khala/issue-9"
 
 
@@ -195,12 +195,7 @@ def test_branch_prep_activity_expected_head_sha_mismatch_fails_closed(
 
     assert out["ok"] is False
     assert stale_sha in (out["error"] or "")
-    head = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head = _checked_out_branch(repo)
     assert head == "main"
 
 

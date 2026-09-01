@@ -44,40 +44,15 @@ _REVIEW_THREAD_COMMENTS_PAGE_SIZE = 100
 # this rate so a future change to it can't miss one of the two bare literals.
 _REVIEW_THREADS_PAGE_SIZE = 100
 
-# GraphQL query for review-thread resolution state: GitHub's REST API has no
-# "resolved" field on a review comment, so thread resolution (the "Resolve
-# conversation" button on GitHub) can only be read via GraphQL's `isResolved`.
-_REVIEW_THREADS_QUERY = f"""
-query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
-  repository(owner: $owner, name: $repo) {{
-    pullRequest(number: $number) {{
-      reviewThreads(first: {_REVIEW_THREADS_PAGE_SIZE}, after: $after) {{
-        pageInfo {{ hasNextPage endCursor }}
-        nodes {{
-          isResolved
-          comments(first: {_REVIEW_THREAD_COMMENTS_PAGE_SIZE}) {{
-            pageInfo {{ hasNextPage }}
-            nodes {{ databaseId }}
-          }}
-        }}
-      }}
-    }}
-  }}
-}}
-"""
-
-# GraphQL query for the FULL review-thread listing (resolution state + the thread's
-# node id + each comment's databaseId). The read-only
-# ``get_resolved_review_thread_comment_ids`` (using ``_REVIEW_THREADS_QUERY``)
-# needs each comment's ``databaseId`` too — its own comment-id-set result requires
-# it — but NOT the thread's node ``id``, since it never resolves a thread, only
-# reports resolution state. Addressing unresolved comments needs BOTH: the thread
-# node ``id`` so the thread can be resolved via the ``resolveReviewThread``
-# mutation, and the per-thread comment ids so a REST reply can be posted to the
-# right comment. Kept separate from ``_REVIEW_THREADS_QUERY`` (which also
-# independently gained a nested-page-detection ``pageInfo { hasNextPage }`` inside
-# ``comments`` — the two queries are not identical in shape, only distinct in
-# PURPOSE: this one additionally needs the thread ``id``, the other doesn't).
+# GraphQL query for the review-thread listing: resolution state (GitHub's REST
+# API has no "resolved" field on a review comment, so thread resolution -- the
+# "Resolve conversation" button on GitHub -- can only be read via GraphQL's
+# `isResolved`) plus the thread's node id and each comment's databaseId.
+# Shared by both callers of :meth:`_iter_review_thread_nodes`:
+# ``get_resolved_review_thread_comment_ids`` (``strict=False``) only needs
+# ``isResolved``/``databaseId`` and simply ignores the extra ``id`` field;
+# ``list_review_threads`` (``strict=True``) additionally needs the thread node
+# ``id`` so a thread can be resolved via the ``resolveReviewThread`` mutation.
 _REVIEW_THREADS_FULL_QUERY = f"""
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {{
   repository(owner: $owner, name: $repo) {{
@@ -952,16 +927,17 @@ class GitHubClient(_GitHubHttpMixin):
 
         Shared transport/pagination/cap machinery for both
         :meth:`get_resolved_review_thread_comment_ids` and
-        :meth:`list_review_threads`: the two callers post different GraphQL
-        queries (``query``) and need different failure semantics, but
-        otherwise walk the exact same ``reviewThreads`` connection the exact
-        same way. ``strict`` selects which: ``True`` (``list_review_threads``,
-        with ``_REVIEW_THREADS_FULL_QUERY``) fails closed on ANY anomaly —
-        an unexpected payload shape must never be mistaken for "no more
-        threads". ``False`` (``get_resolved_review_thread_comment_ids``, with
-        ``_REVIEW_THREADS_QUERY``, which never requests a thread's ``id``)
-        degrades instead: a malformed or missing field is treated as absent
-        (skipped, or a threads page as exhausted) rather than raised, since a
+        :meth:`list_review_threads`: both callers currently post the same
+        GraphQL query (``_REVIEW_THREADS_FULL_QUERY``, passed explicitly via
+        ``query`` so a future caller can still substitute its own) and walk
+        the exact same ``reviewThreads`` connection the exact same way, but
+        need different failure semantics. ``strict`` selects which: ``True``
+        (``list_review_threads``) fails closed on ANY anomaly — an unexpected
+        payload shape must never be mistaken for "no more threads". ``False``
+        (``get_resolved_review_thread_comment_ids``, which never uses the
+        thread's ``id`` field even though the query returns it) degrades
+        instead: a malformed or missing field is treated as absent (skipped,
+        or a threads page as exhausted) rather than raised, since a
         resolution-lookup only loses de-duplication, never correctness, when
         data is missing.
 
@@ -1003,6 +979,19 @@ class GitHubClient(_GitHubHttpMixin):
                 )
             )
             payload = response.json()
+            if not isinstance(payload, dict):
+                if not strict:
+                    logger.warning(
+                        "_iter_review_thread_nodes: non-object GraphQL response for %s/%s#%s: %r",
+                        owner,
+                        repo,
+                        number,
+                        payload,
+                    )
+                    return
+                raise ReviewThreadsUnavailableError(
+                    owner, repo, number, f"non-object GraphQL response: {payload!r}"
+                )
             if payload.get("errors"):
                 if not strict:
                     logger.warning(
@@ -1149,7 +1138,7 @@ class GitHubClient(_GitHubHttpMixin):
         resolved: set[int] = set()
         try:
             for _thread_id, is_resolved, comment_ids in self._iter_review_thread_nodes(
-                owner, repo, number, query=_REVIEW_THREADS_QUERY, strict=False
+                owner, repo, number, query=_REVIEW_THREADS_FULL_QUERY, strict=False
             ):
                 if is_resolved:
                     resolved.update(comment_ids)
