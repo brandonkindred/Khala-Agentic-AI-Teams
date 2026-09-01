@@ -73,10 +73,12 @@ It is **not** a fill-cost engine. Explicitly out of scope:
   changes those targets, which changes both the emitted `exit_price` and
   potentially which bar crosses it (`exit_bar`). It never appears in an
   output field as a raw slippage adjustment applied post hoc to an
-  otherwise-fixed price — the "pre-slippage bid" character of every
-  emitted price/level holds — but it is not causally inert with respect
-  to `exit_price`/`exit_bar` the way it is for `entry_price`. It can also
-  still gate whether a *later* entry is admitted via the capital check.
+  otherwise-fixed price — every emitted price/level is an exact authored
+  level (or worse-of-open-and-level on a gap), never a slippage-adjusted
+  fill, even when — as for `basis="entry_price"` targets — that level's
+  *value* is derived from the post-slippage `entry_price_basis` as
+  described above. It can also still gate whether a *later* entry is
+  admitted via the capital check.
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
   at a single price. This is a real, deliberate simplification, not an
@@ -145,9 +147,13 @@ def simulate(
           bars[key] has bar.symbol == key (the mapping key is the sole
           source of symbol identity this module gates and attributes
           output against; see §2's Contract for the full statement).
-        - starting_equity is finite and > 0 (math.isfinite; excludes inf
-          and NaN, which would let an infinite or undefined quantity pass
-          the ReferenceTrade qty > 0 invariant undetected).
+        - starting_equity is finite and > 0 (math.isfinite; +inf equity
+          sizes an infinite quantity that passes the ReferenceTrade
+          qty > 0 invariant undetected, while NaN equity propagates NaN
+          through sizing and capital arithmetic and fails every entry's
+          qty > 0 gate as a late, opaque invariant violation rather than
+          a clear input error -- both are excluded by this precondition,
+          for different reasons).
         - entry_slippage_bps is finite and >= 0 (math.isfinite; an infinite
           value would make entry_price_basis infinite or -infinite and
           propagate NaN into downstream capital arithmetic).
@@ -331,9 +337,11 @@ resolve unilaterally.
   against (§5's "Target-symbol gating") and attributes `ReferenceTrade`
   output to; a mismatched `bar.symbol` would make that attribution
   ambiguous and is out of scope for this module to detect or reconcile.
-- `starting_equity` is finite and `> 0` (`math.isfinite` — `inf`/`NaN`
-  would let an infinite or undefined quantity slip past the
-  `ReferenceTrade.qty > 0` invariant undetected).
+- `starting_equity` is finite and `> 0` (`math.isfinite` — `inf` starting
+  equity yields an infinite quantity that passes `ReferenceTrade.qty > 0`
+  undetected; `NaN` yields a quantity that fails the same check only as a
+  late, opaque invariant violation rather than a clear input error — both
+  are excluded by this precondition, for different reasons).
 - `entry_slippage_bps` is finite and `>= 0` (`math.isfinite` — an infinite
   value would make `entry_price_basis` infinite/`-inf` and propagate `NaN`
   into downstream capital arithmetic).
@@ -694,9 +702,15 @@ convention as `max_position_pct` — `Field(default=20.0, ge=0, le=100)` on
 `RiskLimits`, and `RiskFilter.can_enter` itself computes `concentration =
 notional / current_equity * 100` before comparing it against the raw field
 value, so the field is compared directly against a percentage, not a
-fraction. Treating any of these as the other silently over- or
-under-sizes every position (or mis-evaluates every gate) by a factor of
-100.
+fraction. `max_gross_leverage` (used below, in "Additional admission
+gates") is different again — a **decimal multiplier**, not a percentage at
+all: `Field(default=1.0, ge=0)` on `RiskLimits` (no `le=100`, unlike the
+two `_pct` fields above), and `RiskFilter.can_enter` compares
+`total_notional / current_equity` directly against the raw field value
+with no `* 100`/`/ 100` anywhere — so `1.0` means "cap gross notional at
+1x equity," not "1%." Treating any of these fields as one of the others
+silently over- or under-sizes every position (or mis-evaluates every gate)
+by a factor of 100.
 
 **Position-cap clamp, applied first.** Before any whole-share handling, the
 raw quantity from every sizing kind above — not just a sub-1 result — is
