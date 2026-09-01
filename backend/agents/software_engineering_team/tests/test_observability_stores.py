@@ -136,6 +136,30 @@ def test_learnings_retention_days_env(monkeypatch) -> None:
 
 # --- trace_store -----------------------------------------------------------
 
+# Positions of the two cache-token columns in ``_INSERT_SQL`` / the tuple
+# ``_record_to_row`` builds. Every cache-token assertion in this module reads
+# through these (via :func:`_cache_tokens`) rather than slicing by literal, so a
+# column reorder is a one-line change here — and
+# ``test_insert_sql_pins_cache_column_positions`` fails loudly if these drift
+# from what the statement actually declares.
+_CACHE_READ_IDX = 10
+_CACHE_CREATION_IDX = 11
+
+
+def _cache_tokens(row) -> tuple:
+    """The ``(cache_read_tokens, cache_creation_tokens)`` pair read from ``row``.
+
+    Preconditions:
+        ``row`` is a positional row tuple in ``_INSERT_SQL`` column order — one
+        built by ``trace_store._record_to_row``, or the params of a recorded
+        INSERT.
+    Postconditions:
+        Returns the two cache-token values at the pinned indices, in
+        (read, creation) order. Indexes each column independently, so the pair
+        does not assume the two columns stay adjacent.
+    """
+    return (row[_CACHE_READ_IDX], row[_CACHE_CREATION_IDX])
+
 
 def test_trace_enabled_env(monkeypatch) -> None:
     """_trace_enabled defaults to False and follows the SE_TRACE_TO_POSTGRES flag."""
@@ -205,10 +229,9 @@ def test_record_to_row_cache_tokens() -> None:
     row_creation = trace_store._record_to_row(_RecWithCreation())
     row_neither = trace_store._record_to_row(_RecWithNeither())
 
-    # Column order: ..., total_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, ...
-    assert row_read[10:12] == (42, 0)
-    assert row_creation[10:12] == (0, 17)
-    assert row_neither[10:12] == (0, 0)  # missing attrs -> 0, never NULL
+    assert _cache_tokens(row_read) == (42, 0)
+    assert _cache_tokens(row_creation) == (0, 17)
+    assert _cache_tokens(row_neither) == (0, 0)  # missing attrs -> 0, never NULL
 
 
 def test_trace_retention_days_env(monkeypatch) -> None:
@@ -345,15 +368,6 @@ def _fake_cursor(monkeypatch):
     return _make
 
 
-# INSERT param order (see trace_store._INSERT_SQL / _record_to_row):
-# params[10] = cache_read_tokens, params[11] = cache_creation_tokens. Those two
-# indices are pinned to the statement's own column list by
-# test_insert_sql_pins_cache_column_positions below, so the hard-coded [10:12]
-# slices used throughout cannot silently start reading the wrong columns.
-_CACHE_READ_IDX = 10
-_CACHE_CREATION_IDX = 11
-
-
 def _insert_columns() -> list[str]:
     """The column names of ``_INSERT_SQL``, in statement order.
 
@@ -384,13 +398,14 @@ def test_insert_sql_placeholder_count_matches_row_width() -> None:
 def test_insert_sql_pins_cache_column_positions() -> None:
     """The cache columns must sit at the positions the value assertions index.
 
-    Every other test binds cache tokens by *position* (``params[10:12]``) and checks
-    only that the column names appear somewhere in the statement. That pair of
-    assertions cannot see a reordering: swapping ``cache_read_tokens`` and
-    ``cache_creation_tokens`` in the column list leaves the params where they are,
-    so Postgres would write each value into the other column while the value
-    assertions stay green. Pinning name-to-index here closes that gap, and is what
-    justifies the hard-coded slices elsewhere in this module.
+    Every other test reads cache tokens by *position* (``_CACHE_READ_IDX`` /
+    ``_CACHE_CREATION_IDX``, via :func:`_cache_tokens`) and checks only that the
+    column names appear somewhere in the statement. That pair of assertions cannot
+    see a reordering: swapping ``cache_read_tokens`` and ``cache_creation_tokens``
+    in the column list leaves the params where they are, so Postgres would write
+    each value into the other column while the value assertions stay green. This
+    test is the sole tie between those index constants and the statement's own
+    column list — it is what makes reading by index safe everywhere else.
     """
     columns = _insert_columns()
     assert len(columns) == trace_store._INSERT_SQL.count("%s")
@@ -405,7 +420,7 @@ def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
     sql, params = cursor.executed[0]
     assert "cache_read_tokens" in sql
     assert "cache_creation_tokens" in sql
-    assert params[10:12] == (42, 0)
+    assert _cache_tokens(params) == (42, 0)
 
 
 def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
@@ -414,7 +429,7 @@ def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
     assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=17)) is True
     sql, params = cursor.executed[0]
     assert "cache_creation_tokens" in sql
-    assert params[10:12] == (0, 17)
+    assert _cache_tokens(params) == (0, 17)
 
 
 def test_write_trace_writes_zero_for_no_cache_usage(_fake_cursor) -> None:
@@ -422,7 +437,7 @@ def test_write_trace_writes_zero_for_no_cache_usage(_fake_cursor) -> None:
     cursor = _fake_cursor()
     assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=0)) is True
     _, params = cursor.executed[0]
-    assert params[10:12] == (0, 0)
+    assert _cache_tokens(params) == (0, 0)
 
 
 def test_write_trace_never_raises_on_missing_cache_fields(_fake_cursor) -> None:
@@ -430,7 +445,7 @@ def test_write_trace_never_raises_on_missing_cache_fields(_fake_cursor) -> None:
     cursor = _fake_cursor()
     assert trace_store.write_trace(_RecNoCacheAttrs()) is True
     _, params = cursor.executed[0]
-    assert params[10:12] == (0, 0)
+    assert _cache_tokens(params) == (0, 0)
 
 
 def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
@@ -441,7 +456,7 @@ def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
     sql, rows = cursor.executed[0]
     assert "cache_read_tokens" in sql
     assert "cache_creation_tokens" in sql
-    assert rows[0][10:12] == (42, 0)
+    assert _cache_tokens(rows[0]) == (42, 0)
 
 
 def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
@@ -451,7 +466,7 @@ def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
     assert trace_store.write_rows([row]) == 1
     sql, rows = cursor.executed[0]
     assert "cache_creation_tokens" in sql
-    assert rows[0][10:12] == (0, 17)
+    assert _cache_tokens(rows[0]) == (0, 17)
 
 
 def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
@@ -460,7 +475,7 @@ def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
     row = trace_store._record_to_row(_RecNoCacheAttrs())
     assert trace_store.write_rows([row]) == 1
     _, rows = cursor.executed[0]
-    assert rows[0][10:12] == (0, 0)
+    assert _cache_tokens(rows[0]) == (0, 0)
 
 
 def test_write_trace_never_raises_on_cursor_failure(_fake_cursor) -> None:
