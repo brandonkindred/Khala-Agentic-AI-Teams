@@ -2742,7 +2742,7 @@ def _ensure_repo_clone(
                     return f"git fetch failed: {_scrub_git_secret(result.stderr, token)}"
                 return None
 
-            clone_url = f"https://github.com/{owner}/{repo}.git"
+            clone_url = f"https://{configured_web_host()}/{owner}/{repo}.git"
             result = subprocess.run(
                 ["git", "clone", clone_url, repo_path],
                 capture_output=True,

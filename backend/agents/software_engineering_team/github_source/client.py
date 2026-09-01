@@ -204,6 +204,16 @@ class ReviewComment:
     body: str
     html_url: str
     author: str = ""
+    # GitHub sets `line` to null once a comment's diff hunk becomes outdated
+    # (the file changed at that spot since), but keeps `original_line`
+    # populated with the comment's line at the time it was posted. Consumers
+    # that need SOME line to center on (e.g. a cited-code excerpt) should
+    # fall back to this when `line` is None rather than treating an outdated
+    # comment as file-level — it reflects the ORIGINAL commit's line
+    # numbering, not necessarily the current head's, but is still a much
+    # better anchor than none for a file that has not shifted drastically
+    # around that spot.
+    original_line: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -397,6 +407,7 @@ def _review_comment_from_payload(payload: dict[str, Any]) -> ReviewComment:
         body=payload.get("body") or "",
         html_url=payload.get("html_url") or "",
         author=(payload.get("user") or {}).get("login") or "",
+        original_line=payload.get("original_line"),
     )
 
 

@@ -41,12 +41,12 @@ def remote_url_matches(
 
     Preconditions:
         - ``owner`` and ``repo`` are non-empty repository coordinates.
-        - ``expected_host`` must NOT include a port (e.g. ``"host:8080"``):
-          the scp-colon normalization below runs unconditionally and turns
-          ANY colon into a path separator, including one that was actually
-          part of a port rather than the scp form's host separator, so a
-          port-bearing ``expected_host`` could never match the host segment
-          this function actually extracts.
+        - ``expected_host`` MAY include a port (e.g. a GitHub Enterprise
+          Server host like ``"git.example.com:8443"``, as
+          ``web_host_for_api_base_url`` returns when the configured API base
+          URL's ``netloc`` carries one) — the scp-colon normalization below
+          only runs for scheme-less (scp-style) input, so a URL-form
+          ``remote_url``'s own host:port survives intact for comparison.
     Postconditions:
         - Returns True iff ALL of: (a) the URL's host segment equals
           ``expected_host`` case-insensitively — a substring/suffix match on
@@ -61,9 +61,14 @@ def remote_url_matches(
           Returns False for a malformed, empty, or too-short URL, or a host
           mismatch — never assumed to match on unverifiable input.
         - Handles both HTTPS (``https://host/owner/repo.git``) and scp-style
-          SSH (``git@host:owner/repo.git``) remote URL forms, normalizing the
-          scp colon to a ``/`` so both split into path segments the same way.
-          Also handles an HTTPS remote carrying userinfo credentials
+          SSH (``git@host:owner/repo.git``) remote URL forms. The scp form's
+          colon (there is no scheme prefix to signal a URL) is normalized to
+          a ``/`` so both split into path segments the same way; a
+          scheme-prefixed URL's colon is left untouched instead, since there
+          it can only be a ``host:port`` separator (scp syntax has no scheme)
+          — converting it would mangle a GHES host's port into its own bogus
+          path segment and break the host-segment comparison below. Also
+          handles an HTTPS remote carrying userinfo credentials
           (``https://x-access-token:TOKEN@host/owner/repo.git``, the form a
           token-based clone produces) — the userinfo is stripped before the
           scp-colon normalization runs, so its embedded colon is never
@@ -72,13 +77,18 @@ def remote_url_matches(
     cleaned = remote_url.strip().rstrip("/")
     if cleaned.endswith(".git"):
         cleaned = cleaned[: -len(".git")]
-    # Strip a URL scheme (https://, ssh://, git://) if present so the host is
-    # always the first segment after normalizing the scp-style colon to "/".
+    # A scheme prefix (https://, ssh://, git://) is scp-style syntax's one
+    # distinguishing feature — scp syntax (`user@host:path`) never has one.
+    # Record whether one was present BEFORE stripping it, so the colon
+    # normalization below can tell a "host:port" URL apart from a genuine
+    # scp-style "host:path" — both look identical once the scheme is gone.
+    had_scheme = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned) is not None
     cleaned = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", cleaned)
-    # Strip HTTPS userinfo (``user:token@``) BEFORE the scp-colon normalization
-    # below — otherwise the colon inside "x-access-token:ghp_xxx@host/..."
-    # gets converted to "/" first, splitting the token off into its own path
-    # segment and making the host segment resolve to the username instead.
+    # Strip userinfo (``user:token@`` or scp's bare ``git@``) BEFORE the
+    # scp-colon normalization below — otherwise the colon inside
+    # "x-access-token:ghp_xxx@host/..." gets converted to "/" first,
+    # splitting the token off into its own path segment and making the host
+    # segment resolve to the username instead.
     # Guarded on "no '/' in the head": the scp form's pre-@ head is just "git"
     # (never containing "/"), so its "git@" prefix IS stripped here too — the
     # remaining "host:owner/repo" is left intact for the colon normalization
@@ -88,9 +98,13 @@ def remote_url_matches(
         head, _sep, tail = cleaned.partition("@")
         if "/" not in head:
             cleaned = tail
-    # Normalize the scp-style "git@host:owner/repo" form to use "/" throughout
-    # so both URL styles split into path segments the same way.
-    cleaned = cleaned.replace(":", "/")
+    if not had_scheme:
+        # Normalize the scp-style "git@host:owner/repo" form to use "/"
+        # throughout so both URL styles split into path segments the same
+        # way. Safe here specifically because scp syntax has no scheme, so
+        # any colon reaching this point can only be its host/path separator
+        # — never a port.
+        cleaned = cleaned.replace(":", "/")
     segments = [s for s in cleaned.split("/") if s]
     if len(segments) < 3:
         return False

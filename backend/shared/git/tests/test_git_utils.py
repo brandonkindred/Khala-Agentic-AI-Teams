@@ -620,6 +620,49 @@ def test_remote_url_matches_accepts_custom_expected_host() -> None:
     )
 
 
+def test_remote_url_matches_preserves_port_on_ghes_host() -> None:
+    """P2 regression: a GHES host with a non-default port (e.g.
+    "git.example.com:8443") must not have its port mangled by the scp-colon
+    normalization, which only applies to genuine scp-style syntax (no scheme
+    prefix) — a URL-form remote's colon here is always a host:port separator."""
+    assert (
+        remote_url_matches(
+            "https://git.example.com:8443/acme/widget.git",
+            "acme",
+            "widget",
+            expected_host="git.example.com:8443",
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_rejects_wrong_port_on_ghes_host() -> None:
+    assert (
+        remote_url_matches(
+            "https://git.example.com:8443/acme/widget.git",
+            "acme",
+            "widget",
+            expected_host="git.example.com:9999",
+        )
+        is False
+    )
+
+
+def test_remote_url_matches_preserves_port_with_userinfo() -> None:
+    """A port-bearing GHES host combined with embedded HTTPS credentials must
+    still resolve the host:port correctly, not have the userinfo strip or the
+    (skipped) scp-colon normalization interfere with the port."""
+    assert (
+        remote_url_matches(
+            "https://x-access-token:ghp_xxx@git.example.com:8443/acme/widget.git",
+            "acme",
+            "widget",
+            expected_host="git.example.com:8443",
+        )
+        is True
+    )
+
+
 def test_remote_url_matches_accepts_https_with_userinfo_credentials() -> None:
     """P1 regression: a token-based HTTPS clone (the form produced by CI /
     _git_auth_env-style credentials) embeds `user:token@` in the URL. The

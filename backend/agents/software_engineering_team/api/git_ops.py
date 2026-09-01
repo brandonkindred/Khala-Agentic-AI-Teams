@@ -912,6 +912,20 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
                 f"could not register fork remote {_FORK_REMOTE_NAME!r}: "
                 f"add failed ({add_msg}); set-url failed ({set_url_msg})",
             )
+        # `set-url` (without `--push`) only rewrites the fetch URL. If this
+        # remote was previously registered with a separately-configured
+        # `remote.<name>.pushurl` pointing elsewhere (e.g. a stale fork from
+        # an earlier run — see the module comment above on why there is only
+        # ever one fork remote to reuse), a later `git push` would still go
+        # to that stale destination even though `get-url` now reports the
+        # freshly-set fetch URL. Reset the push URL to match so push and
+        # fetch never diverge for this remote.
+        rc, push_set_url_msg = _main._git(repo_path, "remote", "set-url", "--push", "--", _FORK_REMOTE_NAME, remote)
+        if rc != 0:
+            return (
+                remote,
+                f"could not reset push URL for fork remote {_FORK_REMOTE_NAME!r}: {push_set_url_msg}",
+            )
     return _FORK_REMOTE_NAME, None
 
 

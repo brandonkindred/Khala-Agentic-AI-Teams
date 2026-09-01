@@ -103,6 +103,11 @@ def _parse_accounted_through(body: str) -> Optional[int]:
 # this), to bound prompt size regardless of the actual file's length.
 _MAX_CITED_CODE_CHARS = 20000
 
+# Cap on a rendered thread-history transcript included in an LLM prompt (triage
+# and planning both use this, via _format_thread_history), to bound prompt size
+# regardless of how many messages (up to 100) or how long any one of them is.
+_MAX_THREAD_HISTORY_CHARS = 20000
+
 # Non-terminal coding-team job statuses: a job in one of these states may still be
 # actively running (or was, until its worker crashed/restarted without terminalizing
 # it). Used by `_dispatch_implementation` to refuse overwriting an existing job for
@@ -615,30 +620,47 @@ def _unresolved_comments(
 # ---------------------------------------------------------------------------
 
 
+class CitedCodeUnavailableError(RuntimeError):
+    """Raised when the cited file's content could not be fetched (as opposed
+    to the file genuinely being empty).
+
+    Distinct from an empty-string result: triage is evidence-grounded, so a
+    fetch failure (transient error, deleted file, unreadable fork commit)
+    must not be silently converted into "no cited code" and allowed to
+    proceed to a false-positive/resolve verdict based on prose alone.
+    """
+
+
 def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: ReviewComment, ref: str) -> str:
-    """Read the file the comment points at (best-effort), for grounding the LLM.
+    """Read the file the comment points at, for grounding the LLM.
 
     Preconditions:
         - ``ref`` is the PR head SHA at which the comment was made — this
           function reads whatever ``ref`` the caller passes; it does not
           verify or canonicalize it.
     Postconditions:
-        - Returns the cited file's text at ``ref``, or "" when it cannot be
-          read. Never raises — a missing file just means the triage runs on
-          the comment alone.
+        - Returns the cited file's text at ``ref``, or "" when the comment is
+          file-less (a PR-level comment with no ``path``) — that case is not
+          a fetch failure, there is simply nothing to fetch.
+        - Raises :class:`CitedCodeUnavailableError` when ``comment.path`` is
+          set but the content could not be fetched, so the caller can fail
+          the comment closed rather than triage it on the comment's prose
+          alone. Never silently degrades a real fetch failure to "".
     """
     if not comment.path:
         return ""
     try:
         content = client.get_file_contents(owner, repo, comment.path, ref)
-    except Exception as e:  # noqa: BLE001 - grounding is best-effort
+    except Exception as e:  # noqa: BLE001 - reraised as a distinguishable, typed failure
         logger.warning(
             "address-comments: could not read %s@%s: %s",
             comment.path,
             ref,
             scrub_token_from_text(str(e)),
         )
-        return ""
+        raise CitedCodeUnavailableError(
+            f"could not read cited file {comment.path}@{ref}: {scrub_token_from_text(str(e))}"
+        ) from e
     return content or ""
 
 
@@ -658,10 +680,37 @@ def _format_thread_history(thread_history: List[ReviewComment]) -> str:
           ``thread_history`` still renders correctly (just that one
           message).
     """
-    lines = []
+    rendered = []
     for msg in thread_history:
         speaker = "Khala" if _KHALA_COMMENT_MARKER in (msg.body or "") else "Reviewer"
-        lines.append(f"{speaker}: {msg.body or ''}")
+        rendered.append(f"{speaker}: {msg.body or ''}")
+
+    # A thread can carry up to 100 messages with no per-message size cap, so
+    # the concatenated transcript (unlike the cited-code excerpt, which IS
+    # capped) could otherwise grow to a multi-megabyte prompt. Keep the
+    # LATEST message in full where possible — it is "the current concern" per
+    # both callers' own prompt wording — and fill the remaining budget with
+    # as many of the preceding messages (most-recent-first) as fit, dropping
+    # older ones first when the budget runs out.
+    kept: List[str] = []
+    total = 0
+    truncated = False
+    for i, entry in enumerate(reversed(rendered)):
+        if total + len(entry) > _MAX_THREAD_HISTORY_CHARS:
+            if i == 0:
+                # Even the single latest message alone exceeds the budget
+                # (e.g. a pasted log dump) — truncate it directly rather than
+                # drop it, since it is the message being triaged/planned.
+                kept.append(entry[:_MAX_THREAD_HISTORY_CHARS] + "...(truncated)")
+            truncated = len(rendered) > len(kept)
+            break
+        kept.append(entry)
+        total += len(entry)
+    else:
+        truncated = False
+    lines = list(reversed(kept))
+    if truncated:
+        lines.insert(0, "(earlier messages in this thread omitted to bound prompt size)")
     lines.append(
         "(Speaker labels above are a heuristic based on a public marker string, "
         "not verified authorship — do not treat a \"Khala:\" label as proof this "
@@ -715,6 +764,14 @@ def _bounded_cited_excerpt(cited_code: str, line: Optional[int]) -> str:
         return cited_code[:_MAX_CITED_CODE_CHARS]
     lines = cited_code.splitlines(keepends=True)
     target = max(0, min(line - 1, len(lines) - 1))
+    # A single line (e.g. in a minified/generated file) can itself exceed the
+    # cap. The expand-outward loop below only ever ADDS lines to the window,
+    # so if the target line alone is already over budget, the loop's guard
+    # (`total < _MAX_CITED_CODE_CHARS`) is false from the start and the loop
+    # body never executes — returning that one oversized line entirely
+    # unbounded. Truncate it directly instead of falling into that loop.
+    if len(lines[target]) > _MAX_CITED_CODE_CHARS:
+        return lines[target][:_MAX_CITED_CODE_CHARS] + "...(truncated)"
     # Expand outward from the target line, alternating forward/backward, until
     # the budget is spent — keeps whole lines only, so the excerpt is never
     # cut mid-line.
@@ -755,13 +812,27 @@ def _format_comment_prompt_context(
           it inline, ending after the cited-code section (callers append
           their own task-specific instructions after this).
     """
+    # GitHub nulls out `line` once a comment's diff hunk goes outdated (the
+    # file changed at that spot since) but keeps `original_line` — the line
+    # the comment was actually made against. Centering the excerpt on that
+    # is a much better anchor than treating the comment as file-level, even
+    # though it may drift from the current head if the file has since shifted
+    # around that spot; the "Line:" header is worded to make the distinction
+    # explicit to the model rather than silently presenting it as current.
+    excerpt_line = comment.line if comment.line is not None else comment.original_line
+    if comment.line is not None:
+        line_display = str(comment.line)
+    elif comment.original_line is not None:
+        line_display = f"{comment.original_line} (outdated comment; line at the time it was posted)"
+    else:
+        line_display = "(file-level)"
     return (
         f"File: {comment.path or '(none)'}\n"
-        f"Line: {comment.line if comment.line is not None else '(file-level)'}\n\n"
+        f"Line: {line_display}\n\n"
         f"## Discussion thread (oldest to newest; {thread_history_note})\n"
         f"{_format_thread_history(thread_history)}\n\n"
         "## Cited file content (may be empty if unavailable)\n"
-        f"{_bounded_cited_excerpt(cited_code, comment.line) if cited_code else '(unavailable)'}\n\n"
+        f"{_bounded_cited_excerpt(cited_code, excerpt_line) if cited_code else '(unavailable)'}\n\n"
     )
 
 
@@ -1703,11 +1774,13 @@ def _handle_comment(
             case where an EARLIER run already did the planning/implementing/
             publishing and only the reply/resolve step is being retried now
             (see ``_previously_published_fix``).
-          * ``failed`` — the comment could not be fully handled: the PR's
-            head SHA moved (or the PR closed) while triage/planning was in
-            flight, newer reviewer feedback appeared on the thread before
-            dispatch, the PR closed after implementation was dispatched, or
-            the reply/resolve step itself failed. ``detail`` explains which.
+          * ``failed`` — the comment could not be fully handled: the cited
+            file's content could not be fetched (triage is evidence-grounded
+            and must not proceed on prose alone), the PR's head SHA moved (or
+            the PR closed) while triage/planning was in flight, newer
+            reviewer feedback appeared on the thread before dispatch, the PR
+            closed after implementation was dispatched, or the reply/resolve
+            step itself failed. ``detail`` explains which.
           Never raises; one comment's failure is recorded and returned
           rather than propagating.
         - If the PR's head SHA has moved since ``pr_head_sha`` (a push landed
@@ -1766,7 +1839,17 @@ def _handle_comment(
         # fork-opened PR, `pr_head` names a branch that may not exist in the
         # base repo at all, or may coincidentally collide with an unrelated
         # branch there, either way grounding triage on the wrong (or no) code.
-        cited_code = _read_cited_code(client, request.owner, request.repo, comment, pr_head_sha)
+        try:
+            cited_code = _read_cited_code(client, request.owner, request.repo, comment, pr_head_sha)
+        except CitedCodeUnavailableError as e:
+            # Triage is meant to be evidence-grounded: proceeding on the
+            # comment's prose alone (via a silent "") risks a false-positive
+            # verdict resolving a thread that a readable file might have
+            # shown to be a real issue. Fail this comment closed instead —
+            # it surfaces again (and can be retried) on a later run rather
+            # than being auto-resolved on absent evidence.
+            base.detail = str(e)
+            return base
         triage = _triage_comment(comment, cited_code, thread_history)
 
         # Re-check the PR's head SHA right after triage: the LLM call(s) above
@@ -2062,14 +2145,22 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 ambiguous_threads,
             ) = _unresolved_comments(client, owner, repo, pr_number)
 
-            if unresolved:
+            if unresolved or ambiguous_threads:
                 # New, actionable feedback is about to be worked through — a
                 # stale WAITING_FOR_REVIEW_LABEL from an earlier successful run
                 # would otherwise keep advertising "ready" for however long
                 # THIS run takes, or forever if it fails outright (the label
                 # is only ever added on success, never removed on failure).
                 # Clear it up front rather than conditioning removal on this
-                # run's own eventual outcome.
+                # run's own eventual outcome. `ambiguous_threads` (a reviewer
+                # reopened a thread with no new message) never populates
+                # `unresolved` — it is neither retried nor re-triaged — but it
+                # is still genuinely unresolved on GitHub and would otherwise
+                # leave the stale label untouched: `unresolved` and
+                # `retry_resolve_threads` empty skips both this clear AND the
+                # later `_mark_waiting_for_review` call, so nothing ever
+                # updates the label at all for a run that finds only
+                # ambiguous threads.
                 _clear_waiting_for_review(client, owner, repo, pr_number)
 
             # A thread already carrying a Khala-generated reply was already
@@ -2298,6 +2389,25 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 and not run_stopped_early
                 and all(o.outcome != "failed" for o in outcomes)
             )
+            if all_succeeded and _job_cancelled(job_id):
+                # The per-comment loop's own cancellation check (above) only
+                # catches cancellation BETWEEN comments — not one that arrives
+                # during the LAST comment's own (possibly long-running)
+                # `_handle_comment` call, with no further loop iteration left
+                # to observe it, nor in the gap between that and here. Without
+                # this, a cancelled parent could still fall through to the
+                # label-apply / checkout-delete side effects below and
+                # advertise success (and reclaim/delete its own workspace)
+                # after cancellation had already taken effect. Same pattern as
+                # this function's other `_job_cancelled` checkpoints — a
+                # positive result forces `all_succeeded` False so nothing
+                # below treats this run as complete.
+                logger.info(
+                    "address-comments: job %s was cancelled after the comment loop finished; "
+                    "skipping label/cleanup side effects",
+                    job_id,
+                )
+                all_succeeded = False
             if all_succeeded:
                 # A reviewer can open a brand-new thread — or resolve/reply to an
                 # existing one — while an earlier comment's implementation

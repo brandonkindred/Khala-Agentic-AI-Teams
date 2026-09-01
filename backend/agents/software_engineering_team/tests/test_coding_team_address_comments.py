@@ -976,6 +976,68 @@ class TestBoundedCitedExcerpt:
         assert "line00000\n" in excerpt
         assert len(excerpt) <= ac._MAX_CITED_CODE_CHARS
 
+    def test_truncates_a_single_line_that_alone_exceeds_the_budget(self, address_env) -> None:
+        """P2 regression: a minified/generated file can have a single line
+        longer than _MAX_CITED_CODE_CHARS. The expand-outward loop's budget
+        guard (`total < _MAX_CITED_CODE_CHARS`) starts already false in that
+        case, so the loop body never runs and the whole oversized line was
+        previously returned unbounded, defeating the cap entirely."""
+        ac = address_env["ac"]
+        huge_line = "x" * (ac._MAX_CITED_CODE_CHARS * 2)
+        text = f"short line before\n{huge_line}\nshort line after\n"
+        cited_line_number = 2
+
+        excerpt = ac._bounded_cited_excerpt(text, cited_line_number)
+
+        assert len(excerpt) <= ac._MAX_CITED_CODE_CHARS + len("...(truncated)")
+        assert excerpt.startswith("x" * 10)
+
+
+# ---------------------------------------------------------------------------
+# _format_thread_history
+# ---------------------------------------------------------------------------
+
+
+def _msg(id_: int, body: str) -> ReviewComment:
+    return ReviewComment(id=id_, path="a.py", line=1, body=body, html_url=f"https://x/{id_}")
+
+
+class TestFormatThreadHistory:
+    def test_renders_all_messages_when_within_budget(self, address_env) -> None:
+        ac = address_env["ac"]
+        history = [_msg(1, "first"), _msg(2, "second"), _msg(3, "third")]
+
+        rendered = ac._format_thread_history(history)
+
+        assert "first" in rendered
+        assert "second" in rendered
+        assert "third" in rendered
+
+    def test_bounds_total_size_for_a_long_discussion(self, address_env) -> None:
+        """P2 regression: up to 100 thread messages were concatenated with no
+        aggregate size cap before going into an LLM prompt (unlike the cited-
+        code excerpt, which IS capped) — a long discussion could produce a
+        multi-megabyte prompt."""
+        ac = address_env["ac"]
+        history = [_msg(i, "x" * 5000) for i in range(100)]
+
+        rendered = ac._format_thread_history(history)
+
+        assert len(rendered) <= ac._MAX_THREAD_HISTORY_CHARS + 5000
+
+    def test_preserves_the_latest_message_in_full(self, address_env) -> None:
+        """The latest message is "the current concern" per both callers'
+        prompt wording — it must survive truncation even when earlier
+        messages are dropped to make room."""
+        ac = address_env["ac"]
+        history = [_msg(i, "x" * 5000) for i in range(100)]
+        latest_body = "THIS IS THE CURRENT CONCERN"
+        history.append(_msg(100, latest_body))
+
+        rendered = ac._format_thread_history(history)
+
+        assert latest_body in rendered
+
 
 # ---------------------------------------------------------------------------
 # _handle_comment
