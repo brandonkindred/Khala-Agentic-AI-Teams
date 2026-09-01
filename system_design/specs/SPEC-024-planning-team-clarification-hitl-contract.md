@@ -175,9 +175,27 @@ the same shared component. Shipping the backend change alone, without this clien
 every legitimate Planning answer submission through the existing UI into a `409`. **Contract
 requirement:** the same rollout must extend `planning.model.ts` with the `resume_token` field (read
 from `PlanningStatusResponse.resume_token` above), update `PlanningApiService.submitAnswers` to
-accept and forward it in the POST body, and wire Planning's usage of `PendingQuestionsComponent` to
-populate its `resumeToken` input from the status response the same way the coding-team path already
-does — this is not backend-only scope, and the story is not complete without it.
+accept and forward it in the POST body, and wire `PendingQuestionsComponent`'s `resumeToken` input
+from the status response the same way the coding-team path already does — this is not backend-only
+scope, and the story is not complete without it.
+
+**Correction — "wire Planning's usage of `PendingQuestionsComponent`" assumes a usage that does not
+exist; Planning has no mounted question-answering surface at all today.** A repo-wide search finds
+`PendingQuestionsComponent` mounted in exactly one place — `coding-team-page.component.html` — for
+the coding team's own flow. Planning's own status surface,
+`planning-job-status.component.html:45-47`, renders only a read-only `app-inline-banner` reporting
+"Workflow paused — N question(s) need your input"; neither `planning-job-status.component.ts` nor
+`planning-page.component.ts` mounts `PendingQuestionsComponent`, or any other component capable of
+displaying `pending_questions` or submitting an answer, anywhere in the Planning page. A Planning job
+that reaches this contract's pause has literally nothing in the browser for a human to view the
+questions or respond through — every such job waits on `wait_condition` indefinitely (§5 risk 1),
+regardless of how correctly the backend and the model/service plumbing above are built. **Contract
+requirement, superseding "wire... the same way the coding-team path already does" above:** this
+rollout must add the actual Planning question-answering surface — mount `PendingQuestionsComponent`
+(or an equivalent) into Planning's job-status view, wired to `pending_questions`, `resume_token`,
+submission via the migrated `PlanningApiService.submitAnswers`, and a status-refresh/poll so the
+paused state clears once answered — not merely extend models and service method signatures that
+nothing in the Planning UI yet calls with real question data.
 
 **Contract requirement — carry every selection, not just one.** PRA's own `OpenQuestion`
 (`product_requirements_analysis_agent/models.py:78`, mirrored in
@@ -533,6 +551,28 @@ the content that was accepted for it — this contract's own write-once slot, §
 enough of a record if it survives the resume-path clear rather than being deleted by it) so that a
 request whose `resume_token` matches an *already-consumed* round, with content identical to what was
 accepted for it, returns success (not `409`) — an idempotent no-op reporting the prior outcome —
+
+**Correction — "the write-once slot... may already be enough of a record" is not reliable once §4.3's
+own resume-time conversion requirement is applied; that step transforms the record this idempotency
+check would need to compare against.** §4.3's resume-path conversion (the requirement introduced
+alongside the synthesized-default fix, above) rewrites each raw `AnswerSubmission` into an enriched
+`AnsweredQuestion`-shaped record — resolving option labels, synthesizing defaults for omitted
+questions, converting `selected_option_ids` into a computed `selected_answer` string — before moving
+it into `resolved_questions`. This conversion is exactly the kind of lossy, one-way transformation
+this contract's own DbC discipline would flag: nothing guarantees it retains the original
+`resume_token` alongside the enriched record, or preserves the raw submitted content (or this section's
+own canonical comparison key) in a form the idempotency check above can compare a retry against.
+After a lost HTTP success response, the "already-consumed-token fast path" this idempotency
+requirement describes has nothing reliable left to prove a retry is identical, and would either
+incorrectly return `409` (defeating this whole requirement) or accept the retry's content unverified
+(losing the "identical content only" guard). **Contract requirement:** explicitly retain a per-token
+raw-content or canonical-key receipt — the resume-path's own consumption step must persist this
+receipt (token, canonical comparison key) as a distinct, durable record *before or alongside* the
+`resolved_questions` conversion, not rely on the converted/enriched record surviving as a proxy for
+it; the audit-facing `resolved_questions` entry can be freely transformed by §4.3's conversion, but
+this idempotency receipt must not be, since it exists purely to answer "was this exact request
+already accepted," not to be human/audit-readable.
+
 while a request against an already-consumed token with *different* content is still rejected as
 genuinely stale/conflicting. This is additive to, not a replacement for, the strict-match `409` above:
 the 409 path still governs any token that was never valid or whose content doesn't match what this
@@ -1926,6 +1966,21 @@ this contract:
   underlying gap completely — no single per-activity check can, since the same race recurs at every
   activity boundary in the chain — only to apply this contract's own established mitigation
   consistently at the boundary it newly creates.
+
+  **The pre-entry check just required for `sub_agent_provisioning_activity` protects only its
+  progress write, not its failure writer — the same distinction already corrected for
+  `finalize_planning_activity` applies here too.** `sub_agent_provisioning_activity` is
+  `SINGLE_ATTEMPT`/`NO_RETRY` (`temporal/activities.py:437-438`), so if a cancellation or interruption
+  lands *after* the new pre-entry check passes but *while* the activity is doing its own work (the
+  AI-Systems build poll, the handoff read-modify-write) and the activity then fails on that one
+  attempt, Planning's `_guarded` wrapper still runs its unconditional `mark_job_failed` — the pre-entry
+  check did nothing to prevent this, exactly as established for finalize above (a pre-entry check
+  covers status *at entry*, not status *at failure*, which can be arbitrarily later within the same
+  invocation). **Contract requirement:** apply the same mandatory conditional active-status-guarded
+  failure writer already required for `document_production_activity` and `finalize_planning_activity`
+  to `sub_agent_provisioning_activity` as well — the pre-entry check alone is sufficient only for the
+  initial progress write, never a substitute for the conditional failure writer, consistent with every
+  other activity this contract corrects.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
@@ -2235,6 +2290,26 @@ this contract:
   then, this contract's position is that every client-visible semantic field belongs in the identity,
   not a hand-picked subset of it.
 
+  **This same rollout changes PRA's own status serialization (adding `allow_multiple`, flipping
+  `required`'s effective default, above) — a rolling deployment of that change can make the identical
+  underlying round compare as "different" purely from which replica served it, with no `apply_answers`
+  call involved at all.** If the status service's old and new code serve concurrently during a rolling
+  deploy, the *same* persisted round can be read once through an old replica (no `allow_multiple` key,
+  `required` defaulting the old way) and again, later, through a new replica (both fields present,
+  `required` defaulting the new way) — the canonical comparison above would see a field-level
+  difference for a round PRA never actually advanced, misclassify it as advancement, and the resumed
+  activity would skip its own submission (or, in the achievable-application-proxy case above,
+  incorrectly treat the mismatch as confirmation) against a round the client is still legitimately
+  answering. **Contract requirement:** this specific rollout — the status-serialization change
+  (`allow_multiple`/`required` default) — must not be exposed to live traffic as a rolling,
+  mixed-version deployment; either deploy it as a single atomic cutover (no old/new replica overlap
+  serving this route), or have the reconciliation comparison normalize both the persisted round and
+  the current status read under one fixed, explicit schema version before comparing field-by-field,
+  so a version skew during rollout cannot itself manufacture a false round-advancement signal. This is
+  narrower in scope than, and does not require, the general worker-versioning machinery this contract
+  uses elsewhere (§4.3.2) — it is a rollout-sequencing constraint on one specific PRA-side change, not
+  a new compatibility primitive.
+
   **`required` and the option metadata default-selection depends on must also be part of this
   canonical identity — a round can keep `id`/`question_text`/`options`/`allow_multiple` unchanged
   while still changing meaning through these fields.** Two further ways a "same-shaped" round is not
@@ -2453,19 +2528,53 @@ requirement, redefining what "confirmed applied" achievably means:** rather than
 application receipt that doesn't exist, treat *genuine round advancement* as the achievable proxy —
 continue `wait_pra` polling (step (3) of the resume path, §4.3) until PRA's status reports either a
 pending-questions round that differs from the persisted one under this contract's own canonical
-comparison (§4.3's multiset/full-shape identity, above) or a terminal (`completed`/`failed`) status;
-only *that* observation — not a bare empty/absent `pending_questions` read, which fires at
-acceptance — clears the local envelope. This is sound because PRA's own `communicate_with_user` loop
-structurally cannot produce a *new*, genuinely different round (or reach completion) without its
-current phase having already consumed the prior round's submitted answers via `apply_answers` first —
-a later phase raising fresh questions, or the run completing, is only reachable after the earlier
-phase that was waiting on this round's answers has proceeded past it. Observing forward progress is
+comparison (§4.3's multiset/full-shape identity, above) or **successful** completion; only *that*
+observation — not a bare empty/absent `pending_questions` read, which fires at acceptance — clears the
+local envelope. This is sound because PRA's own `communicate_with_user` loop structurally cannot
+produce a *new*, genuinely different round (or reach successful completion) without its current phase
+having already consumed the prior round's submitted answers via `apply_answers` first — a later phase
+raising fresh questions, or the run completing successfully, is only reachable after the earlier phase
+that was waiting on this round's answers has proceeded past it. Observing forward progress is
 therefore valid indirect evidence of application, where a bare "no more pending questions" read is
 not. This does mean the local clear can lag slightly behind PRA's actual `apply_answers` call (by
 however long PRA takes to move its own phase forward) rather than firing the instant PRA applies the
 answer — an accepted latency cost, not a correctness gap, since the crash-safety property this
 section protects only requires "never clear before application," never "clear immediately upon
 application."
+
+**Correction — a terminal `failed` status is not the same forward-progress evidence as a new round
+or successful completion; it must not be treated as proof of application.** The redefinition above
+originally included a `failed` terminal status alongside a new round and successful completion as
+proxies for "PRA applied this batch." That is unsound: PRA can fail or be cancelled *after* its
+answers route clears `pending_questions` (at POST-acceptance) but *before* its background
+`communicate_with_user` loop reaches `apply_answers` — precisely the crash window this whole
+correction exists to account for. A `failed` status observed in that window proves only that PRA
+stopped, not that it consumed the batch; treating it as application evidence would clear Planning's
+envelope and mark the batch resolved/consumed even though PRA never actually used it, discarding the
+one durable record of what the human decided. **Contract requirement, narrowing the proxy above:**
+only a genuinely different round (per the canonical comparison) or a **successful** completion status
+may clear the local envelope; a `failed` (or otherwise non-successful) terminal status must not clear
+it or mark the batch consumed — the resume-path activity should instead surface this as its own
+failure (propagating through `_guarded`'s ordinary failure path, per this contract's other
+active-status-conditional writers), leaving the durable, still-unconsumed answer batch in the job
+record for whatever recovery or retry this failure triggers, rather than silently discarding it as if
+it had been applied.
+
+**A different round is evidence *something* was applied — not evidence that Planning's own persisted
+batch was the thing applied.** This contract already permits PRA's public answers endpoint to be used
+concurrently, independent of Planning's own signal path (§4.1/§4.3's repeated acknowledgment that a
+direct PRA submission is possible). A direct caller can submit a different batch B to PRA between the
+moment Planning's resume-path activity persists-and-signals its own batch A and the moment that
+activity's own step (1) actually POSTs A to PRA — if B lands first and PRA applies it, `wait_pra`
+observes a genuinely new round (or completion) exactly as this proxy expects, and the activity
+concludes "A was applied," clears A's envelope, and records A into `resolved_questions` — while PRA's
+actual artifacts reflect B, not A, for that round. The proxy correctly detects forward progress; it
+cannot distinguish *whose* submission caused it. **This is not closable within this contract's
+boundary:** proving "the round that just resolved was resolved specifically by batch A" requires an
+acceptance identity from PRA tied to the submitted content (an idempotency/receipt key covering *what
+was submitted*, not just *that something was*), which PRA does not expose — the same class of gap as
+this contract's other PRA-boundary risks. This is named here as a further open risk (§5, below), not
+resolved by the round-advancement proxy above; #7445-B inherits it knowingly.
 
 **`PlanningWorkflow.submit_answers` (signal handler)**
 - *Preconditions:* None on the caller — a signal handler must accept any payload without raising
@@ -2536,17 +2645,29 @@ application."
   workflow's true state" gap this contract has already corrected for the submit activity's own
   crash/failure paths (§4.3.1) — silent from the job record's perspective, regardless of how loudly
   Temporal itself reports the failure. **Contract requirement:** this activity call must not be left
-  to fail the workflow unconditionally. Either (a) wrap it the same way the submit activity's
-  no-retry-cushion crash is wrapped — a bounded retry policy, and a `try/except` around the
-  `execute_activity` call that, on exhaustion, invokes the same conditional `mark_planning_job_failed_activity`
-  backstop (§4.3.1) before re-raising, so the job record is left `failed` (guarded by the same
-  active-status conditional write, not resurrecting a state that moved on in the meantime) rather than
-  stuck claiming an active pause nothing will ever resume; or (b) treat this specific activity's
-  failure as non-fatal to the workflow — log it and proceed directly into `wait_condition` without the
-  eviction-recovery benefit this round would have provided, relying on a subsequent signal (or this
-  same check retried on the next pause round) rather than failing the whole execution over one
-  reconciliation lookup. This contract does not mandate which; it requires the gap be closed, not left
-  to an unconditional `await` whose failure mode was never specified.
+  to fail the workflow unconditionally. Wrap it the same way the submit activity's no-retry-cushion
+  crash is wrapped — a bounded retry policy, and a `try/except` around the `execute_activity` call
+  that, on exhaustion, invokes the same conditional `mark_planning_job_failed_activity` backstop
+  (§4.3.1) before re-raising, so the job record is left `failed` (guarded by the same active-status
+  conditional write, not resurrecting a state that moved on in the meantime) rather than stuck
+  claiming an active pause nothing will ever resume.
+
+  **Correction — treating this activity's failure as non-fatal ("proceed directly into
+  `wait_condition` without the eviction-recovery benefit") is not a safe alternative; it is unsafe in
+  exactly the scenario this activity exists to recover.** An earlier draft of this requirement offered
+  a second option: log the failure and proceed to `wait_condition` anyway, relying on a subsequent
+  signal. That is unsound precisely when this reconciliation was actually needed — if the legitimate
+  early signal for this round was already evicted (the eviction-cap correction above) and the durable
+  lookup then exhausts its retries, "proceed anyway" means the workflow blocks on `wait_condition`
+  with no buffered signal, no durable-batch confirmation, and no future signal coming (the client
+  already received success and has no reason to retry): the job hangs forever, and no later pause
+  round can ever be reached either, since this one never resumes. **Contract requirement, removing
+  the non-fatal alternative above:** the guarded-backstop path is the only acceptable treatment of
+  this activity's failure — proceeding to `wait_condition` on a failed reconciliation lookup is not a
+  permitted alternative. If a workflow-side retry/timer that keeps re-attempting the durable lookup
+  (rather than failing outright) is preferred over the backstop, it must actually keep attempting the
+  lookup until it succeeds or the workflow is otherwise terminated — never silently abandon the
+  attempt and fall through to an unconfirmed wait.
 
   **A signal carrying a matching `resume_token` is not, by itself, proof a durable answer batch
   exists — the signal handler's own precondition is "none on the caller."** §4.2 states the signal
@@ -2698,14 +2819,50 @@ application."
   regardless of what the client's HTTP response claimed. **Contract requirement:** the persist path
   and the read paths must support both shapes for the duration of the rollout — either (a) dual-write
   (append to both the legacy flat list *and* a new token-keyed structure on every submission) and
-  dual-read (each re-entry reader — the pre-patch flat-list reader and the new token-keyed
-  reconciliation activity — checks its own expected shape, falling back to filtering the flat list by
-  currently-pending question ids exactly as today when no token-keyed entry exists for a given job),
-  or (b) a persisted per-job schema/version marker the route and every reader inspect to decide which
-  shape that specific job's `submitted_answers` is in, set once and never changed for that job's
-  lifetime. Either shape is acceptable; unconditionally switching the route's write format at deploy
-  time, relying solely on `workflow.patched` to protect in-flight executions, is not — that patch
-  marker protects none of this migration's actual failure surface.
+  dual-read (each re-entry reader checks its own expected shape — the pre-patch flat-list reader keeps
+  reading the flat list exactly as it does today, unmodified by this migration; the new token-keyed
+  reconciliation activity reads only the new token-keyed structure), or (b) a persisted per-job
+  schema/version marker the route and every reader inspect to decide which shape that specific job's
+  `submitted_answers` is in, set once and never changed for that job's lifetime. Either shape is
+  acceptable; unconditionally switching the route's write format at deploy time, relying solely on
+  `workflow.patched` to protect in-flight executions, is not — that patch marker protects none of this
+  migration's actual failure surface.
+
+  **Correction — the new token-keyed reconciliation activity must never fall back to filtering the
+  legacy flat list by question-id membership; that reintroduces the exact stale-answer bug this
+  migration's own token-tagging requirement (above) was written to close.** An earlier draft of the
+  dual-read shape (a) above described the new reconciliation activity falling back to id-membership
+  filtering over the flat list when no token-keyed entry exists — but this contract already
+  established, in requiring the token-tagging migration in the first place, that id-membership
+  filtering over the accumulated flat history is unsafe for reconciliation: it cannot distinguish "a
+  batch answering the current round" from "a batch that answered an earlier round reusing the same
+  id," and a stale batch can satisfy the filter for a newly-armed token it never actually answered.
+  Adding that same fallback back in for jobs still on the legacy shape does not avoid this hazard, it
+  just reintroduces it selectively. **Contract requirement, removing the fallback:** the token-keyed
+  reconciliation activity checks only the token-keyed structure; if no entry exists there for the
+  given `resume_token` (whether because none was ever written, or because this specific job is still
+  on the legacy-only shape mid-migration), it reports "no match" — the same outcome as if eviction had
+  discarded a signal and no durable batch exists — never a flat-list membership fallback. The
+  pre-patch flat-list reader is unaffected and continues reading the flat list exactly as it does
+  today; it is a separate, legacy-only code path this migration does not touch, not a fallback the new
+  reconciliation activity shares.
+
+  **The dual-write shape (a) above does not itself require the legacy and token-keyed writes to be
+  committed atomically — left unstated, a partial write reintroduces the exact split-visibility
+  failure this migration exists to avoid.** If the persist path performs two separate job-store calls
+  (one appending to the legacy flat list, one writing the token-keyed entry) and the process or
+  job-service call fails after only one succeeds, two distinct failures follow: a pre-patch workflow's
+  re-entry reader, expecting the flat list, never sees an answer that was written only to the
+  token-keyed structure; and a patched workflow's new reconciliation activity, expecting the
+  token-keyed structure, never sees an answer written only to the flat list. Worse, a client or route
+  retry of the same partial operation — attempting to complete the missing half — can append a
+  duplicate entry to the flat list (which, unlike the token-keyed structure, has no write-once guard
+  of its own), corrupting the very history the legacy reader depends on. **Contract requirement:**
+  the dual-write must be committed as a single atomic job-store update — one call that writes both
+  representations together, succeeding or failing as a unit — not two separate calls a partial failure
+  can split; if the underlying job-store primitive cannot express both representations in one atomic
+  write, use the schema/version-marker alternative (b) instead, which does not have this atomicity
+  requirement since it writes only one representation per job.
 
 **Open risks, not resolved by this spec:**
 1. *Carried over from `hitl_pause_resume_contract.md` §4:* `workflow.wait_condition` here is
@@ -2816,6 +2973,16 @@ application."
    stated scope — this contract does not mandate that PRA-side change, only names the gap explicitly
    rather than leaving it implied-closed by Planning's own (real, but partial) filtering. #7445-B
    inherits this residual risk knowingly.
+10. *New to this spec, cross-team:* the "genuine round advancement proves application" proxy (§4.3,
+    the achievable redefinition of the crash-safe clear-after-apply ordering) detects that *something*
+    was applied, not that Planning's own persisted batch specifically was. Because this contract
+    permits concurrent, independent submission through PRA's own public answers endpoint (§4.1/§4.3),
+    a direct caller's batch can be applied in the same window the resume-path activity is between
+    persisting its own batch and posting it, producing the same forward-progress signal this proxy
+    relies on — the activity then clears and records its own batch as resolved even though PRA's
+    actual artifacts reflect the other submission. Full closure requires an acceptance identity from
+    PRA tied to submitted content, not merely to round progression, which PRA does not expose; this is
+    outside `planning_team`'s boundary. #7445-B inherits this residual risk knowingly.
 
 ---
 
