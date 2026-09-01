@@ -955,22 +955,6 @@ class SpecReadinessGate(GateResultsMixin):
 
         kind = getattr(ctx.spec.sizing, "kind", None)
 
-        # Volatility-target sizing depends on realised volatility, which we
-        # cannot know exactly at design time — and unlike a declared
-        # ``fraction``/``notional_usd``, there's no runtime-enforced floor on
-        # how small the realised ATR can be, so no ATR-derived estimate is a
-        # provably safe worst case (see the ``notional`` derivation below).
-        # Unlike the two static sizing kinds this doesn't let Rule 5 abstain
-        # entirely, though: the one bound the engine DOES unconditionally
-        # enforce — the ``max_position_pct`` clamp — still makes the
-        # concurrency invariant checkable, so ``volatility_target`` specs flow
-        # through the same worst-case notional arithmetic as the other two
-        # kinds. This flag only controls the informational plausibility
-        # warning appended at the end when no critical fires — the check
-        # can't confirm the *actual* deployed vol is sensible, only that the
-        # worst-case bound fits.
-        is_vol_target = kind == "volatility_target"
-
         # Resolve the universe to size against. ``_default_universe_for`` now
         # raises on unknown asset classes (previously it silently fell back to
         # ``OTHER_SYMBOLS``); surface that as a critical so the operator sees
@@ -1035,19 +1019,32 @@ class SpecReadinessGate(GateResultsMixin):
         # inflate the worst-case notional by the configured slippage before
         # comparing.
         slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
+        # bps-display form of the same inflation, shared by every sizing
+        # kind's critical message below so a future change to how it's
+        # presented is a one-line edit instead of a multi-template drift risk.
+        slippage_bps_display = (slippage_multiplier - 1) * 10_000
 
         # Notional is symbol-independent for all three supported kinds, so
         # resolve it once.
         is_fixed_fraction = kind == "fixed_fraction"
         is_fixed_notional = kind == "fixed_notional"
+        # ``is_vol_target`` does double duty: it selects the notional
+        # derivation branch immediately below, AND (at the end of this
+        # function) gates the informational plausibility warning appended
+        # when no critical fires — the check can't confirm the *actual*
+        # deployed vol is sensible, only that the worst-case bound fits.
+        is_vol_target = kind == "volatility_target"
         if is_fixed_fraction:
             fraction = float(ctx.spec.sizing.fraction)
             notional = capital * fraction
         elif is_fixed_notional:
             notional = float(ctx.spec.sizing.notional_usd)
         elif is_vol_target:
-            # ``target_annual_vol`` cannot be turned into a provable worst-case
-            # bound via an assumed ATR floor: the engine's sizing formula
+            # Volatility-target sizing depends on realised volatility, which
+            # we cannot know exactly at design time. Unlike the two static
+            # sizing kinds above, that doesn't let Rule 5 abstain entirely:
+            # ``target_annual_vol`` still cannot be turned into a provable
+            # worst-case bound via an assumed ATR floor, though — the engine's sizing formula
             # (``raw_qty = equity * target_annual_vol / (close * atr_val)`` in
             # ``_compute_qty``) accepts ANY positive ``atr_val`` with no
             # enforced minimum — a smaller realised ATR than any floor we
@@ -1162,8 +1159,7 @@ class SpecReadinessGate(GateResultsMixin):
             if kind == "fixed_fraction":
                 worst_case_fraction = effective_worst_case_notional / capital
                 slippage_note = (
-                    f", inflated {(slippage_multiplier - 1) * 10_000:.1f}bps for "
-                    "configured slippage"
+                    f", inflated {slippage_bps_display:.1f}bps for configured slippage"
                     if worst_case_concurrent > 1
                     else ""
                 )
@@ -1184,8 +1180,7 @@ class SpecReadinessGate(GateResultsMixin):
             if is_vol_target:
                 worst_case_fraction = effective_worst_case_notional / capital
                 slippage_note = (
-                    f", inflated {(slippage_multiplier - 1) * 10_000:.1f}bps for "
-                    "configured slippage"
+                    f", inflated {slippage_bps_display:.1f}bps for configured slippage"
                     if worst_case_concurrent > 1
                     else ""
                 )
@@ -1217,7 +1212,7 @@ class SpecReadinessGate(GateResultsMixin):
                         f"max_open_positions "
                         f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
                         f"whole-lot share flooring and "
-                        f"{(slippage_multiplier - 1) * 10_000:.1f}bps configured "
+                        f"{slippage_bps_display:.1f}bps configured "
                         f"slippage) = ${effective_worst_case_notional:.0f}, which "
                         f"exceeds the cash-bound fundable capital "
                         f"${fundable_capital:.0f} if all concurrent positions filled "

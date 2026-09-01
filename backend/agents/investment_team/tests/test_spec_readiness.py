@@ -990,6 +990,10 @@ def test_rule5_volatility_target_concurrency_capped_by_max_open_positions() -> N
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     matches = [c for c in _critical(results) if "volatility_target" in c]
     assert not matches, matches
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("volatility_target" in w and "cannot be evaluated exactly" in w for w in warnings), (
+        warnings
+    )
 
 
 def test_rule5_volatility_target_ignores_declarative_max_concurrent_positions() -> None:
