@@ -7,12 +7,27 @@ label schema (step 2) can define a closed defect-class vocabulary, that
 vocabulary has to be justified against what the review gates actually emit —
 not against a plausible taxonomy invented for the corpus.
 
-This document catalogues the finding shapes produced today by the four
-finding-producing gates in `software_engineering_team`: the code-review
-coordinator, the QA agent, the security agent, and `false_positive_filter`.
-Every field, severity value, and defect category below is drawn from the
-current model definitions, prompts, and test fixtures — not inferred from
-prompts alone. No production code changes accompany this document.
+This document catalogues the finding shapes produced today by the four LLM
+finding-producing gates named in the inventory request:
+the code-review coordinator, the QA agent, the security agent, and
+`false_positive_filter`. Every field, severity value, and defect category
+below is drawn from the current model definitions, prompts, and test
+fixtures — not inferred from prompts alone. No production code changes
+accompany this document.
+
+**Out of scope:** the linting gate (`linting_tool_agent`, which runs as part
+of the frontend code-review gate via `run_microtask_review` —
+`docs/GATE_DEPENDENCY_GRAPH.md:32-36`) is a fifth finding-producing gate not
+inventoried here. It emits its own structured shape, `LintIssue`
+(`linting_tool_agent/models.py:12-23`: `file_path: str`, `line: int`,
+`column: int`, `rule: str`, `message: str`,
+`severity: Literal["error","warning","info"]`) — a second gate whose
+findings are structurally matchable by file path + numeric line, which the
+step-2/3 corpus work should account for alongside code review. The
+`devops_team`'s `change_review_agent` also emits review findings within this
+team package, but reuses the code-review shapes directly
+(`code_review_agent/models.py:485-488`) rather than defining its own, so it
+is not a distinct shape to catalogue.
 
 ## 1. Code Review Coordinator (`code_review_agent/`)
 
@@ -221,7 +236,7 @@ parseable line number.
 ### Example findings (from tests)
 
 - `{"severity": "critical", "category": "injection", "description": "Command injection in run()", "location": "run:3", "recommendation": "Use subprocess with shell=False"}` — `tests/test_security_agent.py:66-73`
-- `{"severity": "low", "category": "style", "description": "nitpick", "recommendation": "rename var"}` (location omitted entirely) — `tests/test_security_agent.py`
+- `{"severity": "low", "category": "style", "description": "nitpick", "recommendation": "rename var"}` (location omitted entirely) — `tests/test_security_agent.py:74-79`
 
 ## 4. `false_positive_filter` (`code_review_agent/false_positive_filter.py`)
 
@@ -308,12 +323,14 @@ CodeReviewIssue(
 | Gate | Finding model | Severity typing | Category typing | Numeric line? | Structured `file_path`? |
 |---|---|---|---|---|---|
 | Code review | `CodeReviewIssue` / `ChunkReviewIssueLLM` | Closed `Literal` (5 values) at the LLM boundary; plain `str` on the persisted record | Closed 13-value enum (2-value subsets for the architecture/side-effect passes) | Yes — `line` + `start_line` | Yes — always present, may be blank |
-| QA | `BugReport` | Plain `str`, unenforced (test fixture uses `"info"`, outside the documented set) | **None** — no category field | No — `line_or_section` is a string, may hold non-numeric text | Only in `fix_build` mode |
+| QA | `BugReport` | Plain `str`, unenforced (test fixture uses `"info"`, outside the documented set) | **None** — no category field | No (`fix_build` mode adds only a structured `file_path`, not a numeric line field — `line_or_section` stays a string that may hold non-numeric text in every mode) | Only in `fix_build` mode |
 | Security | `SecurityVulnerability` | Plain `str`, unenforced | Free-text `str`, not a closed set | No — no line field of any kind | No — `location` is a single free-text field |
 | `false_positive_filter` | N/A — filters `CodeReviewIssue`; never emits its own shape | N/A (severity-agnostic) | N/A | N/A | N/A |
 
-Code review is the only gate whose findings are structurally matchable by
-file path + numeric line without free-text parsing. QA and security both
-depend on a free-text location string, and QA has no defect-category field
-at all — both are direct constraints on what the step-2 label schema and
+Among the four gates inventoried here, code review is the only one whose
+findings are structurally matchable by file path + numeric line without
+free-text parsing (the out-of-scope linting gate's `LintIssue` is a second
+such gate — see the Purpose section). QA and security both depend on a
+free-text location string, and QA has no defect-category field at all —
+both are direct constraints on what the step-2 label schema and
 step-3 matching rule can cover for those two gates.
