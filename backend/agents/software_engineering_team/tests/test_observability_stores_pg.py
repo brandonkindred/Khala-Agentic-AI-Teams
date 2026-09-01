@@ -211,6 +211,7 @@ def test_record_event_coerces_naive_ts_to_utc(_schema) -> None:
 def test_trace_write_and_cost(_schema, monkeypatch) -> None:
     """Trace write and cost."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
+    from shared.postgres import get_conn
     from software_engineering_team.shared import trace_store
 
     class _Rec:
@@ -224,6 +225,8 @@ def test_trace_write_and_cost(_schema, monkeypatch) -> None:
         prompt_tokens = 1000
         completion_tokens = 500
         total_tokens = 1500
+        cache_read_tokens = 300
+        cache_creation_tokens = 0
         cost_usd = 0.42
         latency_ms = 1200
         status = "success"
@@ -235,6 +238,72 @@ def test_trace_write_and_cost(_schema, monkeypatch) -> None:
     summary = trace_store.fetch_cost_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
     assert summary["total_cost_usd"] == pytest.approx(0.42)
     assert summary["by_job"]["j9"] == pytest.approx(0.42)
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT cache_read_tokens, cache_creation_tokens FROM se_agent_traces WHERE job_id = %s",
+            ("j9",),
+        )
+        row = cur.fetchone()
+    assert row == (300, 0)
+
+
+def test_trace_write_cache_creation_and_no_cache_usage(_schema, monkeypatch) -> None:
+    """A record reporting cache creation, and one reporting neither, both round-trip."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
+    from shared.postgres import get_conn
+    from software_engineering_team.shared import trace_store
+
+    class _RecCreate:
+        timestamp = datetime.now(tz=timezone.utc).timestamp()
+        team = "software_engineering"
+        agent_key = "backend"
+        job_id = "jCreate"
+        task_id = "t1"
+        phase = "execution"
+        model = "m"
+        prompt_tokens = 10
+        completion_tokens = 5
+        total_tokens = 15
+        cache_read_tokens = 0
+        cache_creation_tokens = 200
+        cost_usd = 0.01
+        latency_ms = 100
+        status = "success"
+        outcome = "success"
+        objective = "o"
+        request_id = "rc1"
+
+    class _RecNone:
+        timestamp = datetime.now(tz=timezone.utc).timestamp()
+        team = "software_engineering"
+        agent_key = "backend"
+        job_id = "jNone"
+        task_id = "t1"
+        phase = "execution"
+        model = "m"
+        prompt_tokens = 10
+        completion_tokens = 5
+        total_tokens = 15
+        cost_usd = 0.01
+        latency_ms = 100
+        status = "success"
+        outcome = "success"
+        objective = "o"
+        request_id = "rn1"
+
+    assert trace_store.write_trace(_RecCreate()) is True
+    assert trace_store.write_trace(_RecNone()) is True
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT job_id, cache_read_tokens, cache_creation_tokens FROM se_agent_traces "
+            "WHERE job_id IN (%s, %s) ORDER BY job_id",
+            ("jCreate", "jNone"),
+        )
+        rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    assert rows["jCreate"] == (0, 200)
+    assert rows["jNone"] == (0, 0)  # no cache attrs on the record -> writes 0, never NULL
 
 
 def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
@@ -257,6 +326,8 @@ def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
                 "prompt_tokens": 10,
                 "completion_tokens": 5,
                 "total_tokens": 15,
+                "cache_read_tokens": 50 * (i + 1),
+                "cache_creation_tokens": 0,
                 "cost_usd": 0.01 * (i + 1),
                 "latency_ms": 100,
                 "status": "success",
@@ -274,3 +345,12 @@ def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
 
     summary = trace_store.fetch_cost_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
     assert summary["by_job"]["jB"] == pytest.approx(0.01 + 0.02 + 0.03)
+
+    from shared.postgres import get_conn
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT cache_read_tokens FROM se_agent_traces WHERE job_id = %s ORDER BY task_id",
+            ("jB",),
+        )
+        assert [r[0] for r in cur.fetchall()] == [50, 100, 150]
