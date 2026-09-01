@@ -161,6 +161,24 @@ populate `SubmitAnswersRequest.resume_token` correctly. This mirrors the coding 
 whenever `waiting_for_answers` is `True`, `None` otherwise — the client-visible half of the same
 pause envelope §4.3.1 already persists server-side.
 
+**Extending the backend response is necessary but not sufficient — the existing Angular client
+must actually read and forward the token, and it does not today.** Once this route's answer
+submission enforces the token check above (409 on missing/mismatched `resume_token`), every
+existing Planning submission becomes rejected unless the client sends one, and today's client
+cannot: `PlanningApiService.submitAnswers` (`user-interface/src/app/services/planning-api.service.ts:51-53`)
+posts only `{ answers }`, with no `resume_token` field at all; `planning.model.ts` has no
+`resumeToken`/`resume_token` field on any Planning-facing model to carry it through; and the shared
+`PendingQuestionsComponent`'s own `resumeToken` `@Input`/echo-on-submit behavior
+(`pending-questions.component.ts:103,352-359`) exists and is exercised only for the coding team's
+Temporal-native pause path today — nothing wires a resume token into it for Planning's own usage of
+the same shared component. Shipping the backend change alone, without this client-side wiring, turns
+every legitimate Planning answer submission through the existing UI into a `409`. **Contract
+requirement:** the same rollout must extend `planning.model.ts` with the `resume_token` field (read
+from `PlanningStatusResponse.resume_token` above), update `PlanningApiService.submitAnswers` to
+accept and forward it in the POST body, and wire Planning's usage of `PendingQuestionsComponent` to
+populate its `resumeToken` input from the status response the same way the coding-team path already
+does — this is not backend-only scope, and the story is not complete without it.
+
 **Contract requirement — carry every selection, not just one.** PRA's own `OpenQuestion`
 (`product_requirements_analysis_agent/models.py:78`, mirrored in
 `planning_team/models.py:224`) sets `allow_multiple=True` on some questions, and Planning's own
@@ -249,6 +267,25 @@ whose persisted `allow_multiple` is falsy, and reject (400) a submission that se
 `selected_option_id` (non-blank) and a non-empty `selected_option_ids` for the same answer — the
 two fields are mutually exclusive per answer, selected by the question's own `allow_multiple`, not
 freely combinable by the client.
+
+**This rejection breaks the existing shared UI outright unless the same rollout also migrates it —
+both submission paths it already uses construct *both* fields on every request.**
+`PendingQuestionsComponent`'s manual submit path
+(`pending-questions.component.ts:397-404`) builds every submission with
+`selected_option_id: selectedIds[0] || null` **and** `selected_option_ids: selectedIds` populated
+together, unconditionally — "all questions use multi-select (checkboxes)" per its own comment, even
+for a genuinely single-select question, where `selectedIds` still has length 1 and both fields still
+populate. Its `applyAutoAnswer` path (`:301-305`) does the same. Once `validate_answers` (and PRA's
+own route, per this contract's requirement below) reject a non-blank `selected_option_id` alongside a
+non-empty `selected_option_ids`, *every* submission from this existing, currently-working UI —
+manual and auto-answer alike — starts failing with 400, not just the malformed edge case this
+rejection targets. **Contract requirement:** the same rollout that adds this rejection must also
+update `PendingQuestionsComponent` (and any other caller constructing `AnswerSubmission` payloads
+the same way) to send only the field appropriate to the question's `allow_multiple` — the singular
+field alone for a single-select question, the plural field alone for a multi-select one — or, if a
+transition period is needed, gate the new rejection behind the same rollout mechanism until the
+client migration ships; shipping the validator change without the client change is not acceptable
+even temporarily, since it breaks every existing submission path immediately.
 
 **Rejecting simultaneous singular/plural selections (above) does not catch a contradictory
 `other_text` alongside a non-`"other"` selection.** A submission like `selected_option_id="postgres"`
@@ -643,10 +680,11 @@ incoming values as raw JSONB arrays treats list order as significant, so this re
 "different" from what's already persisted and be rejected outright by the write-once guard above —
 silently dropping the re-signal this correction exists to guarantee, and leaving the workflow asleep
 on a durable answer it will never receive notice of. **Contract requirement:** derive a canonical
-comparison key for each answer batch — sort entries by `question_id` (each `question_id` appears at
-most once per batch, per this contract's own duplicate-id rejection, §4.1) and canonicalize each
-entry's own `selected_option_ids` list (e.g. sorted) *within that key only* — and use this key for
-every equality check the write-once guard performs, both for the initial write and for every retry
+comparison key for each answer batch — sort entries by `question_id` only (each `question_id`
+appears at most once per batch, per this contract's own duplicate-id rejection, §4.1); each entry's
+own `selected_option_ids` list is carried into the key **positionally, in its submitted order, never
+sorted** (see the order-sensitivity correction immediately below) — and use this key for every
+equality check the write-once guard performs, both for the initial write and for every retry
 comparison against it.
 
 **Correction — canonicalizing is for comparison only; the batch actually stored and forwarded must
@@ -665,6 +703,23 @@ selected and in what priority, not a cosmetic normalization. **Contract requirem
 received — sorting/canonicalizing is confined to the derived comparison key described above, computed
 transiently for the write-once equality check and never written in place of, or used to reorder, the
 actual stored/forwarded batch.
+
+**Correction — the comparison key itself must not sort `selected_option_ids` either; doing so
+collapses two genuinely different submissions into "identical."** The requirement above already
+establishes that `selected_option_ids` order determines `primary_selected_id` and the joined
+`selected_answer` text — real, decision-changing content, not incidental ordering. If the *comparison
+key* still canonicalizes that list by sorting it (as an earlier draft of this key's construction
+suggested), two submissions with the same set of ids in different orders — `["z", "a"]` then later
+`["a", "z"]` — produce the identical sorted key and the write-once guard treats the second as a
+harmless retry of the first, returning success without ever storing or forwarding it — even though
+`["a", "z"]` expresses a different primary choice (`"a"` vs. `"z"`) and a different `selected_answer`
+ordering than what was actually persisted. **Contract requirement, superseding "canonicalize... (e.g.
+sorted)" for this list specifically:** the comparison key must carry each entry's `selected_option_ids`
+positionally — compared element-by-element in submitted order — not as a sorted/canonicalized set;
+only the *outer* per-question ordering (which question comes first in the list) is safe to
+canonicalize by `question_id`, since nothing reads meaning from that. A batch differing only in
+`selected_option_ids` order for some question is a genuinely different submission for write-once
+purposes, not an identical retry.
 
 **Persisted answers must be scoped to the active question round, not accumulated across rounds.**
 Unlike the coding team's single Tech-Lead clarify loop, a single `document_production_activity`
@@ -1758,11 +1813,30 @@ this contract:
   contract has already corrected for `document_production_pra_submit_activity` and
   `document_production_activity` (§4.3.1). Conditioning `mark_job_completed` alone does nothing about
   either of `_guarded`'s own writes, which run outside and around it. **Contract requirement:** apply
-  the same fix already required of `document_production_activity` here too — either bind an
-  active-status-conditional progress writer and failure writer into the underlying `guarded` call (in
-  place of Planning's `_guarded` convenience wrapper), or perform the active-status check *before*
-  entering `guarded` at all and return a no-op result directly for an already-terminal job, exactly as
-  this contract already requires for both document-production activities.
+  the same fix already required of `document_production_activity` here too — call the underlying
+  `guarded` directly (in place of Planning's `_guarded` convenience wrapper) with a conditional
+  active-status-guarded failure writer bound in, mandatorily, exactly as required for both
+  document-production activities above; the progress writer alone may instead be covered by
+  performing the active-status check *before* entering `guarded` and returning a no-op result
+  directly for an already-terminal job (the "either/or" this contract allows, per the submit
+  activity's own §4.3.1 treatment).
+
+  **Correction — the failure writer is not part of that "either/or"; a pre-entry check alone does not
+  protect it.** The pre-entry-check alternative above only prevents the *progress* write from
+  reaching an already-terminal row — it covers the job's status at the single instant the check runs,
+  before `guarded`/`_work()` ever starts. It says nothing about a cancellation or interruption that
+  lands *after* that check passes but *while* `_work()` is running (the `get_job` re-read, the audit
+  block) and `_work()` then raises on the final `SAFE_RETRY` attempt: `guarded`'s own final-attempt
+  handler still runs, and if it is bound to the unconditional `mark_job_failed` rather than the
+  conditional writer, it still overwrites whatever terminal status landed in that window with
+  `failed` — the pre-entry check did nothing to prevent this, because the race it closes (status at
+  entry) is different from the race the failure writer closes (status at final-attempt failure,
+  which can be arbitrarily later). **Contract requirement, clarifying the choice above:** the
+  conditional active-status-guarded failure writer is mandatory in every implementation of this fix,
+  not an alternative to anything; the pre-entry-check-instead-of-conditional-writer choice applies
+  only to the progress writer, exactly as it already does for the submit activity's own §4.3.1
+  treatment — this finalize fix must not be read as offering that same either/or for the failure
+  writer too.
 
   **A failed claim does not by itself prove "a pause won" — it could just as easily mean a different
   overlapping attempt's own *completion* claim won first.** Two attempts can both reach `wait_pra`
@@ -1827,6 +1901,31 @@ this contract:
   elsewhere in this section; only once status is confirmed active does the marker check run, ahead of
   any re-poll or re-assembly work, per the requirement above. The marker check stays ahead of the
   PRA/document-production work; the status check stays ahead of the marker check.
+
+  **The status check and the cached-marker return are still two separate operations within one
+  activity invocation — a cancellation landing between them produces a truthful-when-checked but
+  stale-by-return success, and nothing downstream re-verifies before acting on it.** Ordering the two
+  checks (above) closes the window where status is *already* terminal when this activity starts; it
+  does not, and cannot, close the narrower window where the job becomes terminal *after* this
+  activity's own status check passes but *before* the workflow receives and acts on its return value —
+  the same class of irreducible gap this contract has already acknowledged elsewhere (§5's open risks)
+  wherever a check and a later action are not one atomic operation. Concretely: the workflow, seeing
+  this activity's ordinary (non-`skipped_terminal`) successful return, proceeds to schedule
+  `sub_agent_provisioning_activity` next — an activity this contract does not otherwise modify, still
+  wrapped in Planning's unconditional `_guarded` (`temporal/activities.py:432-438`), whose own entry
+  write mutates progress unconditionally and whose failure path can still overwrite a cancellation
+  that landed in this gap with `failed`. Checking only at `document_production_activity`'s own entry
+  does not protect this specific downstream window. **Contract requirement:** apply the same
+  pre-`guarded` active-status check and `skipped_terminal`-equivalent short-circuit already required
+  of `document_production_activity` and `finalize_planning_activity` to
+  `sub_agent_provisioning_activity` as well — not because this contract otherwise touches that
+  activity's own logic, but because this contract is what introduces the specific
+  check-then-later-act gap immediately upstream of it (the completion-marker short-circuit above);
+  narrowing the window at this next activity's own entry is the achievable mitigation, the same way
+  finalize's own entry check narrows the window ahead of it. This does not claim to close the
+  underlying gap completely — no single per-activity check can, since the same race recurs at every
+  activity boundary in the chain — only to apply this contract's own established mitigation
+  consistently at the boundary it newly creates.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
@@ -1972,6 +2071,27 @@ this contract:
   one — mirroring `get_default_option`, `user_communication.py:265-280`, already cited in this
   contract), so Planning's own `resolved_questions` matches what PRA actually applied rather than
   only what the client explicitly chose to submit.
+
+  **Synthesizing the default value alone is not enough — the enriched record must also carry that
+  it *is* a default, or it becomes indistinguishable from a human-selected answer.** PRA's own
+  `apply_all_defaults`/`apply_answers` (`user_communication.py:160-182,247-260`, already cited in
+  this contract) constructs its default-flagged `AnsweredQuestion` with `was_default=True` (and,
+  where applicable, `was_auto_answered`, `rationale`, `confidence` carried from the chosen option) —
+  fields that record *why* this particular answer was chosen, not just what it is. This contract's
+  own earlier fix (§4.3, requirement (a) above) mandates adding `question_text` to
+  `planning_team.models.AnsweredQuestion` so the enriched record can carry it, but names only that
+  one field; `was_default`/`was_auto_answered`/`rationale`/`confidence` remain absent from the model
+  this contract stores `resolved_questions` as. Without them, a synthesized default and a genuine
+  human selection produce structurally identical records in the handoff and audit history — a
+  reviewer or downstream consumer reading `resolved_questions` cannot tell "PRA defaulted this
+  because the human skipped it" from "the human deliberately chose this option," even though this
+  entire synthesis step exists specifically to represent the former accurately. **Contract
+  requirement:** extend the same model change requirement (a) already mandates — add
+  `was_default`/`was_auto_answered`/`rationale`/`confidence` to `planning_team.models.AnsweredQuestion`
+  (or the enriched dict/second-model alternative (a) already permits) alongside `question_text`, and
+  populate them from the synthesized default (or, for a submitted answer, from whatever provenance
+  the submission itself carries) at the same resume-time conversion step this section already
+  requires.
 
   **Hydrating `context`/`context_update` is not sufficient on its own to fix the handoff package —
   the `handoff.setdefault` call is a no-op against an already-populated key.** `DocumentProductionAgent.run`
@@ -2198,6 +2318,24 @@ this contract:
   for the validator's own synthetic free-text path and must never be assignable to a real, displayed
   option.
 
+  **Correction — this blanket rejection would also reject PRA's own legitimate, machine-generated
+  free-text placeholder, making every options-less PRA question unpublishable.** PRA itself
+  synthesizes exactly `{"id": "other", "label": "Provide answer in text field"}` as the *sole* entry
+  in `options` whenever an `OpenQuestion` has none (`convert_to_pending_questions`,
+  `user_communication.py:109-142`, `if not options: options = [{"id": "other", "label": "Provide
+  answer in text field"}]`) — this is the mechanism PRA uses to represent a free-text-only question at
+  all, not an authoring mistake. By the time Planning reads the status payload, this synthesized entry
+  is structurally identical to an authored option with the same shape; the rejection above, applied
+  without qualification, would reject every such question and make free-text-only PRA questions
+  impossible to publish through this contract's pause path. **Contract requirement, narrowing the
+  rejection above:** exempt the specific single-option shape PRA generates for this purpose — a
+  question whose entire `options` list is exactly one entry with `id == "other"` and `label ==
+  "Provide answer in text field"` — from this rejection; continue rejecting `id == "other"` in every
+  other shape (any option list containing `"other"` alongside one or more *other* entries, or a
+  differently-labeled solitary `"other"` entry that isn't PRA's own generated placeholder), since
+  those shapes are exactly the ambiguous-with-a-real-authored-option case this rejection exists to
+  close.
+
   **Rejecting blank option ids does nothing for a blank option label — PRA's parser accepts an
   explicit empty label just as readily as an empty id.** `parse_question_option` applies the same
   `_require_string_field` pattern to `label` as it does to `id` (`question_processing.py:874-883`),
@@ -2221,6 +2359,21 @@ this contract:
   missing or blank (empty-after-stripping) at the same pause-assembly validation boundary as the
   duplicate-id and blank-option-id checks above, rather than merely treating the fallback as a
   reconciliation-comparison hazard once it has already been published.
+
+  **A question's own `id` needs the same blank check already required of option ids — an explicit
+  `question.id == ""` passes every check above unrejected.** `_require_string_field`'s fallback
+  applies only when the `id` key is *absent*; an explicit `id: ""` is a valid string and is not
+  a duplicate of anything else in the round, so it is invisible to the duplicate-question-id check
+  above just as a blank option id was invisible to the duplicate-option-id check. A question keyed by
+  the empty string cannot be addressed by `.../auto-answer/{question_id}` or any other route that
+  paths on the id, supplies an unstable empty key to UI answer-tracking maps and this contract's own
+  reconciliation, and collapses with any other blank-id question a round might contain (nothing
+  prevents more than one, since each blank id is technically "unique" only in the sense that
+  duplicate-detection based on equality treats them as duplicates of each other — a further reason
+  this is unsafe, not a mitigating one). **Contract requirement:** reject a question whose own `id` is
+  missing or blank (empty-after-stripping) at the same pause-assembly validation boundary as every
+  other check in this section — the same non-blank requirement already applied to option ids, applied
+  here to the question id itself.
 
   **This is not a complete fix.** `id` still has an unaddressed fallback problem the
   blank-`question_text` rejection above does not reach: `_require_string_field(q_data, "id",
@@ -2286,6 +2439,33 @@ applied the answer" and "the pause envelope is cleared" is recoverable (retry re
 reconciliation invariant above and finds it already applied), the reverse ordering is not: clearing
 the envelope first and then crashing before PRA sees the answer would leave PRA still waiting with
 no persisted pause to resume from, silently hanging the job.
+
+**Correction — as worded, this ordering requirement names a precondition ("PRA has durably applied
+that batch") this contract has separately established is unobservable, leaving no operation that can
+ever satisfy it.** The risk-6 correction above establishes that PRA exposes no applied-answer
+receipt: its `pending_questions` field clears (and any status read reporting it "gone") at POST
+*acceptance* time, before PRA's background loop necessarily runs `apply_answers` — so "wait until the
+status read confirms application" is not an operation Planning can perform; it can only ever observe
+acceptance. An implementation that takes this ordering requirement literally is stuck between two bad
+choices: block forever waiting for a confirmation signal PRA will never send, or clear on mere
+acceptance and silently violate the crash-safe ordering this section exists to guarantee. **Contract
+requirement, redefining what "confirmed applied" achievably means:** rather than waiting for an
+application receipt that doesn't exist, treat *genuine round advancement* as the achievable proxy —
+continue `wait_pra` polling (step (3) of the resume path, §4.3) until PRA's status reports either a
+pending-questions round that differs from the persisted one under this contract's own canonical
+comparison (§4.3's multiset/full-shape identity, above) or a terminal (`completed`/`failed`) status;
+only *that* observation — not a bare empty/absent `pending_questions` read, which fires at
+acceptance — clears the local envelope. This is sound because PRA's own `communicate_with_user` loop
+structurally cannot produce a *new*, genuinely different round (or reach completion) without its
+current phase having already consumed the prior round's submitted answers via `apply_answers` first —
+a later phase raising fresh questions, or the run completing, is only reachable after the earlier
+phase that was waiting on this round's answers has proceeded past it. Observing forward progress is
+therefore valid indirect evidence of application, where a bare "no more pending questions" read is
+not. This does mean the local clear can lag slightly behind PRA's actual `apply_answers` call (by
+however long PRA takes to move its own phase forward) rather than firing the instant PRA applies the
+answer — an accepted latency cost, not a correctness gap, since the crash-safety property this
+section protects only requires "never clear before application," never "clear immediately upon
+application."
 
 **`PlanningWorkflow.submit_answers` (signal handler)**
 - *Preconditions:* None on the caller — a signal handler must accept any payload without raising
@@ -2541,15 +2721,20 @@ no persisted pause to resume from, silently hanging the job.
    and this spec's stated scope, and is flagged here as a prerequisite for fully retryable PRA
    submission rather than something #7445-B can close alone.
 3. *New to this spec, cross-team:* the answer-delivery reconciliation on a resumed-activity retry
-   (§4.3) compares the full `(id, question_text)` pair, not `id` alone — but PRA's own question
-   parser can default *both* fields identically across two separate rounds
-   (`question_processing.py:821-822`), so no comparison Planning performs over PRA's reported
-   fields can distinguish "this exact question is still pending" from "an unrelated later round
-   coincidentally produced the same fallback pair" with full certainty. This is the same class of
-   gap as risk 2: full closure requires a PRA-side round/version identifier or delivery receipt,
-   which is outside `planning_team`'s boundary. The `(id, question_text)` comparison reduces the
-   collision surface (it catches every case where the two rounds' text actually differs) but is not
-   a complete fix, and #7445-B inherits this residual risk knowingly.
+   (§4.3) compares the full canonical question shape as a multiset — `id`, `question_text`,
+   `options` (positionally, each option's `id`/`label`/`is_default`/`confidence`), `allow_multiple`,
+   `required`, `context`, `recommendation`, `source`, and each option's `rationale` (§4.3's full
+   round-identity requirement, not merely the `(id, question_text)` pair an earlier draft of this
+   section described) — but PRA's own question parser can still default the `id`/`question_text`
+   fields identically across two separate rounds (`question_processing.py:821-822`), and nothing
+   prevents every other covered field from *also* coinciding by LLM happenstance, so no comparison
+   Planning performs over PRA's reported fields can distinguish "this exact question is still
+   pending" from "an unrelated later round coincidentally reproduced the identical shape" with full
+   certainty. This is the same class of gap as risk 2: full closure requires a PRA-side round/version
+   identifier or delivery receipt, which is outside `planning_team`'s boundary. Comparing the full
+   canonical shape reduces the collision surface far more than `(id, question_text)` alone would (it
+   catches every case where *any* covered field actually differs) but is not a complete fix even at
+   its widest, and #7445-B inherits this residual risk knowingly.
 4. *New to this spec, cross-team:* the reconciliation check before step (1)'s submission (above) is
    a read (a PRA status GET) followed by a decision, not a claim — it does not itself prevent two
    overlapping attempts of the *same* resumed activity invocation (the same heartbeat-loss scenario
