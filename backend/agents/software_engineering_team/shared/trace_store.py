@@ -56,6 +56,10 @@ def _record_to_row(record: Any) -> tuple:
         - Returns an 18-element tuple in ``_INSERT_SQL`` column order. A record
           reporting no cache usage (missing or falsy ``cache_read_tokens`` /
           ``cache_creation_tokens``) writes 0, never NULL.
+    Invariants:
+        - Pure: no I/O, no mutation of ``record``. The tuple's column order
+          always matches ``_INSERT_SQL`` — both write paths build rows through
+          this single function so they cannot drift from one another.
     """
     # Use the record's own timestamp; fall back to *now* (not the 1970 epoch) for
     # a missing/invalid value so the row stays inside cost-query windows.
@@ -93,6 +97,9 @@ def write_trace(record: Any) -> bool:
     Postconditions:
         - Returns ``True`` when a row was written; ``False`` when the sink is
           disabled, Postgres is disabled, or the write failed (logged at DEBUG).
+    Invariants:
+        - Never raises into the caller — every failure mode (disabled sink,
+          disabled Postgres, DB error) resolves to a boolean return.
     """
     if not _trace_enabled():
         return False
@@ -121,6 +128,9 @@ def write_rows(rows: Sequence[tuple]) -> int:
     Postconditions:
         - Returns the number of rows written; 0 when the sink or Postgres is
           disabled or the write failed.
+    Invariants:
+        - Never raises into the caller. The write is all-or-nothing per batch:
+          a failure never yields a partial-count result, only 0.
     """
     if not rows:
         return 0

@@ -29,9 +29,11 @@ from ..strategy.contract import (
     Bar,
     Fill,
     FillKind,
+    LimitAttachment,
     OrderRequest,
     OrderSide,
     OrderType,
+    StopAttachment,
     TimeInForce,
     UnfilledPolicy,
     apply_bps_offset,
@@ -734,10 +736,8 @@ class FillSimulator:
         # Partial-fill entries (REQUEUE / TWAP) defer materialization to the
         # mirrored block in ``_continue_entry`` so the children are sized to
         # the *cumulative* position rather than just the first slice.
-        if (
-            req.attached_stop_loss is not None or req.attached_take_profit is not None
-        ) and po.order_id not in self.order_book:
-            self._materialize_bracket_children(po=po, bar=bar, filled_qty=filled_qty)
+        if req.has_attached_exits and po.order_id not in self.order_book:
+            self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=filled_qty)
 
         return (
             Fill(
@@ -914,10 +914,8 @@ class FillSimulator:
         # ``REQUEUE_NEXT_BAR``, so without this any participation-capped
         # bracket entry would silently run unprotected once the parent
         # eventually completes.
-        if (
-            req.attached_stop_loss is not None or req.attached_take_profit is not None
-        ) and po.order_id not in self.order_book:
-            self._materialize_bracket_children(po=po, bar=bar, filled_qty=pos.original_qty)
+        if req.has_attached_exits and po.order_id not in self.order_book:
+            self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=pos.original_qty)
 
         return (
             Fill(
@@ -1520,26 +1518,32 @@ class FillSimulator:
         the legs cover everything that was actually opened.
         """
         req = po.request
-        if req.attached_stop_loss is None and req.attached_take_profit is None:
+        if not req.has_attached_exits:
             return
         pos = self.portfolio.positions.get(req.symbol)
         if pos is None:
             return
-        self._materialize_bracket_children(po=po, bar=bar, filled_qty=pos.original_qty)
+        self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=pos.original_qty)
 
-    def _materialize_bracket_children(
+    def _materialize_attached_exit_children(
         self,
         *,
         po: PendingOrder,
         bar: Bar,
         filled_qty: float,
     ) -> None:
-        """Submit ``StopAttachment`` / ``LimitAttachment`` legs as OCO children.
+        """Submit every attached ``StopAttachment`` / ``LimitAttachment`` leg
+        (the fixed ``attached_stop_loss``/``attached_take_profit`` bracket
+        fields, plus any additional legs in ``attached_exits`` — #7509) as
+        OCO children.
 
         Called once per parent on a successful terminal-fill entry slice.
         Each child is opposite-side to the parent, sized to ``filled_qty``,
         and tagged with a deterministic ``oco_group_id`` derived from the
-        parent so OCO sibling cancellation can scope correctly.
+        parent so OCO sibling cancellation can scope correctly —
+        ``OrderBook.oco_cancel_siblings`` cancels every pending order
+        tagged with that group id, not just one paired sibling, so this
+        works unchanged for an arbitrary number of legs.
         ``submitted_at=bar.timestamp`` blocks same-bar fills via the
         bar-safety guard (children are eligible from the next bar onward).
         ``tif=GTC`` so the protective legs survive across sessions —
@@ -1572,98 +1576,209 @@ class FillSimulator:
         pos = self.portfolio.positions.get(req.symbol)
         entry_fill_price = pos.entry_price if pos is not None else None
         if req.attached_stop_loss is not None:
-            sl = req.attached_stop_loss
-            is_trailing = sl.trail_offset is not None
-            # ``trail_offset`` and ``limit_offset`` are mutually exclusive
-            # (enforced by the parent's ``validate_prices``), so at most one of
-            # ``is_trailing`` / ``is_limit`` is True here.
-            is_limit = sl.limit_offset is not None
-            sl_limit_price = None
-            if is_limit:
-                if sl.limit_offset_kind == "abs":
-                    limit_off = sl.limit_offset
-                else:  # "bps"
-                    limit_off = apply_bps_offset(sl.stop_price, sl.limit_offset)
-                # Limit sits on the protective side of the stop: below it for a
-                # SHORT child (sell-stop-limit closing a long parent), above it
-                # for a LONG child (buy-stop-limit closing a short parent).
-                # Shared with the DSL structured-exit path via the single
-                # sign-convention helper.
-                sl_limit_price = protective_limit_price(
-                    sl.stop_price, limit_off, closing_long=(req.side == OrderSide.LONG)
-                )
-            if is_limit:
-                sl_order_type = OrderType.STOP_LIMIT
-            elif is_trailing:
-                sl_order_type = OrderType.TRAILING_STOP
-            else:
-                sl_order_type = OrderType.STOP
-            sl_req = OrderRequest(
-                client_order_id=sl.client_order_id or f"{req.client_order_id}_sl",
-                symbol=req.symbol,
-                side=child_side,
-                qty=filled_qty,
-                order_type=sl_order_type,
-                stop_price=sl.stop_price,
-                limit_price=sl_limit_price,
-                trail_offset=sl.trail_offset,
-                trail_offset_kind=sl.trail_offset_kind,
-                tif=TimeInForce.GTC,
-                unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
-                # ``engine_exit:`` prefix so a bracket-leg close is attributed as
-                # an engine-owned exit: ``TradeRecord.exit_reason`` carries it
-                # verbatim (the reconciler is bypassed), the alignment/conformance
-                # gates treat the close as engine-owned, and the leg fill is
-                # counted in the engine-exit fire/fill telemetry.
+            self._materialize_stop_child(
+                req=req,
+                po=po,
+                bar=bar,
+                child_side=child_side,
+                oco_group_id=oco_group_id,
+                filled_qty=filled_qty,
+                entry_fill_price=entry_fill_price,
+                sl=req.attached_stop_loss,
                 reason=f"{ENGINE_EXIT_REASON_PREFIX}bracket_sl",
             )
-            sl_child = self.order_book.submit_attached(
-                sl_req,
-                submitted_at=bar.timestamp,
-                submitted_equity=po.submitted_equity,
-                parent_order_id=po.order_id,
-                oco_group_id=oco_group_id,
-            )
-            sl_child.working_against_entry_order_id = po.order_id
-            if is_trailing and entry_fill_price is not None:
-                # Pre-seed the ratchet so the first eligible bar after
-                # entry trails from where we filled (rather than that
-                # bar's high). ``effective_stop_price`` is set so the
-                # initial level is well-defined even before
-                # ``_update_trailing`` first runs against a real bar.
-                sl_child.trailing_water = entry_fill_price
-                if sl.trail_offset_kind == "abs":
-                    offset = sl.trail_offset
-                else:  # "bps"
-                    offset = apply_bps_offset(entry_fill_price, sl.trail_offset)
-                sl_child.effective_stop_price = (
-                    entry_fill_price - offset
-                    if req.side == OrderSide.LONG
-                    else entry_fill_price + offset
-                )
         if req.attached_take_profit is not None:
-            tp = req.attached_take_profit
-            tp_req = OrderRequest(
-                client_order_id=tp.client_order_id or f"{req.client_order_id}_tp",
-                symbol=req.symbol,
-                side=child_side,
-                qty=filled_qty,
-                order_type=OrderType.LIMIT,
-                limit_price=tp.limit_price,
-                tif=TimeInForce.GTC,
-                unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
-                # ``engine_exit:`` prefix — see the SL leg above; a bracket
-                # take-profit close is an engine-owned exit.
+            self._materialize_limit_child(
+                req=req,
+                po=po,
+                bar=bar,
+                child_side=child_side,
+                oco_group_id=oco_group_id,
+                filled_qty=filled_qty,
+                tp=req.attached_take_profit,
                 reason=f"{ENGINE_EXIT_REASON_PREFIX}bracket_tp",
             )
-            tp_child = self.order_book.submit_attached(
-                tp_req,
-                submitted_at=bar.timestamp,
-                submitted_equity=po.submitted_equity,
-                parent_order_id=po.order_id,
-                oco_group_id=oco_group_id,
+        # Generalized non-bracket legs (#7509): reuses the exact same
+        # per-kind materializers as the two fixed bracket fields above, so
+        # arm/latch/gap-through/trailing behavior for these legs is
+        # identical to a bracket leg's — nothing about the fill-simulator
+        # lifecycle needs to know how many legs are attached to one entry.
+        # A default ``client_order_id`` suffix distinct from ``_sl``/``_tp``
+        # avoids colliding with the fixed bracket fields' children when a
+        # request carries both (e.g. a test exercising the combination).
+        for idx, leg in enumerate(req.attached_exits):
+            if isinstance(leg, StopAttachment):
+                self._materialize_stop_child(
+                    req=req,
+                    po=po,
+                    bar=bar,
+                    child_side=child_side,
+                    oco_group_id=oco_group_id,
+                    filled_qty=filled_qty,
+                    entry_fill_price=entry_fill_price,
+                    sl=leg,
+                    reason=f"{ENGINE_EXIT_REASON_PREFIX}exit_leg_{idx}",
+                    default_client_order_id=f"{req.client_order_id}_exit{idx}",
+                )
+            else:
+                self._materialize_limit_child(
+                    req=req,
+                    po=po,
+                    bar=bar,
+                    child_side=child_side,
+                    oco_group_id=oco_group_id,
+                    filled_qty=filled_qty,
+                    tp=leg,
+                    reason=f"{ENGINE_EXIT_REASON_PREFIX}exit_leg_{idx}",
+                    default_client_order_id=f"{req.client_order_id}_exit{idx}",
+                )
+
+    def _materialize_stop_child(
+        self,
+        *,
+        req: OrderRequest,
+        po: PendingOrder,
+        bar: Bar,
+        child_side: OrderSide,
+        oco_group_id: str,
+        filled_qty: float,
+        entry_fill_price: Optional[float],
+        sl: StopAttachment,
+        reason: str,
+        default_client_order_id: Optional[str] = None,
+    ) -> None:
+        """Submit one ``StopAttachment`` leg as a resting OCO child.
+
+        Shared by the fixed ``attached_stop_loss`` bracket field and each
+        ``StopAttachment`` entry in ``attached_exits`` — the STOP /
+        STOP_LIMIT / TRAILING_STOP shaping, submission, and trailing-water
+        pre-seed are identical regardless of which field the leg came from.
+
+        Preconditions: ``po.request is req``; ``entry_fill_price`` is the
+        parent's actual fill price (or ``None`` when unknown, e.g. the
+        abandon path with no open position), used only to pre-seed a
+        trailing leg's ratchet.
+        Postconditions: exactly one resting STOP/STOP_LIMIT/TRAILING_STOP
+        child is submitted to the order book, tagged with ``oco_group_id``
+        and ``parent_order_id=po.order_id``.
+        """
+        is_trailing = sl.trail_offset is not None
+        # ``trail_offset`` and ``limit_offset`` are mutually exclusive
+        # (enforced by the parent's ``validate_prices``), so at most one of
+        # ``is_trailing`` / ``is_limit`` is True here.
+        is_limit = sl.limit_offset is not None
+        sl_limit_price = None
+        if is_limit:
+            if sl.limit_offset_kind == "abs":
+                limit_off = sl.limit_offset
+            else:  # "bps"
+                limit_off = apply_bps_offset(sl.stop_price, sl.limit_offset)
+            # Limit sits on the protective side of the stop: below it for a
+            # SHORT child (sell-stop-limit closing a long parent), above it
+            # for a LONG child (buy-stop-limit closing a short parent).
+            # Shared with the DSL structured-exit path via the single
+            # sign-convention helper.
+            sl_limit_price = protective_limit_price(
+                sl.stop_price, limit_off, closing_long=(req.side == OrderSide.LONG)
             )
-            tp_child.working_against_entry_order_id = po.order_id
+        if is_limit:
+            sl_order_type = OrderType.STOP_LIMIT
+        elif is_trailing:
+            sl_order_type = OrderType.TRAILING_STOP
+        else:
+            sl_order_type = OrderType.STOP
+        sl_req = OrderRequest(
+            client_order_id=sl.client_order_id
+            or default_client_order_id
+            or f"{req.client_order_id}_sl",
+            symbol=req.symbol,
+            side=child_side,
+            qty=filled_qty,
+            order_type=sl_order_type,
+            stop_price=sl.stop_price,
+            limit_price=sl_limit_price,
+            trail_offset=sl.trail_offset,
+            trail_offset_kind=sl.trail_offset_kind,
+            tif=TimeInForce.GTC,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            # ``engine_exit:`` prefix so a bracket-leg close is attributed as
+            # an engine-owned exit: ``TradeRecord.exit_reason`` carries it
+            # verbatim (the reconciler is bypassed), the alignment/conformance
+            # gates treat the close as engine-owned, and the leg fill is
+            # counted in the engine-exit fire/fill telemetry.
+            reason=reason,
+        )
+        sl_child = self.order_book.submit_attached(
+            sl_req,
+            submitted_at=bar.timestamp,
+            submitted_equity=po.submitted_equity,
+            parent_order_id=po.order_id,
+            oco_group_id=oco_group_id,
+        )
+        sl_child.working_against_entry_order_id = po.order_id
+        if is_trailing and entry_fill_price is not None:
+            # Pre-seed the ratchet so the first eligible bar after
+            # entry trails from where we filled (rather than that
+            # bar's high). ``effective_stop_price`` is set so the
+            # initial level is well-defined even before
+            # ``_update_trailing`` first runs against a real bar.
+            sl_child.trailing_water = entry_fill_price
+            if sl.trail_offset_kind == "abs":
+                offset = sl.trail_offset
+            else:  # "bps"
+                offset = apply_bps_offset(entry_fill_price, sl.trail_offset)
+            sl_child.effective_stop_price = (
+                entry_fill_price - offset
+                if req.side == OrderSide.LONG
+                else entry_fill_price + offset
+            )
+
+    def _materialize_limit_child(
+        self,
+        *,
+        req: OrderRequest,
+        po: PendingOrder,
+        bar: Bar,
+        child_side: OrderSide,
+        oco_group_id: str,
+        filled_qty: float,
+        tp: LimitAttachment,
+        reason: str,
+        default_client_order_id: Optional[str] = None,
+    ) -> None:
+        """Submit one ``LimitAttachment`` leg as a resting OCO child.
+
+        Shared by the fixed ``attached_take_profit`` bracket field and each
+        ``LimitAttachment`` entry in ``attached_exits``.
+
+        Preconditions: ``po.request is req``.
+        Postconditions: exactly one resting LIMIT child is submitted to the
+        order book, tagged with ``oco_group_id`` and
+        ``parent_order_id=po.order_id``.
+        """
+        tp_req = OrderRequest(
+            client_order_id=tp.client_order_id
+            or default_client_order_id
+            or f"{req.client_order_id}_tp",
+            symbol=req.symbol,
+            side=child_side,
+            qty=filled_qty,
+            order_type=OrderType.LIMIT,
+            limit_price=tp.limit_price,
+            tif=TimeInForce.GTC,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            # ``engine_exit:`` prefix — see the SL leg above; a bracket
+            # take-profit close is an engine-owned exit.
+            reason=reason,
+        )
+        tp_child = self.order_book.submit_attached(
+            tp_req,
+            submitted_at=bar.timestamp,
+            submitted_equity=po.submitted_equity,
+            parent_order_id=po.order_id,
+            oco_group_id=oco_group_id,
+        )
+        tp_child.working_against_entry_order_id = po.order_id
 
 
 def _date_diff(t1: str, t2: str) -> int:

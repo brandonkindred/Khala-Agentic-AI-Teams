@@ -7,6 +7,12 @@ is registered from the team's FastAPI lifespan.
 Every public method is wrapped in ``@timed_query`` so slow reads and
 writes surface as structured log lines.
 
+``attach_conversation`` is a thin delegate onto
+``coordination.attach_conversation_to_brand``, which owns the atomic
+cross-store transaction linking a conversation (``BrandingConversationStore``)
+to a brand (this store) — see that module for why the orchestration lives
+outside either single-table store.
+
 Note for maintainers:
     ``tests/test_store.py`` exercises this module's SQL against live Postgres
     via ``shared.postgres.testing.real_postgres_schema`` (skips when
@@ -32,7 +38,7 @@ from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
 
-from .assistant.store import BrandingConversationStore, ConversationAttachResult
+from .assistant.store import BrandingConversationStore
 from .models import (
     Brand,
     BrandingMission,
@@ -83,13 +89,6 @@ class AttachConversationResult(str, Enum):
     BRAND_NOT_FOUND = "brand_not_found"
 
 
-class _AttachAbort(Exception):
-    """Internal control-flow signal: abort the attach transaction with *result*."""
-
-    def __init__(self, result: AttachConversationResult) -> None:
-        self.result = result
-
-
 def _apply_brand_patch(cur: Cursor, brand_id: str, client_id: str, patch: dict) -> Optional[Brand]:
     """Shallow-merge *patch* into a brand's JSONB and return the updated Brand.
 
@@ -116,6 +115,13 @@ class BrandingStore(PostgresHelperMixin):
     The constructor takes no arguments — the Postgres DSN is read from
     the ``POSTGRES_*`` env vars by ``shared.postgres.get_conn``. The
     store itself is stateless; the pool is owned by shared.postgres.
+
+    Note for maintainers: ``coordination.attach_conversation_to_brand``
+    opens its shared transaction via :meth:`transaction`, this class's
+    public wrapper around the inherited ``PostgresHelperMixin._transaction``.
+    A rename or signature change to ``transaction`` is a breaking change for
+    that cross-store caller — grep for ``coordination.py`` before touching
+    it.
     """
 
     def __init__(self) -> None:
@@ -444,6 +450,53 @@ class BrandingStore(PostgresHelperMixin):
         with self._transaction() as cur:
             return _apply_brand_patch(cur, brand_id, client_id, patch)
 
+    def transaction(self):
+        """Public wrapper around ``_transaction()``, for cross-store coordinators.
+
+        ``coordination.attach_conversation_to_brand`` needs to open one
+        transaction shared with ``BrandingConversationStore`` — this method
+        is that entry point, so a caller outside this class never has to
+        reach into the inherited ``PostgresHelperMixin._transaction``
+        directly. Every method on this class still uses ``self._transaction()``
+        for its own single-store multi-statement writes; ``transaction()``
+        exists only for the cross-store case.
+
+        Postconditions:
+            Returns the same context manager ``_transaction()`` produces:
+            entering it yields a ``dict_row`` cursor bound to one
+            connection/transaction, committing on clean exit and rolling
+            back on exception. See ``PostgresHelperMixin._transaction`` for
+            the full contract.
+        """
+        return self._transaction()
+
+    @timed_query(store=_STORE, op="patch_brand_locked")
+    def patch_brand_locked(
+        self, cur: Cursor, brand_id: str, client_id: str, patch: dict
+    ) -> Optional[Brand]:
+        """Cursor-aware wrapper around the brand-patch write, for cross-store callers.
+
+        Mirrors ``BrandingConversationStore.attach_locked``: runs on *cur*, a
+        cursor the caller already opened (e.g. via its own
+        ``self._transaction()``), instead of opening a transaction of its
+        own. This lets a caller such as
+        ``coordination.attach_conversation_to_brand`` combine this brand-row
+        write with another store's write in one atomic transaction, while
+        ``BrandingStore`` remains the single owner of ``branding_brands``
+        writes.
+
+        Preconditions:
+            *cur* belongs to a transaction the caller will commit or roll
+            back — this method neither commits nor rolls back. ``brand_id``
+            and ``client_id`` are non-empty strings; ``patch`` is a dict of
+            top-level keys to shallow-merge into the brand's JSONB.
+        Postconditions:
+            Returns the updated :class:`Brand`, or ``None`` when no row
+            matched *brand_id* and *client_id* together (e.g. a concurrent
+            delete).
+        """
+        return _apply_brand_patch(cur, brand_id, client_id, patch)
+
     @timed_query(store=_STORE, op="attach_conversation")
     def attach_conversation(
         self,
@@ -454,63 +507,21 @@ class BrandingStore(PostgresHelperMixin):
     ) -> Tuple[AttachConversationResult, Optional[Brand]]:
         """Attach an existing conversation to *brand_id* and patch the brand, atomically.
 
-        Locks the conversation row (``FOR UPDATE``) before checking whether it is
-        already attached elsewhere, then updates both the conversation and the
-        brand in the same transaction. This closes two races a check-then-write
-        sequence across separate transactions would leave open: another request
-        attaching the same conversation between the uniqueness check and the
-        write, and the brand row disappearing after the conversation was already
-        attached (which would otherwise leave the conversation pointing at a
-        brand that never learns its id).
-
-        Preconditions:
-            ``client_id``, ``brand_id``, ``conversation_id`` are non-empty
-            strings; ``mission``, when provided, is a valid
-            :class:`BrandingMission`.
-        Postconditions:
-            On :attr:`AttachConversationResult.OK`, the conversation row now has
-            ``brand_id`` set to *brand_id*, the brand's ``conversation_id`` is set
-            to *conversation_id*, and the updated :class:`Brand` is returned.
-
-            When *mission* is provided, ``mission_json`` is overwritten with it.
-            When *mission* is omitted (``None``), ``mission_json`` is left as
-            whatever this same locked transaction just read — never a snapshot
-            the caller took before acquiring the lock. This matters when the
-            conversation may have gained a newer mission (e.g. via a concurrent
-            ``POST /conversations/{id}/messages`` turn) between the caller's own
-            read and this call: passing a stale pre-lock mission here would
-            silently roll that edit back and could pair an old mission with
-            output generated for a newer one. Callers that are themselves the
-            source of truth for the mission (e.g. brand creation, where *mission*
-            drove the just-created brand) should still pass it explicitly.
-
-            Any other result leaves both rows unchanged (the transaction rolls
-            back) and the paired value is ``None``.
+        Thin delegate onto :func:`coordination.attach_conversation_to_brand`,
+        which owns the actual cross-store transaction (locking the
+        conversation row, then updating both the conversation and the brand
+        in one atomic write) — see its docstring for the full contract,
+        including the race conditions closed and the ``mission=None``
+        semantics. Delegating keeps that cross-table orchestration out of
+        this single-table store, while ``BrandingStore`` remains the sole
+        owner of ``branding_brands`` writes and ``BrandingConversationStore``
+        remains the sole owner of ``branding_conversations`` writes.
         """
-        if not client_id:
-            raise ValueError("client_id must be a non-empty string")
-        if not brand_id:
-            raise ValueError("brand_id must be a non-empty string")
-        if not conversation_id:
-            raise ValueError("conversation_id must be a non-empty string")
-        if mission is not None and not isinstance(mission, BrandingMission):
-            raise ValueError("mission must be a BrandingMission")
-        conv_store = BrandingConversationStore()
-        try:
-            with self._transaction() as cur:
-                conv_result = conv_store.attach_locked(cur, conversation_id, brand_id, mission)
-                if conv_result is ConversationAttachResult.NOT_FOUND:
-                    raise _AttachAbort(AttachConversationResult.CONVERSATION_NOT_FOUND)
-                if conv_result is ConversationAttachResult.ALREADY_ATTACHED:
-                    raise _AttachAbort(AttachConversationResult.ALREADY_ATTACHED)
+        from .coordination import attach_conversation_to_brand
 
-                patch = {"conversation_id": conversation_id, "updated_at": _now_iso()}
-                brand = _apply_brand_patch(cur, brand_id, client_id, patch)
-                if brand is None:
-                    raise _AttachAbort(AttachConversationResult.BRAND_NOT_FOUND)
-        except _AttachAbort as exc:
-            return exc.result, None
-        return AttachConversationResult.OK, brand
+        return attach_conversation_to_brand(
+            self, BrandingConversationStore(), client_id, brand_id, conversation_id, mission
+        )
 
     @timed_query(store=_STORE, op="append_brand_version")
     def append_brand_version(
