@@ -196,9 +196,13 @@ def simulate(
   `entry_price_basis * (1 ± pct)`, and that computed level is the exact
   price the position fills at — becoming `ReferenceTrade.exit_price`
   directly — so changing `entry_slippage_bps` can change which price (and
-  which bar) such an exit records, even though the *character* of every
-  emitted price (a bar-derived reference level, never a slippage-adjusted
-  fill) never changes. Capital can also gate whether a *later* entry is
+  which bar) such an exit records. This does **not** mean the module
+  applies a separate, post-hoc slippage adjustment to an otherwise-fixed
+  exit price: the *character* of every emitted price never changes — each
+  is either a bar-derived reference level, or a rule-computed level that
+  for `basis="entry_price"` exits legitimately carries entry slippage
+  through `entry_price_basis` (as just described), never a slippage
+  adjustment layered on afterward. Capital can also gate whether a *later* entry is
   admitted, so this parameter affects which trades this module emits
   through that channel too. A caller reproducing a specific backtest run
   passes that run's `BacktestConfig.slippage_bps` through.
@@ -297,11 +301,14 @@ fallback below applies only to one of two distinct cases:
   would mean the Reuse mandate and the Exclusions Postcondition directly
   conflict — not a case Step 2 should silently work around by re-deriving
   the evaluators; the implementer must stop and escalate the conflict
-  instead. (Verified against the current source: `predicate_evaluator.py`
-  carries no such top-level import today — only stdlib, `pandas`, and
-  sibling `strategy_lab` modules — so this case does not apply as of this
-  writing, but the distinction should still be confirmed at Step 2 rather
-  than assumed to still hold.)
+  instead. (Verified against the current source: `predicate_evaluator.py`'s
+  own top-level imports are only stdlib, `pandas`, and sibling
+  `strategy_lab` modules — no *direct* forbidden import as of this writing.
+  A transitive chain through those sibling imports' own top-level imports
+  is **not** ruled out by this check alone; Step 2 must confirm the full
+  transitive import closure carries no chain back into the excluded
+  modules before relying on it, exactly as the operative instruction above
+  already requires.)
 
 In the first case, the Postconditions' no-forbidden-import guarantee holds
 regardless of which concrete history-view implementation Step 2 picks; the
@@ -383,7 +390,13 @@ resolve unilaterally.
   `(spec, bars, starting_equity, entry_slippage_bps)` inputs always produce
   an identical output list. This is required for it to function as a
   reference oracle; a non-deterministic simulator cannot be diffed
-  meaningfully against a single production run.
+  meaningfully against a single production run. `starting_equity`'s role is
+  confined to sizing/capital (it never touches `entry_price`/`exit_price`
+  directly); `entry_slippage_bps`'s role is **not** as narrow — beyond
+  sizing/capital, it also reaches `exit_price`/`exit_bar` indirectly for
+  any `basis="entry_price"` exit — see §2's `entry_slippage_bps` parameter
+  description for the single authoritative statement of both parameters'
+  effects.
 
 ## 3. `ReferenceTrade` schema
 
@@ -447,20 +460,36 @@ style fields, not bar indices, since production carries no bar index at all.
 Carrying both from the start means the matching module never has to derive
 one from the other.
 
-**Deliberately excluded** (all downstream cost/execution-mechanics fields,
-out of scope per §1): `position_value`, `gross_pnl`, `net_pnl`, `return_pct`,
-`outcome`, `cumulative_pnl`, `entry_fill_price`, `exit_fill_price`,
-`entry_order_type`, `exit_order_type`, `participation_clipped`,
-`partial_fill_count`, `total_unfilled_qty`,
-`hold_days` — trivially derivable by the matching module from the entry
-and exit dates, unlike the two partial-fill fields before it, which this
-module simply never models (§1's "Order-book / partial-fill mechanics"
-exclusion) — `entry_reason`/`exit_reason`
-free text — `entry_reason` superseded by the structured `entry_rule_index`
-field above, `exit_reason` superseded by the structured
-`exit_rule_kind`/`exit_rule_index`/`level_index` triple above.
+**Deliberately excluded** (production `TradeRecord` fields this schema
+does not carry, grouped by why):
+
+- `position_value`, `gross_pnl`, `net_pnl`, `return_pct`, `outcome`,
+  `cumulative_pnl`, `entry_fill_price`, `exit_fill_price`,
+  `entry_order_type`, `exit_order_type`, `participation_clipped` —
+  downstream cost/execution-mechanics fields, out of scope per §1.
+- `partial_fill_count`, `total_unfilled_qty` — this module never models
+  order-book/partial-fill mechanics at all (§1's "Order-book / partial-fill
+  mechanics" exclusion), so there is nothing to populate these from.
+- `hold_days` — trivially derivable by the matching module from
+  `entry_date`/`exit_date`, unlike the two fields above.
+- `entry_reason`/`exit_reason` free text — superseded by the structured
+  fields: `entry_reason` by `entry_rule_index` (§3's field table above),
+  `exit_reason` by the `exit_rule_kind`/`exit_rule_index`/`level_index`
+  triple (also above).
 
 ### Invariants (as a value object)
+
+Every invariant in this section is enforced in `__post_init__` (raising
+`ValueError` on violation), not merely guaranteed by `simulate`'s own
+construction path — a `ReferenceTrade` cannot exist in an invalid state
+regardless of caller (direct construction in tests, the matching module's
+translation adapters, or anywhere else), the same fail-fast shape
+`ExitIntent` already uses. The two invariants called out below as
+`Literal`-typed additionally get runtime membership checks precisely
+because a `Literal` annotation alone is not enforced on a plain dataclass;
+every other invariant listed here — the relational, numeric, and
+biconditional ones — has no type-level backstop at all, so its
+`__post_init__` check is the *only* enforcement, not a redundant one.
 
 - `entry_bar < exit_bar` (strict — see §2's Postconditions for why no
   modeled exit can complete on `entry_bar` itself).
@@ -788,7 +817,12 @@ the trigger bar's close, or another symbol's entry consuming cash first in
 the same merged walk). This requires tracking a **second** running figure
 alongside equity: available **capital** (cash), separate from equity (cash
 plus unrealized position value) — mirroring `Portfolio.capital` vs.
-`Portfolio.mark_to_market()`.
+`Portfolio.mark_to_market()`. Like gates 1-2 above, this is a pure
+admission predicate with no side effect other than reject/admit, so it may
+be evaluated before, after, or interleaved with them — the admit/reject
+outcome is identical regardless of order, since production itself runs
+`RiskFilter.can_enter` and this affordability check as two independent
+checks inside `_fill_entry`, both ahead of applying slippage.
 
 The check and the decrement deliberately use **different** bases, mirroring
 production exactly rather than an inconsistency to reconcile: the
@@ -925,8 +959,11 @@ handling rather than a synthetic force-close.
 
 ### Per-bar evaluation order
 
-Two ordering rules this module must enforce, both to stay behaviorally
-identical to production, not just directionally similar:
+Three ordering rules this module must enforce, all to stay behaviorally
+identical to production, not just directionally similar. The first two
+both concern how a resting order and `signal_exit` interact on the same
+bar (entry-bar eligibility, then same-bar precedence); the third is a
+distinct concern — entry-vs-exit evaluation phase order:
 
 - **Resting orders are not eligible on their own materialization bar;
   `signal_exit`'s trigger check is.** These are two different mechanisms
@@ -1016,11 +1053,15 @@ short exposure and has no already-effective short-side stop among its
 existing exit rules, production **appends** a synthetic
 `StopLossRule(pct=1.0, basis="entry_price")` to the working `exit_rules`
 list, mirroring the same "no effective short stop" check production uses
-(`first_side_stop_factor(exit_rules, "short") is None`). The general trigger
-for "permits short exposure" is `spec.entry_rules is None` (the
-`requires_custom_code` signal), but that case is already excluded from this
-module's scope per §2's precondition — so in practice the condition this
-module must check reduces to any `EntryRule.side == "short"`. This is a
+(`first_side_stop_factor(exit_rules, "short") is None`). Production's own
+condition for "permits short exposure" is the disjunction
+`shorts_possible = entry_rules is None or any(rule.side == "short" for rule
+in entry_rules)` (verbatim from `TradingService.__init__`) — the first
+disjunct is the `requires_custom_code` signal, already excluded from this
+module's scope per §2's precondition, so **only** the second disjunct
+applies here: this module's check reduces to
+`any(rule.side == "short" for rule in spec.entry_rules)`, i.e. any
+`EntryRule.side == "short"`. This is a
 **real, indexable** rule once injected — not a
 side-channel default — so a short position that runs to double its entry
 price closes via this synthetic rule in production, with a genuine
