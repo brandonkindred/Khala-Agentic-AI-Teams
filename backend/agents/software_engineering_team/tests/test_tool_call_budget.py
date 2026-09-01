@@ -149,6 +149,20 @@ def test_rejects_invalid_construction() -> None:
         ToolCallBudgetModel(_AlwaysToolCallsModel(), 0)
 
 
+def test_rejects_a_non_int_cap_instead_of_truncating_it() -> None:
+    """A coerced cap would not be the one the caller asked for.
+
+    `int(2.5)` enforces 2 while the caller believes it asked for 2.5, so the
+    contract would stop describing what actually runs. `bool` is an `int`
+    subclass, and `True` as a cap is a caller bug rather than a budget of one.
+    """
+    for bad in (2.5, "3", True, None):
+        with pytest.raises(ValueError, match="must be an int"):
+            ToolCallBudgetModel(_AlwaysToolCallsModel(), bad)
+
+    assert ToolCallBudgetModel(_AlwaysToolCallsModel(), 3).max_tool_calls == 3
+
+
 def test_passthrough_below_cap_is_unchanged() -> None:
     inner = _AlwaysToolCallsModel()
     model = ToolCallBudgetModel(inner, 2)
@@ -334,7 +348,8 @@ def test_cap_bounds_tool_calls_within_a_single_parallel_batch() -> None:
         for event in events
     )
     # The turn's own stop reason is untouched here — the next turn is the one
-    # that withdraws the tools and ends the loop.
+    # that ends the loop, with the tools still attached and a directive on the
+    # system prompt (withdrawing the specs would break the Anthropic request).
     assert events[-1] == {"messageStop": {"stopReason": "tool_use"}}
 
 

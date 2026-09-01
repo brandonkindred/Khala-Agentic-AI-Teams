@@ -214,7 +214,9 @@ class ToolCallBudgetModel:
     Preconditions:
         - ``inner`` exposes an async-generator ``stream`` with the Strands
           ``Model.stream`` signature.
-        - ``max_tool_calls >= 1``.
+        - ``max_tool_calls`` is an ``int`` >= 1. A non-int (``bool`` included)
+          raises rather than being coerced -- a truncated cap would not be the
+          one the caller asked for.
 
     Postconditions:
         - Below the cap: every event of ``inner.stream`` is yielded
@@ -245,10 +247,16 @@ class ToolCallBudgetModel:
     def __init__(self, inner: Any, max_tool_calls: int, *, label: str = "code_review") -> None:
         if inner is None:
             raise ValueError("inner model is required")
+        # Validated, never coerced: ``int(2.5)`` would enforce a cap of 2 while
+        # the caller believes it asked for 2.5, so the contract would no longer
+        # describe what runs. ``bool`` is an ``int`` subclass and is rejected
+        # too -- ``True`` as a cap is a caller bug, not a budget of one.
+        if isinstance(max_tool_calls, bool) or not isinstance(max_tool_calls, int):
+            raise ValueError(f"max_tool_calls must be an int, got {max_tool_calls!r}")
         if max_tool_calls < 1:
             raise ValueError(f"max_tool_calls must be >= 1, got {max_tool_calls}")
         self._inner = inner
-        self._max_tool_calls = int(max_tool_calls)
+        self._max_tool_calls = max_tool_calls
         self._label = label
         self._tool_calls_used = 0
         self._stopped = False
@@ -381,9 +389,14 @@ class ToolCallBudgetModel:
         )
 
     async def _within_budget(
-        self, stream: AsyncGenerator[dict[str, Any], None]
+        self, upstream: AsyncGenerator[dict[str, Any], None]
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Forward ``stream``, counting tool uses and dropping over-budget ones.
+        """Forward ``upstream``, counting tool uses and dropping over-budget ones.
+
+        Named ``upstream`` rather than ``stream``: this class exists to wrap
+        ``stream``, so a parameter of that name inside it would shadow the
+        method and invite a bare ``stream(...)`` where ``self.stream(...)``
+        was meant.
 
         A single assistant turn may carry several ``toolUse`` blocks (a
         parallel batch), so the cap has to be enforced block by block, not
@@ -411,7 +424,7 @@ class ToolCallBudgetModel:
         dropping_index: Any = _MISSING
         forwarded_from_block = False
         counted_block = False
-        async for event in stream:
+        async for event in upstream:
             # A tool use normally opens with ``contentBlockStart``, but Strands
             # also accepts one announced solely in a ``contentBlockDelta``
             # (``streaming.handle_content_block_delta`` fills toolUseId/name
