@@ -2,18 +2,18 @@
 
 ## Purpose
 
-Step 1 of 4 in the golden-set evaluation harness epic. Before the corpus and
-label schema (step 2) can define a closed defect-class vocabulary, that
-vocabulary has to be justified against what the review gates actually emit —
-not against a plausible taxonomy invented for the corpus.
+A golden-set evaluation harness for the SE review gates needs a corpus whose
+labels use a closed defect-class vocabulary. That vocabulary is only
+trustworthy if it is justified against what the gates actually emit — not
+against a plausible taxonomy invented for the corpus. This document is the
+factual baseline that vocabulary is built from.
 
-This document catalogues the finding shapes produced today by the four LLM
-finding-producing gates named in the inventory request:
-the code-review coordinator, the QA agent, the security agent, and
-`false_positive_filter`. Every field, severity value, and defect category
-below is drawn from the current model definitions, prompts, and test
-fixtures — not inferred from prompts alone. No production code changes
-accompany this document.
+It catalogues the finding shapes produced today by four LLM
+finding-producing gates: the code-review coordinator, the QA agent, the
+security agent, and `false_positive_filter`. Every field, severity value,
+and defect category below is drawn from the current model definitions,
+prompts, and test fixtures — not inferred from prompts alone. No production
+code changes accompany this document.
 
 **Out of scope:** the linting gate (`linting_tool_agent`) is a fifth
 finding-producing gate not inventoried here. It runs on the frontend
@@ -25,7 +25,7 @@ of the shared code-review phase impl, per
 `column: int`, `rule: str`, `message: str`,
 `severity: Literal["error","warning","info"]`) — a second gate whose
 findings are structurally matchable by file path + numeric line, which the
-step-2/3 corpus work should account for alongside code review. The
+corpus and matching-rule work should account for alongside code review. The
 `devops_team`'s `change_review_agent` also emits review findings within this
 team package. It runs the code-review engine internally (`devops_maintainability`
 profile) but is not a passthrough: `agent.py::_to_finding` translates each
@@ -39,8 +39,8 @@ computing `blocking` from `is_blocking(severity)`, and remapping the engine's
 `info` severity to `low` (`change_review_agent/agent.py:38-99`) since
 `ReviewFinding`'s severity literal has no `info` member. This translated
 shape is a sixth finding shape not catalogued in depth here, alongside the
-lint gate above — both are out of scope for the four gates named in the
-originating issue but should be accounted for in the step-2/3 corpus work.
+lint gate above — both are out of scope for the four gates inventoried below
+but should be accounted for when the corpus and matching rule are built.
 
 ## 1. Code Review Coordinator (`code_review_agent/`)
 
@@ -99,7 +99,7 @@ accepted or rejected. That path also repairs a conflicting
 `omission`+`pre_existing` pairing (omission wins, `pre_existing` forced
 `False`) instead of raising, where `ChunkReviewIssueLLM`'s `StrictBool`
 fields would reject a non-bool token outright and drive a corrective retry.
-A step-2 corpus schema should treat these two classes as documentation of
+A corpus schema should treat these two classes as documentation of
 the target field set, not proof that malformed booleans are rejected at this
 boundary today.
 
@@ -143,7 +143,7 @@ ReviewProfile.CODE_REVIEW)`, `prompts.py:21`), so its defect checklist lives
 in `code_review_agent/profiles.py`, not in the list quoted below.
 
 For contrast, the defect claims enumerated at `prompts.py:42-47` belong to
-`FALSE_POSITIVE_VERIFY_BODY` (`prompts.py:24-63`), not to the code-review
+`FALSE_POSITIVE_VERIFY_BODY` (`prompts.py:24-55`), not to the code-review
 prompt, and their polarity is **inverted**: they are the verifier's list of
 claims that are *commonly false positives* once the whole codebase is
 visible — "X is undefined / never defined / not imported / not registered",
@@ -358,7 +358,10 @@ per-finding suppression record) and is a no-op when no `job_id` is bound
 Postgres is unavailable — it should not be conflated with a first-class
 suppressed-finding output, but it may be a usable source for the evaluation
 harness. The filter can be disabled entirely via the
-`CODE_REVIEW_FALSE_POSITIVE_FILTER=false/0/no` environment variable
+`CODE_REVIEW_FALSE_POSITIVE_FILTER` environment variable (a default-on
+toggle read through `shared.env.env_flag_enabled`, which treats
+`false`/`0`/`no`/`off` — case-insensitive, whitespace-tolerant — as disabled
+and any other value, blank, or unset as enabled)
 (`_FILTER_ENV`, false_positive_filter.py:99-102), in which case the input
 list is returned unchanged.
 
@@ -380,7 +383,7 @@ CodeReviewIssue(
 
 | Gate | Finding model | Severity typing | Category typing | Numeric line? | Structured `file_path`? |
 |---|---|---|---|---|---|
-| Code review | `CodeReviewIssue` / `ChunkReviewIssueLLM` | Closed `Literal` (5 values) at the LLM boundary; plain `str` on the persisted record | Closed 13-value enum (2-value subsets for the architecture/side-effect passes) | Yes — `line` + `start_line` | Yes — always present, may be blank |
+| Code review | `CodeReviewIssue` / `ChunkReviewIssueLLM` | Closed `Literal` (5 values) at the LLM boundary; plain `str` on the persisted record | Closed 13-value enum at the LLM boundary (2-value subsets for the architecture/side-effect passes); plain `str` defaulting to `"general"` on the persisted record | Yes — `line` + `start_line` | Yes — always present, may be blank |
 | QA | `BugReport` | Plain `str`, unenforced (test fixture uses `"info"`, outside the documented set) | **None** — no category field | No (`fix_build` mode adds only a structured `file_path`, not a numeric line field — `line_or_section` stays a string that may hold non-numeric text in every mode) | Only in `fix_build` mode |
 | Security | `SecurityVulnerability` | Plain `str`, unenforced | Free-text `str`, not a closed set | No — no line field of any kind | No — `location` is a single free-text field |
 | `false_positive_filter` | N/A — filters `CodeReviewIssue`; never emits its own shape | N/A (severity-agnostic) | N/A | N/A | N/A |
@@ -390,5 +393,5 @@ findings are structurally matchable by file path + numeric line without
 free-text parsing (the out-of-scope linting gate's `LintIssue` is a second
 such gate — see the Purpose section). QA and security both depend on a
 free-text location string, and QA has no defect-category field at all —
-both are direct constraints on what the step-2 label schema and
-step-3 matching rule can cover for those two gates.
+both are direct constraints on what a label schema and a file+line matching
+rule can cover for those two gates.
