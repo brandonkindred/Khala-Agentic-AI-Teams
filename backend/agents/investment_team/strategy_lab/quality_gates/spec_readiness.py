@@ -1191,7 +1191,7 @@ class SpecReadinessGate(GateResultsMixin):
                         f"{worst_case_concurrent} (min of {len(symbols)} target symbol(s) "
                         f"and risk_limits.max_open_positions "
                         f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring/promotion where applicable{slippage_note}) "
+                        f"whole-lot share flooring where applicable{slippage_note}) "
                         f"= {worst_case_fraction:.2f}x equity would exceed the cash-bound "
                         f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
                         f"${capital:.0f}) if all concurrent positions filled "
@@ -1458,7 +1458,9 @@ class SpecReadinessGate(GateResultsMixin):
         # express the notional as a fraction, so it is skipped without config.
         # ``volatility_target`` is dynamic (depends on realised vol), so the
         # deployed fraction is unknown at design time and stays ``None`` —
-        # consistent with Rule 5 abstaining on the same kind.
+        # Rule 5 validates volatility_target's worst-case-concurrency
+        # invariant, but that says nothing about the deployed fraction this
+        # check needs, so this Check A stays skipped for it too.
         pos_fraction: Optional[float] = None
         if kind == "fixed_fraction":
             pos_fraction = float(ctx.spec.sizing.fraction)

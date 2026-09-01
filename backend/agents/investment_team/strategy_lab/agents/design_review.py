@@ -767,9 +767,10 @@ def _coerce_critique(
     ``sizing`` objections *when* ``sizing_owned`` (the spec's sizing kind is one
     the gate fully validates), and any objection referencing the retired
     max-drawdown *limit* (max drawdown is not a constraint). ``sizing_owned`` is
-    ``False`` for ``volatility_target`` (the gate abstains and only warns, so the
-    reviewer's plausibility objection is the only substantive check) — such a
-    sizing objection keeps blocking. Non-drawdown ``risk_limits`` objections
+    ``False`` for ``volatility_target`` (the gate only partially owns it —
+    worst-case concurrency, not target_annual_vol plausibility — so the
+    reviewer's plausibility objection remains the only check of the latter) —
+    such a sizing objection keeps blocking. Non-drawdown ``risk_limits`` objections
     (e.g. ``max_gross_leverage=0``) are likewise never demoted. A not-ready
     verdict whose ONLY blocking objections were demotable ones is promoted to
     ``ready=True`` (with an audit-trail ``info`` note) rather than left to churn
@@ -818,7 +819,7 @@ def _coerce_critique(
     # ``info``: the deterministic gate owns sizing for gate-owned kinds and max
     # drawdown is not a constraint, so the reviewer must not veto on them (see
     # ``_is_demotable_issue``). A ``volatility_target`` sizing objection (gate
-    # abstains) and non-drawdown ``risk_limits`` critiques (e.g.
+    # only partially owns it) and non-drawdown ``risk_limits`` critiques (e.g.
     # ``max_gross_leverage=0``) are left untouched so genuine mechanically-
     # unusable settings still block. ``demoted_blocking`` records
     # how many *blocking* (warning/critical) issues were demoted this way, so a

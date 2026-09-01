@@ -1052,7 +1052,7 @@ def test_design_review_run_keeps_volatility_target_sizing_objection(
 ) -> None:
     """End-to-end: a volatility_target spec whose reviewer flags an implausible
     target keeps the verdict not-ready — ``run`` resolves ``sizing_owned`` from
-    the spec's sizing kind, so the gate-abstained objection is not demoted."""
+    the spec's sizing kind, so the not-gate-owned objection is not demoted."""
     spec = _spec().model_copy(update={"sizing": VolatilityTargetSizing(target_annual_vol=0.001)})
     payload = json.dumps(
         {

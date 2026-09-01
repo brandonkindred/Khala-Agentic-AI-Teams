@@ -827,7 +827,7 @@ def test_rule5_volatility_target_emits_warning() -> None:
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
     assert any("volatility_target" in w and "0.15" in w for w in warnings), warnings
-    # No critical from Rule 5 (the rule abstained, not failed).
+    # No critical from Rule 5 — the worst-case bound fits within capital.
     sizing_criticals = [c for c in _critical(results) if "Sizing" in c or "qty=" in c]
     assert not sizing_criticals, sizing_criticals
 
