@@ -966,6 +966,42 @@ class TestCreateIssueReaction:
             _client_with(handler).create_issue_reaction("acme", "widget", 555)
 
 
+class TestClientCreateLabel:
+    def test_creates_label_with_default_color(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["path"] = req.url.path
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(201, json={"id": 1, "name": "waiting for review"})
+
+        client = _client_with(handler)
+        result = client.create_label("acme", "widget", "waiting for review")
+        assert seen["method"] == "POST"
+        assert seen["path"] == "/repos/acme/widget/labels"
+        assert seen["body"]["name"] == "waiting for review"
+        assert result is None
+
+    def test_already_exists_422_is_swallowed(self) -> None:
+        """GitHub responds 422 when a label with this name already exists --
+        this is treated as success (idempotent create-if-missing), not
+        re-raised, so callers can call this unconditionally as a guard."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(422, json={"message": "Validation Failed"})
+
+        result = _client_with(handler).create_label("acme", "widget", "waiting for review")
+        assert result is None
+
+    def test_other_error_raises(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"message": "Forbidden"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).create_label("acme", "widget", "waiting for review")
+
+
 class TestScrubTokenFromText:
     def test_redacts_user_at_url(self) -> None:
         # Build the credentialed URL at runtime so the literal `user:pwd@host`
@@ -3521,6 +3557,44 @@ class TestFileContentsAndTree:
 
         with pytest.raises(GitHubAPIError):
             _client_with(handler).get_file_contents("o", "r", "a.py", "sha1")
+
+    def test_get_file_contents_detailed_confirms_404_as_missing(self) -> None:
+        """A 404 is reported as (None, missing=True) -- distinguishable from a
+        directory or an undecodable payload, which report missing=False."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+        content, missing = _client_with(handler).get_file_contents_detailed(
+            "o", "r", "missing.py", "sha1"
+        )
+        assert content is None
+        assert missing is True
+
+    def test_get_file_contents_detailed_directory_is_not_missing(self) -> None:
+        """A directory path is unreadable but NOT a confirmed-absent path --
+        missing must stay False so callers don't treat it as "file deleted"."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"type": "file", "name": "a.py"}])
+
+        content, missing = _client_with(handler).get_file_contents_detailed(
+            "o", "r", "pkg", "sha1"
+        )
+        assert content is None
+        assert missing is False
+
+    def test_get_file_contents_detailed_matches_get_file_contents(self) -> None:
+        """get_file_contents delegates to get_file_contents_detailed and
+        returns just its content half."""
+        body = "x = 1\n"
+        encoded = base64.b64encode(body.encode()).decode()
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"type": "file", "encoding": "base64", "content": encoded})
+
+        client = _client_with(handler)
+        assert client.get_file_contents("o", "r", "a.py", "sha1") == body
 
     def test_get_repository_tree_returns_blob_paths(self) -> None:
         """Only blob (file) entries are returned; tree (directory) entries are excluded."""

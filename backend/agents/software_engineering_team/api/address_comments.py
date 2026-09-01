@@ -671,15 +671,23 @@ def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: Revie
         - Returns the cited file's text at ``ref``, or "" when the comment is
           file-less (a PR-level comment with no ``path``) — that case is not
           a fetch failure, there is simply nothing to fetch.
+        - Returns a small sentinel string when the cited path is confirmed
+          absent at ``ref`` (a 404, not a directory or undecodable payload):
+          this is the common, legitimate case where the review concern was
+          addressed by deleting or renaming the file, not a fetch failure —
+          triage proceeds using the sentinel as context instead of failing
+          closed.
         - Raises :class:`CitedCodeUnavailableError` when ``comment.path`` is
-          set but the content could not be fetched, so the caller can fail
-          the comment closed rather than triage it on the comment's prose
-          alone. Never silently degrades a real fetch failure to "".
+          set but the content could not be fetched for any other reason (a
+          directory, a non-file entry, an undecodable payload, or a
+          transport/API error), so the caller can fail the comment closed
+          rather than triage it on the comment's prose alone. Never silently
+          degrades a real fetch failure to "".
     """
     if not comment.path:
         return ""
     try:
-        content = client.get_file_contents(owner, repo, comment.path, ref)
+        content, missing = client.get_file_contents_detailed(owner, repo, comment.path, ref)
     except Exception as e:  # noqa: BLE001 - reraised as a distinguishable, typed failure
         logger.warning(
             "address-comments: could not read %s@%s: %s",
@@ -691,12 +699,23 @@ def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: Revie
             f"could not read cited file {comment.path}@{ref}: {scrub_token_from_text(str(e))}"
         ) from e
     if content is None:
-        # get_file_contents returns None (no exception) for a 404, a directory,
-        # or an undecodable payload. That is a fetch failure, not "the file is
-        # empty" — collapsing it to "" would let triage proceed on prose alone.
+        if missing:
+            # Confirmed 404, not a directory or undecodable payload: the file
+            # is genuinely gone at this ref, which is evidence the review
+            # concern may already be resolved by its deletion, not a fetch
+            # failure. Let triage proceed with that context instead of
+            # perma-failing the comment every run.
+            return (
+                "(file no longer exists in the current PR head — the review "
+                "concern may already be addressed by its deletion)"
+            )
+        # A directory, non-file entry, or undecodable payload -- genuinely
+        # unreadable, not confirmed absent. That is a fetch failure, not "the
+        # file is empty" — collapsing it to "" would let triage proceed on
+        # prose alone.
         raise CitedCodeUnavailableError(
-            f"could not read cited file {comment.path}@{ref}: file not found, is a directory, "
-            "or its content could not be decoded"
+            f"could not read cited file {comment.path}@{ref}: is a directory or its content "
+            "could not be decoded"
         )
     return content
 
@@ -939,17 +958,20 @@ def _plan_resolution(
     Postconditions:
         - Returns an :class:`IssueResolutionPlan` whose ``candidate_solutions`` are
           sorted best-first by :attr:`SolutionCandidate.score`, or ``None`` when the
-          LLM planning step fails (the caller then records the comment as failed
-          rather than implementing a plan it does not have).
+          LLM planning step fails OR its structured output is inconsistent with
+          the "always implement the best-scoring of three candidates" invariant
+          this flow exists to enforce (the caller then records the comment as
+          failed rather than implementing a plan it does not have).
         - ``chosen_plan`` is free text the model writes independently of
           ``candidate_solutions`` — nothing in the schema forces it to actually
           describe the candidate ``chosen_candidate_index`` names, let alone the
-          top-scoring one. When they disagree (or ``chosen_candidate_index`` is
-          missing/out of range while candidates exist), this logs a warning but
-          still returns the plan: ``chosen_plan`` — not the candidate list — is
-          what :func:`_dispatch_implementation` actually acts on, so a scoring/
-          description mismatch is a self-consistency signal worth surfacing, not
-          grounds to fail an otherwise usable plan.
+          top-scoring one. Because :func:`_dispatch_implementation` acts on
+          ``chosen_plan`` alone, an inconsistent selection (not exactly three
+          candidates, a missing/out-of-range ``chosen_candidate_index``, or one
+          that does not match the actual top-scoring index) is treated as a
+          fail-closed planning failure — returning ``None`` — rather than
+          dispatching a ``chosen_plan`` nothing here can verify implements the
+          best-scoring candidate.
     """
     prompt = (
         "## Real issue raised by a review comment\n"
@@ -981,21 +1003,30 @@ def _plan_resolution(
             scrub_token_from_text(str(e)),
         )
         return None
-    if plan.candidate_solutions:
-        top_index = max(
-            range(len(plan.candidate_solutions)),
-            key=lambda i: plan.candidate_solutions[i].score,
+    if len(plan.candidate_solutions) != 3:
+        logger.warning(
+            "address-comments: comment %s's plan returned %d candidate_solutions, not the "
+            "required 3 — failing this comment closed rather than dispatching a chosen_plan "
+            "that cannot be verified against a proper top-3 comparison",
+            comment.id,
+            len(plan.candidate_solutions),
         )
-        if plan.chosen_candidate_index != top_index:
-            logger.warning(
-                "address-comments: comment %s's plan names chosen_candidate_index=%s but "
-                "candidate %s scored highest — chosen_plan may not describe the top-scoring "
-                "candidate; proceeding with chosen_plan as-is since it, not the candidate "
-                "list, is what gets implemented",
-                comment.id,
-                plan.chosen_candidate_index,
-                top_index,
-            )
+        return None
+    top_index = max(
+        range(len(plan.candidate_solutions)),
+        key=lambda i: plan.candidate_solutions[i].score,
+    )
+    if plan.chosen_candidate_index != top_index:
+        logger.warning(
+            "address-comments: comment %s's plan names chosen_candidate_index=%s but "
+            "candidate %s scored highest — chosen_plan may not describe the top-scoring "
+            "candidate; failing this comment closed rather than dispatching a chosen_plan "
+            "that is not verifiably the best-scoring candidate's plan",
+            comment.id,
+            plan.chosen_candidate_index,
+            top_index,
+        )
+        return None
     # Rank candidates best-first for display/logging only — this reorders
     # candidate_solutions but does NOT touch chosen_plan or
     # chosen_candidate_index. chosen_plan is the model's own independent
@@ -1661,7 +1692,11 @@ def _mark_waiting_for_review(client: GitHubClient, owner: str, repo: str, pr_num
 
     GitHub has no native "waiting for review" PR state, so this is a label. A PR is
     an issue in GitHub's REST API, so ``update_issue`` applies it; existing labels
-    are preserved by merging (``update_issue`` replaces the full label set).
+    are preserved by merging (``update_issue`` replaces the full label set). GitHub
+    rejects (422) applying a label name the repository has never defined, so this
+    creates ``WAITING_FOR_REVIEW_LABEL`` first (idempotently — a label that already
+    exists is treated as success, see :meth:`GitHubClient.create_label`), otherwise
+    every run on a repo without this label pre-defined would silently no-op here.
 
     Postconditions:
         - The PR carries ``WAITING_FOR_REVIEW_LABEL`` in addition to its existing
@@ -1674,6 +1709,17 @@ def _mark_waiting_for_review(client: GitHubClient, owner: str, repo: str, pr_num
           the rest of this label's convenience-signal contract — GitHub's REST
           API has no compare-and-swap for label sets.
     """
+    try:
+        client.create_label(owner, repo, WAITING_FOR_REVIEW_LABEL)
+    except Exception as e:  # noqa: BLE001 - label creation is best-effort; fall through to apply
+        logger.warning(
+            "address-comments: could not create %r label on %s/%s (will still try to apply "
+            "it in case it already exists): %s",
+            WAITING_FOR_REVIEW_LABEL,
+            owner,
+            repo,
+            scrub_token_from_text(str(e)),
+        )
     try:
         pr = client.get_pull_request(owner, repo, pr_number)
         merged = list(dict.fromkeys([*pr.labels, WAITING_FOR_REVIEW_LABEL]))

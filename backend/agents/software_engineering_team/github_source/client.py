@@ -718,6 +718,34 @@ class GitHubClient(_GitHubHttpMixin):
             )
         )
 
+    def create_label(
+        self, owner: str, repo: str, name: str, color: str = "ededed", description: str = ""
+    ) -> None:
+        """Create a repository label (``POST /repos/{owner}/{repo}/labels``), idempotently.
+
+        Preconditions:
+            - ``name`` is the label's exact display name; ``color`` is a 6-digit hex
+              string without a leading ``#`` (GitHub's own format for this field).
+        Postconditions:
+            - The repository has a label named ``name`` (freshly created with
+              ``color``/``description``, or already present from before this call —
+              both are treated as success). GitHub responds 422 when a label with
+              this name already exists; that specific status is swallowed here so
+              callers can call this unconditionally as a create-if-missing guard
+              before applying a label, without first doing a separate existence
+              check. Raises ``GitHubAPIError`` for any other non-2xx (auth, rate
+              limit, invalid color, server error) — those are real failures, not
+              "already exists".
+        """
+        response = self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/labels",
+            json={"name": name, "color": color, "description": description},
+        )
+        if response.status_code == 422:
+            return
+        self._check(response)
+
     def create_comment_reaction(
         self, owner: str, repo: str, comment_id: int, content: str = "eyes"
     ) -> None:
@@ -1391,21 +1419,42 @@ class GitHubClient(_GitHubHttpMixin):
               error status (auth, rate limit, server), so a real API failure is
               not silently masked as an absent file.
         """
+        content, _missing = self.get_file_contents_detailed(owner, repo, path, ref)
+        return content
+
+    def get_file_contents_detailed(
+        self, owner: str, repo: str, path: str, ref: str
+    ) -> tuple[Optional[str], bool]:
+        """Like :meth:`get_file_contents`, but also reports whether the path is confirmed absent.
+
+        Preconditions:
+            - Same as :meth:`get_file_contents`.
+        Postconditions:
+            - Returns ``(content, missing)``. ``content`` follows exactly the same
+              rules as :meth:`get_file_contents`. ``missing`` is ``True`` only when
+              the API confirmed the path does not exist at ``ref`` (a 404 response)
+              — the one case a caller can safely read as "this path is not present
+              at this ref" rather than "unreadable for some other reason" (a
+              directory, a non-file entry, or an undecodable payload, all of which
+              report ``missing=False`` alongside ``content=None`` since GitHub gave
+              no confirmation the path itself is absent). Raises ``GitHubAPIError``
+              only for a non-404 error status, same as :meth:`get_file_contents`.
+        """
         response = self._request(
             "GET", f"/repos/{owner}/{repo}/contents/{path}", params={"ref": ref}
         )
         if response.status_code == 404:
-            return None
+            return None, True
         payload = self._check(response).json()
         if not isinstance(payload, dict) or payload.get("type") != "file":
-            return None
+            return None, False
         if payload.get("encoding") != "base64" or not isinstance(payload.get("content"), str):
-            return None
+            return None, False
         try:
             raw = base64.b64decode(payload["content"])
         except (binascii.Error, ValueError):
-            return None
-        return raw.decode("utf-8", errors="replace")
+            return None, False
+        return raw.decode("utf-8", errors="replace"), False
 
     def get_repository_tree(
         self, owner: str, repo: str, ref: str, recursive: bool = True

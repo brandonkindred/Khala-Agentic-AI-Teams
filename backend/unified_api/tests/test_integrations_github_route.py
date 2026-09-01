@@ -28,6 +28,7 @@ from unified_api.main import app  # noqa: E402
 from unified_api.routes.integrations import (  # noqa: E402
     _ensure_repo_clone,
     _git_auth_env,
+    _github_api_base,
     _resolve_repo_path,
 )
 
@@ -1664,3 +1665,27 @@ def test_start_pr_review_falls_back_to_configured_default_repo(monkeypatch):
     payload = fake.last_payload()
     assert payload["owner"] == "acme"
     assert payload["repo"] == "widget"
+
+
+def test_github_api_base_strips_trailing_slash(monkeypatch):
+    """An operator's GITHUB_API_URL with a trailing slash must not produce a
+    double slash (`.../api/v3//repos/...`) when a caller builds a URL as
+    f"{_github_api_base()}/repos/...", matching the synchronous GitHubClient,
+    which already strips trailing slashes."""
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3/")
+    assert _github_api_base() == "https://ghes.example.com/api/v3"
+
+
+def test_github_api_base_strips_multiple_trailing_slashes(monkeypatch):
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3///")
+    assert _github_api_base() == "https://ghes.example.com/api/v3"
+
+
+def test_github_api_base_no_trailing_slash_unaffected(monkeypatch):
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3")
+    assert _github_api_base() == "https://ghes.example.com/api/v3"
+
+
+def test_github_api_base_default_when_unset(monkeypatch):
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+    assert _github_api_base() == "https://api.github.com"

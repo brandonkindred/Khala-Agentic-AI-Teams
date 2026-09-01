@@ -288,6 +288,7 @@ class _FakeClient:
         self.resolved: list[str] = []
         self.resolve_result = True  # what resolve_review_thread returns
         self.labels_set: list[list[str]] = []
+        self.labels_created: list[str] = []
         self.authenticated_login = "khala-bot"
         self.web_host = "github.com"
         self.pr = PullRequestDetail(
@@ -326,6 +327,11 @@ class _FakeClient:
 
     def get_file_contents(self, _o: str, _r: str, _p: str, _ref: str) -> Optional[str]:
         return self.file_contents
+
+    def get_file_contents_detailed(
+        self, _o: str, _r: str, _p: str, _ref: str
+    ) -> tuple[Optional[str], bool]:
+        return self.file_contents, False
 
     def reply_to_review_comment(
         self, *, owner: str, repo: str, number: int, comment_id: int, body: str
@@ -375,6 +381,9 @@ class _FakeClient:
     ) -> None:
         self.labels_set.append(list(labels or []))
         return None
+
+    def create_label(self, _o: str, _r: str, name: str, **_kw: Any) -> None:
+        self.labels_created.append(name)
 
 
 def _comment(
@@ -488,7 +497,7 @@ def _stub_triage(monkeypatch, ac, *, raises_issue: bool, is_false_positive: bool
     verdict (matching this codebase's real encoding: ``is_false_positive`` is
     meaningless unless ``raises_issue`` is also True — see ``CommentTriage``'s
     own docstring). Any other requested schema (i.e. ``IssueResolutionPlan``)
-    always gets the same fixed two-candidate plan, regardless of these flags.
+    always gets the same fixed three-candidate plan, regardless of these flags.
     """
     from software_engineering_team.api import coding_team_main as _main
 
@@ -514,6 +523,13 @@ def _stub_triage(monkeypatch, ac, *, raises_issue: bool, is_false_positive: bool
                     computational_performance=5,
                     memory_usage=5,
                     code_complexity=5,
+                ),
+                ac.SolutionCandidate(
+                    summary="C",
+                    requirement_fit=4,
+                    computational_performance=4,
+                    memory_usage=4,
+                    code_complexity=4,
                 ),
             ],
             chosen_candidate_index=0,  # "A" — the higher-scoring candidate
@@ -1060,6 +1076,50 @@ class TestTriageComment:
 
         with pytest.raises(ac.TriageUnavailableError):
             ac._triage_comment(_comment(2), "code", [_comment(2)])
+
+
+class TestReadCitedCode:
+    def test_confirmed_missing_file_returns_sentinel_not_a_raise(
+        self, address_env
+    ) -> None:
+        """A confirmed-404 cited file (the common, legitimate case of a
+        review concern addressed by deleting/renaming the file) must be
+        triage-able, not perma-failed: this returns a sentinel string
+        instead of raising CitedCodeUnavailableError."""
+        ac, fake = address_env["ac"], address_env["fake"]
+
+        def _detailed(_o: str, _r: str, _p: str, _ref: str):
+            return None, True  # confirmed 404
+
+        fake.get_file_contents_detailed = _detailed  # type: ignore[assignment]
+
+        result = ac._read_cited_code(fake, "o", "r", _comment(2), "sha1")
+
+        assert "no longer exists" in result
+
+    def test_directory_or_undecodable_still_raises(self, address_env) -> None:
+        """A directory / non-file entry / undecodable payload is genuinely
+        unreadable, NOT confirmed absent — this must still fail closed."""
+        ac, fake = address_env["ac"], address_env["fake"]
+
+        def _detailed(_o: str, _r: str, _p: str, _ref: str):
+            return None, False  # not a confirmed 404
+
+        fake.get_file_contents_detailed = _detailed  # type: ignore[assignment]
+
+        with pytest.raises(ac.CitedCodeUnavailableError):
+            ac._read_cited_code(fake, "o", "r", _comment(2), "sha1")
+
+    def test_transport_error_still_raises(self, address_env) -> None:
+        ac, fake = address_env["ac"], address_env["fake"]
+
+        def _detailed(_o: str, _r: str, _p: str, _ref: str):
+            raise RuntimeError("network blip")
+
+        fake.get_file_contents_detailed = _detailed  # type: ignore[assignment]
+
+        with pytest.raises(ac.CitedCodeUnavailableError):
+            ac._read_cited_code(fake, "o", "r", _comment(2), "sha1")
 
 
 class TestHandleComment:
@@ -1815,19 +1875,20 @@ class TestHandleComment:
         _stub_triage(monkeypatch, ac, raises_issue=True, is_false_positive=False)
         plan = ac._plan_resolution(_comment(2), "code", [_comment(2)])
         assert plan is not None
-        # "A" (sum 30) must rank ahead of "B" (sum 20) — and no candidate must
-        # be dropped or an extra one injected along the way.
-        assert [c.summary for c in plan.candidate_solutions] == ["A", "B"]
+        # "A" (sum 30) must rank ahead of "B" (sum 20) and "C" (sum 16) — and
+        # no candidate must be dropped or an extra one injected along the way.
+        assert [c.summary for c in plan.candidate_solutions] == ["A", "B", "C"]
 
-    def test_plan_still_returned_when_chosen_index_disagrees_with_top_score(
+    def test_plan_rejected_when_chosen_index_disagrees_with_top_score(
         self, address_env, monkeypatch
     ) -> None:
         """chosen_plan is free text the model writes independently of
-        candidate_solutions — nothing enforces it actually describes
-        chosen_candidate_index, let alone the top-scoring candidate. A
-        mismatch is a self-consistency signal worth logging, not grounds to
-        drop an otherwise usable plan: chosen_plan, not the candidate list,
-        is what _dispatch_implementation actually acts on."""
+        candidate_solutions — nothing in the schema enforces it actually
+        describes chosen_candidate_index, let alone the top-scoring
+        candidate. Since _dispatch_implementation acts on chosen_plan alone,
+        a mismatch here is treated as a fail-closed planning failure (None)
+        rather than dispatching a chosen_plan nothing here verified
+        implements the best-scoring candidate."""
         ac = address_env["ac"]
         from software_engineering_team.api import coding_team_main as _main
 
@@ -1851,6 +1912,13 @@ class TestHandleComment:
                         memory_usage=5,
                         code_complexity=5,
                     ),
+                    ac.SolutionCandidate(
+                        summary="C",
+                        requirement_fit=4,
+                        computational_performance=4,
+                        memory_usage=4,
+                        code_complexity=4,
+                    ),
                 ],
                 chosen_candidate_index=1,  # names "B" even though "A" scores highest
                 chosen_plan="do B's thing",
@@ -1860,8 +1928,41 @@ class TestHandleComment:
 
         plan = ac._plan_resolution(_comment(2), "code", [_comment(2)])
 
-        assert plan is not None
-        assert plan.chosen_plan == "do B's thing"  # returned as-is, not rejected
+        assert plan is None
+
+    def test_plan_rejected_when_candidate_count_is_not_three(
+        self, address_env, monkeypatch
+    ) -> None:
+        """The "always implement the best-scoring of three candidates"
+        invariant requires exactly three scored candidates to compare — a
+        short (or long) candidate list can't be trusted to have surfaced the
+        actual best option, so this fails closed rather than dispatching."""
+        ac = address_env["ac"]
+        from software_engineering_team.api import coding_team_main as _main
+
+        def _gen(prompt, *, schema, **kw):
+            if schema is ac.CommentTriage:
+                return ac.CommentTriage(raises_issue=True, is_false_positive=False, issue_summary="s")
+            return ac.IssueResolutionPlan(
+                requirements=["r1"],
+                candidate_solutions=[
+                    ac.SolutionCandidate(
+                        summary="A",
+                        requirement_fit=9,
+                        computational_performance=8,
+                        memory_usage=7,
+                        code_complexity=6,
+                    ),
+                ],
+                chosen_candidate_index=0,
+                chosen_plan="do A's thing",
+            )
+
+        monkeypatch.setattr(_main, "generate_structured", _gen)
+
+        plan = ac._plan_resolution(_comment(2), "code", [_comment(2)])
+
+        assert plan is None
 
 
 # ---------------------------------------------------------------------------
@@ -1898,11 +1999,11 @@ class TestRunAddressComments:
 
         refs_used: list[str] = []
 
-        def _get_file_contents(_o: str, _r: str, _p: str, ref: str) -> str:
+        def _get_file_contents_detailed(_o: str, _r: str, _p: str, ref: str) -> tuple[str, bool]:
             refs_used.append(ref)
-            return fake.file_contents
+            return fake.file_contents, False
 
-        monkeypatch.setattr(fake, "get_file_contents", _get_file_contents)
+        monkeypatch.setattr(fake, "get_file_contents_detailed", _get_file_contents_detailed)
 
         ac._run_address_comments("job1", req, "tok")
 
@@ -2313,6 +2414,41 @@ class TestRunAddressComments:
         assert "bug" in fake.labels_set[-1]
         final = [u for u in address_env["job_updates"] if u.get("status") == "completed"]
         assert final and final[-1]["review_summary"]["counts"]["resolved"] == 1
+        # The label is created (idempotently) before it is applied, so a repo
+        # that has never defined "waiting for review" doesn't silently no-op.
+        assert ac.WAITING_FOR_REVIEW_LABEL in fake.labels_created
+
+    def test_mark_waiting_for_review_creates_label_before_applying_it(
+        self, address_env
+    ) -> None:
+        """GitHub rejects (422) applying a label name the repo has never
+        defined. _mark_waiting_for_review must create the label first
+        (idempotently) so the very first run on a fresh repo doesn't
+        silently fail to apply it."""
+        ac, fake = address_env["ac"], address_env["fake"]
+
+        ac._mark_waiting_for_review(fake, "o", "r", 7)
+
+        assert fake.labels_created == [ac.WAITING_FOR_REVIEW_LABEL]
+        assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
+
+    def test_mark_waiting_for_review_still_applies_label_when_create_fails(
+        self, address_env
+    ) -> None:
+        """Label creation is itself best-effort: a failure there (e.g. the
+        label already exists under a client that doesn't recognize this as
+        idempotent, or a transient error) must not prevent the apply attempt
+        that follows — the label may already exist."""
+        ac, fake = address_env["ac"], address_env["fake"]
+
+        def _create_label(*_a: Any, **_kw: Any) -> None:
+            raise RuntimeError("boom")
+
+        fake.create_label = _create_label  # type: ignore[assignment]
+
+        ac._mark_waiting_for_review(fake, "o", "r", 7)
+
+        assert fake.labels_set and ac.WAITING_FOR_REVIEW_LABEL in fake.labels_set[-1]
 
     def test_clears_stale_waiting_for_review_label_when_new_work_starts(
         self, address_env, monkeypatch

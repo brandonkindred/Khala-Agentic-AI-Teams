@@ -1322,8 +1322,12 @@ def _github_api_base() -> str:
           mirroring the derivation ``GitHubClient.__init__`` and
           ``configured_web_host`` already use, so every GitHub API call in this
           module targets the same configured host rather than a hardcoded one.
+        - Strips any trailing slash(es) from the result, matching the
+          synchronous ``GitHubClient``, so callers that build URLs as
+          ``f"{_github_api_base()}/repos/..."`` never produce a double slash
+          when the operator's ``GITHUB_API_URL`` env var has a trailing slash.
     """
-    return os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL
+    return (os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL).rstrip("/")
 
 # GitHub's issues endpoint returns at most 100 items per page; we request the max
 # and follow the Link header so the panel shows every open issue, not just page one.
