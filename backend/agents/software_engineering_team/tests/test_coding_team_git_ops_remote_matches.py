@@ -2,8 +2,9 @@
 
 `_checkout_remote_matches` validates an operator-pinned checkout's `origin`
 remote before code gets committed and pushed there. It must reject a checkout
-whose PUSH URL (`git remote get-url --push origin`, which can be configured
-separately from the fetch URL via `remote.origin.pushurl`) points at a
+whose PUSH URL(s) (`git remote get-url --push --all origin` — `--all` because
+git supports more than one `remote.origin.pushurl` entry and pushes to every
+one of them, while bare `--push` only ever reports the first) point at a
 different repository, even when the fetch URL matches — otherwise `git push
 origin` could push to an unrelated repo despite the fetch-URL check passing.
 """
@@ -44,13 +45,13 @@ def test_matching_fetch_and_push_url_passes(monkeypatch) -> None:
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "origin"): (0, "https://github.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (0, "https://github.com/acme/widget.git"),
         },
     )
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is True
     assert ("remote", "get-url", "origin") in calls
-    assert ("remote", "get-url", "--push", "origin") in calls
+    assert ("remote", "get-url", "--push", "--all", "origin") in calls
 
 
 def test_mismatched_push_url_fails_even_when_fetch_url_matches(monkeypatch) -> None:
@@ -60,7 +61,7 @@ def test_mismatched_push_url_fails_even_when_fetch_url_matches(monkeypatch) -> N
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "origin"): (0, "https://github.com/evil/other.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (0, "https://github.com/evil/other.git"),
         },
     )
 
@@ -77,7 +78,7 @@ def test_mismatched_fetch_url_fails_without_checking_push_url(monkeypatch) -> No
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
     # Short-circuits on the fetch-URL mismatch; never bothers checking push.
-    assert ("remote", "get-url", "--push", "origin") not in calls
+    assert ("remote", "get-url", "--push", "--all", "origin") not in calls
 
 
 def test_push_url_lookup_failure_fails_closed(monkeypatch) -> None:
@@ -85,7 +86,7 @@ def test_push_url_lookup_failure_fails_closed(monkeypatch) -> None:
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "origin"): (1, "fatal: no such remote 'origin'"),
+            ("remote", "get-url", "--push", "--all", "origin"): (1, "fatal: no such remote 'origin'"),
         },
     )
 
@@ -99,7 +100,7 @@ def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://ghes.example.com/acme/widget.git"),
-            ("remote", "get-url", "--push", "origin"): (0, "https://ghes.example.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (0, "https://ghes.example.com/acme/widget.git"),
         },
     )
 
@@ -112,3 +113,39 @@ def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:
     # Without the expected_host override, the same GHES remote fails against
     # the github.com default.
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
+
+
+def test_second_pushurl_pointing_elsewhere_fails(monkeypatch) -> None:
+    """`--push` alone only reports the FIRST configured `pushurl`; a second,
+    unrelated one (which `git push` also publishes to) must fail validation
+    too — this is what `--all` (over bare `--push`) is for."""
+    calls = _patch_git(
+        monkeypatch,
+        {
+            ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://github.com/acme/widget.git\nhttps://github.com/evil/other.git",
+            ),
+        },
+    )
+
+    assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
+    assert ("remote", "get-url", "--push", "--all", "origin") in calls
+
+
+def test_multiple_matching_pushurls_pass(monkeypatch) -> None:
+    """Multiple configured pushurls that ALL point at the expected repo (e.g.
+    a redundant mirror entry) must still validate."""
+    _patch_git(
+        monkeypatch,
+        {
+            ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://github.com/acme/widget.git\nhttps://github.com/acme/widget.git",
+            ),
+        },
+    )
+
+    assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is True

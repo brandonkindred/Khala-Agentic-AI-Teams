@@ -253,21 +253,27 @@ def _checkout_remote_matches(
           ``github.com`` default, preserving prior behavior for callers that
           have no client handy.
     Postconditions:
-        - Returns True iff BOTH ``git remote get-url origin`` (the fetch URL)
-          AND ``git remote get-url --push origin`` (the push URL) succeed and
-          match ``owner``/``repo`` on this deployment's expected git host, per
+        - Returns True iff ``git remote get-url origin`` (the fetch URL) AND
+          EVERY URL returned by ``git remote get-url --push --all origin``
+          (every configured push destination) succeed and match
+          ``owner``/``repo`` on this deployment's expected git host, per
           :func:`shared.git.git_utils.remote_url_matches` (the same predicate
           ``unified_api``'s clone-or-fetch reuse path uses, so the two never
-          drift on URL-parsing edge cases). Checking the push URL too closes
-          a gap the fetch-URL-only check left open: git supports a separately
-          configured ``remote.origin.pushurl`` that can point at a different
-          repository than the fetch URL, so a checkout could pass fetch-URL
-          validation yet still ``git push`` code to an unrelated repo — when
-          no ``pushurl`` is configured, git's ``--push`` form already falls
-          back to the fetch URL, so this adds no false negatives for the
-          common case. Returns False on any git failure (no ``origin``
-          remote, git not installed, timeout — ``_git`` never raises, it
-          degrades to a non-zero return code) — an unverifiable remote is
+          drift on URL-parsing edge cases). Checking push URLs too closes a
+          gap the fetch-URL-only check left open: git supports one or more
+          separately configured ``remote.origin.pushurl`` entries that can
+          point at a different repository than the fetch URL, and ``git
+          push`` publishes to ALL of them — ``--all`` (rather than the
+          bare ``--push`` form, which only ever reports the FIRST configured
+          pushurl) is what surfaces every one of them, one per output line,
+          so a checkout with a second, unrelated push destination configured
+          is caught instead of silently passing on the first URL alone. When
+          no ``pushurl`` is configured, git's ``--push --all`` form already
+          falls back to reporting the single fetch URL, so this adds no
+          false negatives for the common case. Returns False on any git
+          failure (no ``origin`` remote, git not installed, timeout —
+          ``_git`` never raises, it degrades to a non-zero return code) or
+          when the push-URL listing is empty — an unverifiable remote is
           treated the same as a mismatched one, never assumed to match.
     """
     kwargs = {} if expected_host is None else {"expected_host": expected_host}
@@ -276,10 +282,13 @@ def _checkout_remote_matches(
         return False
     if not remote_url_matches(out, owner, repo, **kwargs):
         return False
-    rc, push_out = _git(repo_path, "remote", "get-url", "--push", "origin", timeout=10.0)
+    rc, push_out = _git(repo_path, "remote", "get-url", "--push", "--all", "origin", timeout=10.0)
     if rc != 0:
         return False
-    return remote_url_matches(push_out, owner, repo, **kwargs)
+    push_urls = [line for line in push_out.splitlines() if line.strip()]
+    if not push_urls:
+        return False
+    return all(remote_url_matches(url, owner, repo, **kwargs) for url in push_urls)
 
 
 def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:

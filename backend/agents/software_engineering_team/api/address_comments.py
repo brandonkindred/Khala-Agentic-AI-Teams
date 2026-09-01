@@ -644,6 +644,22 @@ class PrFreshnessUnknownError(RuntimeError):
     """
 
 
+class PublishedFixLookupUnavailableError(RuntimeError):
+    """Raised when the "was this comment's fix already published?" lookup fails.
+
+    Distinct from "the lookup ran and found no prior job": a transient
+    lookup failure (job-store/service error) means whether an earlier run
+    already implemented and pushed a fix for this comment is genuinely
+    unknown, not "no". Treating it as "no" — the old behavior — silently
+    re-triages and can re-dispatch a brand new implementation workflow on
+    top of one that may already be on the PR branch (see
+    :func:`_previously_published_fix`). The caller must fail this comment
+    closed instead, the same way :class:`CitedCodeUnavailableError` and
+    :class:`PrFreshnessUnknownError` fail closed on their own fetch
+    failures.
+    """
+
+
 def _read_cited_code(client: GitHubClient, owner: str, repo: str, comment: ReviewComment, ref: str) -> str:
     """Read the file the comment points at, for grounding the LLM.
 
@@ -1071,21 +1087,31 @@ def _previously_published_fix(comment_id: int) -> Optional[Tuple[str, str]]:
           ``github_context.review_comment_id`` matches ``comment_id`` (defends
           against a hypothetical id collision or corrupted record), and it
           carries a non-empty ``chosen_plan`` field.
-        - Returns ``None`` otherwise, including on a lookup failure — this is
-          advisory; a failed check must not block the run, it just means the
-          comment is triaged fresh as if no prior attempt existed.
+        - Returns ``None`` when the lookup succeeded and found no matching
+          completed job — a comment genuinely never dispatched, or dispatched
+          but not (yet) completed, is fine to triage fresh.
+        - Raises :class:`PublishedFixLookupUnavailableError` when the lookup
+          itself fails (job-store/service error). Unlike "no job found", this
+          case must not be silently treated as "no fix was published": doing
+          so risks re-triaging and re-dispatching a brand new implementation
+          workflow on top of one that already landed on the PR branch. The
+          caller must fail the comment closed instead, the same way it does
+          for :class:`CitedCodeUnavailableError`/:class:`PrFreshnessUnknownError`.
     """
     child_job_id = _child_job_id_for_comment(comment_id)
     try:
         job = _main.get_job(child_job_id)
-    except Exception as e:  # noqa: BLE001 - best-effort; a failed lookup must not block
+    except Exception as e:  # noqa: BLE001 - reraised as a distinguishable, typed failure
         logger.warning(
             "address-comments: could not check for a previously-published fix for "
             "comment %s: %s",
             comment_id,
             scrub_token_from_text(str(e)),
         )
-        return None
+        raise PublishedFixLookupUnavailableError(
+            f"could not check for a previously-published fix for comment {comment_id}: "
+            f"{scrub_token_from_text(str(e))}"
+        ) from e
     if not job or job.get("status") != JobStatus.COMPLETED.value:
         return None
     github_context = job.get("github_context") or {}
@@ -1849,7 +1875,15 @@ def _handle_comment(
         # of re-triaging and re-dispatching a brand new implementation
         # workflow on top of one that may already be on the PR branch — see
         # _previously_published_fix for how this is recognized across runs.
-        published = _previously_published_fix(comment.id)
+        try:
+            published = _previously_published_fix(comment.id)
+        except PublishedFixLookupUnavailableError as e:
+            # Whether a fix was already published is genuinely unknown here,
+            # not "no" — fail this comment closed rather than risk
+            # re-dispatching a duplicate implementation on top of one that
+            # may already be on the PR branch.
+            base.detail = str(e)
+            return base
         if published is not None:
             child_job_id, chosen_plan = published
             try:
@@ -2569,7 +2603,12 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 job_id,
             )
         else:
-            summary = _build_summary(outcomes)
+            summary = _build_summary(
+                outcomes,
+                retry_resolve_threads=retry_resolve_threads,
+                retry_resolve_ok=retry_resolve_ok,
+                ambiguous_threads=ambiguous_threads,
+            )
             # `all_succeeded` can be False for reasons that never produce a failed
             # CommentOutcome at all (a resolve-only retry failed, the final re-list
             # found new feedback, thread state became unverifiable, or the PR
@@ -2615,22 +2654,40 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             )
 
 
-def _build_summary(outcomes: List[CommentOutcome]) -> Dict[str, Any]:
+def _build_summary(
+    outcomes: List[CommentOutcome],
+    retry_resolve_threads: Optional[List[Tuple[str, int]]] = None,
+    retry_resolve_ok: bool = True,
+    ambiguous_threads: Optional[List[Tuple[str, int]]] = None,
+) -> Dict[str, Any]:
     """Fold per-comment outcomes into the job's ``review_summary`` shape.
 
+    Preconditions:
+        - ``retry_resolve_threads``/``ambiguous_threads``, when passed, are the
+          SAME lists ``_unresolved_comments`` produced for this run (see its
+          own docstring) — used here only to make ``status_text`` accurate
+          when ``outcomes`` is empty, never to recompute counts from them.
+        - ``retry_resolve_ok`` reflects whether every entry in
+          ``retry_resolve_threads`` actually resolved (see
+          ``_run_address_comments``'s own ``retry_resolve_ok`` tracking);
+          meaningless when ``retry_resolve_threads`` is empty/``None``.
     Postconditions:
         - Returns a dict carrying per-outcome counts, a human ``status_text``, and
           the serialized per-comment outcome list, suitable for the UI's status/
           review-summary rendering.
-        - Deliberately covers ``outcomes`` only: a successful resolve-only retry
-          (see ``retry_resolve_threads`` in ``_unresolved_comments``) never
-          produces a ``CommentOutcome`` — a retry has only a ``thread_id``, not
-          the comment metadata (path/line/html_url) ``CommentOutcome`` requires —
-          so it is invisible to ``counts``/``total_comments`` here even though it
-          did real work. That real work is still surfaced separately: a
-          successful retry-only run still moves the PR to "waiting for review"
-          (see ``_run_address_comments``'s ``all_succeeded``/``retry_resolve_ok``
-          handling).
+        - Deliberately covers ``outcomes`` only for ``counts``/``total_comments``:
+          a successful resolve-only retry (see ``retry_resolve_threads`` in
+          ``_unresolved_comments``) never produces a ``CommentOutcome`` — a
+          retry has only a ``thread_id``, not the comment metadata
+          (path/line/html_url) ``CommentOutcome`` requires — so it is
+          invisible to ``counts``/``total_comments`` here even though it did
+          real work.
+        - When ``outcomes`` is empty, ``status_text`` distinguishes three
+          cases instead of always reading "No unresolved comments to
+          address": a resolve-only run reports how many retried threads
+          resolved; a run blocked solely on ambiguous (reviewer-reopened,
+          evidence-unclear) threads says so; a genuine no-op (neither
+          outcomes, retries, nor ambiguous threads) keeps the original text.
     """
     counts: Dict[str, int] = {}
     for o in outcomes:
@@ -2640,11 +2697,25 @@ def _build_summary(outcomes: List[CommentOutcome]) -> Dict[str, Any]:
     handled = (
         counts.get("resolved", 0) + counts.get("false_positive", 0) + counts.get("not_an_issue", 0)
     )
-    status_text = (
-        f"Handled {handled}/{total} unresolved comment(s)"
-        if total
-        else "No unresolved comments to address"
-    )
+    if total:
+        status_text = f"Handled {handled}/{total} unresolved comment(s)"
+    elif retry_resolve_threads:
+        retry_count = len(retry_resolve_threads)
+        noun = "thread" if retry_count == 1 else "threads"
+        status_text = (
+            f"Resolved {retry_count} previously-addressed {noun} (no new comments to address)"
+            if retry_resolve_ok
+            else f"Failed to resolve {retry_count} previously-addressed {noun}"
+        )
+    elif ambiguous_threads:
+        thread_count = len(ambiguous_threads)
+        noun = "thread" if thread_count == 1 else "threads"
+        status_text = (
+            f"Blocked on {thread_count} ambiguous {noun} needing human review "
+            "(no new comments to address)"
+        )
+    else:
+        status_text = "No unresolved comments to address"
     return {
         "kind": "address_comments",
         "status_text": status_text,
