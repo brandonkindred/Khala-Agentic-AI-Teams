@@ -15,10 +15,12 @@ below is drawn from the current model definitions, prompts, and test
 fixtures — not inferred from prompts alone. No production code changes
 accompany this document.
 
-**Out of scope:** the linting gate (`linting_tool_agent`, which runs as part
-of the frontend code-review gate via `run_microtask_review` —
-`docs/GATE_DEPENDENCY_GRAPH.md:32-36`) is a fifth finding-producing gate not
-inventoried here. It emits its own structured shape, `LintIssue`
+**Out of scope:** the linting gate (`linting_tool_agent`) is a fifth
+finding-producing gate not inventoried here. It runs on the frontend
+code-review gate via `run_microtask_review` *and* on the `run_review` path
+(`shared/v2_review.py:1130-1136`, `1303-1314`) — it is deliberately not part
+of the shared code-review phase impl, per
+`docs/GATE_DEPENDENCY_GRAPH.md:34-36`. It emits its own structured shape, `LintIssue`
 (`linting_tool_agent/models.py:12-23`: `file_path: str`, `line: int`,
 `column: int`, `rule: str`, `message: str`,
 `severity: Literal["error","warning","info"]`) — a second gate whose
@@ -87,13 +89,19 @@ field set — the same as `CodeReviewIssue` minus `title` and `start_line`:
 `description`, `suggestion`, `pre_existing`, and `omission` onto the
 resulting `CodeReviewIssue`, so no field is lost in practice. But the
 *active* coercion contract is looser than the `StrictBool` schema implies:
-`_coerce_finding` accepts recognized string/numeric boolean tokens for
-`pre_existing`/`omission` (via `chunking._coerce_scope_tags`) and repairs a
-conflicting `omission`+`pre_existing` pairing rather than rejecting it,
-where `ChunkReviewIssueLLM`'s `StrictBool` fields would reject a non-bool
-token outright and drive a corrective retry. A step-2 corpus schema should
-treat these two classes as documentation of the target field set, not proof
-that malformed booleans are rejected at this boundary today.
+`_coerce_finding` routes `pre_existing`/`omission` through
+`chunking._coerce_scope_tags` → `_coerce_bool` (chunking.py:453-475), which
+accepts only the bool `True` or a recognized truthy *string* token
+(`"true"`/`"yes"`/`"1"`, case-insensitive) and silently returns `False` for
+everything else — **including any number**, so a raw `"pre_existing": 1`
+becomes `False` (flipping the finding to in-scope) rather than being
+accepted or rejected. That path also repairs a conflicting
+`omission`+`pre_existing` pairing (omission wins, `pre_existing` forced
+`False`) instead of raising, where `ChunkReviewIssueLLM`'s `StrictBool`
+fields would reject a non-bool token outright and drive a corrective retry.
+A step-2 corpus schema should treat these two classes as documentation of
+the target field set, not proof that malformed booleans are rejected at this
+boundary today.
 
 **`CodeReviewOutput`** — `code_review_agent/models.py:1106-1134` — top-level
 output: `approved: bool`, `issues: List[CodeReviewIssue]`,
@@ -103,15 +111,20 @@ output: `approved: bool`, `issues: List[CodeReviewIssue]`,
 
 `Literal["critical", "high", "medium", "low", "info"]`
 (`CodeReviewIssueSeverity`, models.py:489; mirrored by
-`_VALID_SEVERITIES` in `chunking.py:57`). `critical` and `high` are the two
-severities that force `approved=False`
-(`ChunkReviewLLMResponse._require_approval_consistent_with_issues`,
-models.py:693-727).
+`_VALID_SEVERITIES` in `chunking.py:58`). `critical` and `high` are the only
+severities that can force `approved=False`, but severity alone is not
+sufficient: `ChunkReviewLLMResponse._require_approval_consistent_with_issues`
+(models.py:711-726) keys on an **actionable** critical/high issue — one whose
+`description` is non-blank *and* whose `suggestion` is not a no-op phrasing
+(`is_no_op_suggestion`). A critical finding with a blank description or a
+"No changes needed." suggestion does not block. The check binds in both
+directions: `approved=True` is rejected when an actionable critical/high
+issue is present, and `approved=False` is rejected when none is.
 
 ### Defect categories actually named
 
 Closed 13-value enum (`_ChunkReviewIssueCategory`, models.py:506-520;
-mirrored by `_VALID_CATEGORIES`, chunking.py:62-76):
+mirrored by `_VALID_CATEGORIES`, chunking.py:62-78):
 
 `naming`, `structure`, `logic`, `spec-compliance`, `standards`,
 `integration`, `testing`, `architecture`, `refactor`, `maintainability`,
@@ -124,10 +137,21 @@ architecture boundary/pattern/decision the change contradicts) or `refactor`
 (a real caller-breaking side effect) or `documentation` (a docstring/comment
 that no longer matches the implementation) — `models.py:850-853`.
 
-Concrete defect content named in the prompt (`prompts.py:42-47`): undefined
-or unimported names, missing test coverage, missing error
-handling/validation/null checks, duplicate/unused/dead code, a
-file/module claimed not to exist, unclear/unresolved relative imports.
+The coordinator's own review prompt is not a literal in `prompts.py` — it is
+built by profile (`CODE_REVIEW_PROMPT = build_review_system_prompt(
+ReviewProfile.CODE_REVIEW)`, `prompts.py:21`), so its defect checklist lives
+in `code_review_agent/profiles.py`, not in the list quoted below.
+
+For contrast, the defect claims enumerated at `prompts.py:42-47` belong to
+`FALSE_POSITIVE_VERIFY_BODY` (`prompts.py:24-63`), not to the code-review
+prompt, and their polarity is **inverted**: they are the verifier's list of
+claims that are *commonly false positives* once the whole codebase is
+visible — "X is undefined / never defined / not imported / not registered",
+"no tests for X", "missing error handling / validation / null check",
+"duplicate / unused / dead code", "file/module Y must be created / does not
+exist", "this relative import is unclear / unresolved". They describe what
+`false_positive_filter` is primed to *drop*, and must not be read as defect
+kinds the code-review gate names (see §4).
 
 ### Location fields
 
@@ -147,9 +171,14 @@ denotes a structural/file-wide finding with no single anchor line.
 
 ### Finding model
 
-**`BugReport`** — `qa_agent/models.py:10-37` — the single finding shape used
-across all four request modes (default review, `fix_build`, `write_tests`,
-`acceptance_evidence`).
+**`BugReport`** — `qa_agent/models.py:10-37` — the gate's only finding shape.
+It is requested in the default review, `fix_build`, and `write_tests` modes,
+but **not** in `acceptance_evidence` mode: that mode's prompt is built from
+`ACCEPTANCE_EVIDENCE_FIELD_NAMES` (`qa_agent/models.py:151-157` — `approved`,
+`quality_gates`, `acceptance_trace`, `validation_evidence`, `summary`) via
+`AcceptanceEvidenceModel` (`agent.py:368-388`), which omits `bugs_found`
+entirely. So an `acceptance_evidence` run produces evidence records, not
+findings — a corpus case cannot expect findings from that mode.
 
 | field | type | default |
 |---|---|---|
@@ -240,11 +269,17 @@ platform-wide: `BLOCKING_SEVERITIES = frozenset({"critical", "high"})`
 
 `category` is a **free-text string, not a closed enum** — the prompt gives
 only examples: `"category": string (e.g. injection, xss, auth, crypto)"`
-(prompts.py:64). No CWE or OWASP-ID field exists. The prompt's methodology
-additionally names: injection (SQL/NoSQL/command), XSS, CSRF,
-authentication/authorization flaws, cryptographic issues (weak
-algorithms, hardcoded secrets), insecure deserialization, SSRF, dependency
-CVEs.
+(prompts.py:64). No CWE or OWASP-ID field exists.
+
+The prompt names defect kinds in two disjoint places. Its **"Your
+expertise"** block (`security_agent/prompts.py:17-22`) lists the vulnerability
+classes: OWASP Top 10, injection (SQL/NoSQL/command), XSS, CSRF,
+authentication/authorization flaws, cryptographic issues (weak algorithms,
+hardcoded secrets), insecure deserialization, and SSRF. Its separate
+**"Methodology"** block (`prompts.py:29-35`) instead enumerates attack
+surfaces to walk, not defect classes: entry points (HTTP/WebSocket/CLI/file
+upload/env var), data flow and injection points, authentication boundaries,
+authorization gaps, secrets management, and dependency CVEs.
 
 ### Location fields — gap flagged
 
