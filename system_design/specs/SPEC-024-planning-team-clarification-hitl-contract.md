@@ -1662,6 +1662,29 @@ this contract:
   sequential chain (§4.3), so a non-completing return here simply means nothing further schedules,
   matching the treatment of every other `skipped_terminal`-shaped stop in this contract.
 
+  **Making only `mark_job_completed` conditional leaves `finalize_planning_activity`'s own `_guarded`
+  wrapper untouched, and that wrapper writes unconditionally on both its entry and its failure
+  path.** `finalize_planning_activity` is wrapped in Planning's `_guarded`
+  (`temporal/activities.py:499-506`) exactly like `document_production_activity` was before its own
+  fix above (§4.3.1) — the same wrapper that (a) performs an unconditional initial
+  `current_phase`/`progress`/`status_text` write *before* `_work()` (and its now-conditional
+  completion check) ever runs, and (b) hardcodes the unconditional `mark_job_failed` as its
+  final-`SAFE_RETRY`-attempt failure writer if anything inside `_work()` raises. If a cancellation or
+  interruption lands *before* `finalize_planning_activity` even starts — not only in the narrower
+  window between the completion claim and finalize already covered above — this wrapper's own entry
+  write still mutates the terminal row's progress metadata, and any transient failure inside `_work()`
+  (the `get_job` re-read, an audit-block exception the `except Exception` doesn't happen to catch,
+  though that block already isolates most of its own errors) can still let `_guarded`'s own
+  final-attempt handler overwrite the terminal status with `failed`, exactly the class of race this
+  contract has already corrected for `document_production_pra_submit_activity` and
+  `document_production_activity` (§4.3.1). Conditioning `mark_job_completed` alone does nothing about
+  either of `_guarded`'s own writes, which run outside and around it. **Contract requirement:** apply
+  the same fix already required of `document_production_activity` here too — either bind an
+  active-status-conditional progress writer and failure writer into the underlying `guarded` call (in
+  place of Planning's `_guarded` convenience wrapper), or perform the active-status check *before*
+  entering `guarded` at all and return a no-op result directly for an already-terminal job, exactly as
+  this contract already requires for both document-production activities.
+
   **A failed claim does not by itself prove "a pause won" — it could just as easily mean a different
   overlapping attempt's own *completion* claim won first.** Two attempts can both reach `wait_pra`
   reporting `"completed"` (the same heartbeat-loss overlap as every other race in this section); one
@@ -1681,6 +1704,32 @@ this contract:
   means re-emit the *same successful completion* result the winning attempt would have returned
   (not raise, not treat the lost claim as an error) — the two code paths converge on "reload and
   re-emit whatever the winner actually recorded," never on an assumption about which side won.
+
+  **The marker check above is described only for an attempt that loses its *own* conditional claim
+  — it does nothing for a brand-new activity re-entry that never attempts a claim at all, because the
+  marker from a prior successful (but never-returned) attempt already exists before this entry even
+  starts.** If a previous attempt's atomic claim-and-persist write succeeds but that attempt's
+  process then crashes before its result reaches Temporal, the *next* `SAFE_RETRY` re-entry of this
+  activity starts from scratch: the job's `status` is still `pending`/`running` (only
+  `finalize_planning_activity`, later, sets the terminal status — the completion claim itself does
+  not, per the correction above), the checkpoint is present, and nothing in this activity's described
+  flow checks the completion marker *before* re-running `wait_pra` and re-attempting document
+  production. This fresh attempt reads the *current* (already-advanced) `pause_generation` as its own
+  `observed_generation`, so its own eventual completion claim would not be "losing" in the sense the
+  correction above describes — there is no concurrent winner to lose to, this attempt simply doesn't
+  know a marker already exists until it gets there on its own. In the meantime it has redundantly
+  redone `wait_pra` polling and full document-production output assembly for a job that already
+  completed successfully; if any part of that redundant work hits a transient failure, this
+  attempt's own final-`SAFE_RETRY`-attempt failure writer (now correctly conditional per the earlier
+  fix) can still terminalize the job as `failed` while it is genuinely still active — a job whose
+  output was already durably persisted and completion already durably claimed gets marked failed by
+  redundant work that never needed to run. **Contract requirement:** every entry into this activity
+  — not only a losing conditional-claim attempt — must check for the durable completion marker
+  *first*, before doing any checkpoint-based `wait_pra` polling or document-production work at all.
+  If the marker is already present, reconstruct and return the same slim successful result
+  immediately (no re-poll, no re-assembly, no new claim attempt) — the same "reload and re-emit
+  whatever the winner actually recorded" rule above, applied as the activity's very first check
+  rather than only as a losing-claim fallback.
 - *Invariants:* The activity never blocks waiting for a human answer. It is safe to call multiple
   times for the same `job_id`/pause round: a call that finds a persisted pause whose token does not
   match `acknowledged_resume_token` re-emits the same paused payload unchanged, performing no new
@@ -1911,6 +1960,25 @@ this contract:
   advancement exactly like an id/text change is treated above: proceed straight to step (2),
   submitting nothing, rather than resubmitting a selection that may no longer correspond to what the
   new round actually offers.
+
+  **`required` and the option metadata default-selection depends on must also be part of this
+  canonical identity — a round can keep `id`/`question_text`/`options`/`allow_multiple` unchanged
+  while still changing meaning through these fields.** Two further ways a "same-shaped" round is not
+  actually the same round: (1) `required` can flip from `false` to `true` between when this pause
+  round was persisted and when the retry's status GET re-reads it — a batch that legitimately omitted
+  this (then-optional) question is structurally incomplete against the new round's own
+  `required_ids - answered_ids` check (§4.1), so resubmitting it verbatim fails PRA's route outright,
+  degrading to the same stalled-polling failure mode already established above for a rejected
+  resubmission; (2) each option's `is_default`/`confidence` feeds this contract's own synthesized
+  default for an omitted optional question (§4.3's `get_default_option`-mirroring requirement) — if
+  the new round's default-flagged option or confidence ranking differs from what was persisted while
+  every other field stays identical, Planning's synthesized default and PRA's own live default
+  (computed from the *current* round's metadata when it actually applies the round) can diverge,
+  producing a `resolved_questions` entry that misrepresents what PRA actually decided for that
+  question. **Contract requirement:** extend the canonical comparison to include each question's
+  `required` flag and each option's `is_default`/`confidence`, alongside `id`/`question_text`/
+  `options`/`allow_multiple` above — a difference in any of these fields is advancement, exactly as
+  for the fields already covered.
 
   **Multiset comparison only fixes reconciliation — it does not make a round with duplicate question
   ids answerable at all, and duplicates should never reach a client as a pause round in the first
@@ -2281,6 +2349,29 @@ no persisted pause to resume from, silently hanging the job.
    understands, the same class of gap as risk 2 above; that is outside `planning_team`'s boundary.
    #7445-B inherits this residual risk knowingly; this spec does not claim the plain read eliminates
    the race, only narrows it.
+8. *New to this spec, planning-internal:* `document_production_pra_submit_activity`'s
+   checkpoint-first read is a plain read, not a claim — an operator-triggered reset or an overlapping
+   second workflow execution for the same job can let two concurrent entries each independently read
+   the checkpoint as absent and both call the non-idempotent `run_pra`, each submitting a real
+   external PRA job, with no crash required anywhere in the sequence (§4.3.1). This is distinct from,
+   and broader than, risk 7 above (which is specifically about a job becoming terminal in the
+   read-to-POST window) — this risk exists even when the job stays active throughout. §4.3.1 leaves
+   closing this to either a durable submission claim/lease #7445-B may add, or explicit acknowledgment
+   here; this entry is that acknowledgment. Full closure without a claim/lease requires PRA's own
+   submission endpoint to reject or de-duplicate concurrent submissions for the same Planning job,
+   which is outside `planning_team`'s boundary and this spec's stated scope. #7445-B inherits this
+   residual risk knowingly unless it chooses to add the claim/lease primitive instead.
+9. *New to this spec, cross-team:* PRA's own `submitted_answers` history (§4.1) is a single flat,
+   unscoped list that `apply_answers` resolves against in its entirety, not only the most recent
+   POST — this contract's own round-scoped filtering on Planning's *local* store guarantees Planning
+   never *sends* a stale batch, but does nothing about PRA independently resolving a later round's
+   omitted-and-optional question from an *earlier* round's still-present entry in that flat history,
+   when the two rounds happen to reuse the same question id. This is the same class of cross-team gap
+   as risks 2, 3, 4, and 7-8: full closure requires PRA's own submission/resolution path to be
+   round-scoped or cleared between rounds, which is outside `planning_team`'s boundary and this spec's
+   stated scope — this contract does not mandate that PRA-side change, only names the gap explicitly
+   rather than leaving it implied-closed by Planning's own (real, but partial) filtering. #7445-B
+   inherits this residual risk knowingly.
 
 ---
 
