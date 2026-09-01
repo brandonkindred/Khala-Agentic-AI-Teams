@@ -488,18 +488,32 @@ def web_host_for_api_base_url(base_url: str) -> str:
     return host
 
 
+def _default_base_url() -> str:
+    """This deployment's configured GitHub API base URL.
+
+    Single source of truth for the ``GITHUB_API_URL`` env var / :data:`DEFAULT_BASE_URL`
+    fallback, shared by :func:`configured_web_host` and :class:`GitHubClient.__init__`
+    so the env var name and fallback constant can never drift apart between the two
+    (previously each re-derived this expression independently).
+
+    Postconditions:
+        - Returns the ``GITHUB_API_URL`` env var when set and non-empty, else
+          :data:`DEFAULT_BASE_URL`.
+    """
+    return os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL
+
+
 def configured_web_host() -> str:
     """The web (clone/browse) host for this deployment's configured GitHub API.
 
     Postconditions:
         - Derives the host the same way a :class:`GitHubClient` constructed
-          with no explicit ``base_url`` would (``GITHUB_API_URL`` env var,
-          falling back to :data:`DEFAULT_BASE_URL`), via
+          with no explicit ``base_url`` would (:func:`_default_base_url`), via
           :func:`web_host_for_api_base_url` — for use by callers validating a
           remote URL who have no live client instance to read ``web_host``
           from.
     """
-    return web_host_for_api_base_url(os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL)
+    return web_host_for_api_base_url(_default_base_url())
 
 
 # ---------------------------------------------------------------------------
@@ -523,18 +537,17 @@ class GitHubClient(_GitHubHttpMixin):
         Preconditions:
             - ``token`` is a non-empty GitHub token (PAT or installation token).
         Postconditions:
-            - ``base_url`` defaults to ``GITHUB_API_URL`` when unset, else
-              :data:`DEFAULT_BASE_URL`, with any trailing slash stripped.
-              ``max_retries`` is floored at 1 so a retry loop always attempts at
-              least once. ``sleep`` is injectable (tests pass a no-op) so retry/backoff
-              delays never actually block. Raises ``ValueError`` when ``token`` is empty.
+            - ``base_url`` defaults to :func:`_default_base_url` when unset
+              (``GITHUB_API_URL`` env var, else :data:`DEFAULT_BASE_URL`), with
+              any trailing slash stripped. ``max_retries`` is floored at 1 so a
+              retry loop always attempts at least once. ``sleep`` is injectable
+              (tests pass a no-op) so retry/backoff delays never actually
+              block. Raises ``ValueError`` when ``token`` is empty.
         """
         if not token:
             raise ValueError("GitHubClient requires a token")
         self._token = token
-        self._base_url = (base_url or os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL).rstrip(
-            "/"
-        )
+        self._base_url = (base_url or _default_base_url()).rstrip("/")
         self._timeout = timeout
         self._max_retries = max(1, max_retries)
         self._sleep = sleep
