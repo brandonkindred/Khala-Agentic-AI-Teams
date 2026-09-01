@@ -1026,7 +1026,7 @@ class SpecReadinessGate(GateResultsMixin):
         slippage_bps_display = (slippage_multiplier - 1) * 10_000
         slippage_note = (
             f", inflated {slippage_bps_display:.1f}bps for configured slippage"
-            if worst_case_concurrent > 1
+            if worst_case_concurrent > 1 and slippage_bps_display > 0
             else ""
         )
 
