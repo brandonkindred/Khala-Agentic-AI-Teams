@@ -256,3 +256,79 @@ def test_run_agent_via_reasoning_terminates_against_a_looping_model(
     assert result == {"verdict": "kept"}
     # Exactly the cap's worth of tool calls, then one final tool-free turn.
     assert len(calls) == 3
+
+
+class _ParallelBatchModel:
+    """Emits several `toolUse` blocks in one assistant turn (a parallel batch)."""
+
+    stateful = False
+
+    def __init__(self, batch_size: int) -> None:
+        self._batch_size = batch_size
+
+    def get_config(self) -> Dict[str, Any]:
+        return {}
+
+    def update_config(self, **overrides: Any) -> None:
+        return None
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        if not tool_specs:
+            for event in _text_events("done"):
+                yield event
+            return
+        yield {"messageStart": {"role": "assistant"}}
+        for i in range(self._batch_size):
+            yield {
+                "contentBlockStart": {
+                    "contentBlockIndex": i,
+                    "start": {"toolUse": {"toolUseId": f"call_{i}", "name": "read_file"}},
+                },
+            }
+            yield {
+                "contentBlockDelta": {
+                    "contentBlockIndex": i,
+                    "delta": {"toolUse": {"input": json.dumps({"path": f"f{i}.py"})}},
+                },
+            }
+            yield {"contentBlockStop": {"contentBlockIndex": i}}
+        yield {"messageStop": {"stopReason": "tool_use"}}
+
+
+def _tool_use_ids(events: List[Dict]) -> List[str]:
+    return [
+        event["contentBlockStart"]["start"]["toolUse"]["toolUseId"]
+        for event in events
+        if "contentBlockStart" in event and "toolUse" in event["contentBlockStart"]["start"]
+    ]
+
+
+def test_cap_bounds_tool_calls_within_a_single_parallel_batch() -> None:
+    """A batch that crosses the cap mid-turn is truncated, not forwarded whole."""
+    model = ToolCallBudgetModel(_ParallelBatchModel(5), 2)
+
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    # Only the calls that fit in the budget reach Strands; the rest are dropped
+    # whole (start, input delta and stop), so they are never executed.
+    assert _tool_use_ids(events) == ["call_0", "call_1"]
+    assert model.tool_calls_used == 2
+    assert sum(1 for event in events if "contentBlockStop" in event) == 2
+    assert not any(
+        "toolUse" in (event.get("contentBlockDelta", {}).get("delta") or {})
+        and json.loads(event["contentBlockDelta"]["delta"]["toolUse"]["input"])["path"]
+        not in {"f0.py", "f1.py"}
+        for event in events
+    )
+    # The turn's own stop reason is untouched here — the next turn is the one
+    # that withdraws the tools and ends the loop.
+    assert events[-1] == {"messageStop": {"stopReason": "tool_use"}}
+
+
+def test_cap_of_one_executes_exactly_one_tool_call() -> None:
+    model = ToolCallBudgetModel(_ParallelBatchModel(4), 1)
+
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    assert _tool_use_ids(events) == ["call_0"]
+    assert model.tool_calls_used == 1

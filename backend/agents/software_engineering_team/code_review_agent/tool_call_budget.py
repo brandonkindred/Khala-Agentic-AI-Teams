@@ -125,8 +125,12 @@ class ToolCallBudgetModel:
         - ``max_tool_calls >= 1``.
 
     Postconditions:
-        - Before the cap: every event of ``inner.stream`` is yielded
+        - Below the cap: every event of ``inner.stream`` is yielded
           unchanged; ``tool_calls_used`` counts the ``toolUse`` blocks seen.
+        - Once the cap is reached mid-turn (an assistant turn may carry a
+          parallel batch of ``toolUse`` blocks): each further block in that
+          turn is dropped whole, so Strands never executes it, while the
+          turn's other content passes through untouched.
         - At/after the cap: exactly one further turn is issued, with
           ``tool_specs=None`` and a directive appended to the messages; its
           ``toolUse`` blocks are dropped and its ``messageStop`` reason is
@@ -137,8 +141,8 @@ class ToolCallBudgetModel:
 
     Invariants:
         - ``tool_calls_used`` is monotonically non-decreasing and never
-          exceeds ``max_tool_calls`` by more than the tool calls of the one
-          turn that crossed it (a turn is never cut off mid-stream).
+          exceeds ``max_tool_calls`` — the cap bounds the tool calls a run
+          can execute, not just the turns it can take.
     """
 
     def __init__(self, inner: Any, max_tool_calls: int, *, label: str = "code_review") -> None:
@@ -247,27 +251,68 @@ class ToolCallBudgetModel:
               exception comes from ``inner.stream``.
         """
         if self._tool_calls_used < self._max_tool_calls:
-            async for event in self._inner.stream(
-                messages, tool_specs=tool_specs, system_prompt=system_prompt, **kwargs
+            async for event in self._within_budget(
+                self._inner.stream(
+                    messages, tool_specs=tool_specs, system_prompt=system_prompt, **kwargs
+                )
             ):
-                if _is_tool_use_start(event):
-                    self._tool_calls_used += 1
                 yield event
             return
 
-        if not self._stopped:
-            self._stopped = True
-            logger.warning(
-                "%s: agent hit the hard tool-call cap (%d calls, %s); withdrawing tools "
-                "and forcing a final answer this turn",
-                self._label,
-                self._max_tool_calls,
-                _CAP_ENV,
-            )
+        self._note_cap_reached()
         async for event in self._final_turn(messages, system_prompt, kwargs):
             yield event
 
     # -- internals -------------------------------------------------------
+
+    def _note_cap_reached(self) -> None:
+        """Log the cap being hit, once per run."""
+        if self._stopped:
+            return
+        self._stopped = True
+        logger.warning(
+            "%s: agent hit the hard tool-call cap (%d calls, %s); dropping further tool "
+            "calls, withdrawing the tools and forcing a final answer",
+            self._label,
+            self._max_tool_calls,
+            _CAP_ENV,
+        )
+
+    async def _within_budget(
+        self, stream: AsyncGenerator[Dict[str, Any], None]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Forward ``stream``, counting tool uses and dropping over-budget ones.
+
+        A single assistant turn may carry several ``toolUse`` blocks (a
+        parallel batch), so the cap has to be enforced block by block, not
+        only between turns — otherwise one turn started at 49/50 could still
+        execute an arbitrarily large batch.
+
+        Postconditions:
+            - Yields every event unchanged until ``tool_calls_used`` reaches
+              the cap; from then on, each complete ``toolUse`` block (start,
+              input deltas, stop) is dropped so Strands never executes it.
+              Non-tool content in the same turn is untouched.
+            - ``tool_calls_used`` never exceeds ``max_tool_calls``.
+        """
+        dropping = False
+        async for event in stream:
+            if _is_tool_use_start(event):
+                if self._tool_calls_used >= self._max_tool_calls:
+                    self._note_cap_reached()
+                    dropping = True
+                    continue
+                self._tool_calls_used += 1
+                dropping = False
+                yield event
+                continue
+            if dropping:
+                if _is_tool_use_delta(event):
+                    continue
+                if isinstance(event, dict) and "contentBlockStop" in event:
+                    dropping = False
+                    continue
+            yield event
 
     async def _final_turn(
         self,
@@ -281,24 +326,22 @@ class ToolCallBudgetModel:
             - Tools are withdrawn (``tool_specs=None``) and a stop directive
               is appended to ``messages`` (a copy — the caller's list is never
               mutated).
-            - ``toolUse`` blocks are dropped and ``messageStop`` is rewritten
-              to ``end_turn``, so Strands cannot recurse into another turn.
+            - ``toolUse`` blocks are dropped (the budget is already spent, so
+              ``_within_budget`` drops every one of them) and ``messageStop``
+              is rewritten to ``end_turn``, so Strands cannot recurse into
+              another turn.
             - At least one text block is emitted.
         """
-        in_tool_block = False
         emitted_text = False
         saw_stop = False
-        async for event in self._inner.stream(
-            self._with_directive(messages), tool_specs=None, system_prompt=system_prompt, **kwargs
+        async for event in self._within_budget(
+            self._inner.stream(
+                self._with_directive(messages),
+                tool_specs=None,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
         ):
-            if _is_tool_use_start(event):
-                in_tool_block = True
-                continue
-            if in_tool_block and _is_tool_use_delta(event):
-                continue
-            if in_tool_block and isinstance(event, dict) and "contentBlockStop" in event:
-                in_tool_block = False
-                continue
             if _has_text_delta(event):
                 emitted_text = True
             if isinstance(event, dict) and "messageStop" in event:
