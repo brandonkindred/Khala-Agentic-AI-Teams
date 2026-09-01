@@ -52,33 +52,19 @@ It is **not** a fill-cost engine. Explicitly out of scope:
 
 - **Slippage and transaction costs.** Reference prices are exact bar-derived
   levels (a resting order's authored price, or worse-of-open-and-level on a
-  gap), not slippage-adjusted fills. See §3 for exactly which production
-  field this corresponds to. `entry_slippage_bps` has exactly two internal
-  uses: (1) anchoring `basis="entry_price"` levels (and the trailing-stop
-  watermark seed) via `entry_price_basis`; (2) building the post-slippage
-  **capital** (cash) ledger. The **equity** figure used for sizing — capital
-  plus unrealized mark-to-market value (see this section's own "Cost-aware
-  position sizing" bullet and §5's "Entries" subsection) — inherits
-  capital's post-slippage basis rather than being a separate no-slippage
-  figure. Both uses are detailed in full, as the
-  single authoritative enumeration, in §2's `entry_slippage_bps` parameter
-  description. `ReferenceTrade.entry_price` itself is always the
-  pre-slippage bid, unaffected by this parameter — but it does reach
-  `ReferenceTrade.exit_price`/`exit_bar` *indirectly* for any
-  `basis="entry_price"` `stop_loss`/`take_profit`/`scaled_take_profit`
-  target: those targets are computed as `entry_price_basis * (1 ± pct)`
-  (§5's `stop_loss` subsection), and the resulting level is the exact price
-  the position fills at, which becomes `ReferenceTrade.exit_price` directly
-  — so changing `entry_slippage_bps` changes `entry_price_basis`, which
-  changes those targets, which changes both the emitted `exit_price` and
-  potentially which bar crosses it (`exit_bar`). It never appears in an
-  output field as a raw slippage adjustment applied post hoc to an
-  otherwise-fixed price — every emitted price/level is an exact authored
-  level (or worse-of-open-and-level on a gap), never a slippage-adjusted
-  fill, even when — as for `basis="entry_price"` targets — that level's
-  *value* is derived from the post-slippage `entry_price_basis` as
-  described above. It can also still gate whether a *later* entry is
-  admitted via the capital check.
+  gap), not slippage-adjusted fills — `ReferenceTrade.entry_price`/
+  `exit_price` are never a raw slippage adjustment applied post hoc to an
+  otherwise-fixed price. See §3 for exactly which production field this
+  corresponds to. `entry_slippage_bps` is not therefore inert: it still
+  shapes internal bookkeeping (the `entry_price_basis` anchor used by
+  `basis="entry_price"` exits and the trailing-stop watermark seed, and the
+  internal post-slippage capital/equity ledger used for sizing and
+  capital-sufficiency gating), which can in turn change which price and bar
+  a `basis="entry_price"` exit records, and which trades this module emits
+  at all via the capital-gating channel. §2's `entry_slippage_bps` parameter
+  description is the single authoritative enumeration of both uses and
+  their downstream effects; this bullet only establishes the scope
+  boundary, not the mechanism.
 - **Order-book / partial-fill mechanics.** No order queue, no
   participation-cap clipping, no multi-slice fills. One trigger, one fill,
   at a single price. This is a real, deliberate simplification, not an
@@ -246,11 +232,28 @@ must newly implement, is: resting-order *fill-price* mechanics (gap handling
 — worse-of-open-and-level, trailing-stop watermark ratcheting, ladder-rung
 sequencing across bars, and stop-limit arm/latch behavior); turning a
 matched entry signal into an actual fill (bar and price); and entry-quantity
-resolution (§5's "Entries" subsection covers both of the latter two). Today
-this logic lives inside the production fill engine and dispatchers, which
-this module must not depend on (see below) — so it is modeled here at the
+resolution (§5's "Entries" subsection covers both of the latter two). This
+logic lives inside the production fill engine and dispatchers, which this
+module must not depend on (see below) — so it is modeled here at the
 semantic level described in §5, as new pure code, not imported from the
 production engine.
+
+One piece of this — the trailing-stop watermark ratchet specifically — is
+not unique to the production engine: `strategy_lab/quality_gates/
+exit_rule_conformance.py::_check_stop_loss_trailing_replay` already
+implements a pure, engine-independent bar-by-bar watermark reconstruction
+(seeding the running high/low at entry, evaluate-then-extend per bar,
+calling the shared `rule_compiler.stop_loss_triggers` geometry this design
+already mandates reusing) as an opt-in conformance replay. It is not a
+candidate for wholesale import here: its module carries a top-level import
+of `trading_service/service.py` (for `ENGINE_EXIT_REASON_PREFIX`), which
+this design's Exclusions below forbid. This module's own trailing-watermark
+implementation is therefore still new code, not a reuse of that gate — but
+because a second, independent implementation of the same watermark-ratchet
+semantics already exists, this module's version must be pinned to it by a
+parity test (comparing ratchet/trigger-bar outputs on shared fixture bars),
+the same discipline §2's `PandasHistoryView` fallback below already requires
+for a duplicated indicator view.
 
 ### Exclusions
 
@@ -507,14 +510,20 @@ biconditional ones — has no type-level backstop at all, so its
   above (a `Literal` annotation alone is not runtime-enforced on a plain
   dataclass).
 - `level_index is not None` **if and only if**
-  `exit_rule_kind == "scaled_take_profit"`. The forward direction (every
-  `scaled_take_profit` close identifies its fired level) is enforced by
-  §5's `scaled_take_profit` fill semantics, which set `level_index` to the
-  fired rung on every such close. The converse (no other exit kind ever
-  populates `level_index`) holds because every other §5 fill semantics
-  subsection leaves `level_index` unset — so a `scaled_take_profit` exit
-  can never leave the fired level unidentified, and no other exit kind can
-  populate one.
+  `exit_rule_kind == "scaled_take_profit"` — like every other invariant in
+  this section, this is a `__post_init__` check on the constructed
+  `ReferenceTrade` itself (raising `ValueError` if a value with
+  `exit_rule_kind == "scaled_take_profit"` and `level_index is None` reaches
+  it, or vice versa), not merely a property §5's fill semantics are trusted
+  to uphold unchecked. §5 independently gets this right by construction: the
+  forward direction (every `scaled_take_profit` close identifies its fired
+  level) holds because §5's `scaled_take_profit` fill semantics set
+  `level_index` to the fired rung on every such close, and the converse (no
+  other exit kind ever populates `level_index`) holds because every other
+  §5 fill semantics subsection leaves `level_index` unset. The
+  `__post_init__` check is what turns a violation of either direction —
+  whether from `simulate()` or from any other caller — into an immediate
+  `ValueError` instead of a silently malformed record.
 
 ## 4. `exit_rule_kind` vocabulary
 
@@ -758,9 +767,15 @@ all: `Field(default=1.0, ge=0)` on `RiskLimits` (no `le=100`, unlike the
 two `_pct` fields above), and `RiskFilter.can_enter` compares
 `total_notional / current_equity` directly against the raw field value
 with no `* 100`/`/ 100` anywhere — so `1.0` means "cap gross notional at
-1x equity," not "1%." Treating any of these fields as one of the others
-silently over- or under-sizes every position (or mis-evaluates every gate)
-by a factor of 100.
+1x equity," not "1%." Treating a field from one convention as if it belonged
+to another — e.g. reading `fraction`/`target_annual_vol`'s decimal-fraction
+value as a whole-number percentage, or `max_gross_leverage`'s decimal
+multiplier as a `_pct` field's percentage — silently over- or under-sizes
+every position (or mis-evaluates every gate) by a factor of 100. Confusing
+two fields that share the *same* convention instead (e.g. `max_position_pct`
+for `max_symbol_concentration_pct`, both whole-number percentages) is a
+different bug — the wrong threshold applied, not a magnitude error — and is
+not covered by this factor-of-100 warning.
 
 **Position-cap clamp, applied first.** Before any whole-share handling, the
 raw quantity from every sizing kind above — not just a sub-1 result — is
@@ -1273,10 +1288,18 @@ which exists for exactly this reason. Sequencing mirrors the
 production ladder cursor's per-rule-index "next un-fired rung" counter: only
 the **un-fired rung closest to entry** — i.e. the next rung in configured
 ladder order, advancing outward — is eligible to trigger on a given bar, and
-a single bar advances the cursor by exactly one rung even if the bar's range
-would have cleared several rungs at once — this module must maintain that
-same one-rung-per-position-per-bar advancement rule, matching the counter's
-semantics rather than firing every technically-reachable rung in one step.
+a single bar advances that rung's ladder cursor by exactly one rung even if
+the bar's range would have cleared several rungs at once. This module must
+maintain that same one-rung-per-ladder-per-bar advancement rule, where
+"ladder" means one `(position, exit_rule_index)` cursor, not the position as
+a whole: a `StrategySpec` may define more than one `scaled_take_profit`
+rule (each its own `exit_rules` entry, hence its own `exit_rule_index`), and
+production's cursor is keyed per `rule_index` precisely so each ladder
+advances independently — two distinct scaled-take-profit rules attached to
+the same position can each fire a rung on the same bar. This module's cursor
+state must therefore also be keyed per `(position, exit_rule_index)`,
+matching the counter's semantics rather than firing every
+technically-reachable rung, across every ladder, in one step.
 Fill price for a firing rung follows the same exact-price rule as
 standalone `take_profit`; fill bar is the trigger bar. A fired rung does
 **not** emit its own `ReferenceTrade` — see the "Exit aggregation"
@@ -1391,32 +1414,32 @@ loses nothing it could otherwise have, and gains full attribution the
 moment production's own persistence is extended (which is not this
 document's concern).
 
-**A `(symbol, entry_date, exit_date, side)` key is not always unique.** On an
-intraday timeframe, one symbol can complete more than one same-side round
-trip within a single calendar day — `entry_date`/`exit_date`'s `[:10]`
-truncation (§3) collapses those to the same key. This schema does carry a
-bar index (`entry_bar`/`exit_bar`, §3) but it is no help here: production's
-`TradeRecord` carries no bar-level field at all, so there is no
-production-side counterpart for the matching module to compare it
-against — the discriminator has to come from somewhere both ledgers
-actually have. `trade_num` (§3's field, mirroring production's own
-same-named, same-semantics field) is the discriminator for that case: both
-ledgers assign it as a single run-wide monotonic sequence in emission order,
-so the matching module needs same-day same-symbol-and-side trades resolved
-by their relative occurrence order within that shared key, not assumed to
-be 1:1 on the key alone. That resolution is **not** as simple as pairing
-by raw occurrence index, though: if production is missing a trade this
-module has (e.g. a spec-compilation bug drops an entry, or the divergence
-this whole reference ledger exists to catch), naive index-based pairing
-misaligns every trade after the gap — reference trade 1 would pair with
-production trade 2, and so on — and `trade_num` itself shifts after any
-earlier unmatched trade, so it cannot repair the misalignment on its own.
-Resolving same-day same-symbol-and-side collisions in the presence of a
-possible missing or extra trade (an insertion/deletion, not just a
+**A `(symbol, entry_date, exit_date, side)` key is not always unique, and
+raw occurrence-order pairing within a colliding key is not a sufficient
+resolution on its own** — this document does not endorse that as the
+matching module's answer; the concrete algorithm is that later step's
+design to make, not this document's, but the risk below is real enough that
+it should not be discovered late. On an intraday timeframe, one symbol can
+complete more than one same-side round trip within a single calendar day —
+`entry_date`/`exit_date`'s `[:10]` truncation (§3) collapses those to the
+same key. This schema does carry a bar index (`entry_bar`/`exit_bar`, §3)
+but it is no help here: production's `TradeRecord` carries no bar-level
+field at all, so there is no production-side counterpart for the matching
+module to compare it against — the discriminator has to come from
+somewhere both ledgers actually have. `trade_num` (§3's field, mirroring
+production's own same-named, same-semantics field) is the discriminator for
+that case: both ledgers assign it as a single run-wide monotonic sequence in
+emission order, so the matching module needs same-day same-symbol-and-side
+trades resolved by their relative occurrence order within that shared key,
+not assumed to be 1:1 on the key alone. That resolution is **not** as simple
+as pairing by raw occurrence index, though: if production is missing a
+trade this module has (e.g. a spec-compilation bug drops an entry, or the
+divergence this whole reference ledger exists to catch), naive index-based
+pairing misaligns every trade after the gap — reference trade 1 would pair
+with production trade 2, and so on — and `trade_num` itself shifts after
+any earlier unmatched trade, so it cannot repair the misalignment on its
+own. Resolving same-day same-symbol-and-side collisions in the presence of
+a possible missing or extra trade (an insertion/deletion, not just a
 reordering) is a sequence-alignment problem the matching module must solve
 explicitly — e.g. aligning by closest `entry_price`/`exit_price`/`qty`
-match within the colliding group, or an edit-distance-style algorithm —
-rather than a blind index pairing; the concrete algorithm is that later
-step's design to make, not this document's, but this document should not
-be read as endorsing raw occurrence-order pairing as sufficient on its
-own.
+match within the colliding group, or an edit-distance-style algorithm.
