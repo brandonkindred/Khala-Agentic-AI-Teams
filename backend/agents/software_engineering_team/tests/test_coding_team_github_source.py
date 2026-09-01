@@ -381,7 +381,9 @@ class TestClientWebHost:
 
     def test_ghes_api_host_is_returned_unchanged(self, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
-        client = GitHubClient(token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None)
+        client = GitHubClient(
+            token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None
+        )
         try:
             assert client.web_host == "ghes.example.com"
         finally:
@@ -694,11 +696,12 @@ class TestAbsoluteUrl:
         finally:
             client._client.close()  # type: ignore[attr-defined]
 
-    def test_graphql_url_derived_separately_for_ghes(self) -> None:
+    def test_graphql_url_derived_separately_for_ghes(self, monkeypatch) -> None:
         """GitHub Enterprise Server's REST base is "https://host/api/v3", but
         GHES exposes GraphQL at "https://host/api/graphql" — not
         "https://host/api/v3/graphql". Naively joining "/graphql" onto the
         REST base would target a URL GHES doesn't serve GraphQL from."""
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
         client = GitHubClient(
             token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None
         )
@@ -1489,9 +1492,10 @@ class TestCheckoutRunningRoute:
 
     def test_is_read_only_and_creates_no_job(self, patched_app) -> None:
         before = len(patched_app["jobs"].list_jobs())
-        patched_app["client"].get(
+        resp = patched_app["client"].get(
             "/checkout/running", params={"repo_path": patched_app["repo_path"]}
         )
+        assert resp.status_code == 200
         assert len(patched_app["jobs"].list_jobs()) == before
 
 
@@ -3164,10 +3168,11 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_refuses_repo_level_path_under_root(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
-        """A repo-level checkout (no issue-N component) under a root is never removed."""
-        # A repo-level checkout (no ``issue-N`` final component) that merely sits
-        # under an ephemeral root must NOT be removed even with .git and the flag —
-        # only per-issue clones are reclaimable (the PR-review path lives here).
+        """A repo-level checkout (no issue-N/pr-N component) under a root is never removed."""
+        # A repo-level checkout (no ``issue-N``/``pr-N`` final component) that merely
+        # sits under an ephemeral root must NOT be removed even with .git and the flag
+        # — per-issue AND per-PR clones are reclaimable, but a bare repo-level
+        # checkout (the PR-review path lives here) is not.
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)

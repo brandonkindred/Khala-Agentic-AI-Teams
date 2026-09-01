@@ -935,6 +935,7 @@ def _prepare_issue_branch(
     integration_branch: str,
     token: Optional[str] = None,
     issue_number: Optional[int] = None,
+    *,
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
     base_remote: str = "origin",

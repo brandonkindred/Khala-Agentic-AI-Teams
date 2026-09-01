@@ -8,6 +8,10 @@ Exports:
 - :func:`flock_lock` — an exclusive, cross-process ``fcntl.flock`` on a
   well-known file: the primitive for "serialize access to a shared resource
   across worker *processes*", not just threads in one process.
+- :func:`held_checkout_lock` — the cancellation-safe async wrapper around
+  ``flock_lock`` for holding it from a coroutine (acquisition runs in an
+  executor thread; a cancellation of the awaiting coroutine mid-acquisition
+  must not leak the flock).
 - :class:`KeyedLockManager` — a per-key mutual-exclusion registry: concurrent
   writers touching the same key are serialized, while writers touching
   disjoint keys proceed fully concurrently.
@@ -20,6 +24,7 @@ Exports:
 
 from __future__ import annotations
 
+from shared.concurrency.checkout_lock import held_checkout_lock
 from shared.concurrency.flock_lock import flock_lock
 from shared.concurrency.heartbeat import BackgroundHeartbeat
 from shared.concurrency.keyed_lock_manager import KeyedLockManager
@@ -31,5 +36,6 @@ __all__ = [
     "KeyedLockManager",
     "LatestValueFlusher",
     "flock_lock",
+    "held_checkout_lock",
     "parallel_map",
 ]

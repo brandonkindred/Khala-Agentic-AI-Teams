@@ -8,6 +8,8 @@ database.
 
 from __future__ import annotations
 
+import pytest
+
 import software_engineering_team.resolve_attempt_store as store
 
 
@@ -68,17 +70,21 @@ def test_has_recorded_resolve_failure_false_when_postgres_disabled(monkeypatch) 
     assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is False
 
 
-def test_writes_swallow_db_errors(monkeypatch) -> None:
+def test_writes_swallow_db_errors(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
 
     def _boom(*_a, **_kw):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(store, "get_conn", _boom)
-    # Best-effort: a DB failure is logged, never raised.
-    store.record_resolve_failure("o", "r", 7, "T1", 3)
-    store.clear_resolve_attempt("o", "r", 7, "T1")
-    store.clear_resolve_attempts_for_pr("o", "r", 7)
+    # Best-effort: a DB failure is logged (via shared.postgres.helpers.best_effort_write), never raised.
+    with caplog.at_level("WARNING"):
+        store.record_resolve_failure("o", "r", 7, "T1", 3)
+        store.clear_resolve_attempt("o", "r", 7, "T1")
+        store.clear_resolve_attempts_for_pr("o", "r", 7)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 3
+    assert all("failed" in r.getMessage() for r in warnings)
 
 
 def test_has_recorded_resolve_failure_degrades_on_db_error(monkeypatch) -> None:

@@ -30,6 +30,11 @@ def _commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> s
           already checked out (or at least existing) — this helper always
           returns to ``main`` afterwards, so a repo without one leaves the
           checkout in an unexpected state.
+        - ``repo`` already has a committer identity configured (``git config
+          user.email``/``user.name``, local or global) — this helper does not
+          set one itself, and ``git commit`` fails without it. Both current
+          callers' own ``_init_repo`` helpers set this on the repo they build
+          before ever calling this function.
 
     Uses ``git checkout -B <branch>``, which creates ``branch`` if it does not
     already exist but, when it DOES exist, resets it to the current HEAD

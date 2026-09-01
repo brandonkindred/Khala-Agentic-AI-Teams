@@ -23,8 +23,6 @@ import logging
 import os
 import re
 import subprocess
-import sys
-import threading
 import urllib.parse
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -35,7 +33,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from shared.concurrency import flock_lock
+from shared.concurrency import flock_lock, held_checkout_lock
 from shared.git.git_utils import remote_url_matches
 from shared.postgres import bounded_probe
 from software_engineering_team.clone_workspace import (
@@ -2697,7 +2695,12 @@ def _ensure_repo_clone(
                     timeout=10,
                 )
                 url_out = url_check.stdout.strip()
-                if url_check.returncode != 0 or not remote_url_matches(url_out, owner, repo):
+                if url_check.returncode != 0:
+                    return (
+                        f"could not read the existing checkout's remote origin at {repo_path}: "
+                        f"{_scrub_git_secret(url_check.stderr, token)}"
+                    )
+                if not remote_url_matches(url_out, owner, repo):
                     # Redact any embedded credentials before surfacing the remote in the error.
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "
@@ -2903,141 +2906,87 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
 
     loop = asyncio.get_running_loop()
     lock_path = clone_lock_path(repo_path)
-    lock_cm = flock_lock(lock_path)
-    lock_held = False
-    # Tracks whether lock_cm.__enter__ actually completed inside the executor
-    # thread, independent of whether this coroutine resumes to see it. If the
-    # awaiting task is cancelled (e.g. client disconnect) while __enter__ is
-    # in flight, the executor thread can still finish acquiring the flock
-    # after the coroutine has already stopped running -- lock_held would then
-    # never be set, and the finally below would skip __exit__, leaving the
-    # release to depend on GC of the abandoned context manager. Keying release
-    # off this event (set from inside the executor thread itself) instead
-    # guarantees a completed __enter__ is always paired with an __exit__.
-    entered_lock = threading.Event()
-    # Acquisition and the work that follows share ONE try/finally (rather than
-    # two sequential ones) so a CancelledError raised while awaiting
-    # `_enter_lock` -- e.g. a client disconnect -- still reaches the finally
-    # below. A cancellation there does not stop the executor thread: it can
-    # still complete `lock_cm.__enter__()` (setting `entered_lock`) after this
-    # coroutine has already been torn down, and a finally scoped only around
-    # the *later* work block would never run to release it.
     try:
-        try:
-            # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
-            # on an existing parent is a no-op needing no write permission, so this
-            # stays safe for an operator path under a read-only parent.
-            await loop.run_in_executor(
-                None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
-            )
-
-            def _enter_lock() -> None:
-                lock_cm.__enter__()
-                entered_lock.set()
-
-            await loop.run_in_executor(None, _enter_lock)
-            lock_held = True
-        except OSError as e:
-            if platform_owned:
-                raise HTTPException(
-                    status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
-                ) from e
-            # Best-effort for an operator-pinned path: degrade to no additional
-            # locking rather than failing an otherwise-valid request, matching
-            # address_github_pr_comments' identical fallback.
-            logger.warning(
-                "github run-issue: could not acquire serialization lock for pinned checkout %s: %s",
-                repo_path,
-                e,
-            )
-
-        running = await _forward_to_coding_team(
-            coding_team_url,
-            "checkout/running",
-            method="GET",
-            params={"repo_path": repo_path},
-            log_prefix="github run-issue admission check",
-            timeout_detail="Coding team service timed out while checking for a running job.",
-            generic_failure_detail="Coding team service failed the admission pre-check.",
-        )
-        if isinstance(running, dict):
-            running_job_id = running.get("running_job_id")
-        else:
-            running_job_id = None
-            # This pre-check is the ONLY admission guard this route has (see the
-            # docstring above); a malformed response silently disables it, so
-            # make that observable rather than proceeding unblocked in silence.
-            logger.warning(
-                "github run-issue: admission pre-check returned unexpected payload %r for "
-                "%s; proceeding without admission check",
-                running,
-                repo_path,
-            )
-        if running_job_id:
-            raise HTTPException(
-                status_code=409,
-                detail=f"job {running_job_id} already running on checkout {repo_path}",
-            )
-
-        clone_err = await loop.run_in_executor(
-            None,
-            functools.partial(
-                _ensure_repo_clone,
-                repo_path,
-                owner,
-                repo,
-                token,
-                platform_owned=platform_owned,
-                acquire_lock=False,
-            ),
-        )
-        if clone_err:
-            logger.warning("github run-issue: repository preparation failed: %s", clone_err)
-            raise HTTPException(status_code=502, detail=clone_err)
-
-        payload: dict[str, Any] = {
-            "owner": owner,
-            "repo": repo,
-            "repo_path": repo_path,
-            "issue_number": body.issue_number,
-            "github_token": token,
-            "cleanup_checkout_on_success": cleanup_checkout_on_success,
-        }
-        if body.base_branch:
-            payload["base_branch"] = body.base_branch
-
-        # connect fast-fails an unreachable service; the longer read budget covers the
-        # coding team's synchronous GitHub API round-trips inside /run-from-github.
-        data = await _forward_to_coding_team(
-            coding_team_url,
-            "run-from-github",
-            json_body=payload,
+        async with held_checkout_lock(
+            loop,
+            lock_path,
+            platform_owned=platform_owned,
+            owner=owner,
+            repo=repo,
             log_prefix="github run-issue",
-            timeout_detail="Coding team service timed out while starting the job.",
-            # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
-            generic_failure_detail="Failed to start the coding job.",
-        )
-    finally:
-        # entered_lock.is_set() catches the case where this task was cancelled
-        # while __enter__ was running in the executor thread: __enter__ still
-        # completed (acquiring the flock) even though lock_held never got set
-        # on this (abandoned) coroutine resumption, so release must not depend
-        # on lock_held alone.
-        if lock_held or entered_lock.is_set():
-            # Pass the ACTIVE exception info (not a hardcoded None, None, None)
-            # so a context manager that inspects it (e.g. to log what error was
-            # in flight) sees the real one. This is NOT a full semantic
-            # replacement for a real `with` block, though: a `with` statement
-            # also honors __exit__'s return value to decide whether to
-            # suppress the active exception, and this call discards that
-            # return value — lock_cm.__exit__ returning True here would NOT
-            # suppress anything, unlike a real `with`.
-            # flock releases are per open-file-description, not per-thread, so
-            # releasing from a different executor thread than the one that
-            # acquired it (or from a task that never itself observed the
-            # acquisition) is safe.
-            exc_type, exc_val, exc_tb = sys.exc_info()
-            await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
+        ):
+            running = await _forward_to_coding_team(
+                coding_team_url,
+                "checkout/running",
+                method="GET",
+                params={"repo_path": repo_path},
+                log_prefix="github run-issue admission check",
+                timeout_detail="Coding team service timed out while checking for a running job.",
+                generic_failure_detail="Coding team service failed the admission pre-check.",
+            )
+            if isinstance(running, dict) and "running_job_id" in running:
+                running_job_id = running.get("running_job_id")
+            else:
+                running_job_id = None
+                # This pre-check is the ONLY admission guard this route has (see the
+                # docstring above); a malformed response silently disables it, so
+                # make that observable rather than proceeding unblocked in silence.
+                # A legitimate idle response is {"running_job_id": None} -- the
+                # coding-team route has no response_model_exclude_none, so the key
+                # is always present even when null; only a response missing the
+                # key entirely (or not a dict) is malformed.
+                logger.warning(
+                    "github run-issue: admission pre-check returned unexpected payload %r for "
+                    "%s; proceeding without admission check",
+                    running,
+                    repo_path,
+                )
+            if running_job_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"job {running_job_id} already running on checkout {repo_path}",
+                )
+
+            clone_err = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _ensure_repo_clone,
+                    repo_path,
+                    owner,
+                    repo,
+                    token,
+                    platform_owned=platform_owned,
+                    acquire_lock=False,
+                ),
+            )
+            if clone_err:
+                logger.warning("github run-issue: repository preparation failed: %s", clone_err)
+                raise HTTPException(status_code=502, detail=clone_err)
+
+            payload: dict[str, Any] = {
+                "owner": owner,
+                "repo": repo,
+                "repo_path": repo_path,
+                "issue_number": body.issue_number,
+                "github_token": token,
+                "cleanup_checkout_on_success": cleanup_checkout_on_success,
+            }
+            if body.base_branch:
+                payload["base_branch"] = body.base_branch
+
+            # connect fast-fails an unreachable service; the longer read budget covers the
+            # coding team's synchronous GitHub API round-trips inside /run-from-github.
+            data = await _forward_to_coding_team(
+                coding_team_url,
+                "run-from-github",
+                json_body=payload,
+                log_prefix="github run-issue",
+                timeout_detail="Coding team service timed out while starting the job.",
+                # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
+                generic_failure_detail="Failed to start the coding job.",
+            )
+    except OSError as e:
+        raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
     try:
         return RunGitHubIssueResponse(
             job_id=data["job_id"],
@@ -3214,137 +3163,78 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
 
     loop = asyncio.get_running_loop()
     lock_path = clone_lock_path(repo_path)
-    lock_cm = flock_lock(lock_path)
-    lock_held = False
-    # Tracks whether lock_cm.__enter__ actually completed inside the executor
-    # thread, independent of whether this coroutine resumes to see it, so a
-    # cancellation mid-acquisition can't leave the flock released only by GC.
-    entered_lock = threading.Event()
-    # Acquisition and the work that follows share ONE try/finally (rather than
-    # two sequential ones) so a CancelledError raised while awaiting
-    # `_enter_lock` -- e.g. a client disconnect -- still reaches the finally
-    # below. A cancellation there does not stop the executor thread: it can
-    # still complete `lock_cm.__enter__()` (setting `entered_lock`) after this
-    # coroutine has already been torn down, and a finally scoped only around
-    # the *later* work block would never run to release it.
     try:
-        try:
-            # flock_lock requires its parent dir to already exist; mkdir(exist_ok=True)
-            # on an existing parent is a no-op needing no write permission, so this
-            # stays safe for an operator path under a read-only parent.
-            try:
-                await loop.run_in_executor(
-                    None, functools.partial(lock_path.parent.mkdir, parents=True, exist_ok=True)
-                )
-            except OSError as e:
-                if platform_owned:
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"could not create checkout parent directory for {owner}/{repo}: {e}",
-                    ) from e
-                logger.warning(
-                    "github address-comments: could not create checkout parent directory for "
-                    "pinned checkout %s: %s",
-                    repo_path,
-                    e,
-                )
-            else:
-
-                def _enter_lock() -> None:
-                    lock_cm.__enter__()
-                    entered_lock.set()
-
-                await loop.run_in_executor(None, _enter_lock)
-                lock_held = True
-        except OSError as e:
-            if platform_owned:
-                raise HTTPException(
-                    status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}"
-                ) from e
-            # Best-effort for an operator-pinned path (see Postconditions): degrade to
-            # no additional locking rather than failing an otherwise-valid request.
-            logger.warning(
-                "github address-comments: could not acquire serialization lock for pinned checkout %s: %s",
-                repo_path,
-                e,
-            )
-
-        running = await _forward_to_coding_team(
-            coding_team_url,
-            f"pulls/{pr_number}/address-comments/running",
-            method="GET",
-            # repo_path lets the pre-check also catch a DIFFERENT PR's job already
-            # active on this SAME checkout (operator-pinned repo_path is shared,
-            # unnamespaced, across every PR) — not just a job for this exact PR.
-            params={"owner": owner, "repo": repo, "repo_path": repo_path},
-            log_prefix="github address-comments admission check",
-            timeout_detail="Coding team service timed out while checking for a running job.",
-            generic_failure_detail="Coding team service failed the admission pre-check.",
-        )
-        running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
-        if running_job_id:
-            # The pre-check is checkout-scoped, not PR-scoped: with repo_path
-            # passed, a hit can be a DIFFERENT PR's job sharing this same
-            # operator-pinned checkout (see get_address_comments_running's own
-            # docstring) — never claim it belongs to the current PR.
-            raise HTTPException(
-                status_code=409,
-                detail=f"job {running_job_id} already running on the checkout for {owner}/{repo}",
-            )
-
-        clone_err = await loop.run_in_executor(
-            None,
-            functools.partial(
-                _ensure_repo_clone,
-                repo_path,
-                owner,
-                repo,
-                token,
-                platform_owned=platform_owned,
-                acquire_lock=False,
-            ),
-        )
-        if clone_err:
-            logger.warning("github address-comments: repository preparation failed: %s", clone_err)
-            raise HTTPException(status_code=502, detail=clone_err)
-
-        payload: dict[str, Any] = {
-            "owner": owner,
-            "repo": repo,
-            "repo_path": repo_path,
-            "pr_number": pr_number,
-            "github_token": token,
-            "cleanup_checkout_on_success": platform_owned,
-        }
-        if body.base_branch:
-            payload["base_branch"] = body.base_branch
-
-        data = await _forward_to_coding_team(
-            coding_team_url,
-            f"pulls/{pr_number}/address-comments",
-            json_body=payload,
+        async with held_checkout_lock(
+            loop,
+            lock_path,
+            platform_owned=platform_owned,
+            owner=owner,
+            repo=repo,
             log_prefix="github address-comments",
-            timeout_detail="Coding team service timed out while starting the comment-addressing job.",
-            generic_failure_detail="Failed to start addressing the PR comments.",
-        )
-    finally:
-        # entered_lock.is_set() catches cancellation mid-acquisition: __enter__
-        # completed in the executor thread even though this coroutine never
-        # resumed to set lock_held, so release must not depend on lock_held alone.
-        if lock_held or entered_lock.is_set():
-            # Pass the ACTIVE exception info (not a hardcoded None, None, None)
-            # so a context manager that inspects it (e.g. to log what error was
-            # in flight) sees the real one. This is NOT a full semantic
-            # replacement for a real `with` block, though: a `with` statement
-            # also honors __exit__'s return value to decide whether to
-            # suppress the active exception, and this call discards that
-            # return value — lock_cm.__exit__ returning True here would NOT
-            # suppress anything, unlike a real `with`.
-            # flock releases are per open-file-description, not per-thread, so
-            # releasing from a different executor thread than the one that
-            # acquired it is safe.
-            exc_type, exc_val, exc_tb = sys.exc_info()
-            await loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
+        ):
+            running = await _forward_to_coding_team(
+                coding_team_url,
+                f"pulls/{pr_number}/address-comments/running",
+                method="GET",
+                # repo_path lets the pre-check also catch a DIFFERENT PR's job already
+                # active on this SAME checkout (operator-pinned repo_path is shared,
+                # unnamespaced, across every PR) — not just a job for this exact PR.
+                params={"owner": owner, "repo": repo, "repo_path": repo_path},
+                log_prefix="github address-comments admission check",
+                timeout_detail="Coding team service timed out while checking for a running job.",
+                generic_failure_detail="Coding team service failed the admission pre-check.",
+            )
+            running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
+            if running_job_id:
+                # The pre-check is checkout-scoped, not PR-scoped: with repo_path
+                # passed, a hit can be a DIFFERENT PR's job sharing this same
+                # operator-pinned checkout (see get_address_comments_running's own
+                # docstring) — never claim it belongs to the current PR.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"job {running_job_id} already running on the checkout for {owner}/{repo}",
+                )
+
+            clone_err = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _ensure_repo_clone,
+                    repo_path,
+                    owner,
+                    repo,
+                    token,
+                    platform_owned=platform_owned,
+                    acquire_lock=False,
+                ),
+            )
+            if clone_err:
+                logger.warning("github address-comments: repository preparation failed: %s", clone_err)
+                raise HTTPException(
+                    status_code=502,
+                    detail="Failed to prepare the repository clone for this pull request.",
+                )
+
+            payload: dict[str, Any] = {
+                "owner": owner,
+                "repo": repo,
+                "repo_path": repo_path,
+                "pr_number": pr_number,
+                "github_token": token,
+                "cleanup_checkout_on_success": platform_owned,
+            }
+            if body.base_branch:
+                payload["base_branch"] = body.base_branch
+
+            data = await _forward_to_coding_team(
+                coding_team_url,
+                f"pulls/{pr_number}/address-comments",
+                json_body=payload,
+                log_prefix="github address-comments",
+                timeout_detail="Coding team service timed out while starting the comment-addressing job.",
+                generic_failure_detail="Failed to start addressing the PR comments.",
+            )
+    except OSError as e:
+        raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
     try:
         return AddressPrCommentsResponse(
             job_id=data["job_id"],

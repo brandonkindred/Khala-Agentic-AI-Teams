@@ -1008,6 +1008,12 @@ class GitHubClient(_GitHubHttpMixin):
             pr_data = ((payload.get("data") or {}).get("repository") or {}).get("pullRequest")
             if not isinstance(pr_data, dict):
                 if not strict:
+                    logger.warning(
+                        "_iter_review_thread_nodes: missing pullRequest payload for %s/%s#%s",
+                        owner,
+                        repo,
+                        number,
+                    )
                     return
                 raise ReviewThreadsUnavailableError(owner, repo, number, "missing pullRequest payload")
             review_threads = pr_data.get("reviewThreads")
@@ -1015,6 +1021,13 @@ class GitHubClient(_GitHubHttpMixin):
                 review_threads.get("nodes"), list
             ):
                 if not strict:
+                    logger.warning(
+                        "_iter_review_thread_nodes: invalid reviewThreads payload for %s/%s#%s: %r",
+                        owner,
+                        repo,
+                        number,
+                        review_threads,
+                    )
                     return
                 raise ReviewThreadsUnavailableError(owner, repo, number, "invalid reviewThreads payload")
             for node in review_threads["nodes"]:
@@ -1088,6 +1101,13 @@ class GitHubClient(_GitHubHttpMixin):
             page_info = review_threads.get("pageInfo")
             if not isinstance(page_info, dict):
                 if not strict:
+                    logger.warning(
+                        "_iter_review_thread_nodes: invalid reviewThreads pageInfo for %s/%s#%s: %r",
+                        owner,
+                        repo,
+                        number,
+                        page_info,
+                    )
                     return
                 raise ReviewThreadsUnavailableError(owner, repo, number, "invalid reviewThreads pageInfo")
             if not page_info.get("hasNextPage"):
@@ -1095,6 +1115,12 @@ class GitHubClient(_GitHubHttpMixin):
             after = page_info.get("endCursor")
             if not after:
                 if not strict:
+                    logger.warning(
+                        "_iter_review_thread_nodes: reviewThreads page missing endCursor for %s/%s#%s",
+                        owner,
+                        repo,
+                        number,
+                    )
                     return
                 raise ReviewThreadsUnavailableError(
                     owner, repo, number, "reviewThreads page missing endCursor"

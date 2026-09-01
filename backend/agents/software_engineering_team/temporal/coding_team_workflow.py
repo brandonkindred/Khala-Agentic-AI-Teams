@@ -519,6 +519,34 @@ class CodingTeamWorkflow:
         activity_timeout = timedelta(hours=4)
         github_timeout = timedelta(minutes=30)
 
+        # Validate github.publish_mode and extract the required github-payload
+        # keys UP FRONT, before branch prep or the (potentially long,
+        # LLM-driven) pipeline activity ever run: both are caller-contract
+        # concerns (a payload-wiring bug), not an orchestrator/activity
+        # failure worth posting to the issue/PR as a "publish failed" notice,
+        # so a bad payload should fail the workflow task immediately rather
+        # than burn an entire pipeline run first. The extracted values are
+        # reused, unchanged, at publish time below -- only WHEN this
+        # validation runs moved, not what it validates.
+        owner = repo = base = integration_branch = None
+        is_existing_pr_publish = False
+        pr_number = None
+        issue_number = issue_title = None
+        if isinstance(github, dict) and github:
+            publish_mode = github.get("publish_mode")
+            if publish_mode not in (None, "existing_pr"):
+                raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
+            is_existing_pr_publish = publish_mode == "existing_pr"
+            owner = github["owner"]
+            repo = github["repo"]
+            base = github["base"]
+            integration_branch = github["integration_branch"]
+            if is_existing_pr_publish:
+                pr_number = github["pr_number"]
+            else:
+                issue_number = github["issue_number"]
+                issue_title = github["issue_title"]
+
         if isinstance(github, dict) and github:
             try:
                 prep = await workflow.execute_activity(
@@ -527,8 +555,8 @@ class CodingTeamWorkflow:
                         "job_id": request["job_id"],
                         "repo_path": request["repo_path"],
                         "remote": github.get("remote") or "origin",
-                        "default_branch": github["base"],
-                        "integration_branch": github["integration_branch"],
+                        "default_branch": base,
+                        "integration_branch": integration_branch,
                         "issue_number": github.get("issue_number"),
                         "expected_head_sha": github.get("expected_head_sha"),
                         "expected_base_sha": github.get("expected_base_sha"),
@@ -610,32 +638,10 @@ class CodingTeamWorkflow:
             status = result.get("status")
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
-            # A malformed publish_mode is a caller-contract violation (bad payload
-            # wiring), not an orchestrator/activity failure worth posting to the
-            # issue/PR as a "publish failed" notice -- same reasoning as the
-            # resume_token ValueError above. Validated before the try below so it
-            # fails the workflow task directly instead of being caught and
-            # reported as a publish failure.
-            publish_mode = github.get("publish_mode")
-            if publish_mode not in (None, "existing_pr"):
-                raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
-            is_existing_pr_publish = publish_mode == "existing_pr"
-            # Required github-payload keys are a caller-contract concern (a
-            # wiring bug), not an orchestrator/activity failure worth posting
-            # to the issue/PR as a "publish failed" notice -- same reasoning
-            # as the publish_mode check above. Extracted before the try below
-            # so a KeyError fails the workflow task directly instead of being
-            # caught by the broad `except Exception` and misreported as a
-            # publish failure.
-            owner = github["owner"]
-            repo = github["repo"]
-            base = github["base"]
-            integration_branch = github["integration_branch"]
-            if is_existing_pr_publish:
-                pr_number = github["pr_number"]
-            else:
-                issue_number = github["issue_number"]
-                issue_title = github["issue_title"]
+            # publish_mode and the required github-payload keys (owner, repo,
+            # base, integration_branch, and either pr_number or
+            # issue_number/issue_title) were already validated and extracted
+            # up front, before branch prep -- see the top of this method.
             try:
                 publish_activity = (
                     github_pr_publish_activity if is_existing_pr_publish else github_publish_activity

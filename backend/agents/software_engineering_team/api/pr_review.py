@@ -110,9 +110,10 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
         exists. A matching job whose heartbeat went stale (its worker crashed before
         terminalizing it) is NOT returned — it must not block new reviews of the PR
         forever — and is best-effort marked ``failed`` so it stops surfacing as a
-        zombie running review; a failure to mark it never propagates. Only review
-        jobs carry ``pr_number`` in ``github_context`` (issue runs carry
-        ``issue_number``), so matching on it never collides with an issue run.
+        zombie running review; a failure to mark it never propagates. Review jobs
+        AND address-comments jobs carry ``pr_number`` in ``github_context`` (issue
+        runs carry ``issue_number`` instead), so matching on it never collides
+        with an issue run.
         A job carrying ``parent_job_id`` (an address-comments child implementation
         job) is EXCLUDED from the scan entirely, live-heartbeat check included —
         it carries the same PR-identifying ``github_context`` as its parent but

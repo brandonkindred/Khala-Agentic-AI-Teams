@@ -26,6 +26,12 @@ from unified_api.main import app  # noqa: E402
 client = TestClient(app, follow_redirects=False)
 
 _M = "unified_api.routes.integrations"
+# The flock acquire/release choreography now lives in the shared
+# held_checkout_lock helper (shared/concurrency/checkout_lock.py), which
+# imports flock_lock directly from shared.concurrency.flock_lock -- patching
+# it on unified_api.routes.integrations (which no longer references it for
+# these two routes) would have no effect on the lock actually used.
+_LOCK_M = "shared.concurrency.checkout_lock"
 _URL = "/api/integrations/github/pulls/7/address-comments"
 
 _GH_CFG = {"enabled": True, "owner": "acme", "repo": "widget", "default_label": "", "repo_path": ""}
@@ -167,7 +173,10 @@ def test_502_when_clone_fails(mock_cfg, mock_cred, mock_path, mock_clone, monkey
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_URL, json={})
     assert resp.status_code == 502
-    assert resp.json()["detail"] == "git clone failed: boom"
+    # The raw clone error is logged, not forwarded verbatim to the external
+    # caller — a curated message is returned instead (matching the same
+    # handler's other 502 responses' convention).
+    assert resp.json()["detail"] == "Failed to prepare the repository clone for this pull request."
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
@@ -196,9 +205,7 @@ def test_502_on_unreachable(mock_cfg, mock_cred, mock_path, mock_clone, monkeypa
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_wraps_upstream_5xx_error_in_generic_message(
-    mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch
-):
+def test_wraps_upstream_5xx_error_in_generic_message(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     """A 5xx from the coding-team service is deliberately NOT propagated
     verbatim (it could carry an internal stack trace) — `_forward_to_coding_team`
     wraps it in a generic, client-safe message instead."""
@@ -287,7 +294,7 @@ class _SpyLock:
         return False
 
 
-@patch(f"{_M}.flock_lock", lambda p: _SpyLock(p))
+@patch(f"{_LOCK_M}.flock_lock", lambda p: _SpyLock(p))
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget/pr-7")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
@@ -332,7 +339,7 @@ def test_checkout_lock_held_around_the_whole_flow(mock_cfg, mock_cred, mock_path
     )
 
 
-@patch(f"{_M}.flock_lock", lambda p: _SpyLock(p, fail=True))
+@patch(f"{_LOCK_M}.flock_lock", lambda p: _SpyLock(p, fail=True))
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget/pr-7")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
@@ -349,7 +356,7 @@ def test_503_when_platform_owned_lock_acquisition_fails(mock_cfg, mock_cred, moc
     mock_clone.assert_not_called()
 
 
-@patch(f"{_M}.flock_lock", lambda p: _SpyLock(p, fail=True))
+@patch(f"{_LOCK_M}.flock_lock", lambda p: _SpyLock(p, fail=True))
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}._resolve_repo_path", return_value="/srv/pinned-checkout")
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
@@ -366,6 +373,7 @@ def test_operator_pinned_lock_failure_degrades_gracefully(mock_cfg, mock_cred, m
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_URL, json={})
     assert resp.status_code == 200
+    assert resp.json() == {**_OK, "created_at": None}
     mock_clone.assert_called_once_with(
         "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, acquire_lock=False
     )

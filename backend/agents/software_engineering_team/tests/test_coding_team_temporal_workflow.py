@@ -518,6 +518,12 @@ def test_pr_comment_run_uses_existing_pr_publisher(monkeypatch: pytest.MonkeyPat
             {"job_id": "job-1", "status": "completed", "github_pr_url": github["pr_url"]},
         ],
     )
+    # The github flow never waits (no HITL pause in this run) -- enforce that
+    # invariant the same way sibling tests in this file do.
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
 
     result = asyncio.run(CodingTeamWorkflow().run(_github_request(github=github)))
 
@@ -1009,7 +1015,12 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
     diagnostic naming the actual misconfiguration. This is a caller-contract
     violation (bad payload wiring), not an orchestrator/activity failure, so
     (mirroring the resume_token ValueError above) it fails the workflow task
-    directly without a "publish failed" notice on the issue/PR."""
+    directly without a "publish failed" notice on the issue/PR.
+
+    publish_mode is now validated up front, before branch prep or the
+    pipeline activity ever run (a payload-wiring bug should fail immediately,
+    not burn an entire pipeline run first) -- so NEITHER activity is called
+    here."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
         github_failure_notice_activity,
@@ -1039,7 +1050,7 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
     with pytest.raises(ValueError, match=r"unsupported github\.publish_mode: 'existing-pr'"):
         asyncio.run(workflow_obj.run(_github_request(github=github)))
 
-    assert calls == [github_branch_prep_activity, run_pipeline_activity]
+    assert calls == []
 
 
 def test_github_publish_exception_preserves_original_when_terminalize_fails(

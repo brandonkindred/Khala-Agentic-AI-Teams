@@ -421,9 +421,13 @@ def test_execute_workflow_sync_reattach_cancels_initial_waiter(running_loop):
     )
 
     assert out is sentinel
-    # Give the cancelled coroutine's CancelledError handler a moment to run
-    # on the worker loop before asserting on it from this thread.
-    time.sleep(0.05)
+    # Give the cancelled coroutine's CancelledError handler a moment to run on
+    # the worker loop before asserting on it from this thread. A bounded poll
+    # (rather than one fixed sleep) avoids flaking under CI load while still
+    # failing promptly if the flag is never set.
+    deadline = time.monotonic() + 2.0
+    while captured.get("execute_workflow_cancelled") is not True and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert captured.get("execute_workflow_cancelled") is True
 
 

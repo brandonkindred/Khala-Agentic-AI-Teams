@@ -69,7 +69,7 @@
     </div>
   } @else if (!githubConfigured) {
     <div class="github-section github-section--unconfigured">
-      <mat-icon>info</mat-icon>
+      <mat-icon aria-hidden="true">info</mat-icon>
       <span>
         GitHub integration is not configured.
         <a routerLink="/integrations">Set up GitHub</a> to browse issues and start AI-driven coding.
@@ -366,7 +366,7 @@
 @if (activeView === 'pulls') {
   @if (!githubConfigured && !isLoadingConfig) {
     <div class="github-section github-section--unconfigured">
-      <mat-icon>info</mat-icon>
+      <mat-icon aria-hidden="true">info</mat-icon>
       <span>
         GitHub integration is not configured.
         <a routerLink="/integrations">Set up GitHub</a> to browse pull requests.
@@ -749,7 +749,7 @@
 @if (activeView === 'issues') {
   @if (!githubConfigured && !isLoadingConfig) {
     <div class="github-section github-section--unconfigured">
-      <mat-icon>info</mat-icon>
+      <mat-icon aria-hidden="true">info</mat-icon>
       <span>
         GitHub integration is not configured.
         <a routerLink="/integrations">Set up GitHub</a> to view out-of-scope issues.

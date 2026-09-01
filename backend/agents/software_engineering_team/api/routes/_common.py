@@ -42,8 +42,12 @@ def raise_if_checkout_occupied(repo_path: str) -> None:
     sib_ctx = sibling.get("github_context") or {}
     if "pr_number" in sib_ctx:
         sib_label = f"PR #{sib_ctx.get('pr_number')}"
+    elif "issue_number" in sib_ctx:
+        sib_label = f"issue #{sib_ctx.get('issue_number')}"
     else:
-        sib_label = f"issue #{sib_ctx.get('issue_number', '?')}"
+        # A plain non-GitHub job has no github_context at all -- "issue #?"
+        # would misleadingly imply it's a malformed GitHub run.
+        sib_label = "non-GitHub job"
     raise HTTPException(
         status_code=409,
         detail=(

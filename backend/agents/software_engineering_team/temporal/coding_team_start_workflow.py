@@ -39,11 +39,13 @@ def _contains_token_key(value: Any, _seen: Optional[set[int]] = None) -> bool:
           dicts, lists, or tuples) has a key that is, or case-insensitively
           contains, the substring ``"token"`` (e.g. ``"token"``,
           ``"github_token"``, ``"auth_token"``, ``"TOKEN"``).
-        - Never raises ``RecursionError``: a container already on the current
-          recursion path (identity-compared via ``id()``, so this only guards
-          against a genuine reference cycle, not merely equal-valued sibling
-          containers) is treated as containing no token key and not
-          traversed again.
+        - Guards against unbounded recursion on a genuine reference cycle: a
+          container already on the current recursion path (identity-compared
+          via ``id()``) is treated as containing no token key and not
+          traversed again. This does NOT bound recursion depth in general --
+          a pathologically deep but acyclic structure (no container repeated
+          on its own path) can still recurse as deep as the structure goes
+          and, in principle, raise ``RecursionError``.
     """
     if isinstance(value, (dict, list, tuple)):
         seen = _seen if _seen is not None else set()
@@ -57,6 +59,55 @@ def _contains_token_key(value: Any, _seen: Optional[set[int]] = None) -> bool:
             )
         return any(_contains_token_key(v, seen) for v in value)
     return False
+
+
+def _validate_common_args(job_id: str, repo_path: str, caller: str) -> None:
+    """Shared job_id/repo_path presence validation for both dispatchers.
+
+    Preconditions:
+        - ``caller`` is the calling function's name, used verbatim in the
+          raised message so callers keep distinguishable error text.
+    Postconditions:
+        - Returns None when both ``job_id`` and ``repo_path`` are non-empty.
+    Raises:
+        ValueError: ``job_id`` or ``repo_path`` is empty.
+    """
+    if not job_id:
+        raise ValueError(f"{caller} requires a non-empty job_id")
+    if not repo_path:
+        raise ValueError(f"{caller} requires a non-empty repo_path")
+
+
+def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, required: bool) -> None:
+    """Shared ``github`` argument validation for both dispatchers.
+
+    Preconditions:
+        - ``caller`` is the calling function's name, used verbatim in raised
+          messages.
+        - ``required`` is True for callers (``execute_coding_team_workflow``)
+          that must always receive a non-empty ``github`` dict; False for
+          callers (``start_coding_team_workflow``) for which ``github`` is
+          optional.
+    Postconditions:
+        - Returns None when ``github`` passes validation: present as a
+          non-empty dict when ``required``; absent, or a dict (possibly
+          empty) containing no ``"token"``-like key at any nesting depth,
+          otherwise.
+    Raises:
+        ValueError: ``required`` is True and ``github`` is not a non-empty
+            dict; or ``github`` is truthy but not a ``dict`` (a bare truthy
+            non-dict, e.g. a token string, would otherwise bypass
+            :func:`_contains_token_key`'s dict/list/tuple-only traversal and
+            be serialized into the workflow payload verbatim); or ``github``
+            contains a ``"token"``-like key at any nesting depth.
+    """
+    if required:
+        if not isinstance(github, dict) or not github:
+            raise ValueError(f"{caller} requires a non-empty github dict")
+    elif github and not isinstance(github, dict):
+        raise ValueError(f"{caller} requires github to be a dict when provided")
+    if github and _contains_token_key(github):
+        raise ValueError("github workflow payload must not include a token")
 
 
 def _workflow_id(job_id: str) -> str:
@@ -114,12 +165,8 @@ def start_coding_team_workflow(
         RuntimeError: the worker's Temporal client never becomes available
             within the wait window.
     """
-    if not job_id:
-        raise ValueError("start_coding_team_workflow requires a non-empty job_id")
-    if not repo_path:
-        raise ValueError("start_coding_team_workflow requires a non-empty repo_path")
-    if github and _contains_token_key(github):
-        raise ValueError("github workflow payload must not include a token")
+    _validate_common_args(job_id, repo_path, "start_coding_team_workflow")
+    _validate_github_arg(github, caller="start_coding_team_workflow", required=False)
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
     workflow_id = _workflow_id(job_id)
     start_workflow_sync(
@@ -176,14 +223,8 @@ def execute_coding_team_workflow(
             worker must be prepared for these, not just the two explicit
             raises above.
     """
-    if not job_id:
-        raise ValueError("execute_coding_team_workflow requires a non-empty job_id")
-    if not repo_path:
-        raise ValueError("execute_coding_team_workflow requires a non-empty repo_path")
-    if not isinstance(github, dict) or not github:
-        raise ValueError("execute_coding_team_workflow requires a non-empty github dict")
-    if _contains_token_key(github):
-        raise ValueError("github workflow payload must not include a token")
+    _validate_common_args(job_id, repo_path, "execute_coding_team_workflow")
+    _validate_github_arg(github, caller="execute_coding_team_workflow", required=True)
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
     workflow_id = _workflow_id(job_id)
     logger.info(
