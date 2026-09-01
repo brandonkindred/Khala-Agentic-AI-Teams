@@ -133,8 +133,11 @@ class ToolCallBudgetModel:
           turn's other content passes through untouched.
         - At/after the cap: exactly one further turn is issued, with
           ``tool_specs=None`` and a directive appended to the messages; its
-          ``toolUse`` blocks are dropped and its ``messageStop`` reason is
-          forced to ``end_turn``, so the Strands event loop cannot recurse.
+          ``toolUse`` blocks are dropped and a ``tool_use`` stop reason is
+          rewritten to ``end_turn``, so the Strands event loop cannot
+          recurse. Any other stop reason passes through untouched — it
+          already ends the loop, and a terminal one such as ``max_tokens``
+          must keep reaching Strands so its truncation handling still fires.
           A turn that yields no text at all gets one synthesized text block
           so the caller sees an honest "no conclusion" answer rather than an
           empty assistant message.
@@ -327,9 +330,15 @@ class ToolCallBudgetModel:
               is appended to ``messages`` (a copy — the caller's list is never
               mutated).
             - ``toolUse`` blocks are dropped (the budget is already spent, so
-              ``_within_budget`` drops every one of them) and ``messageStop``
-              is rewritten to ``end_turn``, so Strands cannot recurse into
-              another turn.
+              ``_within_budget`` drops every one of them) and a
+              ``stopReason`` of ``tool_use`` is rewritten to ``end_turn``, so
+              Strands cannot recurse into another turn. Every other stop
+              reason passes through untouched: they already end the loop, and
+              rewriting a terminal one would suppress the handling it exists
+              for -- notably ``max_tokens``, which Strands turns into a
+              truncation exception that the callers' fail-safes depend on.
+              Silently relabelling it would send a truncated answer into the
+              formatting pass as if it were complete.
             - At least one text block is emitted.
         """
         emitted_text = False
@@ -351,10 +360,12 @@ class ToolCallBudgetModel:
                         yield fallback
                     emitted_text = True
                 stop = event.get("messageStop")
-                stop = {**stop, "stopReason": "end_turn"} if isinstance(stop, dict) else stop
-                # Sibling keys (``metadata`` with usage/latency) ride along on
-                # the same event — rewrite the stop reason, keep the rest.
-                yield {**event, "messageStop": stop}
+                if isinstance(stop, dict) and stop.get("stopReason") == "tool_use":
+                    # Sibling keys (``metadata`` with usage/latency) ride along
+                    # on the same event — rewrite the stop reason, keep the rest.
+                    yield {**event, "messageStop": {**stop, "stopReason": "end_turn"}}
+                else:
+                    yield event
                 continue
             yield event
         if not emitted_text:

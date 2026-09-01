@@ -332,3 +332,37 @@ def test_cap_of_one_executes_exactly_one_tool_call() -> None:
 
     assert _tool_use_ids(events) == ["call_0"]
     assert model.tool_calls_used == 1
+
+
+class _TruncatedFinalTurnModel:
+    """Asks for a tool, then hits the token limit on the tool-free final turn."""
+
+    stateful = False
+
+    def get_config(self) -> Dict[str, Any]:
+        return {}
+
+    def update_config(self, **overrides: Any) -> None:
+        return None
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        if tool_specs:
+            for event in _tool_use_events("call_0", "read_file", {"path": "app/main.py"}):
+                yield event
+            return
+        yield {"messageStart": {"role": "assistant"}}
+        yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
+        yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Finding 0 is par"}}}
+        yield {"contentBlockStop": {"contentBlockIndex": 0}}
+        yield {"messageStop": {"stopReason": "max_tokens"}}
+
+
+def test_final_turn_preserves_a_terminal_stop_reason() -> None:
+    """`max_tokens` must reach Strands so its truncation handling still fires."""
+    model = ToolCallBudgetModel(_TruncatedFinalTurnModel(), 1)
+
+    _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    stops = [event["messageStop"] for event in events if "messageStop" in event]
+    assert stops == [{"stopReason": "max_tokens"}]
