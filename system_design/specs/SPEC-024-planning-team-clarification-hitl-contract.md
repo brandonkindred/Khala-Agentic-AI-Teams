@@ -228,26 +228,49 @@ rollout must forward `q["allow_multiple"]` in this status conversion, alongside 
 `AnswerSubmission`/validator/PRA-route changes above; all four pieces are one change, not
 independently shippable.
 
-**The same status conversion also flips `required`'s effective default.** `OpenQuestion`
-(`planning_team/models.py:224-234`) has no `required` field at all — it is a
-dict-key convention only, applied at the two edges independently and inconsistently.
-`api/routes/product_analysis.py:210` reconstructs the shared `PendingQuestion` with
-`required=q.get("required", False)`, while the answers route's own validation
-(`api/routes/product_analysis.py:263`) computes `required_ids` with
-`q.get("required", True)` against the same underlying dict. Every PRA question that never had
-`required` set explicitly — the common case, since `OpenQuestion` has no such field to set —
-therefore reports as **optional** to a polling client reading status, while PRA itself still
-**requires an answer for it**. A client (Planning's mandated shared validator included) can
-accept a submission omitting that question as complete, submit it, and have PRA's own answers
-route reject the batch with 400 for a missing required answer; because the polling adapter
-(`planning_team/adapters/product_analysis.py`'s `wait_for_product_analysis_completion`/`_on_poll`)
-does not inspect the submission's result, the resumed activity then keeps polling an unresolved
-job until it times out rather than surfacing the mismatch. **Contract requirement:** the same
-rollout that fixes `allow_multiple` must also make the status conversion default `required` to
-`True` — matching the answers route's own effective default — or, preferably, add and persist an
-explicit `required` field on `OpenQuestion` so neither edge depends on an implicit default at all.
-This is a fifth piece of the same one-change rollout above, not a separate, independently
-shippable fix.
+**Every PRA question is `required`; there is no optional-question path through this contract.**
+`OpenQuestion` (`planning_team/models.py:224-234`) has no `required` field at all, and the sole
+producer of PRA's `pending_questions` — `convert_to_pending_questions`
+(`product_requirements_analysis_agent/user_communication.py:109-157`) — stamps a literal
+`"required": True` on **every** question it emits. Both consumers therefore read `True` in
+practice: `api/routes/product_analysis.py:210`'s `required=q.get("required", False)` and the
+answers route's `required_ids = {... if q.get("required", True)}`
+(`api/routes/product_analysis.py:263`) differ only in the default applied when the key is
+*absent*, and it never is. **Contract requirement:** this contract's own rules must be written
+against the true invariant — for a PRA-sourced round, *every* question is required — not against a
+hypothetical optional one. Concretely, three rules elsewhere in this contract are scoped by that
+invariant:
+
+- The resume-path precondition's "optional questions may legitimately be omitted" (§5) is
+  **vacuous for PRA-sourced rounds**: `required_ids == pending_ids`, so a complete batch is one
+  covering every question in the round. The precondition stays worded in terms of *required*
+  questions (correct in general, and correct if a future producer ever emits an optional one), but
+  #7445-B must not build a code path that depends on omission being possible today.
+- The "submit an empty batch for an all-optional round" requirement (§4.3, step (1)) is
+  **unreachable for a PRA-sourced round and must not be implemented as an unconditional empty
+  POST**: PRA's own answers route rejects a batch missing any required id with a 400
+  (`:266-271`), `_on_poll` never inspects the response
+  (`adapters/product_analysis.py:92-97`), and `wait_for_product_analysis_completion` has no
+  failure branch — so an empty POST degrades to a silent hang until `MAX_POLL_WAIT` (3600s), the
+  same failure mode this contract flags for any other rejected resubmission. The requirement's
+  real content is narrower and still correct: **step (1) must not skip the POST merely because the
+  batch is falsy** (the `if answers:` truthiness guard) — it must POST whatever batch the resume
+  round actually carries. An empty batch is not a state a PRA-sourced round can legitimately
+  reach; if one is ever observed, that is a contract violation to surface, not an empty POST to
+  send.
+- The synthesized-default requirement (§4.3's requirement (c)) is likewise scoped to whatever
+  questions a round leaves unanswered; for a PRA-sourced round that set is empty by construction,
+  so the synthesis path is a correctness backstop rather than the common case.
+
+**No `required`-default change is part of this rollout.** An earlier draft of this section claimed
+the two edges disagreed and mandated defaulting the status conversion to `True` as "a fifth piece
+of the same one-change rollout" — that premise was false (the key is always present), and the
+change is therefore **not required**; `allow_multiple`'s serialization gap above remains a genuine
+part of that rollout, `required`'s default does not. Adding an explicit `required` field to
+`OpenQuestion` remains a reasonable independent cleanup — it would let a future producer emit a
+genuinely optional question, which is the only world in which the omission rules above become
+live — but it is out of scope here and must not be bundled in as a correctness fix for a skew that
+does not exist.
 
 **The shared validator needs the same fix, not just the model.** Adding the field to
 `AnswerSubmission` is necessary but not sufficient: `shared.hitl.validation.validate_answers`
@@ -293,17 +316,28 @@ both submission paths it already uses construct *both* fields on every request.*
 `selected_option_id: selectedIds[0] || null` **and** `selected_option_ids: selectedIds` populated
 together, unconditionally — "all questions use multi-select (checkboxes)" per its own comment, even
 for a genuinely single-select question, where `selectedIds` still has length 1 and both fields still
-populate. Its `applyAutoAnswer` path (`:301-305`) does the same. Once `validate_answers` (and PRA's
-own route, per this contract's requirement below) reject a non-blank `selected_option_id` alongside a
-non-empty `selected_option_ids`, *every* submission from this existing, currently-working UI —
-manual and auto-answer alike — starts failing with 400, not just the malformed edge case this
-rejection targets. **Contract requirement:** the same rollout that adds this rejection must also
-update `PendingQuestionsComponent` (and any other caller constructing `AnswerSubmission` payloads
+populate. Its `applyAutoAnswer` path (`:301-305`) does the same.
+
+**Correction — which endpoints this actually breaks, and which it does not.** An earlier draft
+concluded that "*every* submission from this existing UI starts failing with 400." That overstates
+it: `PendingQuestionsComponent` dispatches per `submitEndpoint`, and the branches differ. The
+**`coding-team`** branch already rebuilds its body with `question_id`/`selected_option_id`/
+`other_text` only — explicitly stripping `selected_option_ids`, with a comment saying so
+(`pending-questions.component.ts:350-361`) — so it is unaffected by this rejection; and it is
+today's *only mounted* usage of this component (§4.1's UI correction below:
+`coding-team-page.component.html` is the sole production mount). The branches that do send both
+fields onward are **`planning`** (`:340-347`, which maps `selected_option_ids` through explicitly),
+**`product-analysis`**, and **`run-team`** (both forwarding `request` unchanged). So the breakage is
+real but scoped to those three endpoints — and for `planning` specifically it is *prospective*,
+since this contract is what first mounts that surface at all. **Contract requirement:** the same
+rollout that adds this rejection must also update `PendingQuestionsComponent`'s
+`planning`/`product-analysis`/`run-team` bodies (and any other caller constructing answer payloads
 the same way) to send only the field appropriate to the question's `allow_multiple` — the singular
-field alone for a single-select question, the plural field alone for a multi-select one — or, if a
-transition period is needed, gate the new rejection behind the same rollout mechanism until the
-client migration ships; shipping the validator change without the client change is not acceptable
-even temporarily, since it breaks every existing submission path immediately.
+field alone for a single-select question, the plural field alone for a multi-select one — or gate
+the new rejection behind the same rollout mechanism until that client change ships. The
+`coding-team` branch needs no migration; its existing strip already satisfies the rule. Scoping this
+correctly matters because the gating decision above should rest on the endpoints actually at risk,
+not on an inflated "every path breaks" claim.
 
 **Rejecting simultaneous singular/plural selections (above) does not catch a contradictory
 `other_text` alongside a non-`"other"` selection.** A submission like `selected_option_id="postgres"`
@@ -433,23 +467,56 @@ implementation decision to make, not this design story's.
 ### 4.3 Retry/continuation shape
 
 `PlanningWorkflow.run` wraps the `document_production_activity` call in the same loop shape as
-`CodingTeamWorkflow.run` (`temporal/coding_team_workflow.py:546-579`):
+`CodingTeamWorkflow.run` (`temporal/coding_team_workflow.py:546-579`).
+
+> **Normative status of this listing.** The sketch below is the *loop shape* — the signal/wait state
+> machine this contract reuses from `CodingTeamWorkflow`. It is illustrative, and the numbered
+> corrections in §4.3.1–§4.3.2 and §5 are normative wherever they differ from or add to it. The
+> listing has been brought forward to reflect them (the patch gate, the separately-scheduled submit
+> activity, `skipped_terminal`, the durable-answer reconciliation and latch re-arm, the crash
+> backstop, and result-into-`context` threading); where a requirement is stated only in prose below,
+> that prose governs. #7445-B must implement against the requirements, not transcribe this block.
 
 ```python
-# Initial call. retry_policy is required here too -- every execute_activity call is its own
-# independent command; omitting it falls back to the SDK's unbounded default, which _guarded's
-# finite-max_attempts contract (§4.3.1) cannot tolerate on either call. heartbeat_timeout must
-# also carry over from the current call (temporal/workflows.py:189-195, paired with the
-# activity's own BackgroundHeartbeat) on both calls below: this activity polls PRA for a long
-# time, and without a heartbeat timeout Temporal cannot detect a dead poller until the full
-# multi-hour start_to_close_timeout elapses, long after this contract's retry/reentry behavior
-# should have kicked in.
-result = await workflow.execute_activity(
+# Legacy branch: an execution whose history predates this feature keeps its recorded command
+# shape exactly -- three positional args, NO_RETRY/SINGLE_ATTEMPT, no submit activity, no loop
+# (§4.3.2). Only the patched branch below runs this contract's pause machinery.
+if not workflow.patched(_CLARIFICATION_PAUSE_PATCH):
+    return await self._run_document_production_legacy(job_id, context, use_product_analysis)
+
+# Patched branch. The PRA submission is its own separately-scheduled NO_RETRY activity (§4.3.1);
+# it is scheduled ONLY when PRA is enabled -- an explicit opt-out keeps its ordinary,
+# non-PRA document-production call and skips both the submit activity and the loop.
+if use_product_analysis:
+    submit = await self._guarded_activity(          # workflow-level crash backstop (§4.3.1):
+        document_production_pra_submit_activity,     # on any exception, invoke the conditional
+        job_id, context,                             # mark_planning_job_failed_activity, then
+        retry_policy=NO_RETRY,                       # re-raise -- see the CancelledError rules
+        start_to_close_timeout=submit_timeout,       # in §4.3.1, which this helper implements.
+    )
+    if submit.get("outcome") == "skipped_terminal":
+        # The job reached a terminal status (cancelled/interrupted/failed) before or during the
+        # submit. Schedule NOTHING further -- not document production, not sub-agent
+        # provisioning, not finalize (whose write would clobber that terminal status).
+        return
+
+# retry_policy is required on every execute_activity call -- each is its own independent
+# command, and the SDK's unbounded default is incompatible with _guarded's finite-max_attempts
+# contract (§4.3.1). heartbeat_timeout likewise carries over on every call
+# (temporal/workflows.py:189-195, paired with the activity's own BackgroundHeartbeat): this
+# activity polls PRA for a long time, and without it Temporal cannot detect a dead poller until
+# the full multi-hour start_to_close_timeout elapses.
+result = await self._guarded_activity(
     document_production_activity, request,
     start_to_close_timeout=activity_timeout, heartbeat_timeout=HEARTBEAT_TIMEOUT,
     retry_policy=SAFE_RETRY,
 )
-while result.get("outcome") == "paused":
+while True:
+    if result.get("outcome") == "skipped_terminal":
+        return                                       # same stop-everything rule as above
+    if result.get("outcome") != "paused":
+        break
+
     resume_token = result.get("resume_token")
     if not isinstance(resume_token, str) or not resume_token:
         # Mirrors CodingTeamWorkflow.run's own guard (temporal/coding_team_workflow.py:552-563):
@@ -460,16 +527,36 @@ while result.get("outcome") == "paused":
     self._active_resume_token = resume_token
     self._submitted_answers = self._buffered_signals.pop(resume_token, None)
     self._buffered_signals.clear()
-    await workflow.wait_condition(lambda: self._submitted_answers is not None)
+
+    # A signal is a wake-up hint, never the answer itself, and an evicted buffered signal must
+    # still be recoverable: confirm the DURABLE batch through the reconciliation activity before
+    # leaving the wait (§4.2). On a failed check, re-arm the latch and re-check once more to
+    # catch a submission that landed while the first check was in flight.
+    while True:
+        if self._submitted_answers is None:
+            if await self._check_submitted_answers(job_id, resume_token):
+                break                                # durable batch exists -- proceed to resume
+            await workflow.wait_condition(lambda: self._submitted_answers is not None)
+        if await self._check_submitted_answers(job_id, resume_token):
+            break
+        self._submitted_answers = None               # rogue/unbacked signal: re-arm the latch
+        if await self._check_submitted_answers(job_id, resume_token):
+            break                                    # landed during the in-flight check
+
     request["acknowledged_resume_token"] = self._active_resume_token
     self._submitted_answers = None
     self._active_resume_token = None
-    result = await workflow.execute_activity(
+    result = await self._guarded_activity(
         document_production_activity, request,
         start_to_close_timeout=activity_timeout, heartbeat_timeout=HEARTBEAT_TIMEOUT,
         retry_policy=SAFE_RETRY,
     )
     request.pop("acknowledged_resume_token", None)
+
+# The activity returns a SLIM result ({"repo_path": ...}) -- the handoff lives in the job store,
+# never crossing the Temporal boundary (temporal/activities.py:366-368). Thread that slim result
+# forward; do NOT carry the fat pre-document-production context into the downstream phases.
+context = _merge_context(context, result)
 ```
 
 `document_production_activity` becomes idempotent on re-entry using
@@ -612,7 +699,23 @@ scoped to this guard — e.g. `update_job_if_resume_token_matches(job_id, expect
 not a generic CAS API to design from scratch; it is the same proven conditional-`UPDATE` pattern
 `update_job_if_not_cancelled` already establishes, applied to a second, narrowly-scoped guard
 condition. A broad, arbitrary-field-equality primitive is explicitly **not** required — only this
-one resume-token-guarded shape, which is all this contract needs. **The guard must be strict
+one resume-token-guarded shape, which is all this contract needs.
+
+**Mirroring that primitive's *guard* must not mean inheriting its whole-key merge semantics.**
+`update_job_if_not_cancelled` merges its `fields` into the job's `data` at the **top level** — a
+shallow `jsonb` merge in which passing `submitted_answers={...}` replaces the entire
+`submitted_answers` value. Combined with the `resume_token`-keyed storage shape recommended below,
+that is a data-loss bug, not a detail: each round's write would replace the whole keyed object,
+erasing every earlier round's batch — the same batches this contract requires reading back for
+terminal hydration of `resolved_questions` (§4.3) and for the per-token idempotency receipts
+(above). **Contract requirement:** `update_job_if_resume_token_matches` must write *into* the
+`submitted_answers` object at the round's own key (a nested/targeted `jsonb_set`-style update
+server-side, `data = jsonb_set(data, '{submitted_answers,<token>}', %s::jsonb, true)`), never by
+passing a wholesale replacement value for `submitted_answers` through a top-level shallow merge.
+The same applies to any other multi-round accumulator this contract stores per token. Only fields
+this contract genuinely intends to replace outright (the pause-envelope scalars —
+`waiting_for_answers`, `resume_token`, `pause_kind`, `pause_context`, `pending_questions`) may go
+through the top-level merge. **The guard must be strict
 equality only — no `IS NULL` branch.** This primitive's only described caller is the
 answer-submission route, which always supplies a concrete `expected_resume_token` from the
 client's request; a job record with no `resume_token` persisted means no pause is currently
@@ -656,10 +759,29 @@ reads from — `submitted_answers` (§4.2/§4.3, keyed per `resume_token` per th
 below), never a generically-named `answers` field**; guarding an unrelated key would leave the
 real slot unprotected and let concurrent submissions overwrite the batch the activity later
 consumes. This is one extra `WHERE`-clause condition on the same `UPDATE ... WHERE resume_token =
-%s AND (data->'submitted_answers'->%s IS NULL OR data->'submitted_answers'->%s =
-%s::jsonb)`-shaped statement (keyed by `resume_token` within `submitted_answers`, per the keyed
-storage shape below), not a second round-trip or a separate primitive — the resume-token guard and
-the write-once guard are enforced by the same atomic server-side write.
+%s AND (<slot-absent> OR <slot-matches-this-batch>)`-shaped statement (keyed by `resume_token`
+within `submitted_answers`, per the keyed storage shape below), not a second round-trip or a
+separate primitive — the resume-token guard and the write-once guard are enforced by the same atomic
+server-side write.
+
+**The slot-matches predicate must compare the canonical key, not raw JSONB — and that key must
+therefore be persisted alongside the batch.** An earlier draft wrote this condition as a direct
+JSONB equality on the stored batch (`data->'submitted_answers'->%s = %s::jsonb`). That contradicts
+this section's own canonicalization requirement below: raw JSONB array equality is order-sensitive
+across the answer list, so a legitimate retry whose entries are serialized in a different order
+compares as *different*, the guard rejects it as a conflicting submission, the route never reaches
+its (re-)signal step, and the workflow sleeps forever on an answer that is already durable —
+precisely the strand this section's "a rejected write must not strand the winner's own retry" rule
+exists to prevent. **Contract requirement:** the write-once predicate must be expressed over the
+canonical comparison key defined below — sorted by `question_id`, with each entry's
+`selected_option_ids` compared positionally — not over the raw stored array. Because SQL cannot
+recompute that key inside the `WHERE` clause, **the canonical key must itself be persisted** as a
+small scalar next to the batch (e.g. `submitted_answers.<token>.canonical_key`, a stable
+string/digest computed by the route before the write), and the predicate compares that scalar:
+`(data->'submitted_answers'->%s IS NULL OR data->'submitted_answers'->%s->>'canonical_key' = %s)`.
+This also gives the already-consumed-token idempotency receipt (above) the durable, unconverted
+comparison value it requires, from the same write — one scalar serving both guards, rather than two
+representations that can disagree.
 
 **This write-once slot condition is specific to the answer-submission route's call — it is an
 optional extra guard clause this one call site supplies, not a permanent, universal part of every
@@ -908,6 +1030,28 @@ a client-supplied idempotency key** (or expose a way to look up an existing job 
 outside `planning_team`'s boundary and this spec's stated scope — it is software_engineering_team's
 endpoint. This spec cannot mandate a fix on the other side of that boundary; it can only avoid
 making the gap worse and say plainly what closes it.
+
+**A second, independent hazard in the same write: `save_checkpoint` is not atomic.**
+`shared/temporal/checkpoints.py:41-51` implements it as a client-side read-modify-write — `get_job`,
+copy the whole `checkpoints` map, insert this phase's entry, then `update_job(checkpoints=...)`
+replacing the entire map. Two concurrent writers (this contract's own overlapping-attempt scenarios,
+or any other phase checkpointing the same job at the same moment) can each read the map before
+either writes, and the later `update_job` silently discards the other's entry — a classic lost
+update, entirely separate from the crash window above. For this contract that means "a checkpoint
+exists, therefore `run_pra` already ran" is **not** guaranteed by the checkpoint write alone: an
+attempt whose checkpoint entry was clobbered by a concurrent map-replacing write finds no checkpoint
+on re-entry and submits a second external PRA job — the very duplicate-submission outcome the
+checkpoint exists to prevent, reached without any crash. **Contract requirement:** #7445-B must not
+rely on `save_checkpoint`'s current shape for this guarantee. Either (a) write the `pra_job_id`
+through a primitive that updates only its own key server-side (a targeted nested/merge update, or a
+conditional `UPDATE` in the same family as this contract's other guarded writes) rather than
+replacing the whole `checkpoints` map client-side, or (b) persist this contract's PRA-job id as its
+own top-level job-record field written by a single-key update, using `save_checkpoint` only as a
+non-authoritative convenience mirror. Whichever shape is chosen, the durable record this contract's
+"never resubmit once a checkpoint exists" invariant reads must be written by an operation that
+cannot lose a concurrent writer's update; a read-modify-write over a shared map does not qualify.
+This is a `planning_team`/shared-infra-side gap — unlike the idempotency-key gap above it does **not**
+require any PRA change — so it is a requirement here, not an open risk.
 
 **Contract requirement given that constraint:** until PRA supports an idempotency key, the PRA
 *submission* itself (`run_pra(...)` through the eager `save_checkpoint` write, and nothing else)
@@ -1489,6 +1633,26 @@ The primitive #7445-B builds must satisfy:
   submit-activity exception, never lets the backstop's own failure silently replace the real root
   cause the workflow is failing over.
 
+  **A blanket `except` around `execute_activity` also catches workflow *cancellation*, and the
+  backstop as described both mishandles it and cannot complete during it.** Two distinct problems,
+  both specific to Temporal's cancellation model rather than to ordinary activity failure:
+  (1) when the workflow execution is cancelled, the pending `execute_activity` raises
+  `CancelledError` — which an unqualified `except Exception`/`except BaseException` catches like any
+  other failure, so the backstop marks a *cancelled* job `failed`, misreporting a deliberate
+  cancellation as an error (the conditional active-status write narrows this — a job whose row
+  already reads `cancelled` is protected — but it does not close it, since the workflow can be
+  cancelled while the job row is still `running`, exactly the window the backstop is meant to
+  cover); and (2) once the workflow is in a cancelled state, a *newly scheduled*
+  `execute_activity` for the backstop is itself immediately cancelled, so the terminalizing write
+  never lands at all. **Contract requirement:** the backstop's exception handling must treat
+  cancellation as its own case, not fold it into the generic failure path — re-raise
+  `CancelledError` (after any cancellation-appropriate bookkeeping) rather than marking the job
+  `failed`; and when a terminal job-record write *is* wanted on the cancellation path, that write
+  must be issued from a cancellation-shielded scope (`workflow.unsafe.shield()`/the SDK's
+  equivalent for the version in use) so it can actually run to completion, since an unshielded
+  activity scheduled after cancellation cannot. The ordinary-failure backstop above is unchanged;
+  this requirement scopes it so it does not swallow, or silently no-op on, cancellation.
+
 **`document_production_activity` (entry — every invocation, paused or not)**
 This contract's pause machinery (checkpoint-before-`run_pra`, the new `SAFE_RETRY` policy, the
 retry/continuation loop) applies to **exactly one** of three cases: **patched branch AND
@@ -1543,8 +1707,28 @@ this contract:
   makes it retryable/pausable and therefore first exposes it to this class of race.
 
 - **Patched branch, `use_product_analysis=False`:** no checkpoint exists or is expected (PRA never
-  engages); the activity runs its ordinary non-PRA document-production work. This contract does not
-  govern this case — it is unaffected, not merely relaxed.
+  engages); the activity runs its ordinary non-PRA document-production work, and none of this
+  contract's pause machinery (submit activity, pause envelope, retry/continuation loop) applies.
+
+  **"Unaffected" is wrong for this branch, and its retry policy must be stated explicitly.** Two
+  things do change here even though the *pause* machinery does not. First, the **call shape**: this
+  branch is reached through the patched code path, which passes the `request` dict this contract
+  introduces rather than the legacy three positional args — so the activity must decode the new
+  shape here too (it is the legacy branch, not this one, that keeps the old positional call).
+  Second, and load-bearing: this branch's **`retry_policy` and `_guarded` `max_attempts` were never
+  specified**, and the two must agree. `_guarded`'s own precondition requires `max_attempts` to
+  match the phase's Temporal `RetryPolicy` (`temporal/activities.py:87-88`); pairing this contract's
+  `SAFE_RETRY` with a `_guarded` still passing `SINGLE_ATTEMPT` makes `is_final_attempt` true on the
+  *first* transient failure, marking the job FAILED while Temporal goes on retrying — the exact
+  false-terminal mode §4.3.1 warns about — while the reverse pairing leaves `_guarded` waiting for a
+  final attempt that never comes. **Contract requirement:** this branch keeps today's
+  `NO_RETRY`/`SINGLE_ATTEMPT` pairing (`temporal/workflows.py:59-61` documents why document
+  production is non-idempotent and must run once: it writes files, and a workflow-level retry must
+  not re-run them). It must **not** be switched to `SAFE_RETRY` alongside the PRA-enabled branch:
+  the checkpoint protection that makes retry safe there covers the PRA submission specifically, and
+  nothing in this branch is checkpoint-protected. The retry-policy split §4.3.1 describes is
+  therefore three-way, not two-way — `SAFE_RETRY` for patched+PRA-enabled, `NO_RETRY` for the new
+  submit activity, and `NO_RETRY` (unchanged) for both this branch and the legacy branch below.
 - **Legacy branch** (`not workflow.patched(...)` — a `PlanningWorkflow` execution whose history
   predates this feature, per §4.3.2): called with the original three positional args, exactly
   `[job_id, context, use_product_analysis]` (`temporal/workflows.py:189-197`'s current shape —
@@ -2008,18 +2192,29 @@ this contract:
   pauses again, for the next round, per the paused-return path above).
 
   **Contract requirement — step (1)'s submission must not be gated by a truthiness check on the
-  answer batch.** A round consisting entirely of optional questions produces a valid, empty answer
-  batch once every required question is satisfied elsewhere (or the round has none) — this section's
-  own resume-path precondition above explicitly permits this (`required_ids - answered_ids`, optional
-  questions may be omitted). `wait_for_product_analysis_completion`'s existing `_on_poll` callback
-  only calls `submit_product_analysis_answers` `if answers` (`adapters/product_analysis.py:92-97`);
-  an implementation that reuses that callback path for step (1) would silently skip the POST for an
-  all-optional round, leaving PRA waiting indefinitely for a submission that will never arrive even
-  though the client's request was already validated and accepted. **Contract requirement:** step
-  (1)'s submission call must POST the batch — including an empty one — for every resumed round,
-  bypassing or not reusing that truthiness-gated callback path; PRA's own `apply_answers` already
-  handles an empty submitted batch correctly (falling back to defaults for every question, §4.1), so
-  an empty POST is a valid, expected call here, not a no-op to skip.
+  answer batch.** `wait_for_product_analysis_completion`'s existing `_on_poll` callback only calls
+  `submit_product_analysis_answers` `if answers` (`adapters/product_analysis.py:92-97`) — a
+  truthiness gate on the batch, not on whether a submission is owed. An implementation that reuses
+  that callback path for step (1) makes "did we POST the resumed round's answers" depend on the
+  batch being non-empty rather than on the resume path having a round to answer. **Contract
+  requirement:** step (1) must POST whatever batch the resumed round actually carries, driven by
+  "this resume round owes PRA a submission," never by `if answers` — bypassing or not reusing that
+  truthiness-gated callback path.
+
+  **This requirement is about the *gate*, not about sending empty batches — an empty batch is
+  unreachable for a PRA-sourced round and must not be POSTed if one somehow appears.** An earlier
+  draft justified this rule with an "all-optional round produces a valid empty batch" scenario;
+  §4.1 establishes that premise is false — `convert_to_pending_questions` stamps `"required": True`
+  on every question, so `required_ids == pending_ids` and a complete batch always covers the whole
+  round. Worse, POSTing an empty batch would be actively harmful: PRA's answers route rejects any
+  batch missing a required id with a 400 (`api/routes/product_analysis.py:266-271`), `_on_poll`
+  never inspects the response, and `wait_for_product_analysis_completion` has no failure branch —
+  so the "valid, expected empty POST" that draft mandated degrades to a silent hang until
+  `MAX_POLL_WAIT` (3600s), exactly the failure mode this contract flags for every other rejected
+  resubmission. **Contract requirement, superseding "including an empty one" above:** an empty
+  batch at step (1) is a contract violation to surface (raise, so `SAFE_RETRY`/the failure path
+  handles it visibly), not a POST to send — the resume path's own preconditions guarantee a
+  non-empty batch for every PRA-sourced round it can legitimately resume.
 
   **Contract requirement — step (2)'s clear must itself be conditioned on the resumed token, not
   unconditional.** Overlapping attempts resuming the *same* `resume_token` A (the same heartbeat-loss
@@ -2056,16 +2251,33 @@ this contract:
   `context_update` ahead of the `_merge_context` call — so the terminal `update_job(...,
   resolved_questions=...)` preserves rather than clobbers them.
 
-  **The durable consumed batches are `AnswerSubmission`-shaped, not already `AnsweredQuestion`-shaped
-  — hydrating them as-is produces malformed `resolved_questions` entries.** What step (2) persists
-  is the wire-format `AnswerSubmission` (`question_id`, `selected_option_id`/`selected_option_ids`,
-  `other_text` — `shared/hitl/models.py:70-78`), which has no `question_text` field at all and no
-  human-readable answer text; `planning_team`'s own `AnsweredQuestion` (`models.py:237-244`), which
-  `resolved_questions`/downstream decision rendering actually expect, requires `question_text` and a
-  populated `selected_answer`. Hydrating the raw `AnswerSubmission` batch directly would silently
-  drop `question_text` (downstream coverage checks use it to avoid re-asking an already-answered
-  question) and leave `selected_answer` empty for every multi-select answer (only
-  `selected_option_ids` is populated on those, never a computed label). **Contract requirement:**
+  **The durable consumed batches are answer-submission-shaped, not already `AnsweredQuestion`-shaped
+  — hydrating them as-is produces malformed `resolved_questions` entries.** What step (2) persists is
+  the wire-format submission (`question_id`, `selected_option_id`/`selected_option_ids`, `other_text`
+  — `shared/hitl/models.py:70-78`) plus whatever the validator itself adds; `planning_team`'s own
+  `AnsweredQuestion` (`models.py:237-244`), which `resolved_questions`/downstream decision rendering
+  actually expect, requires `question_text` and a populated `selected_answer`. Hydrating that batch
+  directly leaves `selected_answer` empty for every multi-select answer (only `selected_option_ids`
+  is populated on those, never a computed label).
+
+  **Correction — `question_text` is *not* among the missing fields when the mandated shared
+  validator is used; only the computed answer text is.** An earlier draft of this section claimed the
+  persisted batch "has no `question_text` field at all," reasoning from `AnswerSubmission`'s own
+  model fields. That is wrong for the path this contract actually mandates:
+  `shared.hitl.validation.validate_answers` — the validator §4.1 requires Planning's route to reuse —
+  builds `text_by_qid` from the round's `pending_questions` and stamps `"question_text"` into **every**
+  dict it returns (`validation.py:106-118`), precisely so a later resume can match by text rather
+  than re-asking. A route that persists the validator's return value (as this contract requires)
+  therefore already has `question_text` durably attached to each answer. **Contract requirement,
+  narrowing (a) and (b) below:** the conversion step's job is to compute `selected_answer` from the
+  selected option label(s) and to carry provenance (below) — **not** to recover a `question_text` the
+  validator already supplied. #7445-B must read `question_text` from the persisted batch itself,
+  and must not build a `pending_questions` lookup whose only purpose is to re-derive it. The
+  requirements below still hold for everything other than `question_text`: an option-label lookup is
+  genuinely needed for `selected_answer`, and that lookup does still have to happen at resume time,
+  before the round's `pending_questions` is cleared.
+
+  **Contract requirement:**
   each consumed `AnswerSubmission` must be converted into an enriched record — looking up the
   matching persisted `pending_questions` entry by `question_id` for its `question_text`/options, and
   computing `selected_answer` from the selected option label(s) (joining multiple labels, and
@@ -2108,10 +2320,15 @@ this contract:
   already-enriched records, never re-derive labels from question metadata that may no longer exist.
 
   **(c) Converting only the *submitted* batch silently drops every question PRA answered by
-  default.** §4.1's resume-path precondition (above) permits an optional question to be omitted from
-  the submitted batch — `validate_answers`'s `required_ids - answered_ids` check only requires
-  required questions, and PRA's own `apply_answers` (`user_communication.py:248-260`) supplies a
-  default-flagged `AnsweredQuestion` for every question with no matching submitted entry. Because
+  default.** *(Scope: for a PRA-sourced round this is a correctness backstop, not the common case —
+  §4.1 establishes every such question carries `"required": True`, so a legitimately resumable round
+  leaves nothing omitted. It governs any round that does reach the conversion with an unanswered
+  question, whether from a future producer that emits optional questions or from a malformed round
+  the pause-assembly checks did not reject.)* The resume-path precondition permits an *optional*
+  question to be omitted from the submitted batch — `validate_answers`'s `required_ids -
+  answered_ids` check only requires required questions, and PRA's own `apply_answers`
+  (`user_communication.py:248-260`) supplies a default-flagged `AnsweredQuestion` for every question
+  with no matching submitted entry. Because
   this conversion step (above) only converts entries present in the *submitted* `AnswerSubmission`
   batch, an all-optional or partially-omitted round produces no enriched record at all for the
   omitted questions — an empty batch yields zero `resolved_questions` entries for that round even
@@ -2290,18 +2507,17 @@ this contract:
   then, this contract's position is that every client-visible semantic field belongs in the identity,
   not a hand-picked subset of it.
 
-  **This same rollout changes PRA's own status serialization (adding `allow_multiple`, flipping
-  `required`'s effective default, above) — a rolling deployment of that change can make the identical
-  underlying round compare as "different" purely from which replica served it, with no `apply_answers`
-  call involved at all.** If the status service's old and new code serve concurrently during a rolling
-  deploy, the *same* persisted round can be read once through an old replica (no `allow_multiple` key,
-  `required` defaulting the old way) and again, later, through a new replica (both fields present,
-  `required` defaulting the new way) — the canonical comparison above would see a field-level
-  difference for a round PRA never actually advanced, misclassify it as advancement, and the resumed
-  activity would skip its own submission (or, in the achievable-application-proxy case above,
-  incorrectly treat the mismatch as confirmation) against a round the client is still legitimately
-  answering. **Contract requirement:** this specific rollout — the status-serialization change
-  (`allow_multiple`/`required` default) — must not be exposed to live traffic as a rolling,
+  **This same rollout changes PRA's own status serialization (adding `allow_multiple`, §4.1) — a
+  rolling deployment of that change can make the identical underlying round compare as "different"
+  purely from which replica served it, with no `apply_answers` call involved at all.** If the status
+  service's old and new code serve concurrently during a rolling deploy, the *same* persisted round
+  can be read once through an old replica (no `allow_multiple` key at all) and again, later, through
+  a new replica (the field present and populated) — the canonical comparison above would see a
+  field-level difference for a round PRA never actually advanced, misclassify it as advancement, and
+  the resumed activity would skip its own submission (or, in the achievable-application-proxy case
+  above, incorrectly treat the mismatch as confirmation) against a round the client is still
+  legitimately answering. **Contract requirement:** this specific rollout — the status-serialization
+  change (`allow_multiple`) — must not be exposed to live traffic as a rolling,
   mixed-version deployment; either deploy it as a single atomic cutover (no old/new replica overlap
   serving this route), or have the reconciliation comparison normalize both the persisted round and
   the current status read under one fixed, explicit schema version before comparing field-by-field,
@@ -2313,12 +2529,16 @@ this contract:
   **`required` and the option metadata default-selection depends on must also be part of this
   canonical identity — a round can keep `id`/`question_text`/`options`/`allow_multiple` unchanged
   while still changing meaning through these fields.** Two further ways a "same-shaped" round is not
-  actually the same round: (1) `required` can flip from `false` to `true` between when this pause
-  round was persisted and when the retry's status GET re-reads it — a batch that legitimately omitted
-  this (then-optional) question is structurally incomplete against the new round's own
-  `required_ids - answered_ids` check (§4.1), so resubmitting it verbatim fails PRA's route outright,
-  degrading to the same stalled-polling failure mode already established above for a rejected
-  resubmission; (2) each option's `is_default`/`confidence` feeds this contract's own synthesized
+  actually the same round: (1) `required` is part of the round's client-visible contract, and a
+  round whose `required` flag differs from what was persisted is by definition not the round that
+  was persisted — a batch built against the old flag can be structurally incomplete against the new
+  round's own `required_ids - answered_ids` check (§4.1), so resubmitting it verbatim fails PRA's
+  route outright, degrading to the same stalled-polling failure mode already established above for a
+  rejected resubmission. (Today this is defensive rather than live: §4.1 establishes
+  `convert_to_pending_questions` stamps `"required": True` on every question, so a PRA-sourced
+  round's flag does not vary in practice — it is included for the same reason every other
+  client-visible field is, since a comparison that silently omits a field cannot detect a producer
+  that later starts varying it.) (2) each option's `is_default`/`confidence` feeds this contract's own synthesized
   default for an omitted optional question (§4.3's `get_default_option`-mirroring requirement) — if
   the new round's default-flagged option or confidence ranking differs from what was persisted while
   every other field stays identical, Planning's synthesized default and PRA's own live default
