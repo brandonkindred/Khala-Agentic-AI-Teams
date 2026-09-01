@@ -58,6 +58,9 @@ def _stub_token(monkeypatch: pytest.MonkeyPatch, api: Any) -> None:
 
 class TestGithubPrPublishActivityValidation:
     def test_missing_required_field_raises(self, monkeypatch: pytest.MonkeyPatch, api: Any) -> None:
+        """An ABSENT (None) pr_number still falls through to the required-fields
+        sweep, which names it as missing -- only a present-but-invalid value is
+        diverted to the positive-integer check."""
         _stub_token(monkeypatch, api)
         with pytest.raises(ValueError, match="missing required fields"):
             _pr_publish()(_base_request(pr_number=None))
@@ -70,14 +73,14 @@ class TestGithubPrPublishActivityValidation:
         with pytest.raises(ValueError, match="positive integer pr_number"):
             _pr_publish()(_base_request(pr_number=bad_pr_number))
 
-    def test_zero_pr_number_rejected_by_required_fields_check(
+    def test_zero_pr_number_rejected_as_non_positive_not_as_missing(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
-        """``0`` is falsy, so it is caught by the earlier required-fields check
-        (``if not request.get(f)``) before the positive-integer check ever runs
-        -- still a rejection, just via the other ValueError message."""
+        """``0`` is PRESENT but falsy: the truthiness-based required-fields sweep
+        would misreport it as a MISSING field, so the positive-integer check runs
+        first and rejects it with the precise message naming the bad value."""
         _stub_token(monkeypatch, api)
-        with pytest.raises(ValueError, match="missing required fields"):
+        with pytest.raises(ValueError, match="positive integer pr_number, got 0"):
             _pr_publish()(_base_request(pr_number=0))
 
 

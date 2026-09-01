@@ -43,9 +43,9 @@ from software_engineering_team.clone_workspace import (
     clone_lock_path,
 )
 from software_engineering_team.github_source.client import (
-    DEFAULT_BASE_URL,
     _pr_detail_from_payload,
     configured_web_host,
+    default_api_base,
 )
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
@@ -1316,18 +1316,22 @@ _GITHUB_SERVICE = "github"
 def _github_api_base() -> str:
     """Return the configured GitHub API base URL (GHES-aware).
 
+    Thin module-local alias for :func:`default_api_base`, which owns the whole
+    derivation (``GITHUB_API_URL`` env var, else ``https://api.github.com``,
+    trailing slashes stripped) for ``GitHubClient.__init__`` and
+    ``configured_web_host`` alike. Re-deriving that expression here is exactly
+    how the env var name, the fallback constant, and the trailing-slash
+    normalization drift apart between modules, so this delegates rather than
+    duplicates.
+
     Postconditions:
-        - Returns ``GITHUB_API_URL`` when set (e.g. a GitHub Enterprise Server
-          API host), else :data:`DEFAULT_BASE_URL` (``https://api.github.com``) —
-          mirroring the derivation ``GitHubClient.__init__`` and
-          ``configured_web_host`` already use, so every GitHub API call in this
-          module targets the same configured host rather than a hardcoded one.
-        - Strips any trailing slash(es) from the result, matching the
-          synchronous ``GitHubClient``, so callers that build URLs as
-          ``f"{_github_api_base()}/repos/..."`` never produce a double slash
-          when the operator's ``GITHUB_API_URL`` env var has a trailing slash.
+        - Returns exactly :func:`default_api_base`'s result, so every GitHub
+          API call in this module targets the same configured host the
+          coding-team client does — never a hardcoded one — and callers
+          building ``f"{_github_api_base()}/repos/..."`` never produce a double
+          slash from an operator's trailing-slash env var.
     """
-    return (os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL).rstrip("/")
+    return default_api_base()
 
 
 # GitHub's issues endpoint returns at most 100 items per page; we request the max

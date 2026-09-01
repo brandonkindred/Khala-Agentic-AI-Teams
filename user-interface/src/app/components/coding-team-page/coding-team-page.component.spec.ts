@@ -2100,6 +2100,44 @@ describe('CodingTeamPageComponent', () => {
       expect(icons).toContain('play_arrow');
     });
 
+    it('the per-PR "Address comments" button is wired to addressPrComments (template click)', async () => {
+      // Clicking the real button — rather than calling the method directly, as the
+      // behavioral tests below do — is what pins the template's (click) binding: a
+      // dropped or mis-bound handler would leave every one of those tests passing.
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      integrationsSpy.addressPrComments.mockReturnValue(
+        of({ job_id: 'a1', pr_number: 7, pr_url: 'u', unresolved_comment_count: 2, status: 'pending', message: '' }),
+      );
+      await setup();
+      openPullsForRepo();
+      const btn: HTMLButtonElement | null = fixture.nativeElement.querySelector('.pull-row__actions button');
+      expect(btn).toBeTruthy();
+      btn!.click();
+      fixture.detectChanges();
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledWith(7, { owner: 'acme', repo: 'widgets' });
+    });
+
+    it('disables the per-PR button and shows "Starting…" while its job is in flight', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      // Never-completing observable so the in-flight flag stays set after the click.
+      integrationsSpy.addressPrComments.mockReturnValue(new Subject());
+      await setup();
+      openPullsForRepo();
+      const btn: HTMLButtonElement = fixture.nativeElement.querySelector('.pull-row__actions button');
+      expect(btn.disabled).toBe(false);
+
+      btn.click();
+      fixture.detectChanges();
+
+      // The template binds [disabled]="isAddressingPr(pr)", so the native button is
+      // actually disabled — a second click cannot re-submit the same PR.
+      expect(btn.disabled).toBe(true);
+      expect(btn.textContent).toContain('Starting…');
+      btn.click();
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
+    });
+
     it('prompts to pick a repo when none is expanded', async () => {
       await setup();
       showView('pulls');

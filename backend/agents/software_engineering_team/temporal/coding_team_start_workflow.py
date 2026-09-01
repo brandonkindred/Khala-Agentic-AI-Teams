@@ -91,12 +91,19 @@ def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: st
         - ``caller`` is the calling function's name, used verbatim in the
           raised message.
     Postconditions:
-        - Returns None when ``plan_input`` is ``None`` or contains no
-          ``"token"``-like key at any nesting depth.
+        - Returns None when ``plan_input`` is ``None``, or is a dict containing
+          no ``"token"``-like key at any nesting depth.
     Raises:
-        ValueError: ``plan_input`` contains a ``"token"``-like key at any
-            nesting depth (see :func:`_contains_token_key`).
+        ValueError: ``plan_input`` is truthy but not a ``dict`` (a bare truthy
+            non-dict, e.g. a token string, would otherwise bypass
+            :func:`_contains_token_key`'s dict/list/tuple-only traversal and be
+            serialized into the durable workflow payload verbatim — the same
+            hole :func:`_validate_github_arg` already closes for ``github``);
+            or ``plan_input`` contains a ``"token"``-like key at any nesting
+            depth (see :func:`_contains_token_key`).
     """
+    if plan_input and not isinstance(plan_input, dict):
+        raise ValueError(f"{caller} requires plan_input to be a dict when provided")
     if plan_input and _contains_token_key(plan_input):
         raise ValueError(f"{caller} requires plan_input to not include a token")
 
@@ -130,7 +137,7 @@ def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, requi
     elif github and not isinstance(github, dict):
         raise ValueError(f"{caller} requires github to be a dict when provided")
     if github and _contains_token_key(github):
-        raise ValueError("github workflow payload must not include a token")
+        raise ValueError(f"{caller} github workflow payload must not include a token")
 
 
 def _workflow_id(job_id: str) -> str:
@@ -188,10 +195,10 @@ def start_coding_team_workflow(
           included on the payload under ``"github"``; otherwise that key is
           omitted.
     Raises:
-        ValueError: ``job_id`` or ``repo_path`` is empty; ``github`` is
-            truthy but not a ``dict``; or ``github`` or ``plan_input``
-            contains a ``"token"``-like key at any nesting depth (see
-            :func:`_contains_token_key`).
+        ValueError: ``job_id`` or ``repo_path`` is empty; ``github`` or
+            ``plan_input`` is truthy but not a ``dict``; or ``github`` or
+            ``plan_input`` contains a ``"token"``-like key at any nesting
+            depth (see :func:`_contains_token_key`).
         RuntimeError: the worker's Temporal client never becomes available
             within the wait window.
     """
@@ -246,9 +253,9 @@ def execute_coding_team_workflow(
           keep blocking — there is no request deadline to respect here.
     Raises:
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
-            non-empty dict, or ``github`` or ``plan_input`` contains a
-            ``"token"``-like key at any nesting depth (see
-            :func:`_contains_token_key`).
+            non-empty dict, ``plan_input`` is truthy but not a dict, or
+            ``github`` or ``plan_input`` contains a ``"token"``-like key at
+            any nesting depth (see :func:`_contains_token_key`).
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result.
         Exception: Any other exception ``execute_workflow_sync`` itself raises
             (a Temporal RPC error, the workflow's own failure exception, a

@@ -476,6 +476,11 @@ def post_address_comments(
                 # actually wrote a row, this call harmlessly targets a job_id the job
                 # service has never seen.
                 error = f"Could not start address-comments worker: {scrub_token_from_text(str(e))}"
+                # Each terminalization gets its OWN try/except: sequencing both in
+                # one try means an update_job failure skips update_review entirely,
+                # leaving the review row non-terminal — precisely the orphan state
+                # this cleanup exists to prevent. They terminalize independent
+                # stores, so neither may gate the other.
                 try:
                     _main.update_job(
                         job_id,
@@ -484,6 +489,9 @@ def post_address_comments(
                         status_text="Failed to start address-comments worker",
                         error=error,
                     )
+                except Exception:
+                    logger.exception("Could not terminalize address-comments job %s", job_id)
+                try:
                     _main.update_review(
                         job_id,
                         status="failed",
@@ -492,7 +500,7 @@ def post_address_comments(
                         completed=True,
                     )
                 except Exception:
-                    logger.exception("Could not terminalize address-comments job %s", job_id)
+                    logger.exception("Could not terminalize address-comments review row %s", job_id)
                 raise HTTPException(status_code=500, detail=error) from e
 
     return AddressCommentsResponse(
@@ -870,9 +878,14 @@ def post_file_out_of_scope_issues(
                                 for loc in locations:
                                     fp = str(loc.get("file_path") or "unknown")
                                     ln = loc.get("line")
+                                    # `bool` subclasses `int`, so a payload carrying
+                                    # `{"line": true}` would otherwise render as
+                                    # `x.py:True`; exclude it explicitly.
                                     loc_text = (
                                         f"`{fp}:{ln}`"
-                                        if isinstance(ln, int) and ln > 0
+                                        if isinstance(ln, int)
+                                        and not isinstance(ln, bool)
+                                        and ln > 0
                                         else f"`{fp}`"
                                     )
                                     loc_desc = str(loc.get("description") or "").strip()

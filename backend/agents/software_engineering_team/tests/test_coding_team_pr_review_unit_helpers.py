@@ -318,6 +318,24 @@ class TestRunningSiblingOnCheckoutUnit:
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
         assert updates == [("child-1", {"status": "failed", "error": ANY})]
 
+    def test_mark_failed_raising_does_not_break_the_scan(self, monkeypatch, tmp_path) -> None:
+        """The orphan mark-failed is documented best-effort, and the scan's own
+        fail-closed contract is never-raise: an ``update_job`` that itself throws
+        (job service down) must be swallowed, leaving the orphan unreported so
+        admission is still unblocked -- the whole point of the cleanup."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(main, "get_job", lambda job_id: None)
+
+        def _boom(job_id, **kw):
+            raise RuntimeError("job service unreachable")
+
+        monkeypatch.setattr(main, "update_job", _boom)
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+
     def test_child_with_live_parent_is_still_reported_as_sibling(self, monkeypatch, tmp_path) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()

@@ -555,7 +555,10 @@ class CodingTeamWorkflow:
             except KeyError as exc:
                 raise ValueError(f"github payload missing required key: {exc}") from exc
 
-        if isinstance(github, dict) and github:
+            # Branch prep lives under the SAME guard as the validation above (one
+            # `isinstance(github, dict) and github` in this method, not two
+            # identical ones that can drift apart) — and it must stay ordered
+            # after it, since it consumes the locals extracted there.
             try:
                 prep = await workflow.execute_activity(
                     github_branch_prep_activity,

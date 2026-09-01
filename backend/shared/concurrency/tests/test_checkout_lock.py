@@ -21,6 +21,53 @@ from shared.concurrency.checkout_lock import held_checkout_lock
 from shared.concurrency.flock_lock import flock_lock
 
 
+class _SlowLock:
+    """Instrumented ``flock_lock`` stand-in whose ``__enter__`` blocks on an Event.
+
+    Shared by both cancellation tests: each installs ONE instance as the
+    ``flock_lock`` factory's return value, so ``entered_calls``/``exited_calls``
+    record that instance's own lifecycle rather than a module-level list two
+    copies of this class would have to close over.
+
+    Preconditions:
+        - ``proceed`` is the test's own Event; ``__enter__`` blocks until the
+          test sets it (bounded by a 5s timeout so a hung test still fails
+          rather than wedging the suite), simulating acquisition still in
+          flight in the executor thread.
+    Postconditions:
+        - ``entered_calls``/``exited_calls`` gain one entry per completed
+          ``__enter__``/``__exit__``. ``__exit__`` returns False, so it never
+          suppresses an exception propagating through the ``with`` body.
+    """
+
+    def __init__(self, proceed: threading.Event) -> None:
+        self._proceed = proceed
+        self.entered_calls: list[int] = []
+        self.exited_calls: list[int] = []
+
+    def __enter__(self) -> "_SlowLock":
+        self._proceed.wait(timeout=5)
+        self.entered_calls.append(1)
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        self.exited_calls.append(1)
+        return False
+
+
+def _install_slow_lock(monkeypatch: pytest.MonkeyPatch, proceed: threading.Event) -> _SlowLock:
+    """Patch ``checkout_lock``'s ``flock_lock`` to hand back one shared _SlowLock.
+
+    Postconditions:
+        - Returns the instance every ``flock_lock(...)`` call in the module under
+          test will return, so a test can assert on its call records. The patch
+          is undone by ``monkeypatch``'s own teardown.
+    """
+    lock = _SlowLock(proceed)
+    monkeypatch.setattr(checkout_lock_module, "flock_lock", lambda _path: lock)
+    return lock
+
+
 def test_lock_is_held_around_the_body_and_released_after(tmp_path: Path) -> None:
     lock_path = tmp_path / ".test.lock"
 
@@ -105,88 +152,69 @@ def test_operator_pinned_lock_failure_degrades_without_raising(
     assert any("test-prefix" in r.message for r in caplog.records)
 
 
-def test_cancellation_during_acquisition_does_not_leak_the_lock(tmp_path: Path) -> None:
+def test_cancellation_during_acquisition_does_not_leak_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Reproduces the HIGH-severity bug: cancelling the awaiting coroutine while
     ``lock_cm.__enter__()`` is still in flight inside the executor thread must
     not leave the flock held forever.
 
-    A slow, instrumented stand-in for ``flock_lock`` blocks ``__enter__`` on a
-    threading.Event so the test can cancel the awaiting task while acquisition
-    is provably still in progress in the executor thread, then release the
-    Event so acquisition actually completes. Release is proven by asserting
-    ``exited_calls == [1]`` on the instrumented stand-in itself (its
+    ``_SlowLock`` (the module-level stand-in for ``flock_lock``) blocks
+    ``__enter__`` on a threading.Event so the test can cancel the awaiting task
+    while acquisition is provably still in progress in the executor thread,
+    then release the Event so acquisition actually completes. Release is proven
+    by asserting ``exited_calls == [1]`` on the stand-in itself (its
     ``__exit__`` was actually invoked) -- not via a subsequent real
     acquisition.
     """
     lock_path = tmp_path / ".test.lock"
     proceed = threading.Event()
-    entered_calls: list[int] = []
-    exited_calls: list[int] = []
+    lock = _install_slow_lock(monkeypatch, proceed)
 
-    class _SlowLock:
-        def __init__(self, path: Path) -> None:
-            self._path = path
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        async with held_checkout_lock(
+            loop, lock_path, platform_owned=True, owner="acme", repo="widget", log_prefix="test"
+        ):
+            pytest.fail("body must not run before this task is cancelled mid-acquisition")
 
-        def __enter__(self) -> "_SlowLock":
-            # Block here until the test explicitly releases us -- simulating
-            # __enter__ still being in flight in the executor thread at the
-            # moment the awaiting coroutine gets cancelled.
-            proceed.wait(timeout=5)
-            entered_calls.append(1)
-            return self
+    async def _drive() -> None:
+        task = asyncio.ensure_future(_run())
+        # Give the executor thread a beat to actually call __enter__ and
+        # block on proceed.wait() before cancelling.
+        await asyncio.sleep(0.05)
+        task.cancel()
+        # Give the cancellation a moment to actually reach the task's
+        # awaited shield() point. Do NOT await `task` yet: its `finally`
+        # will itself await the (still in-flight) acquisition future, so
+        # awaiting the task here -- before releasing `proceed` -- would
+        # deadlock this test on the same background thread.
+        await asyncio.sleep(0.05)
+        # __enter__ is still blocked in the executor thread at this point --
+        # the cancellation must not have released anything, since nothing
+        # was actually acquired yet.
+        assert not lock.entered_calls
+        assert not lock.exited_calls
+        # Now let the executor thread's __enter__ actually complete. The
+        # task's `finally` -- awaiting the acquisition future -- can now
+        # observe it complete and release the lock before the
+        # CancelledError finishes propagating out of the task.
+        proceed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
-        def __exit__(self, *exc_info) -> bool:
-            exited_calls.append(1)
-            return False
+    asyncio.run(_drive())
 
-    original_flock_lock = checkout_lock_module.flock_lock
-    checkout_lock_module.flock_lock = lambda p: _SlowLock(p)
-    try:
-
-        async def _run() -> None:
-            loop = asyncio.get_running_loop()
-            async with held_checkout_lock(
-                loop, lock_path, platform_owned=True, owner="acme", repo="widget", log_prefix="test"
-            ):
-                pytest.fail("body must not run before this task is cancelled mid-acquisition")
-
-        async def _drive() -> None:
-            task = asyncio.ensure_future(_run())
-            # Give the executor thread a beat to actually call __enter__ and
-            # block on proceed.wait() before cancelling.
-            await asyncio.sleep(0.05)
-            task.cancel()
-            # Give the cancellation a moment to actually reach the task's
-            # awaited shield() point. Do NOT await `task` yet: its `finally`
-            # will itself await the (still in-flight) acquisition future, so
-            # awaiting the task here -- before releasing `proceed` -- would
-            # deadlock this test on the same background thread.
-            await asyncio.sleep(0.05)
-            # __enter__ is still blocked in the executor thread at this point --
-            # the cancellation must not have released anything, since nothing
-            # was actually acquired yet.
-            assert not entered_calls
-            assert not exited_calls
-            # Now let the executor thread's __enter__ actually complete. The
-            # task's `finally` -- awaiting the acquisition future -- can now
-            # observe it complete and release the lock before the
-            # CancelledError finishes propagating out of the task.
-            proceed.set()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        asyncio.run(_drive())
-    finally:
-        checkout_lock_module.flock_lock = original_flock_lock
-
-    assert entered_calls == [1], "the executor thread's __enter__ should have completed exactly once"
-    assert exited_calls == [1], (
+    assert lock.entered_calls == [1], "the executor thread's __enter__ should have completed exactly once"
+    assert lock.exited_calls == [1], (
         "a __enter__ that completes after the awaiting coroutine was cancelled must still be released "
         "-- this is the exact HIGH-severity leak this helper exists to prevent"
     )
 
 
-def test_second_cancellation_during_cleanup_await_does_not_leak_the_lock(tmp_path: Path) -> None:
+def test_second_cancellation_during_cleanup_await_does_not_leak_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Reproduces the deeper variant of the same bug: a SECOND cancellation
     delivered while the ``finally`` block is itself awaiting the (shielded)
     acquisition future must not abandon that await either.
@@ -199,64 +227,44 @@ def test_second_cancellation_during_cleanup_await_does_not_leak_the_lock(tmp_pat
     """
     lock_path = tmp_path / ".test.lock"
     proceed = threading.Event()
-    entered_calls: list[int] = []
-    exited_calls: list[int] = []
+    lock = _install_slow_lock(monkeypatch, proceed)
 
-    class _SlowLock:
-        def __init__(self, path: Path) -> None:
-            self._path = path
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        async with held_checkout_lock(
+            loop, lock_path, platform_owned=True, owner="acme", repo="widget", log_prefix="test"
+        ):
+            pytest.fail("body must not run before this task is cancelled mid-acquisition")
 
-        def __enter__(self) -> "_SlowLock":
-            proceed.wait(timeout=5)
-            entered_calls.append(1)
-            return self
+    async def _drive() -> None:
+        task = asyncio.ensure_future(_run())
+        # Let the executor thread actually start __enter__ and block.
+        await asyncio.sleep(0.05)
+        # First cancellation: reaches the initial (shielded) acquisition
+        # await, unwinds into the `finally` block, which starts its own
+        # (also shielded) await of the still in-flight acquisition future.
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not lock.entered_calls
+        assert not lock.exited_calls
+        # Second cancellation: delivered while the task is suspended at
+        # the `finally` block's cleanup await. Before this fix, this
+        # would be caught by `contextlib.suppress(asyncio.CancelledError)`
+        # and the task would unwind with `lock_acquired` still False.
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # __enter__ is still blocked -- neither cancellation should have
+        # released anything, since nothing was actually acquired yet.
+        assert not lock.entered_calls
+        assert not lock.exited_calls
+        # Now let the executor thread's __enter__ actually complete.
+        proceed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
-        def __exit__(self, *exc_info) -> bool:
-            exited_calls.append(1)
-            return False
+    asyncio.run(_drive())
 
-    original_flock_lock = checkout_lock_module.flock_lock
-    checkout_lock_module.flock_lock = lambda p: _SlowLock(p)
-    try:
-
-        async def _run() -> None:
-            loop = asyncio.get_running_loop()
-            async with held_checkout_lock(
-                loop, lock_path, platform_owned=True, owner="acme", repo="widget", log_prefix="test"
-            ):
-                pytest.fail("body must not run before this task is cancelled mid-acquisition")
-
-        async def _drive() -> None:
-            task = asyncio.ensure_future(_run())
-            # Let the executor thread actually start __enter__ and block.
-            await asyncio.sleep(0.05)
-            # First cancellation: reaches the initial (shielded) acquisition
-            # await, unwinds into the `finally` block, which starts its own
-            # (also shielded) await of the still in-flight acquisition future.
-            task.cancel()
-            await asyncio.sleep(0.05)
-            assert not entered_calls
-            assert not exited_calls
-            # Second cancellation: delivered while the task is suspended at
-            # the `finally` block's cleanup await. Before this fix, this
-            # would be caught by `contextlib.suppress(asyncio.CancelledError)`
-            # and the task would unwind with `lock_acquired` still False.
-            task.cancel()
-            await asyncio.sleep(0.05)
-            # __enter__ is still blocked -- neither cancellation should have
-            # released anything, since nothing was actually acquired yet.
-            assert not entered_calls
-            assert not exited_calls
-            # Now let the executor thread's __enter__ actually complete.
-            proceed.set()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        asyncio.run(_drive())
-    finally:
-        checkout_lock_module.flock_lock = original_flock_lock
-
-    assert entered_calls == [1], "the executor thread's __enter__ should have completed exactly once"
-    assert exited_calls == [1], (
+    assert lock.entered_calls == [1], "the executor thread's __enter__ should have completed exactly once"
+    assert lock.exited_calls == [1], (
         "a __enter__ that completes after a SECOND cancellation during cleanup must still be released"
     )

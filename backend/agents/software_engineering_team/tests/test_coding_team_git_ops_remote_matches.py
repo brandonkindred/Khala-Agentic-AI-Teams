@@ -31,11 +31,17 @@ def _patch_git(
     Returns the list of ``args`` tuples the stub was called with, in order,
     so a test can assert both the outcome and that the expected git
     subcommands were actually issued.
+
+    An invocation with no canned response fails the test with an
+    ``AssertionError`` naming the unexpected args, rather than a bare
+    ``KeyError`` that says nothing about which git call went unstubbed.
     """
     calls: List[Tuple[str, ...]] = []
 
     def _fake_git(repo_path: str, *args: str, timeout: float = 120.0, env=None):
         calls.append(args)
+        if args not in responses:
+            raise AssertionError(f"Unexpected git invocation: {args!r}")
         return responses[args]
 
     monkeypatch.setattr(git_ops, "_git", _fake_git)
@@ -77,6 +83,8 @@ def test_mismatched_push_url_fails_even_when_fetch_url_matches(monkeypatch) -> N
 
 
 def test_mismatched_fetch_url_fails_without_checking_push_url(monkeypatch) -> None:
+    """A fetch URL naming a different repo fails immediately, without spending a
+    second git call on the push URL it can no longer rescue."""
     calls = _patch_git(
         monkeypatch,
         {
@@ -90,6 +98,9 @@ def test_mismatched_fetch_url_fails_without_checking_push_url(monkeypatch) -> No
 
 
 def test_push_url_lookup_failure_fails_closed(monkeypatch) -> None:
+    """A non-zero rc from the PUSH-url lookup leaves the push destinations
+    unverifiable, which must be treated exactly like a mismatch (False), never
+    assumed to match on the strength of the fetch URL alone."""
     _patch_git(
         monkeypatch,
         {
@@ -102,6 +113,20 @@ def test_push_url_lookup_failure_fails_closed(monkeypatch) -> None:
     )
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
+
+
+def test_fetch_url_lookup_failure_fails_closed(monkeypatch) -> None:
+    """The FETCH-url counterpart: a non-zero rc (no `origin` remote, git missing,
+    timeout -- `_git` degrades to a return code rather than raising) returns
+    False and never reaches the push-URL lookup, since there is nothing left to
+    validate against."""
+    calls = _patch_git(
+        monkeypatch,
+        {("remote", "get-url", "origin"): (1, "fatal: no such remote 'origin'")},
+    )
+
+    assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
+    assert ("remote", "get-url", "--push", "--all", "origin") not in calls
 
 
 def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:

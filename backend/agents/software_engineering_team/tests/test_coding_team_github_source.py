@@ -1765,6 +1765,23 @@ class TestEndpointHappyPath:
         assert job["status"] == "failed"
         assert "unable to resolve base branch" in job["error"]
 
+        # Prove the docstring's rationale rather than merely asserting the row is
+        # terminal: an identical retry must NOT be 409-wedged by the first
+        # attempt's job. It re-fails the same way (500) and creates its own
+        # second job row -- which it could not do if the first were still
+        # holding admission as a non-terminal 'pending'.
+        retry = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert retry.status_code == 500
+        assert "unable to resolve base branch" in retry.json()["detail"]
+        retry_jobs = patched_app["jobs"].list_jobs()
+        assert len(retry_jobs) == 2
+        assert all(
+            patched_app["jobs"].get_job(j["job_id"])["status"] == "failed" for j in retry_jobs
+        )
+
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
             issues=[_issue(11, title="Add feature")],
@@ -3615,19 +3632,28 @@ class TestFileContentsAndTree:
         assert content is None
         assert missing is False
 
-    def test_get_file_contents_detailed_matches_get_file_contents(self) -> None:
-        """get_file_contents delegates to get_file_contents_detailed and
-        returns just its content half."""
-        body = "x = 1\n"
-        encoded = base64.b64encode(body.encode()).decode()
+    def test_get_file_contents_delegates_to_get_file_contents_detailed(self, monkeypatch) -> None:
+        """`get_file_contents` is the content half of `get_file_contents_detailed`,
+        not a parallel implementation: it must forward its arguments verbatim and
+        return whatever that call's first element is. Stubbing the detailed method
+        pins the delegation itself -- asserting only that both decode the same
+        payload would still pass if the delegation were replaced by a duplicate
+        request/decode of its own."""
 
-        def handler(_req: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200, json={"type": "file", "encoding": "base64", "content": encoded}
-            )
+        def handler(_req: httpx.Request) -> httpx.Response:  # pragma: no cover - never called
+            raise AssertionError("get_file_contents must delegate, not issue its own request")
 
         client = _client_with(handler)
-        assert client.get_file_contents("o", "r", "a.py", "sha1") == body
+        calls: list[tuple[str, str, str, str]] = []
+
+        def _fake_detailed(owner: str, repo: str, path: str, ref: str) -> tuple[str, bool]:
+            calls.append((owner, repo, path, ref))
+            return "delegated body", False
+
+        monkeypatch.setattr(client, "get_file_contents_detailed", _fake_detailed)
+
+        assert client.get_file_contents("o", "r", "a.py", "sha1") == "delegated body"
+        assert calls == [("o", "r", "a.py", "sha1")]
 
     def test_get_repository_tree_returns_blob_paths(self) -> None:
         """Only blob (file) entries are returned; tree (directory) entries are excluded."""

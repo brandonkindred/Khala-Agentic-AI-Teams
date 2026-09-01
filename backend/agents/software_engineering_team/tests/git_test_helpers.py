@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import subprocess
+from pathlib import Path
 
 
 def expected_basic_header(token: str) -> str:
@@ -35,6 +36,9 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
           set one itself, and ``git commit`` fails without it. Both current
           callers' own ``_init_repo`` helpers set this on the repo they build
           before ever calling this function.
+        - ``filename`` is repository-relative. It MAY name a nested path
+          (``pkg/mod.py``): missing parent directories are created here, so a
+          caller does not have to pre-create them just to commit a file.
 
     Uses ``git checkout -B <branch>``, which creates ``branch`` if it does not
     already exist but, when it DOES exist, resets it to the current HEAD
@@ -65,8 +69,12 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
         return result.stdout.strip()
 
     _run("checkout", "-q", "-B", branch)
-    with open(f"{repo}/{filename}", "w", encoding="utf-8") as fh:
-        fh.write(contents)
+    target = Path(repo) / filename
+    # A nested `filename` would otherwise fail with FileNotFoundError before git
+    # is ever reached; creating parents makes the helper usable for directory
+    # paths too, which is strictly more useful than documenting the limitation.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(contents, encoding="utf-8")
     _run("add", filename)
     _run("commit", "-q", "--no-gpg-sign", "-m", f"{branch}: {filename}")
     sha = _run("rev-parse", "HEAD")

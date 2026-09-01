@@ -299,24 +299,31 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
           carrying the SAME just-computed ``status``/``status_text`` (never a
           hardcoded ``"completed"``, which would misreport a partial run).
     Raises:
-        ValueError: ``request`` is missing any field in
-            ``_PR_PUBLISH_REQUIRED_FIELDS``, or ``pr_number`` is not a
-            positive integer.
+        ValueError: ``pr_number`` is present but not a positive integer
+            (checked FIRST, so a present-but-falsy ``0`` is rejected as a bad
+            value rather than misreported as a missing field), or ``request``
+            is missing any field in ``_PR_PUBLISH_REQUIRED_FIELDS``.
         RuntimeError: The git fast-forward or the push to ``remote`` fails.
     """
     token = _require_activity_github_token(request)
-    missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]
-    if missing:
-        raise ValueError(f"github_pr_publish_activity missing required fields: {missing!r}")
-    pr_number = request["pr_number"]
-    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1:
-        # The truthiness check above accepts any non-empty value, including a
-        # string — which would later get interpolated straight into
-        # status_text below, producing a nonsensical "Published fix to PR
-        # #abc" rather than a clear rejection here.
+    # `pr_number` is validated BEFORE the missing-fields sweep, which is
+    # truthiness-based: a PRESENT but falsy 0 would otherwise be reported as a
+    # MISSING field rather than getting this precise rejection. A wrong TYPE
+    # (e.g. the string "7") is caught here too, since the sweep accepts any
+    # non-empty value and the value is later interpolated straight into
+    # status_text — producing a nonsensical "Published fix to PR #abc" instead
+    # of a clear error. An absent/None pr_number deliberately falls through to
+    # the sweep below, which names it correctly as missing.
+    pr_number = request.get("pr_number")
+    if pr_number is not None and (
+        not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1
+    ):
         raise ValueError(
             f"github_pr_publish_activity requires a positive integer pr_number, got {pr_number!r}"
         )
+    missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]
+    if missing:
+        raise ValueError(f"github_pr_publish_activity missing required fields: {missing!r}")
 
     from software_engineering_team.api import coding_team_main as _main
     from software_engineering_team.models import JobStatus

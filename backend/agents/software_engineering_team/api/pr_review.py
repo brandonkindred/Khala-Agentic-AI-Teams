@@ -671,11 +671,14 @@ def _checkout_admission(repo_path: str):
           :func:`_running_sibling_on_checkout` and then, if free, used by a job
           this call site is about to create.
     Postconditions:
-        - Serializes callers keyed on ``repo_path``'s CANONICAL form
-          (:func:`os.path.realpath`), so two different spellings of the same
-          checkout (e.g. a trailing slash, a symlink) still serialize against
-          each other, matching how :func:`_running_sibling_on_checkout` itself
-          compares paths. Delegates to :func:`advisory_lock` — see its
+        - Serializes callers keyed on ``repo_path``'s CASEFOLDED CANONICAL form
+          (:func:`os.path.realpath` then :meth:`str.casefold`), so two
+          different spellings of the same checkout (a trailing slash, a
+          symlink, or — on a case-insensitive filesystem — a different case)
+          still serialize against each other, matching how
+          :func:`_running_sibling_on_checkout` itself compares paths and how
+          the sibling :func:`_pr_review_admission` key is casefolded.
+          Delegates to :func:`advisory_lock` — see its
           docstring for the full locking contract (degradation, invariants,
           exception behavior). A caller that also holds a per-PR
           :func:`_pr_review_admission` lock must acquire this one INSIDE it
@@ -685,7 +688,7 @@ def _checkout_admission(repo_path: str):
     with advisory_lock(
         _CHECKOUT_ADMISSION_LOCK,
         "coding_team_checkout_admission",
-        os.path.realpath(repo_path),
+        os.path.realpath(repo_path).casefold(),
     ):
         yield
 

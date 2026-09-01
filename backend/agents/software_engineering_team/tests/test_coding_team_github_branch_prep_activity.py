@@ -326,6 +326,11 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
     assert len(fetches) == 1
     for _args, env in fetches:
         assert env is not None
+        # Pin the whole config entry, not just its value: git only applies the
+        # header when the COUNT and KEY are right too, so asserting the value
+        # alone would still pass with a wrong/missing key that git ignores.
+        assert env["GIT_CONFIG_COUNT"] == "1"
+        assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
         assert env["GIT_CONFIG_VALUE_0"] == expected_basic_header("tok-123")
     assert all(env is None for args, env in calls if args[0] != "fetch")
 

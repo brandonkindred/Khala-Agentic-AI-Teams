@@ -37,6 +37,14 @@ from shared.postgres.metrics import timed_query
 logger = logging.getLogger(__name__)
 _STORE = "coding_team"
 
+# The table every read/write in this module targets. Named so the identifier is
+# not a bare literal at each call site that PASSES it as a value (the
+# best-effort-write log tag below). The SQL statements themselves keep the name
+# spelled inline: their text is static and never composed from a variable, which
+# is what makes them provably free of user-controlled SQL — see
+# `_UPDATABLE_COLUMNS`.
+_REVIEW_RUNS_TABLE = "code_review_runs"
+
 # Columns `update_review` is permitted to write. The SET clause is composed only
 # from these constants — never from caller-supplied identifiers — so the query
 # can never carry user-controlled SQL.
@@ -45,7 +53,7 @@ _UPDATABLE_COLUMNS = frozenset({"status", "status_text", "review_summary", "erro
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 _best_effort_write: Callable[[str, Callable[[], None]], None] = partial(
-    _shared_best_effort_write, "code_review_runs"
+    _shared_best_effort_write, _REVIEW_RUNS_TABLE
 )
 
 

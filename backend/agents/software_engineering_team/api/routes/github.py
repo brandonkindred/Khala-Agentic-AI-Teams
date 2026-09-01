@@ -59,6 +59,11 @@ def _fail_new_job(
 
     Preconditions:
         - ``job_id`` names a job row this request already created.
+        - ``error`` is safe to disclose: it is stored on the job row, which the
+          generic ``GET /api/jobs/{team}`` route echoes verbatim to any caller
+          that can read the job. Pass a sanitized summary — never raw
+          ``str(exception)`` text — and keep the full diagnostic in ``cause``
+          and the caller's own ``logger.exception``.
         - ``detail``, when given, is the (possibly friendlier/less internal)
           HTTP response detail to use instead of ``error`` — e.g. to avoid
           echoing an internal exception's ``str()`` straight into the
@@ -238,11 +243,17 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # Dispatch failed (worker not ready, start timeout, bad config). Mark
             # the freshly-created row failed so it is not orphaned in 'pending',
             # and surface a retryable error instead of an opaque 500.
+            # The stored `error` is deliberately sanitized, not `str(e)`: the
+            # generic `GET /api/jobs/{team}` route echoes a job's error verbatim,
+            # so raw dispatch-exception text (host names, connection strings,
+            # anything a Temporal client puts in its message) would reach any
+            # caller that can read the job. The full diagnostic still reaches the
+            # log through the logger.exception above and the chained `cause`.
             logger.exception("Coding team Temporal dispatch failed: %s", e)
             _fail_new_job(
                 job_id,
                 503,
-                f"Temporal dispatch failed: {e}",
+                "Temporal dispatch failed (worker unavailable)",
                 detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
                 cause=e,
             )

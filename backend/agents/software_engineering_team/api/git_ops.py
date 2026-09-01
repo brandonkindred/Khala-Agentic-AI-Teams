@@ -378,7 +378,7 @@ def _is_ephemeral_checkout_path(repo_path: str) -> bool:
     return _ephemeral_checkout_target(repo_path) is not None
 
 
-def _locked_rmtree(target: Path, repo_path: str) -> None:
+def _locked_rmtree(target: Path) -> None:
     """Delete a resolved per-issue or per-PR checkout while holding the shared clone flock.
 
     Holds the SAME sibling ``flock`` that unified_api's ``_ensure_repo_clone``
@@ -393,8 +393,9 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
 
     Preconditions:
         - ``target`` is the resolved, non-symlink per-issue or per-PR checkout
-          returned by ``_ephemeral_checkout_target``; ``repo_path`` is the
-          original request string (used only for the failure log line).
+          returned by ``_ephemeral_checkout_target``. Every log line here names
+          ``target`` — the path actually operated on — so one cleanup never
+          reports two different path spellings depending on its outcome.
     Postconditions:
         - Best-effort: ``target`` is removed only if the lock is acquired and it
           still resolves as a deletable per-issue or per-PR checkout under the lock. Never
@@ -452,7 +453,7 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
             # exc_info so a partial-rmtree failure (the non-atomic case) is
             # diagnosable from the traceback, not just the message.
             logger.warning(
-                "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
+                "Failed to remove ephemeral checkout at %s: %s", target, e, exc_info=True
             )
     finally:
         # Release and close, but do NOT unlink the lock file (see the docstring).
@@ -515,7 +516,7 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
         return
 
-    _locked_rmtree(target, repo_path)
+    _locked_rmtree(target)
 
 
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:

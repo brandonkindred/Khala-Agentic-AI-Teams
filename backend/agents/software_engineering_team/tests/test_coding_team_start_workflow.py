@@ -126,14 +126,21 @@ def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
     assert captured["reattach_on_timeout"] is True
 
 
+# A github payload that passes validation on its own, so the two argument-presence
+# tests below isolate the branch they name instead of silently depending on
+# validation ORDER (an empty `{}` is itself rejected by `_validate_github_arg`, so
+# either test would still pass with its own check removed).
+_VALID_GITHUB = {"owner": "acme", "repo": "widgets", "pr_number": 7}
+
+
 def test_execute_coding_team_workflow_requires_job_id(monkeypatch):
     with pytest.raises(ValueError, match="non-empty job_id"):
-        sw.execute_coding_team_workflow("", "/repo", {"x": 1}, {})
+        sw.execute_coding_team_workflow("", "/repo", {"x": 1}, dict(_VALID_GITHUB))
 
 
 def test_execute_coding_team_workflow_requires_repo_path(monkeypatch):
     with pytest.raises(ValueError, match="non-empty repo_path"):
-        sw.execute_coding_team_workflow("job-7", "", {"x": 1}, {})
+        sw.execute_coding_team_workflow("job-7", "", {"x": 1}, dict(_VALID_GITHUB))
 
 
 def test_execute_coding_team_workflow_rejects_plaintext_token(monkeypatch):
@@ -173,3 +180,29 @@ def test_execute_coding_team_workflow_rejects_empty_github_dict(monkeypatch):
     that can never reply to or resolve anything."""
     with pytest.raises(ValueError, match="non-empty github dict"):
         sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {})
+
+
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        lambda bad: sw.start_coding_team_workflow("job-7", "/repo", bad),
+        lambda bad: sw.execute_coding_team_workflow("job-7", "/repo", bad, dict(_VALID_GITHUB)),
+    ],
+    ids=["start", "execute"],
+)
+def test_dispatchers_reject_non_dict_plan_input(monkeypatch, dispatch):
+    """`plan_input` is serialized into the same durable payload as `github`, so a
+    truthy NON-dict (a bare token string, say) must be rejected outright:
+    `_contains_token_key` only traverses dicts/lists/tuples, so the token check
+    alone returns False for it and the value would be written into Temporal
+    history verbatim -- the identical hole `github` already guards against."""
+    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="requires plan_input to be a dict when provided"):
+        dispatch("ghp_secret")
+
+
+def test_start_coding_team_workflow_rejects_token_in_plan_input(monkeypatch):
+    """A dict `plan_input` is still token-scanned at any nesting depth."""
+    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="plan_input to not include a token"):
+        sw.start_coding_team_workflow("job-7", "/repo", {"auth": {"token": "ghp_secret"}})

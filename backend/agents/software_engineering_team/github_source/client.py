@@ -488,19 +488,25 @@ def web_host_for_api_base_url(base_url: str) -> str:
     return host
 
 
-def _default_base_url() -> str:
-    """This deployment's configured GitHub API base URL.
+def default_api_base() -> str:
+    """This deployment's configured GitHub API base URL, normalized.
 
-    Single source of truth for the ``GITHUB_API_URL`` env var / :data:`DEFAULT_BASE_URL`
-    fallback, shared by :func:`configured_web_host` and :class:`GitHubClient.__init__`
-    so the env var name and fallback constant can never drift apart between the two
-    (previously each re-derived this expression independently).
+    THE single source of truth for the ``GITHUB_API_URL`` env var /
+    :data:`DEFAULT_BASE_URL` fallback. Public (unlike the private helper it
+    replaces) because callers outside this package build GitHub REST URLs of
+    their own — ``unified_api.routes.integrations`` most of all — and each
+    re-deriving ``os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL`` is
+    exactly how the env var name, the fallback constant, and the trailing-slash
+    normalization drift apart between modules.
 
     Postconditions:
         - Returns the ``GITHUB_API_URL`` env var when set and non-empty, else
-          :data:`DEFAULT_BASE_URL`.
+          :data:`DEFAULT_BASE_URL`, with any trailing slash(es) stripped — the
+          same normalization :class:`GitHubClient.__init__` applies — so a
+          caller building ``f"{default_api_base()}/repos/..."`` never produces
+          a double slash from an operator's trailing-slash env var.
     """
-    return os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL
+    return (os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL).rstrip("/")
 
 
 def configured_web_host() -> str:
@@ -508,12 +514,12 @@ def configured_web_host() -> str:
 
     Postconditions:
         - Derives the host the same way a :class:`GitHubClient` constructed
-          with no explicit ``base_url`` would (:func:`_default_base_url`), via
+          with no explicit ``base_url`` would (:func:`default_api_base`), via
           :func:`web_host_for_api_base_url` — for use by callers validating a
           remote URL who have no live client instance to read ``web_host``
           from.
     """
-    return web_host_for_api_base_url(_default_base_url())
+    return web_host_for_api_base_url(default_api_base())
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +543,7 @@ class GitHubClient(_GitHubHttpMixin):
         Preconditions:
             - ``token`` is a non-empty GitHub token (PAT or installation token).
         Postconditions:
-            - ``base_url`` defaults to :func:`_default_base_url` when unset
+            - ``base_url`` defaults to :func:`default_api_base` when unset
               (``GITHUB_API_URL`` env var, else :data:`DEFAULT_BASE_URL`), with
               any trailing slash stripped. ``max_retries`` is floored at 1 so a
               retry loop always attempts at least once. ``sleep`` is injectable
@@ -547,7 +553,9 @@ class GitHubClient(_GitHubHttpMixin):
         if not token:
             raise ValueError("GitHubClient requires a token")
         self._token = token
-        self._base_url = (base_url or _default_base_url()).rstrip("/")
+        # `default_api_base()` is already normalized; the rstrip still applies to
+        # an explicitly-passed `base_url`, which nothing else normalizes.
+        self._base_url = (base_url or default_api_base()).rstrip("/")
         self._timeout = timeout
         self._max_retries = max(1, max_retries)
         self._sleep = sleep
