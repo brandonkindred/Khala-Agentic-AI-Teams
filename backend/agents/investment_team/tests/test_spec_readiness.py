@@ -922,6 +922,13 @@ def test_rule5_volatility_target_bound_is_independent_of_target_annual_vol_and_p
         c for c in _critical(high_tav_results) if "volatility_target" in c and "worst-case" in c
     ]
     assert high_tav_matches, _critical(high_tav_results)
+    # Pin the "IDENTICAL verdict" claim directly: since the bound depends on
+    # neither target_annual_vol nor price, the critical messages themselves
+    # (which embed no target_annual_vol/price figures) must match exactly —
+    # not just "a critical fired in both cases", which wouldn't catch the
+    # bound becoming partially price/target_annual_vol-dependent while still
+    # emitting some worst-case critical.
+    assert low_tav_matches == high_tav_matches, (low_tav_matches, high_tav_matches)
 
 
 def test_rule5_volatility_target_over_committed_across_symbols_is_critical() -> None:
@@ -1080,14 +1087,15 @@ def test_rule5_all_sizing_kinds_against_max_open_positions(
     kinds validated against a range of risk_limits.max_open_positions values,
     on a fixed 5-symbol universe so max_open_positions is always the tighter
     concurrency bound below 5 and a no-op at/above it."""
-    is_vol_target = isinstance(sizing_factory(), VolatilityTargetSizing)
+    sizing = sizing_factory()
+    is_vol_target = isinstance(sizing, VolatilityTargetSizing)
     # 45% (not 50%) so 2 positions (0.9x) clears the >1-position slippage
     # inflation with headroom, while 3 positions (1.35x) still overcommits —
     # 50% put the 2-position case exactly on the 1.0x boundary, which
     # slippage inflation then tips over into a false critical.
     max_position_pct = 45 if is_vol_target else 50
     spec = _spec(
-        sizing=sizing_factory(),
+        sizing=sizing,
         target_symbols=["AAPL", "MSFT", "GOOG", "AMZN", "META"],
         asset_class="stocks",
         risk_limits={

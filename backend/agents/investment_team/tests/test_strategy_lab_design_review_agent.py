@@ -1014,14 +1014,18 @@ def test_coerce_critique_keeps_defect_that_only_mentions_drawdown(description: s
 )
 def test_sizing_owned_by_gate(kind: object, owned: bool) -> None:
     """Only the static sizing kinds the deterministic gate fully validates are
-    'owned'. volatility_target (gate abstains) and unknown/missing kinds are not."""
+    'owned'. volatility_target (gate only partially owns it — worst-case
+    concurrency, not target_annual_vol plausibility) and unknown/missing kinds
+    are not."""
     assert _sizing_owned_by_gate(kind) is owned
 
 
 def test_coerce_critique_volatility_sizing_objection_keeps_blocking() -> None:
     """When the spec's sizing kind is NOT gate-owned (volatility_target), a
-    sizing objection must keep blocking — the deterministic gate abstains on it,
-    so the reviewer's plausibility critique is the only substantive check."""
+    sizing objection must keep blocking — the deterministic gate only
+    partially owns it (worst-case concurrency, not target_annual_vol
+    plausibility), so the reviewer's plausibility critique remains the only
+    check of the latter."""
     parsed = {
         "ready": False,
         "rationale": "implausible vol target",

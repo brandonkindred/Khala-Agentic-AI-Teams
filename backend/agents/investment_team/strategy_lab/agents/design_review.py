@@ -154,11 +154,15 @@ _MAX_DRAWDOWN_LIMIT_RE = re.compile(
 # Sizing kinds whose realisability/coherence the deterministic gate FULLY owns
 # (Rule 5 realisability + Rule 9 deployed-vs-cap). ``volatility_target`` is
 # deliberately absent: ``SpecReadinessGate._check_sizing_realisable`` now
-# validates volatility_target's worst-case-concurrency invariant against a
-# documented conservative ATR-floor bound (and can emit a genuine critical for
-# it), but that is only a *partial* realisability check — it says nothing
-# about whether the declared ``target_annual_vol`` itself is plausible, which
-# only the LLM reviewer's sizing critique evaluates. So for vol-target the LLM
+# validates volatility_target's worst-case-concurrency invariant against the
+# ATR-independent ``risk_limits.max_position_pct`` clamp — the one bound the
+# engine's ``_compute_qty`` unconditionally enforces regardless of realised
+# ATR (an ATR-floor estimate is deliberately NOT used, since ``_compute_qty``
+# accepts any positive ATR with no enforced minimum, so an assumed floor could
+# underestimate the true worst case) — and can emit a genuine critical for it,
+# but that is only a *partial* realisability check — it says nothing about
+# whether the declared ``target_annual_vol`` itself is plausible, which only
+# the LLM reviewer's sizing critique evaluates. So for vol-target the LLM
 # reviewer's sizing objection remains a necessary, non-duplicative check and
 # must keep blocking.
 _GATE_OWNED_SIZING_KINDS: frozenset[str] = frozenset({"fixed_fraction", "fixed_notional"})
