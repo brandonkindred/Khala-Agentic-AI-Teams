@@ -99,6 +99,64 @@ def test_has_attached_exits_property() -> None:
     assert with_exits_list.has_attached_exits is True
 
 
+def test_attached_exits_stop_leg_rejects_negative_trail_offset() -> None:
+    """A ``StopAttachment`` in ``attached_exits`` gets the same offset
+    validation as the fixed ``attached_stop_loss`` field — a negative
+    ``trail_offset`` must be rejected at submission, not surface later as
+    an unprotected position when ``_materialize_stop_child`` runs."""
+    with pytest.raises(ValueError, match=r"attached_exits\[0\]\.trail_offset must be non-negative"):
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            attached_exits=[StopAttachment(stop_price=95.0, trail_offset=-2.0)],
+        ).validate_prices()
+
+
+def test_attached_exits_stop_leg_rejects_negative_limit_offset() -> None:
+    with pytest.raises(ValueError, match=r"attached_exits\[0\]\.limit_offset must be non-negative"):
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            attached_exits=[StopAttachment(stop_price=95.0, limit_offset=-1.0)],
+        ).validate_prices()
+
+
+def test_attached_exits_stop_leg_rejects_trail_and_limit_offset_together() -> None:
+    with pytest.raises(
+        ValueError, match=r"attached_exits\[0\] cannot set both trail_offset and limit_offset"
+    ):
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            attached_exits=[StopAttachment(stop_price=95.0, trail_offset=2.0, limit_offset=1.0)],
+        ).validate_prices()
+
+
+def test_attached_exits_second_stop_leg_offsets_are_also_validated() -> None:
+    """A valid first leg must not shadow validation of a later one."""
+    with pytest.raises(ValueError, match=r"attached_exits\[1\]\.trail_offset must be non-negative"):
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            attached_exits=[
+                StopAttachment(stop_price=95.0),
+                StopAttachment(stop_price=90.0, trail_offset=-1.0),
+            ],
+        ).validate_prices()
+
+
 # ---------------------------------------------------------------------------
 # Materialization: N > 2 independently-attached children from attached_exits
 # ---------------------------------------------------------------------------
