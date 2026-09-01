@@ -44,11 +44,15 @@ class _Rec:
 @pytest.fixture(autouse=True)
 def _reset_flusher(monkeypatch):
     """Start each test with an empty buffer, no registered observer/heartbeat,
-    and the trace sink enabled (SE_TRACE_TO_POSTGRES=1) so the observer exercises
-    the enqueue path by default; tests that want the disabled-sink path
-    setenv it to an explicit falsy value (e.g. "false") — the sink now
-    defaults on, so delenv no longer reaches the disabled path."""
+    the trace sink enabled (SE_TRACE_TO_POSTGRES=1), and Postgres configured
+    (POSTGRES_HOST set) so the observer exercises the enqueue path by default;
+    tests that want the disabled-sink path setenv SE_TRACE_TO_POSTGRES to an
+    explicit falsy value (e.g. "false"), and tests that want the
+    Postgres-unconfigured path delenv POSTGRES_HOST — the sink now defaults
+    on, so delenv'ing SE_TRACE_TO_POSTGRES alone no longer reaches either
+    disabled path."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "1")
+    monkeypatch.setenv("POSTGRES_HOST", "test-postgres")
     trace_flusher._reset_for_test()
     yield
     trace_flusher._reset_for_test()
@@ -94,6 +98,16 @@ def test_observer_skips_when_sink_disabled(monkeypatch) -> None:
     buffering them would fill the buffer and emit drop warnings for rows that
     are never persisted."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "false")
+    trace_flusher._trace_observer(_Rec())
+    assert trace_flusher._buffer_size() == 0
+
+
+def test_observer_skips_when_postgres_unconfigured(monkeypatch) -> None:
+    """Even with the sink enabled (the default), the observer must not enqueue
+    when Postgres itself is unconfigured (POSTGRES_HOST unset) — otherwise
+    every no-Postgres environment (local dev, pytest) would pay per-call
+    buffering/locking overhead for rows write_rows can never persist."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
     trace_flusher._trace_observer(_Rec())
     assert trace_flusher._buffer_size() == 0
 

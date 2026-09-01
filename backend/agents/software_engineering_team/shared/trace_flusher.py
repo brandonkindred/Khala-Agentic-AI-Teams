@@ -19,10 +19,12 @@ Invariants:
       a DB outage or sustained burst cannot flood the log; bounded memory,
       never blocks callers).
     - When the Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES``
-      explicitly set to a falsy value; enabled by default) the observer
-      enqueues nothing — the drain would drop these rows anyway, so buffering
-      them only adds per-call work and can fill the buffer with
-      never-persisted rows.
+      explicitly set to a falsy value; enabled by default) or Postgres itself
+      is unconfigured (``POSTGRES_HOST`` unset) the observer enqueues nothing
+      — the drain would drop these rows anyway, so buffering them only adds
+      per-call work and can fill the buffer with never-persisted rows. This
+      keeps a no-Postgres environment (e.g. local dev, ``pytest``) genuinely
+      free of the per-call buffering/locking work, not just free of writes.
     - A flush failure never raises into the heartbeat thread or the caller; it
       is logged at DEBUG and the rows are dropped (telemetry must not break the
       LLM call path or the flusher).
@@ -36,6 +38,7 @@ from collections import deque
 from typing import Any, Optional
 
 from shared.concurrency.heartbeat import BackgroundHeartbeat
+from shared.postgres import is_postgres_enabled
 from software_engineering_team.shared import trace_store
 from software_engineering_team.shared.env_config import env_float, env_int
 
@@ -86,13 +89,19 @@ def _trace_observer(record: Any) -> None:
 
     Skips the per-call ``_record_to_row`` + enqueue work entirely when the
     Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` explicitly set to
-    a falsy value; enabled by default): the background drain would drop these
-    rows anyway (``write_rows`` re-checks the flag), and on a high-throughput
-    job buffering them would fill the buffer and emit drop warnings for rows
-    that are never persisted.
+    a falsy value; enabled by default) or when Postgres itself is unconfigured
+    (``POSTGRES_HOST`` unset): the background drain would drop these rows
+    anyway (``write_rows`` re-checks both), and on a high-throughput job
+    buffering them would fill the buffer and emit drop warnings for rows that
+    are never persisted. The Postgres check matters now that the sink defaults
+    on — without it, every environment that merely lacks Postgres (rather than
+    explicitly opting out) would still pay the per-call buffering/locking cost
+    and run the drain heartbeat forever, for rows that can never be written.
     """
     global _overflow_warned
     if not trace_store._trace_enabled():
+        return
+    if not is_postgres_enabled():
         return
     team = getattr(record, "team", "") or ""
     if not getattr(record, "job_id", "") or team not in _SE_TEAMS:
