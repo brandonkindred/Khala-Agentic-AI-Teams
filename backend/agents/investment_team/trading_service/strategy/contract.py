@@ -457,10 +457,6 @@ class OrderRequest(BaseModel):
             raise InvalidTWAPOrderError(
                 "twap_slices may only be set when unfilled_policy is twap_n"
             )
-        if self.has_attached_exits and self.parent_order_id is not None:
-            raise ValueError(
-                "attachments may only be set on entry-creating orders (parent_order_id must be None)"
-            )
 
 
 class Fill(BaseModel):

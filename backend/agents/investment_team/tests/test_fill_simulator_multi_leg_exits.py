@@ -4,7 +4,7 @@ Step 1 (#7494) generalized the pure ``resolve_exit_leg_attachments`` helper
 to resolve an arbitrary ordered list of leg specs into ``StopAttachment`` /
 ``LimitAttachment`` objects. This step extends ``OrderRequest`` with a
 generic ``attached_exits`` list and the fill simulator's materialization
-step (``FillSimulator._materialize_bracket_children``) to submit an
+step (``FillSimulator._materialize_attached_exit_children``) to submit an
 arbitrary number of those as resting OCO children — not just the two fixed
 ``attached_stop_loss``/``attached_take_profit`` bracket fields.
 
@@ -41,6 +41,7 @@ from investment_team.trading_service.strategy.contract import (
     OrderType,
     StopAttachment,
     TimeInForce,
+    UnfilledPolicy,
 )
 
 
@@ -85,8 +86,15 @@ def _make_simulator() -> tuple[FillSimulator, OrderBook, Portfolio]:
 
 
 def test_has_attached_exits_property() -> None:
+    """``has_attached_exits`` is True for either bracket field or a
+    non-empty ``attached_exits`` list, and False for an empty one — an
+    empty list must not be treated as "has legs to materialize", which
+    would otherwise submit a zero-child OCO group on entry fill."""
     bare = OrderRequest(client_order_id="entry-1", symbol="AAA", side=OrderSide.LONG, qty=10.0)
     assert bare.has_attached_exits is False
+
+    empty_exits = bare.model_copy(update={"attached_exits": []})
+    assert empty_exits.has_attached_exits is False
 
     with_bracket_field = bare.model_copy(
         update={"attached_stop_loss": StopAttachment(stop_price=95.0)}
@@ -116,6 +124,8 @@ def test_attached_exits_stop_leg_rejects_negative_trail_offset() -> None:
 
 
 def test_attached_exits_stop_leg_rejects_negative_limit_offset() -> None:
+    """A negative ``limit_offset`` on an ``attached_exits`` stop leg is
+    rejected, mirroring the bracket-field rule."""
     with pytest.raises(ValueError, match=r"attached_exits\[0\]\.limit_offset must be non-negative"):
         OrderRequest(
             client_order_id="entry-1",
@@ -128,6 +138,8 @@ def test_attached_exits_stop_leg_rejects_negative_limit_offset() -> None:
 
 
 def test_attached_exits_stop_leg_rejects_trail_and_limit_offset_together() -> None:
+    """``trail_offset`` and ``limit_offset`` remain mutually exclusive on an
+    ``attached_exits`` stop leg, mirroring the bracket-field rule."""
     with pytest.raises(
         ValueError, match=r"attached_exits\[0\] cannot set both trail_offset and limit_offset"
     ):
@@ -309,10 +321,12 @@ def test_bracket_fields_and_attached_exits_materialize_together() -> None:
 
 
 def test_stop_limit_leg_among_multiple_exits_still_gap_throughs() -> None:
-    """A STOP_LIMIT leg reuses the same gap-through handling whether it's a
-    bracket field or one leg among several ``attached_exits`` — the
-    per-``PendingOrder`` lifecycle in ``process_bar`` doesn't know or care
-    how many siblings share its ``oco_group_id``."""
+    """A STOP_LIMIT leg materialized from ``attached_exits`` (not the fixed
+    ``attached_stop_loss`` field) reuses the exact same gap-through
+    handling as a bracket field — the per-``PendingOrder`` lifecycle in
+    ``process_bar`` doesn't know or care which field (or list index) a
+    leg's materialization came from, or how many siblings share its
+    ``oco_group_id``."""
     sim, order_book, portfolio = _make_simulator()
     parent = order_book.submit(
         OrderRequest(
@@ -322,9 +336,11 @@ def test_stop_limit_leg_among_multiple_exits_still_gap_throughs() -> None:
             qty=10.0,
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
-            attached_stop_loss=StopAttachment(stop_price=95.0, limit_offset=1.0),
             attached_take_profit=LimitAttachment(limit_price=110.0),
-            attached_exits=[LimitAttachment(limit_price=130.0)],
+            attached_exits=[
+                StopAttachment(stop_price=95.0, limit_offset=1.0),
+                LimitAttachment(limit_price=130.0),
+            ],
         ),
         submitted_at="2024-01-01",
         submitted_equity=10_000_000.0,
@@ -347,3 +363,65 @@ def test_stop_limit_leg_among_multiple_exits_still_gap_throughs() -> None:
     types = [c.request.order_type for c in children]
     assert types.count(OrderType.STOP_LIMIT) == 1
     assert types.count(OrderType.LIMIT) == 2
+
+
+def test_twap_age_out_materializes_attached_exits_legs_for_open_position() -> None:
+    """A TWAP_N entry carrying only generalized ``attached_exits`` legs
+    (no fixed bracket fields) that ages out via the no-trigger counter
+    must still materialize protective children sized to the partially
+    filled position — the same ``_maybe_materialize_brackets_on_abandon``
+    hook covered for the fixed bracket fields by
+    ``test_bracket_orders.py::test_twap_age_out_bracket_parent_materializes_brackets_for_open_position``
+    delegates to the same shared per-leg helpers, so it must not silently
+    drop ``attached_exits`` legs on this abandon path."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=200.0,
+            order_type=OrderType.LIMIT,
+            limit_price=100.0,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.TWAP_N,
+            twap_slices=2,
+            attached_exits=[
+                StopAttachment(stop_price=95.0),
+                LimitAttachment(limit_price=110.0),
+            ],
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Bar 2: low (98) <= limit_price (100) triggers a partial fill on a
+    # low-ADV bar (200 * 100 notional vs 1_000 * 100 dollar volume -> raw
+    # 0.20 -> cap clips to 0.5 -> 100 fills, 100 requeued;
+    # ``twap_slices_remaining`` seeded to 1).
+    sim.process_bar(
+        _bar("2024-01-02", open_price=99.0, high=101.0, low=98.0, close=100.0, volume=1_000.0)
+    )
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+    assert parent.order_id in order_book
+    assert order_book.children_of(parent.order_id) == []
+
+    # Bar 3: bar.low (104) > limit_price (100) -> no trigger ->
+    # ``twap_slices_remaining`` decrements from 1 to 0 -> parent removed
+    # with ``was_filled=True`` -> abandon hook materializes the
+    # ``attached_exits`` legs sized to the 100-share open position.
+    sim.process_bar(_bar("2024-01-03", open_price=105.0, high=107.0, low=104.0, close=106.0))
+
+    assert parent.order_id not in order_book
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 2, "TWAP-aged-out attached_exits legs must still materialize"
+    sl = next(c for c in children if c.request.order_type == OrderType.STOP)
+    tp = next(c for c in children if c.request.order_type == OrderType.LIMIT)
+    assert sl.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert tp.request.qty == pytest.approx(100.0, rel=1e-9)
+    assert sl.armed is True and tp.armed is True
+    expected_oco = f"oco_{parent.order_id}"
+    assert sl.request.oco_group_id == expected_oco
+    assert tp.request.oco_group_id == expected_oco
+    assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)

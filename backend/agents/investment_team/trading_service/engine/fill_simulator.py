@@ -737,7 +737,7 @@ class FillSimulator:
         # mirrored block in ``_continue_entry`` so the children are sized to
         # the *cumulative* position rather than just the first slice.
         if req.has_attached_exits and po.order_id not in self.order_book:
-            self._materialize_bracket_children(po=po, bar=bar, filled_qty=filled_qty)
+            self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=filled_qty)
 
         return (
             Fill(
@@ -915,7 +915,7 @@ class FillSimulator:
         # bracket entry would silently run unprotected once the parent
         # eventually completes.
         if req.has_attached_exits and po.order_id not in self.order_book:
-            self._materialize_bracket_children(po=po, bar=bar, filled_qty=pos.original_qty)
+            self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=pos.original_qty)
 
         return (
             Fill(
@@ -1523,9 +1523,9 @@ class FillSimulator:
         pos = self.portfolio.positions.get(req.symbol)
         if pos is None:
             return
-        self._materialize_bracket_children(po=po, bar=bar, filled_qty=pos.original_qty)
+        self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=pos.original_qty)
 
-    def _materialize_bracket_children(
+    def _materialize_attached_exit_children(
         self,
         *,
         po: PendingOrder,
