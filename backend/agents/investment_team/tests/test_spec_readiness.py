@@ -1091,10 +1091,10 @@ def test_rule5_all_sizing_kinds_against_max_open_positions(
     max_open_positions: int,
     expect_critical: bool,
 ) -> None:
-    """Full-suite coverage (per #7528's acceptance criteria): all three sizing
-    kinds validated against a range of risk_limits.max_open_positions values,
-    on a fixed 5-symbol universe so max_open_positions is always the tighter
-    concurrency bound below 5 and a no-op at/above it."""
+    """Full-suite coverage: all three sizing kinds validated against a range
+    of risk_limits.max_open_positions values, on a fixed 5-symbol universe so
+    max_open_positions is always the tighter concurrency bound below 5 and a
+    no-op at/above it."""
     sizing = sizing_factory()
     is_vol_target = isinstance(sizing, VolatilityTargetSizing)
     # 45% (not 50%) so 2 positions (0.9x) clears the >1-position slippage
@@ -1235,6 +1235,28 @@ def test_rule5_warns_on_persistent_nan_for_fractional_crypto() -> None:
         if r.severity == "warning" and not r.passed and "no usable price sample" in r.details
     ]
     assert warnings, "expected a non-blocking warning for persistent NaN on crypto"
+
+
+def test_rule5_persistent_nan_does_not_mask_volatility_target_warning() -> None:
+    """A persistently broken price provider must not silently drop the
+    volatility_target plausibility warning: a spec can be affected by BOTH
+    at once (the provider is down AND target_annual_vol was never confirmed
+    sensible), so the NaN-price warning must not crowd out the other."""
+    spec = _spec(
+        asset_class="crypto",
+        target_symbols=["BTC-USD"],
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        hypothesis="BTC-USD momentum via RSI(14).",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: float("nan"))
+    results = gate.validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "Sizing realisability" in c]
+    assert not sizing_failures, sizing_failures
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("no usable price sample" in w for w in warnings), warnings
+    assert any("volatility_target" in w and "cannot be evaluated exactly" in w for w in warnings), (
+        warnings
+    )
 
 
 def test_rule5_persistent_zero_price_is_critical_for_forex() -> None:

@@ -1063,8 +1063,8 @@ class SpecReadinessGate(GateResultsMixin):
             # placed (``_compute_qty``'s ``_cap_position`` path /
             # ``_cap_qty_to_position``) — so that clamp alone is the only
             # value provably safe to size the worst case against. Changing
-            # runtime sizing to itself enforce an ATR floor is out of scope
-            # (tracked separately, issue #7487's dispatcher math).
+            # the dispatcher's runtime sizing to itself enforce an ATR floor
+            # is a separate, larger change and out of scope here.
             notional = capital * float(ctx.spec.risk_limits.max_position_pct) / 100.0
         else:
             # Unknown sizing kind — covered by spec_dsl validation, but be
@@ -1240,27 +1240,16 @@ class SpecReadinessGate(GateResultsMixin):
                 ),
             )
 
-        # Only fractional asset classes reach here with unresolved NaN samples.
-        # A NaN that affected *every* symbol (no finite sample anywhere) is a
-        # persistently broken provider, but fractional sizing stays
-        # implementable once data returns, so warn rather than fail closed. A
-        # NaN alongside a finite sample is a transient gap and is ignored.
-        if nan_symbols and not saw_finite_price:
-            return (
-                self._warning(
-                    f"Sizing realisability: no usable price sample for any of {nan_symbols} "
-                    f"({ctx.spec.asset_class}); market-data provider may be down. Proceeding "
-                    "since fractional sizing stays implementable once data returns."
-                ),
-            )
-
-        # The worst-case concurrency bound fits, but volatility_target's
-        # *actual* deployed size still depends on realised vol, which cannot
-        # be known at readiness time — surface a warning so the operator
-        # notices the plausibility of target_annual_vol itself was never
-        # confirmed, only that the conservative worst-case bound is fundable.
-        if is_vol_target:
-            return (
+        # The worst-case concurrency bound fits (or was never checkable due to
+        # missing price data below), but volatility_target's *actual* deployed
+        # size still depends on realised vol, which cannot be known at
+        # readiness time — surface a warning so the operator notices the
+        # plausibility of target_annual_vol itself was never confirmed, only
+        # that the conservative worst-case bound is fundable. Built as its own
+        # tuple (not an early return) so it can be appended to, rather than
+        # masked by, the NaN-price warning below when both apply.
+        vol_target_warning = (
+            (
                 self._warning(
                     "Sizing realisability: volatility_target sizing requires "
                     "realised vol and cannot be evaluated exactly at readiness "
@@ -1271,7 +1260,29 @@ class SpecReadinessGate(GateResultsMixin):
                     "ATR floor) fits within initial_capital."
                 ),
             )
-        return ()
+            if is_vol_target
+            else ()
+        )
+
+        # Only fractional asset classes reach here with unresolved NaN samples.
+        # A NaN that affected *every* symbol (no finite sample anywhere) is a
+        # persistently broken provider, but fractional sizing stays
+        # implementable once data returns, so warn rather than fail closed. A
+        # NaN alongside a finite sample is a transient gap and is ignored.
+        # Appends (rather than replaces) the vol-target plausibility warning
+        # above — a broken price provider says nothing about whether
+        # target_annual_vol is itself sensible, so returning only one would
+        # silently drop the other's guidance.
+        if nan_symbols and not saw_finite_price:
+            return (
+                self._warning(
+                    f"Sizing realisability: no usable price sample for any of {nan_symbols} "
+                    f"({ctx.spec.asset_class}); market-data provider may be down. Proceeding "
+                    "since fractional sizing stays implementable once data returns."
+                ),
+            ) + vol_target_warning
+
+        return vol_target_warning
 
     # ------------------------------------------------------------------
     # Rule 6: Hypothesis–rule consistency.
