@@ -7,7 +7,7 @@ dedicated test that exercises its failure path.
 
 from __future__ import annotations
 
-from typing import List
+from typing import Callable, List, Union
 
 import pytest
 from pydantic import ValidationError
@@ -1085,7 +1085,11 @@ def test_rule5_volatility_target_worst_case_fits_with_slippage_headroom() -> Non
     ],
 )
 def test_rule5_all_sizing_kinds_against_max_open_positions(
-    sizing_factory, max_open_positions: int, expect_critical: bool
+    sizing_factory: Callable[
+        [], Union[FixedFractionSizing, FixedNotionalSizing, VolatilityTargetSizing]
+    ],
+    max_open_positions: int,
+    expect_critical: bool,
 ) -> None:
     """Full-suite coverage (per #7528's acceptance criteria): all three sizing
     kinds validated against a range of risk_limits.max_open_positions values,

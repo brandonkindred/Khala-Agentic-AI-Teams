@@ -1019,10 +1019,16 @@ class SpecReadinessGate(GateResultsMixin):
         # inflate the worst-case notional by the configured slippage before
         # comparing.
         slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
-        # bps-display form of the same inflation, shared by every sizing
-        # kind's critical message below so a future change to how it's
-        # presented is a one-line edit instead of a multi-template drift risk.
+        # bps-display form of the same inflation, and the note phrase built
+        # from it, shared by every sizing kind's critical message below so a
+        # future wording change is a one-line edit instead of a
+        # multi-template drift risk.
         slippage_bps_display = (slippage_multiplier - 1) * 10_000
+        slippage_note = (
+            f", inflated {slippage_bps_display:.1f}bps for configured slippage"
+            if worst_case_concurrent > 1
+            else ""
+        )
 
         # Notional is symbol-independent for all three supported kinds, so
         # resolve it once.
@@ -1158,11 +1164,6 @@ class SpecReadinessGate(GateResultsMixin):
         if effective_worst_case_notional > fundable_capital:
             if kind == "fixed_fraction":
                 worst_case_fraction = effective_worst_case_notional / capital
-                slippage_note = (
-                    f", inflated {slippage_bps_display:.1f}bps for configured slippage"
-                    if worst_case_concurrent > 1
-                    else ""
-                )
                 return (
                     self._critical(
                         f"Sizing realisability: fixed_fraction {fraction:.4f} × "
@@ -1179,11 +1180,6 @@ class SpecReadinessGate(GateResultsMixin):
                 )
             if is_vol_target:
                 worst_case_fraction = effective_worst_case_notional / capital
-                slippage_note = (
-                    f", inflated {slippage_bps_display:.1f}bps for configured slippage"
-                    if worst_case_concurrent > 1
-                    else ""
-                )
                 return (
                     self._critical(
                         f"Sizing realisability: volatility_target worst-case notional, "
