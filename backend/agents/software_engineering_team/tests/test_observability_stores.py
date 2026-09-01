@@ -224,6 +224,18 @@ def test_trace_retention_days_env(monkeypatch) -> None:
 # --- trace_store cache-token persistence (single-row + batch, no live Postgres) --------
 
 
+class _FakeCursorContractViolation(BaseException):
+    """Raised when a statement/row pair would be rejected by real psycopg.
+
+    Deliberately derives from ``BaseException``, not ``Exception``: both write
+    paths wrap their cursor work in ``except Exception`` (DEBUG log, no raise),
+    so an ``Exception`` raised by the fake would be swallowed by the code under
+    test and resurface as an opaque ``IndexError`` on ``cursor.executed[0]``.
+    Deriving from ``BaseException`` lets the violation propagate to pytest with
+    its own message intact.
+    """
+
+
 class _FakeCursor:
     """Records every execute/executemany call; no live Postgres involved.
 
@@ -250,7 +262,8 @@ class _FakeCursor:
     def _check_arity(sql, params) -> None:
         expected = sql.count("%s")
         actual = len(params or ())
-        assert expected == actual, f"SQL expects {expected} params, row has {actual}"
+        if expected != actual:
+            raise _FakeCursorContractViolation(f"SQL expects {expected} params, row has {actual}")
 
     def execute(self, sql, params=None):
         if self._raise:
@@ -333,7 +346,26 @@ def _fake_cursor(monkeypatch):
 
 
 # INSERT param order (see trace_store._INSERT_SQL / _record_to_row):
-# params[10] = cache_read_tokens, params[11] = cache_creation_tokens.
+# params[10] = cache_read_tokens, params[11] = cache_creation_tokens. Those two
+# indices are pinned to the statement's own column list by
+# test_insert_sql_pins_cache_column_positions below, so the hard-coded [10:12]
+# slices used throughout cannot silently start reading the wrong columns.
+_CACHE_READ_IDX = 10
+_CACHE_CREATION_IDX = 11
+
+
+def _insert_columns() -> list[str]:
+    """The column names of ``_INSERT_SQL``, in statement order.
+
+    Preconditions:
+        ``_INSERT_SQL`` is a single ``INSERT INTO <table> (<cols>) VALUES (...)``
+        statement whose first parenthesised group is the column list.
+    Postconditions:
+        Returns the column names, stripped, in the order the statement declares
+        them — the order Postgres binds positional params to.
+    """
+    columns = trace_store._INSERT_SQL.split("(", 1)[1].split(")", 1)[0]
+    return [c.strip() for c in columns.split(",")]
 
 
 def test_insert_sql_placeholder_count_matches_row_width() -> None:
@@ -347,6 +379,23 @@ def test_insert_sql_placeholder_count_matches_row_width() -> None:
     swallowed error inside a write-path test.
     """
     assert trace_store._INSERT_SQL.count("%s") == len(trace_store._record_to_row(_rec()))
+
+
+def test_insert_sql_pins_cache_column_positions() -> None:
+    """The cache columns must sit at the positions the value assertions index.
+
+    Every other test binds cache tokens by *position* (``params[10:12]``) and checks
+    only that the column names appear somewhere in the statement. That pair of
+    assertions cannot see a reordering: swapping ``cache_read_tokens`` and
+    ``cache_creation_tokens`` in the column list leaves the params where they are,
+    so Postgres would write each value into the other column while the value
+    assertions stay green. Pinning name-to-index here closes that gap, and is what
+    justifies the hard-coded slices elsewhere in this module.
+    """
+    columns = _insert_columns()
+    assert len(columns) == trace_store._INSERT_SQL.count("%s")
+    assert columns[_CACHE_READ_IDX] == "cache_read_tokens"
+    assert columns[_CACHE_CREATION_IDX] == "cache_creation_tokens"
 
 
 def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
@@ -417,18 +466,17 @@ def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
 def test_write_trace_never_raises_on_cursor_failure(_fake_cursor) -> None:
     """A DB failure on the single-row path degrades to False, never raises.
 
-    Without this, dropping ``write_trace``'s ``except Exception`` guard would let a
-    DB error propagate into the llm_service call observer with the suite still green.
+    The return value is the whole contract here: dropping ``write_trace``'s
+    ``except Exception`` guard lets the cursor's error propagate, which fails this
+    test outright, and a write that somehow succeeded would return True. (Real
+    atomicity is Postgres's, not something this in-memory double can attest to.)
     """
-    cursor = _fake_cursor(raise_on_execute=True)
+    _fake_cursor(raise_on_execute=True)
     assert trace_store.write_trace(_rec(cache_read_tokens=5, cache_creation_tokens=0)) is False
-    assert cursor.executed == []  # the failed INSERT left nothing recorded
 
 
 def test_write_rows_never_raises_on_cursor_failure(_fake_cursor) -> None:
     """A DB failure on the batch path degrades to 0, never raises (mirrors write_trace)."""
-    cursor = _fake_cursor(raise_on_execute=True)
+    _fake_cursor(raise_on_execute=True)
     row = trace_store._record_to_row(_rec(cache_read_tokens=5, cache_creation_tokens=0))
     assert trace_store.write_rows([row]) == 0
-    # All-or-nothing: a failed batch records no partial write.
-    assert cursor.executed == []
