@@ -97,14 +97,20 @@ def attach_conversation_to_brand(
             added there without a matching branch here, rather than silently
             treating an unknown result as success.
     """
+    # Deferred: store.py's attach_conversation defers its import of this
+    # module the same way, for the same reason — store.py needs
+    # attach_conversation_to_brand and this module needs AttachConversationResult,
+    # so at least one side has to stay function-scoped to avoid a load-order
+    # cycle; both sides do, so neither import order is load-bearing.
     from .store import AttachConversationResult
 
-    if not client_id:
-        raise ValueError("client_id must be a non-empty string")
-    if not brand_id:
-        raise ValueError("brand_id must be a non-empty string")
-    if not conversation_id:
-        raise ValueError("conversation_id must be a non-empty string")
+    for name, value in (
+        ("client_id", client_id),
+        ("brand_id", brand_id),
+        ("conversation_id", conversation_id),
+    ):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{name} must be a non-empty string")
     if mission is not None and not isinstance(mission, BrandingMission):
         raise ValueError("mission must be a BrandingMission")
     try:
