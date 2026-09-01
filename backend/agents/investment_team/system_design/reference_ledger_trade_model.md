@@ -202,10 +202,11 @@ def simulate(
   is either a bar-derived reference level, or a rule-computed level that
   for `basis="entry_price"` exits legitimately carries entry slippage
   through `entry_price_basis` (as just described), never a slippage
-  adjustment layered on afterward. Capital can also gate whether a *later* entry is
-  admitted, so this parameter affects which trades this module emits
-  through that channel too. A caller reproducing a specific backtest run
-  passes that run's `BacktestConfig.slippage_bps` through.
+  adjustment layered on afterward. Capital can also gate whether a
+  *later* entry is admitted, so this parameter affects which trades
+  this module emits through that channel too. A caller reproducing a
+  specific backtest run passes that run's `BacktestConfig.slippage_bps`
+  through.
 - Return value: one `ReferenceTrade` per **fully closed** position, in
   emission order — never one row per partial exit. A position reduced by one
   or more `scaled_take_profit` rungs before its final closing event
@@ -638,7 +639,27 @@ non-finite — production has no `math.isfinite` check either) yields a
 **production** trade with no reference counterpart at all — the later
 trade-matching module must treat any production trade whose entry price is
 not a positive finite number as an expected unmatched production trade,
-not a matching failure.
+not a matching failure. The same widened guard on the *trigger*-bar close
+(above) raises a related but **different** question: `_compute_qty`'s own
+`close <= 0` check does not catch a `NaN` trigger close either (`NaN <= 0`
+is `False`), so `equity * fraction / NaN` (or the equivalent for the other
+sizing kinds) propagates `NaN` into `qty` —
+`_EngineEntryDispatcher.maybe_emit`'s own `qty <= 0` early-return (the
+`risk_capped_skip` path) does not catch it either, for the same reason.
+Unlike the fill-bar-open case above, this is **not** confirmed to produce a
+silent, valid-looking unmatched production trade: `qty` next reaches
+`OrderRequest(qty=qty, ...)`, whose `qty: float = Field(gt=0)` Pydantic
+constraint *does* reject `NaN` at construction (verified directly —
+`Field(gt=0)` raises on a `NaN` input, unlike a raw Python `<= 0`
+comparison). Whether that raised `ValidationError` is caught and logged
+somewhere in the dispatcher's call chain, or propagates and aborts the
+run, is not established here. Either way, production does **not**
+silently complete a NaN-quantity trade the way it silently completes a
+nonpositive/non-finite-entry-price trade above — so this case needs no
+"expected unmatched trade" handling in the matching module; it is a
+degenerate-input failure mode outside comparable operation for either
+ledger, and this module's own `math.isfinite` guard means it never has to
+reproduce whatever production's actual failure behavior turns out to be.
 
 **Quantity.** `simulate` resolves each entry's quantity from `spec.sizing`
 against a running equity figure it tracks itself — seeded at
