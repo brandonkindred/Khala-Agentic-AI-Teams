@@ -354,3 +354,59 @@ def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
             ("jB",),
         )
         assert [r[0] for r in cur.fetchall()] == [50, 100, 150]
+
+
+def test_prune_traces_deletes_only_stale_rows(_schema) -> None:
+    """prune_traces deletes rows older than the retention window and leaves
+    recent ones intact, returning the exact count removed."""
+    from shared.postgres import get_conn
+    from software_engineering_team.shared import trace_store
+
+    now = datetime.now(tz=timezone.utc)
+    old_ts = now - timedelta(days=40)
+    recent_ts = now - timedelta(days=5)
+    insert_sql = (
+        "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
+        "input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, "
+        "cost_usd, latency_ms, status, outcome, objective, request_id) VALUES "
+        "(%s, 'software_engineering', 'backend', %s, %s, 'execution', 'm', 10, 5, 15, 0, 0, "
+        "0.01, 100, 'success', 'success', 'o', %s)"
+    )
+
+    with get_conn() as conn, conn.cursor() as cur:
+        for i in range(3):
+            cur.execute(insert_sql, (old_ts, "jOld", f"told{i}", f"rold{i}"))
+        for i in range(2):
+            cur.execute(insert_sql, (recent_ts, "jNew", f"tnew{i}", f"rnew{i}"))
+
+    removed = trace_store.prune_traces(retention_days=30)
+    assert removed == 3
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT job_id FROM se_agent_traces")
+        remaining_jobs = {r[0] for r in cur.fetchall()}
+    assert remaining_jobs == {"jNew"}
+
+
+def test_prune_traces_zero_retention_is_noop(_schema) -> None:
+    """A retention_days of 0 (or less) prunes nothing, matching the existing
+    _retention_days()<=0 short-circuit — no accidental full-table wipe."""
+    from shared.postgres import get_conn
+    from software_engineering_team.shared import trace_store
+
+    old_ts = datetime.now(tz=timezone.utc) - timedelta(days=400)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
+            "input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, "
+            "cost_usd, latency_ms, status, outcome, objective, request_id) VALUES "
+            "(%s, 'software_engineering', 'backend', 'jAncient', 't0', 'execution', 'm', 10, 5, "
+            "15, 0, 0, 0.01, 100, 'success', 'success', 'o', 'r0')",
+            (old_ts,),
+        )
+
+    assert trace_store.prune_traces(retention_days=0) == 0
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM se_agent_traces WHERE job_id = 'jAncient'")
+        assert cur.fetchone()[0] == 1

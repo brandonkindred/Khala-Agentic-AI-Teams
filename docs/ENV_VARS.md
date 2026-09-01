@@ -516,6 +516,13 @@ once per burst — bounded memory, never blocks the caller.
 Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`
 (default `30`; garbage → `30`, negatives clamped to `0`).
 
+### SE_TRACE_PRUNE_INTERVAL_S
+Seconds between background prune sweeps that enforce `SE_TRACE_RETENTION_DAYS`
+via `trace_store.prune_traces` (default `21600` = 6 hours; garbage → `21600`,
+negatives clamped to `0` which floors the loop at `60s` so it never
+busy-loops). Mirrors `SE_TRACE_FLUSH_INTERVAL_S`'s pattern at a much slower
+cadence — retention is day-granularity, so a tighter interval buys nothing.
+
 ### SE_LEARNINGS_TOPN
 Number of past-sprint learnings injected into the Tech Lead's Design prompt
 (default `5`, clamped to `[0, 50]`; `0` disables injection; garbage → `5`).

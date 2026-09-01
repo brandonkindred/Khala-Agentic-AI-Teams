@@ -63,7 +63,8 @@ async def _wait_for_team_worker_ready(team: str) -> None:
 
 
 async def _se_startup() -> None:
-    """Register SE telemetry observers and start SE's + coding_team's Temporal workers.
+    """Register SE telemetry observers, start the trace-retention pruner, and
+    start SE's + coding_team's Temporal workers.
 
     Runs after the factory has registered the SE Postgres schema. Fails fast
     when Temporal is disabled, unreachable, either Temporal worker fails to
@@ -83,9 +84,11 @@ async def _se_startup() -> None:
         )
         from software_engineering_team.shared.cost_tracker import register_cost_observer
         from software_engineering_team.shared.trace_flusher import register_trace_flusher
+        from software_engineering_team.shared.trace_pruner import register_trace_pruner
 
         register_cost_observer()
         register_trace_flusher()
+        register_trace_pruner()
         register_transcript_flusher()
     except Exception as e:
         logger.warning("Could not register SE telemetry observers: %s", e)
@@ -115,7 +118,7 @@ async def _se_startup() -> None:
 
 
 def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown hook
-    """Flush buffered traces and mark active SE jobs as failed for resume.
+    """Stop background telemetry workers and mark active SE jobs as failed for resume.
 
     Runs before the factory closes the Postgres pool (see
     ``shared/app/factory.py``), so the trace flusher's final drain can still use
@@ -128,6 +131,12 @@ def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown
         flush_shutdown()
     except Exception as e:
         logger.warning("Could not flush SE traces on shutdown: %s", e)
+    try:
+        from software_engineering_team.shared.trace_pruner import shutdown as prune_shutdown
+
+        prune_shutdown()
+    except Exception as e:
+        logger.warning("Could not stop SE trace pruner on shutdown: %s", e)
     try:
         from software_engineering_team.code_review_agent.transcript import (
             shutdown as transcript_shutdown,
