@@ -12,13 +12,15 @@ linking a conversation to a brand). That coordination — opening the shared
 transaction and deciding what each store does with it — lives here rather
 than inside either store, so no single-table store class ends up owning
 another store's cross-table orchestration. Each store still owns its own
-table's writes: this module only sequences calls into the cursor-aware
-methods (e.g. :meth:`BrandingConversationStore.attach_locked`) that the
-stores expose for exactly this purpose.
+table's writes: this module only sequences calls into the public,
+cursor-aware methods (``BrandingConversationStore.attach_locked``,
+``BrandingStore.patch_brand_locked``) that the stores expose for exactly
+this purpose.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from .assistant.store import BrandingConversationStore, ConversationAttachResult
@@ -58,9 +60,10 @@ def attach_conversation_to_brand(
     borrows *store*'s ``_transaction()`` to open one connection/transaction
     shared by both writes, calls ``conv_store.attach_locked`` for the
     conversation row (``BrandingConversationStore`` remains the sole owner of
-    ``branding_conversations`` writes), and patches the brand row itself via
-    *store*'s own brand-patch helper (``BrandingStore`` remains the sole
-    owner of ``branding_brands`` writes).
+    ``branding_conversations`` writes), and calls *store*'s
+    ``patch_brand_locked`` for the brand row (``BrandingStore`` remains the
+    sole owner of ``branding_brands`` writes) — both are public,
+    cursor-aware methods the stores expose for exactly this cross-store use.
 
     Preconditions:
         ``client_id``, ``brand_id``, ``conversation_id`` are non-empty
@@ -85,8 +88,16 @@ def attach_conversation_to_brand(
 
         Any other result leaves both rows unchanged (the transaction rolls
         back) and the paired value is ``None``.
+    Raises:
+        ValueError: if any of the id preconditions or the mission type
+            precondition is violated.
+        RuntimeError: if ``conv_store.attach_locked`` ever returns a
+            :class:`ConversationAttachResult` member this function doesn't
+            recognize — a fail-closed guard against a future member being
+            added there without a matching branch here, rather than silently
+            treating an unknown result as success.
     """
-    from .store import AttachConversationResult, _apply_brand_patch, _now_iso
+    from .store import AttachConversationResult
 
     if not client_id:
         raise ValueError("client_id must be a non-empty string")
@@ -103,9 +114,14 @@ def attach_conversation_to_brand(
                 raise _AttachAbort(AttachConversationResult.CONVERSATION_NOT_FOUND)
             if conv_result is ConversationAttachResult.ALREADY_ATTACHED:
                 raise _AttachAbort(AttachConversationResult.ALREADY_ATTACHED)
+            if conv_result is not ConversationAttachResult.OK:
+                raise RuntimeError(f"unrecognized ConversationAttachResult: {conv_result!r}")
 
-            patch = {"conversation_id": conversation_id, "updated_at": _now_iso()}
-            brand = _apply_brand_patch(cur, brand_id, client_id, patch)
+            patch = {
+                "conversation_id": conversation_id,
+                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            brand = store.patch_brand_locked(cur, brand_id, client_id, patch)
             if brand is None:
                 raise _AttachAbort(AttachConversationResult.BRAND_NOT_FOUND)
     except _AttachAbort as exc:

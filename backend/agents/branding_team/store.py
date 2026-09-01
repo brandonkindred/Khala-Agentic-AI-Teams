@@ -115,6 +115,14 @@ class BrandingStore(PostgresHelperMixin):
     The constructor takes no arguments — the Postgres DSN is read from
     the ``POSTGRES_*`` env vars by ``shared.postgres.get_conn``. The
     store itself is stateless; the pool is owned by shared.postgres.
+
+    Note for maintainers: ``coordination.attach_conversation_to_brand``
+    borrows ``self._transaction()`` (inherited from ``PostgresHelperMixin``)
+    to open the one transaction it shares with ``BrandingConversationStore``.
+    That's the same primitive every method below uses for its own
+    multi-statement writes, but a rename or signature change here is also a
+    breaking change for that cross-store caller — grep for
+    ``coordination.py`` before touching it.
     """
 
     def __init__(self) -> None:
@@ -442,6 +450,33 @@ class BrandingStore(PostgresHelperMixin):
             patch["conversation_id"] = conversation_id
         with self._transaction() as cur:
             return _apply_brand_patch(cur, brand_id, client_id, patch)
+
+    @timed_query(store=_STORE, op="patch_brand_locked")
+    def patch_brand_locked(
+        self, cur: Cursor, brand_id: str, client_id: str, patch: dict
+    ) -> Optional[Brand]:
+        """Cursor-aware wrapper around the brand-patch write, for cross-store callers.
+
+        Mirrors ``BrandingConversationStore.attach_locked``: runs on *cur*, a
+        cursor the caller already opened (e.g. via its own
+        ``self._transaction()``), instead of opening a transaction of its
+        own. This lets a caller such as
+        ``coordination.attach_conversation_to_brand`` combine this brand-row
+        write with another store's write in one atomic transaction, while
+        ``BrandingStore`` remains the single owner of ``branding_brands``
+        writes.
+
+        Preconditions:
+            *cur* belongs to a transaction the caller will commit or roll
+            back — this method neither commits nor rolls back. ``brand_id``
+            and ``client_id`` are non-empty strings; ``patch`` is a dict of
+            top-level keys to shallow-merge into the brand's JSONB.
+        Postconditions:
+            Returns the updated :class:`Brand`, or ``None`` when no row
+            matched *brand_id* and *client_id* together (e.g. a concurrent
+            delete).
+        """
+        return _apply_brand_patch(cur, brand_id, client_id, patch)
 
     @timed_query(store=_STORE, op="attach_conversation")
     def attach_conversation(
