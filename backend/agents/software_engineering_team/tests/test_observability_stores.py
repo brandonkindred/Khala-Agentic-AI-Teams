@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pytest
@@ -218,3 +219,161 @@ def test_trace_retention_days_env(monkeypatch) -> None:
     assert trace_store._retention_days() == 7.0
     monkeypatch.setenv("SE_TRACE_RETENTION_DAYS", "garbage")
     assert trace_store._retention_days() == 30.0  # bad value → default
+
+
+# --- trace_store cache-token persistence (single-row + batch, no live Postgres) --------
+
+
+class _FakeCursor:
+    """Records every execute/executemany call; no live Postgres involved."""
+
+    def __init__(self, raise_on_execute: bool = False) -> None:
+        self.executed: list[tuple] = []
+        self._raise = raise_on_execute
+
+    def execute(self, sql, params=None):
+        if self._raise:
+            raise RuntimeError("boom")
+        self.executed.append((sql, params))
+
+    def executemany(self, sql, seq):
+        if self._raise:
+            raise RuntimeError("boom")
+        self.executed.append((sql, list(seq)))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _rec(**overrides):
+    """A minimal telemetry-record stand-in; overrides layer on top of a base call."""
+
+    class _R:
+        timestamp = datetime.now(tz=timezone.utc).timestamp()
+        team = "software_engineering"
+        agent_key = "backend"
+        job_id = "j1"
+        task_id = "t1"
+        phase = "execution"
+        model = "m"
+        prompt_tokens = 10
+        completion_tokens = 5
+        total_tokens = 15
+        cost_usd = 0.01
+        latency_ms = 100
+        status = "success"
+        outcome = "success"
+        objective = "o"
+        request_id = "r1"
+
+    r = _R()
+    for k, v in overrides.items():
+        setattr(r, k, v)
+    return r
+
+
+@pytest.fixture
+def _fake_cursor(monkeypatch):
+    """Enable tracing and swap trace_store.pg_cursor for a recording FakeCursor."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
+    cursor = _FakeCursor()
+
+    @contextmanager
+    def _pg_cursor(*, dict_rows: bool = False, database=None):
+        yield cursor
+
+    monkeypatch.setattr(trace_store, "pg_cursor", _pg_cursor)
+    return cursor
+
+
+def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
+    """write_trace (single-row path) carries cache_read_tokens through to the INSERT params."""
+    assert trace_store.write_trace(_rec(cache_read_tokens=42, cache_creation_tokens=0)) is True
+    sql, params = _fake_cursor.executed[0]
+    assert "cache_read_tokens" in sql
+    assert params[10:12] == (42, 0)
+
+
+def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
+    """write_trace (single-row path) carries cache_creation_tokens through to the INSERT params."""
+    assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=17)) is True
+    _, params = _fake_cursor.executed[0]
+    assert params[10:12] == (0, 17)
+
+
+def test_write_trace_writes_zero_for_no_cache_usage(_fake_cursor) -> None:
+    """A record reporting neither cache reads nor creation writes 0 for both, never NULL."""
+    assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=0)) is True
+    _, params = _fake_cursor.executed[0]
+    assert params[10:12] == (0, 0)
+
+
+def test_write_trace_never_raises_on_missing_cache_fields(_fake_cursor) -> None:
+    """The never-raise contract holds even when the record has no cache attrs at all."""
+
+    class _RecNoCacheAttrs:
+        timestamp = datetime.now(tz=timezone.utc).timestamp()
+        team = "software_engineering"
+        job_id = "j1"
+
+    assert trace_store.write_trace(_RecNoCacheAttrs()) is True
+    _, params = _fake_cursor.executed[0]
+    assert params[10:12] == (0, 0)
+
+
+def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
+    """write_rows (batch path) carries cache_read_tokens through identically to write_trace."""
+    row = trace_store._record_to_row(_rec(cache_read_tokens=42, cache_creation_tokens=0))
+    assert trace_store.write_rows([row]) == 1
+    sql, rows = _fake_cursor.executed[0]
+    assert "cache_read_tokens" in sql
+    assert rows[0][10:12] == (42, 0)
+
+
+def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
+    """write_rows (batch path) carries cache_creation_tokens through identically to write_trace."""
+    row = trace_store._record_to_row(_rec(cache_read_tokens=0, cache_creation_tokens=17))
+    assert trace_store.write_rows([row]) == 1
+    _, rows = _fake_cursor.executed[0]
+    assert rows[0][10:12] == (0, 17)
+
+
+def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
+    """write_rows (batch path) writes 0/0 for a record reporting neither, never NULL."""
+
+    class _RecNoCacheAttrs:
+        timestamp = datetime.now(tz=timezone.utc).timestamp()
+        team = "software_engineering"
+        job_id = "j1"
+
+    row = trace_store._record_to_row(_RecNoCacheAttrs())
+    assert trace_store.write_rows([row]) == 1
+    _, rows = _fake_cursor.executed[0]
+    assert rows[0][10:12] == (0, 0)
+
+
+def test_write_rows_never_raises_on_cursor_failure(monkeypatch) -> None:
+    """A DB failure on the batch path degrades to 0, never raises (mirrors write_trace)."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
+    cursor = _FakeCursor(raise_on_execute=True)
+
+    @contextmanager
+    def _pg_cursor(*, dict_rows: bool = False, database=None):
+        yield cursor
+
+    monkeypatch.setattr(trace_store, "pg_cursor", _pg_cursor)
+    row = trace_store._record_to_row(_rec(cache_read_tokens=5, cache_creation_tokens=0))
+    assert trace_store.write_rows([row]) == 0
+
+
+def test_register_team_schemas_noop_without_postgres(monkeypatch) -> None:
+    """Schema registration for the SE team (se_agent_traces included) is a no-op when
+    POSTGRES_HOST is unset — confirms the Postgres-optional contract these stores rely on."""
+    from shared.postgres import register_team_schemas
+    from software_engineering_team.postgres import SCHEMA
+
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    assert register_team_schemas(SCHEMA) is False
