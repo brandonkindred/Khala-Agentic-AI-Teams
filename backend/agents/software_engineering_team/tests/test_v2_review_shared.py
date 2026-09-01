@@ -1322,6 +1322,325 @@ def test_microtask_tool_agent_malformed_output_is_never_cached_and_stays_contain
     assert calls["n"] == 2  # the bad output was never cached -> both calls were live
 
 
+# ---------------------------------------------------------------------------
+# Concurrent tool-agent fan-out
+# ---------------------------------------------------------------------------
+#
+# Unlike every other test in this file, these use a plain ``MagicMock()`` llm
+# (not ``DummyLLMClient``) so ``_review_steps_run_sequentially`` does *not*
+# force the sequential branch -- mirroring ``test_run_review_steps_run_concurrently``
+# in test_v2_review_phase.py for the code-review/QA/security fan-out.
+
+
+def test_run_review_tool_agents_run_concurrently(tmp_path: Path) -> None:
+    """Wired tool agents must fan out -- a barrier that needs all agents to
+    release only clears if every ``review()`` call runs in its own worker
+    thread; a sequential loop would deadlock and time out."""
+    import threading
+
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    kinds = [
+        ToolAgentKind.ACCESSIBILITY,
+        ToolAgentKind.LINTER,
+        ToolAgentKind.PERFORMANCE,
+        ToolAgentKind.UX_USABILITY,
+    ]
+    barrier = threading.Barrier(len(kinds), timeout=30)
+
+    class _BarrierAgent:
+        def review(self, phase_inp):
+            barrier.wait()
+            return SimpleNamespace(issues=[], recommendations=[])
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={kind: _BarrierAgent() for kind in kinds},
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert result is not None
+    # Each agent's review() is wrapped in its own try/except, so a regression to
+    # sequential dispatch would not raise here -- agent 1 would block until the
+    # barrier times out, break, and every agent's resulting BrokenBarrierError
+    # would be caught and logged rather than propagating. Asserting the barrier
+    # actually cleared is what makes this test fail on sequential dispatch, an
+    # undersized worker pool, or a skipped agent.
+    assert not barrier.broken, (
+        "tool agents did not all clear the barrier -- dispatch is not fully concurrent"
+    )
+
+
+def test_run_review_tool_agents_concurrent_output_matches_sequential(tmp_path: Path) -> None:
+    """A fixed set of stub tool-agent outputs folds into the same merged
+    ``issues`` (order-independent) whether dispatched concurrently
+    (``MagicMock`` llm) or sequentially (``DummyLLMClient``)."""
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    def _make_tool_agents() -> Dict[ToolAgentKind, Any]:
+        agents = {}
+        for kind in [
+            ToolAgentKind.ACCESSIBILITY,
+            ToolAgentKind.LINTER,
+            ToolAgentKind.PERFORMANCE,
+            ToolAgentKind.UX_USABILITY,
+            ToolAgentKind.BUILD_SPECIALIST,
+        ]:
+
+            def _review(phase_inp, _kind=kind):
+                return SimpleNamespace(
+                    issues=[
+                        ReviewIssue(
+                            source=_kind.value,
+                            severity="low",
+                            description=f"issue from {_kind.value}",
+                        )
+                    ],
+                    recommendations=[f"rec from {_kind.value}"],
+                )
+
+            agents[kind] = SimpleNamespace(review=_review)
+        return agents
+
+    config = _build_config()
+
+    def _run(llm: Any) -> Any:
+        return run_review(
+            config=config,
+            llm=llm,
+            task=_task(),
+            execution_result=_execution_result({"x.py": "code"}),
+            repo_path=tmp_path,
+            tool_agents=_make_tool_agents(),
+            language="python",
+            **_noop_runners(),
+        )
+
+    concurrent_result = _run(MagicMock())
+    sequential_result = _run(DummyLLMClient())
+
+    def _issue_set(result: Any) -> set:
+        return {(i.source, i.severity, i.description) for i in result.issues}
+
+    assert _issue_set(concurrent_result) == _issue_set(sequential_result)
+    assert len(concurrent_result.issues) == len(sequential_result.issues)
+
+
+def test_run_review_tool_agent_failure_does_not_drop_others_when_concurrent(
+    tmp_path: Path,
+) -> None:
+    """One tool agent raising during concurrent dispatch must not drop the
+    other agents' issues -- each agent's failure is contained to its own
+    dispatched unit of work."""
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    class _RaisingAgent:
+        def review(self, phase_inp):
+            raise RuntimeError("boom")
+
+    class _OkAgent:
+        def review(self, phase_inp):
+            return SimpleNamespace(
+                issues=[ReviewIssue(source="ok", severity="low", description="fine")],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            ToolAgentKind.SECURITY: _RaisingAgent(),
+            ToolAgentKind.TESTING_QA: _OkAgent(),
+        },
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert result is not None  # did not raise
+    assert any(i.description == "fine" for i in result.issues)
+
+
+def test_run_review_tool_agents_fold_order_matches_submission_not_completion(
+    tmp_path: Path,
+) -> None:
+    """``issues`` order must match ``tool_agents`` submission order even when
+    agents complete out of order under concurrent dispatch. Each agent folds
+    into a local list; this function then extends the shared ``issues`` in
+    submission order once dispatch returns -- not incrementally, in whichever
+    order each agent's call happened to finish. This matters because a
+    downstream same-key dedup (``_dedup_issues``) keeps only the first
+    occurrence of a given ``(file_path, description)``, so fold order must
+    stay deterministic rather than racing on completion time."""
+    import time
+
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    class _DelayedAgent:
+        def __init__(self, source: str, delay: float) -> None:
+            self.source = source
+            self.delay = delay
+
+        def review(self, phase_inp):
+            time.sleep(self.delay)
+            return SimpleNamespace(
+                issues=[ReviewIssue(source=self.source, severity="low", description=self.source)],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    # Submission order is accessibility -> linter -> performance, but the LAST
+    # submitted agent finishes FIRST (shortest delay) and the FIRST submitted
+    # agent finishes LAST (longest delay).
+    tool_agents = {
+        ToolAgentKind.ACCESSIBILITY: _DelayedAgent("accessibility", 0.3),
+        ToolAgentKind.LINTER: _DelayedAgent("linter", 0.15),
+        ToolAgentKind.PERFORMANCE: _DelayedAgent("performance", 0.0),
+    }
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents=tool_agents,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert [i.source for i in result.issues] == ["accessibility", "linter", "performance"]
+
+
+def test_run_review_build_runner_agents_never_run_concurrently(tmp_path: Path) -> None:
+    """Agents whose ``build_runner`` is set (they run a real external command
+    against ``repo_path`` in ``review()`` -- e.g. the build specialist, the
+    linter) must never have overlapping ``review()`` calls, even under
+    concurrent dispatch, AND must run in their original ``tool_agents``
+    relative order (build before lint, matching the wired frontend roster) --
+    not whichever happens to start first. A plain mutex would give the first
+    guarantee but not the second (acquisition order isn't FIFO), so this
+    checks both. A non-``build_runner`` (LLM-only) agent is included to
+    exercise a mixed roster alongside the command agents; its own
+    concurrency is not directly asserted here (see
+    ``test_run_review_tool_agents_run_concurrently`` for that)."""
+    import threading
+    import time
+
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    active = {"count": 0, "max": 0}
+    active_lock = threading.Lock()
+    started_order: list = []
+
+    class _CommandAgent:
+        build_runner = staticmethod(lambda path: [])
+
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        def review(self, phase_inp):
+            with active_lock:
+                active["count"] += 1
+                active["max"] = max(active["max"], active["count"])
+                started_order.append(self.source)
+            time.sleep(0.1)
+            with active_lock:
+                active["count"] -= 1
+            return SimpleNamespace(
+                issues=[ReviewIssue(source=self.source, severity="low", description=self.source)],
+                recommendations=[],
+            )
+
+    class _LlmOnlyAgent:
+        def review(self, phase_inp):
+            time.sleep(0.3)  # deliberately slower than the whole command-agent chain
+            return SimpleNamespace(issues=[], recommendations=[])
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            ToolAgentKind.BUILD_SPECIALIST: _CommandAgent("build"),
+            ToolAgentKind.LINTER: _CommandAgent("lint"),
+            ToolAgentKind.ACCESSIBILITY: _LlmOnlyAgent(),
+        },
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert result is not None
+    assert active["max"] == 1, "two build_runner agents ran review() concurrently"
+    assert started_order == ["build", "lint"], (
+        "build_runner agents did not run in their original tool_agents relative order"
+    )
+
+
+def test_run_review_interleaved_build_runner_agent_keeps_its_own_position(
+    tmp_path: Path,
+) -> None:
+    """A non-``build_runner`` agent submitted *between* two ``build_runner``
+    agents must fold into ``issues`` at its own original position -- not get
+    pushed after both command agents. Submission order here is
+    build (command) -> middle (LLM-only) -> lint (command); the merged
+    ``issues`` must come back in that same order, matching what the old
+    sequential loop would have produced, even though the two command agents
+    still run serialized relative to each other and never overlap."""
+    from software_engineering_team.codegen_team.models import ToolAgentKind
+
+    class _CommandAgent:
+        build_runner = staticmethod(lambda path: [])
+
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        def review(self, phase_inp):
+            return SimpleNamespace(
+                issues=[ReviewIssue(source=self.source, severity="low", description=self.source)],
+                recommendations=[],
+            )
+
+    class _LlmOnlyAgent:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        def review(self, phase_inp):
+            return SimpleNamespace(
+                issues=[ReviewIssue(source=self.source, severity="low", description=self.source)],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            ToolAgentKind.BUILD_SPECIALIST: _CommandAgent("build"),
+            ToolAgentKind.ACCESSIBILITY: _LlmOnlyAgent("middle"),
+            ToolAgentKind.LINTER: _CommandAgent("lint"),
+        },
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert [i.source for i in result.issues] == ["build", "middle", "lint"]
+
+
 def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
     """The microtask opening INFO line uses the config's ``microtask_intro``."""
     import logging
