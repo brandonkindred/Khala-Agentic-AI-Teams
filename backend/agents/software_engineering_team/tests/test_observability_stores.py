@@ -225,21 +225,38 @@ def test_trace_retention_days_env(monkeypatch) -> None:
 
 
 class _FakeCursor:
-    """Records every execute/executemany call; no live Postgres involved."""
+    """Records every execute/executemany call; no live Postgres involved.
+
+    Mirrors psycopg's arity check: a statement whose ``%s`` count does not match
+    the row width is a hard error, not a silently-recorded call. Without this the
+    fake would happily accept a row that real psycopg rejects, and since both
+    write paths swallow exceptions (DEBUG log, no raise) the drift would surface
+    only as silently-dropped trace rows in production.
+    """
 
     def __init__(self, raise_on_execute: bool = False) -> None:
         self.executed: list[tuple] = []
         self._raise = raise_on_execute
 
+    @staticmethod
+    def _check_arity(sql, params) -> None:
+        expected = sql.count("%s")
+        actual = len(params or ())
+        assert expected == actual, f"SQL expects {expected} params, row has {actual}"
+
     def execute(self, sql, params=None):
         if self._raise:
             raise RuntimeError("boom")
+        self._check_arity(sql, params)
         self.executed.append((sql, params))
 
     def executemany(self, sql, seq):
         if self._raise:
             raise RuntimeError("boom")
-        self.executed.append((sql, list(seq)))
+        rows = list(seq)
+        for row in rows:
+            self._check_arity(sql, row)
+        self.executed.append((sql, rows))
 
     def __enter__(self):
         return self
@@ -311,12 +328,26 @@ def _fake_cursor(monkeypatch):
 # params[10] = cache_read_tokens, params[11] = cache_creation_tokens.
 
 
+def test_insert_sql_placeholder_count_matches_row_width() -> None:
+    """``_INSERT_SQL``'s ``%s`` count must equal the tuple width ``_record_to_row`` builds.
+
+    Adding a column to the statement without a matching value (or vice versa) makes
+    every real INSERT fail — and because both write paths swallow exceptions, that
+    failure is invisible: trace rows are silently dropped and the cost endpoint
+    reports zero. This pins the two halves of the contract against each other
+    directly, so drift fails here with a legible message rather than as a
+    swallowed error inside a write-path test.
+    """
+    assert trace_store._INSERT_SQL.count("%s") == len(trace_store._record_to_row(_rec()))
+
+
 def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
     """write_trace (single-row path) carries cache_read_tokens through to the INSERT params."""
     cursor = _fake_cursor()
     assert trace_store.write_trace(_rec(cache_read_tokens=42, cache_creation_tokens=0)) is True
     sql, params = cursor.executed[0]
     assert "cache_read_tokens" in sql
+    assert "cache_creation_tokens" in sql
     assert params[10:12] == (42, 0)
 
 
@@ -351,6 +382,7 @@ def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
     assert trace_store.write_rows([row]) == 1
     sql, rows = cursor.executed[0]
     assert "cache_read_tokens" in sql
+    assert "cache_creation_tokens" in sql
     assert rows[0][10:12] == (42, 0)
 
 
@@ -372,9 +404,21 @@ def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
     assert rows[0][10:12] == (0, 0)
 
 
+def test_write_trace_never_raises_on_cursor_failure(_fake_cursor) -> None:
+    """A DB failure on the single-row path degrades to False, never raises.
+
+    Without this, dropping ``write_trace``'s ``except Exception`` guard would let a
+    DB error propagate into the llm_service call observer with the suite still green.
+    """
+    cursor = _fake_cursor(raise_on_execute=True)
+    assert trace_store.write_trace(_rec(cache_read_tokens=5, cache_creation_tokens=0)) is False
+    assert cursor.executed == []  # the failed INSERT left nothing recorded
+
+
 def test_write_rows_never_raises_on_cursor_failure(_fake_cursor) -> None:
     """A DB failure on the batch path degrades to 0, never raises (mirrors write_trace)."""
     cursor = _fake_cursor(raise_on_execute=True)
     row = trace_store._record_to_row(_rec(cache_read_tokens=5, cache_creation_tokens=0))
     assert trace_store.write_rows([row]) == 0
-    assert cursor._raise is True
+    # All-or-nothing: a failed batch records no partial write.
+    assert cursor.executed == []
