@@ -37,6 +37,7 @@ from software_engineering_team.github_source import (
 from software_engineering_team.github_source.client import (
     MAX_ISSUES_TRAVERSED,
     _is_safe_ref,
+    configured_web_host,
 )
 from software_engineering_team.github_source.client_http import (
     SECONDARY_RATE_LIMIT_MAX_RETRIES,
@@ -396,6 +397,19 @@ class TestClientWebHost:
             assert client.web_host == "ghes.other.com"
         finally:
             client._client.close()  # type: ignore[attr-defined]
+
+
+class TestConfiguredWebHost:
+    """`configured_web_host()` derives the same host as `GitHubClient.web_host`
+    for callers (e.g. remote-URL validation) with no live client instance."""
+
+    def test_defaults_to_github_com_with_no_env_var(self, monkeypatch) -> None:
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        assert configured_web_host() == "github.com"
+
+    def test_honors_github_api_url_env_var_for_ghes(self, monkeypatch) -> None:
+        monkeypatch.setenv("GITHUB_API_URL", "https://ghes.other.com/api/v3")
+        assert configured_web_host() == "ghes.other.com"
 
 
 class TestClientTransportErrorRetry:

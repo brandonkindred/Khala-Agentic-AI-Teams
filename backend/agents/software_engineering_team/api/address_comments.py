@@ -112,11 +112,21 @@ _ACTIVE_JOB_STATUSES = frozenset(
 )
 
 # Named pieces of _unresolved_comments' return type, factored out so the function's
-# own signature doesn't carry one unreadable nested 4-tuple annotation.
+# own signature doesn't carry one unreadable nested 5-tuple annotation.
 RetryResolveEntry = Tuple[str, int]
+# Same shape as RetryResolveEntry (thread_id, khala_reply_comment_id), but for a
+# thread `_unresolved_comments` could NOT confirm is safe to retry-resolve (no
+# persisted evidence its own resolve mutation failed) — see `ambiguous_threads`
+# below. Named separately so a caller can never accidentally feed one of these
+# into the retry-resolve path meant only for confirmed RetryResolveEntry values.
+AmbiguousThreadEntry = Tuple[str, int]
 ThreadHistoryByCommentId = Dict[int, List[ReviewComment]]
 UnresolvedCommentsResult = Tuple[
-    List[ReviewComment], Dict[int, ReviewThread], List[RetryResolveEntry], ThreadHistoryByCommentId
+    List[ReviewComment],
+    Dict[int, ReviewThread],
+    List[RetryResolveEntry],
+    ThreadHistoryByCommentId,
+    List[AmbiguousThreadEntry],
 ]
 
 
@@ -300,7 +310,7 @@ def _unresolved_comments(
         - ``client`` is a live :class:`GitHubClient`; ``pr_number`` names an open PR.
     Postconditions:
         - Returns ``(comments, thread_by_comment_id, retry_resolve_threads,
-          thread_history_by_comment_id)``.
+          thread_history_by_comment_id, ambiguous_threads)``.
         - ``comments`` has AT MOST ONE entry per unresolved thread — its LATEST
           message in GitHub's response order — even when the thread carries
           multiple messages; a thread's replies share the same underlying issue,
@@ -357,6 +367,25 @@ def _unresolved_comments(
           A reply posted before this marker existed carries no boundary
           (``_parse_accounted_through`` returns None) and is treated under
           the prior, order-only rule.
+        - ``ambiguous_threads`` lists ``(thread_id, khala_reply_comment_id)`` for
+          every UNRESOLVED thread whose LATEST message is a Khala-generated
+          reply with no unaddressed follow-up (the same population
+          ``retry_resolve_threads`` is drawn from) but for which
+          :func:`resolve_attempt_store.has_recorded_resolve_failure` found NO
+          persisted evidence — i.e. exactly the threads logged and skipped as
+          "ambiguous reviewer reopen" above, deliberately excluded from both
+          ``comments`` (never re-triaged/re-implemented) and
+          ``retry_resolve_threads`` (never auto-resolved without evidence).
+          A thread landing here is NOT eligible for either action, but it is
+          also NOT resolved on GitHub — a reviewer's genuine reopen is still
+          open. Callers computing "is anything still owed on this PR" must
+          treat a non-empty ``ambiguous_threads`` as blocking completion (see
+          ``_run_address_comments``'s fresh re-list check) even though it
+          never appears in ``comments`` or ``retry_resolve_threads`` — leaving
+          it out of every collection a completion check consults would let a
+          run report full success (and label the PR "waiting for review", or
+          delete its ephemeral checkout) while a reviewer's reopened
+          conversation is still genuinely unresolved.
         - ``thread_by_comment_id`` maps EVERY comment id appearing in ANY thread
           GitHub returned (resolved threads included) to its owning
           :class:`ReviewThread`. Callers only look up ids drawn from ``comments``,
@@ -445,6 +474,7 @@ def _unresolved_comments(
 
     unresolved: List[ReviewComment] = []
     retry_resolve_threads: List[Tuple[str, int]] = []
+    ambiguous_threads: List[Tuple[str, int]] = []
     thread_history_by_comment_id: Dict[int, List[ReviewComment]] = {}
     seen_thread_ids: Set[str] = set()
     for thread in threads:
@@ -558,13 +588,26 @@ def _unresolved_comments(
                     "ambiguous reviewer reopen and skipping rather than auto-resolving",
                     thread.id,
                 )
+                # Not eligible for retry-resolve (no evidence) or re-triage (no
+                # unaddressed follow-up), but still genuinely unresolved on
+                # GitHub — record it separately so a completion check can see
+                # this thread is still blocking without making it eligible for
+                # either action. See `ambiguous_threads` in this function's
+                # own docstring.
+                ambiguous_threads.append((thread.id, latest.id))
             continue
         # `latest` is either the thread's only message so far, or newer
         # feedback a reviewer posted after an earlier Khala reply in the same
         # thread. Either way it is the current concern to triage.
         unresolved.append(latest)
         thread_history_by_comment_id[latest.id] = messages
-    return unresolved, thread_by_comment_id, retry_resolve_threads, thread_history_by_comment_id
+    return (
+        unresolved,
+        thread_by_comment_id,
+        retry_resolve_threads,
+        thread_history_by_comment_id,
+        ambiguous_threads,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1809,23 +1852,35 @@ def _handle_comment(
                 pr_remote,
                 token,
             )
-        except RuntimeError as e:
-            # Usually a non-"completed" workflow result (see
-            # _dispatch_implementation's own postcondition), meaning a child
-            # job row and Temporal workflow WERE created and may have
-            # committed work to the shared `development` branch that never
-            # reached a clean publish — every comment's branch preparation
-            # writes/reads the SAME `khala.active-issue` marker (the bare PR
-            # number) for every comment of this PR, so a LATER comment's
-            # branch prep would otherwise treat this leftover, unpublished
-            # state as same-work continuation and could publish it alongside
-            # (or instead of) its own fix. (The other raise path — the PR's
-            # fork was deleted, so no remote could be resolved — creates no
-            # job at all and poses no such risk, but is flagged the same way
-            # here too: erring toward the safe/conservative direction for a
-            # rare edge case is cheaper than distinguishing it.) Flagging
-            # this (see left_unpublished_work) lets the caller stop the run
-            # here rather than risk it.
+        except Exception as e:
+            # Usually a non-"completed" workflow result surfaced as a
+            # RuntimeError (see _dispatch_implementation's own
+            # postcondition), meaning a child job row and Temporal workflow
+            # WERE created and may have committed work to the shared
+            # `development` branch that never reached a clean publish —
+            # every comment's branch preparation writes/reads the SAME
+            # `khala.active-issue` marker (the bare PR number) for every
+            # comment of this PR, so a LATER comment's branch prep would
+            # otherwise treat this leftover, unpublished state as same-work
+            # continuation and could publish it alongside (or instead of)
+            # its own fix. (The other raise path — the PR's fork was
+            # deleted, so no remote could be resolved — creates no job at
+            # all and poses no such risk, but is flagged the same way here
+            # too: erring toward the safe/conservative direction for a rare
+            # edge case is cheaper than distinguishing it.)
+            #
+            # Widened from `except RuntimeError` to `except Exception`:
+            # `_dispatch_implementation`'s own postcondition documents that
+            # `execute_coding_team_workflow` can raise uncaught — a Temporal
+            # RPC error, `WorkflowFailureError`, a cancellation, or anything
+            # else — AFTER the child job row (and possibly the Temporal
+            # workflow itself) was already created. Every one of those is
+            # exactly the same "job row/workflow may exist, may have
+            # committed unpublished work" situation as the RuntimeError
+            # case, so narrowing to one exception type left the others to
+            # propagate uncaught out of this function — skipping the
+            # left_unpublished_work flag and the caller's run-stopping
+            # safeguard for what is otherwise the identical hazard.
             base.detail = scrub_token_from_text(str(e))
             base.left_unpublished_work = True
             return base
@@ -1999,9 +2054,13 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             # already guards: a `None` `pr_remote` raises there rather than
             # silently reusing a stale non-None value.
             pr_remote = _pr_head_remote(owner, repo, pr, client.web_host)
-            unresolved, thread_by_comment_id, retry_resolve_threads, thread_history_by_comment_id = (
-                _unresolved_comments(client, owner, repo, pr_number)
-            )
+            (
+                unresolved,
+                thread_by_comment_id,
+                retry_resolve_threads,
+                thread_history_by_comment_id,
+                ambiguous_threads,
+            ) = _unresolved_comments(client, owner, repo, pr_number)
 
             if unresolved:
                 # New, actionable feedback is about to be worked through — a
@@ -2274,9 +2333,13 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 }
 
                 try:
-                    fresh_unresolved, _tbc, fresh_retry, fresh_history_by_comment_id = (
-                        _unresolved_comments(client, owner, repo, pr_number)
-                    )
+                    (
+                        fresh_unresolved,
+                        _tbc,
+                        fresh_retry,
+                        fresh_history_by_comment_id,
+                        fresh_ambiguous,
+                    ) = _unresolved_comments(client, owner, repo, pr_number)
                     blocking = [
                         c
                         for c in fresh_unresolved
@@ -2288,7 +2351,15 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                             )
                         )
                     ]
-                    all_succeeded = not blocking and not fresh_retry
+                    # An ambiguous thread (Khala's reply is the latest message,
+                    # but no persisted evidence justifies auto-resolving it —
+                    # see `ambiguous_threads` in `_unresolved_comments`'s
+                    # docstring) is neither retried nor re-triaged, but it is
+                    # still genuinely unresolved on GitHub: a reviewer's
+                    # reopened conversation must keep blocking completion, not
+                    # be silently reported as "nothing owed" just because it
+                    # appears in neither `fresh_unresolved` nor `fresh_retry`.
+                    all_succeeded = not blocking and not fresh_retry and not fresh_ambiguous
                 except Exception as e:  # noqa: BLE001 - fail closed: unverifiable state must not read as success
                     logger.warning(
                         "address-comments: could not re-list unresolved threads before "

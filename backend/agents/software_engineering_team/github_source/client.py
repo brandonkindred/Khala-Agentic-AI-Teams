@@ -408,6 +408,48 @@ def _issue_comment_from_payload(payload: dict[str, Any]) -> IssueComment:
     )
 
 
+def web_host_for_api_base_url(base_url: str) -> str:
+    """The web (clone/browse) host matching a configured GitHub API base URL.
+
+    Standalone so both a :class:`GitHubClient` instance (via the ``web_host``
+    property) and code with no client handy (e.g. remote-URL validation that
+    only has ``GITHUB_API_URL``/a bare base URL string) can derive the same
+    clone/browse host without instantiating a client just to read a property.
+
+    Postconditions:
+        - Returns ``"github.com"`` for the default ``api.github.com`` host
+          (github.com Cloud's API and web hosts differ by an "api." prefix).
+        - For any other host (a GitHub Enterprise Server instance, whose API
+          and web UI share one host, typically at an ``/api/v3`` path),
+          returns that host unchanged — GHES's clone URLs use the bare host,
+          not the API path. Falls back to the raw ``base_url`` on any parse
+          error OR an empty parsed ``netloc`` (e.g. a relative-path base
+          URL) rather than raising, since this only feeds a display/
+          clone-URL convenience, never an auth-relevant decision.
+    """
+    try:
+        host = urlsplit(base_url).netloc or base_url
+    except ValueError:
+        return base_url
+    if host == "api.github.com":
+        return "github.com"
+    return host
+
+
+def configured_web_host() -> str:
+    """The web (clone/browse) host for this deployment's configured GitHub API.
+
+    Postconditions:
+        - Derives the host the same way a :class:`GitHubClient` constructed
+          with no explicit ``base_url`` would (``GITHUB_API_URL`` env var,
+          falling back to :data:`DEFAULT_BASE_URL`), via
+          :func:`web_host_for_api_base_url` — for use by callers validating a
+          remote URL who have no live client instance to read ``web_host``
+          from.
+    """
+    return web_host_for_api_base_url(os.environ.get("GITHUB_API_URL") or DEFAULT_BASE_URL)
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -451,23 +493,10 @@ class GitHubClient(_GitHubHttpMixin):
         """The web (clone/browse) host matching this client's configured API host.
 
         Postconditions:
-            - Returns ``"github.com"`` for the default ``api.github.com`` host
-              (github.com Cloud's API and web hosts differ by an "api." prefix).
-            - For any other host (a GitHub Enterprise Server instance, whose API
-              and web UI share one host, typically at an ``/api/v3`` path),
-              returns that host unchanged — GHES's clone URLs use the bare host,
-              not the API path. Falls back to the raw base URL on any parse
-              error OR an empty parsed ``netloc`` (e.g. a relative-path base
-              URL) rather than raising, since this only feeds a display/
-              clone-URL convenience, never an auth-relevant decision.
+            - See :func:`web_host_for_api_base_url` — this property is a thin
+              instance-scoped wrapper over it, applied to ``self._base_url``.
         """
-        try:
-            host = urlsplit(self._base_url).netloc or self._base_url
-        except ValueError:
-            return self._base_url
-        if host == "api.github.com":
-            return "github.com"
-        return host
+        return web_host_for_api_base_url(self._base_url)
 
     def get_repo(self, owner: str, repo: str) -> Repo:
         """Fetch repository metadata (``GET /repos/{owner}/{repo}``).

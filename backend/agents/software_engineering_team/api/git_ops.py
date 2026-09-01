@@ -227,7 +227,9 @@ def _is_deletable_ephemeral_checkout(target: Path) -> bool:
     )
 
 
-def _checkout_remote_matches(repo_path: str, owner: str, repo: str) -> bool:
+def _checkout_remote_matches(
+    repo_path: str, owner: str, repo: str, *, expected_host: Optional[str] = None
+) -> bool:
     """True iff ``repo_path``'s ``origin`` remote points at ``owner/repo``.
 
     An operator-pinned ``repo_path`` is only validated as "a git checkout"
@@ -242,21 +244,42 @@ def _checkout_remote_matches(repo_path: str, owner: str, repo: str) -> bool:
         - ``repo_path`` names an existing directory with a ``.git`` entry
           (checked by the caller first — this issues a real git subprocess
           call and is not itself a "is this a checkout at all" check).
+        - ``expected_host``, when given, should be the caller's
+          ``GitHubClient.web_host`` (the clone/browse host matching whatever
+          ``GITHUB_API_URL`` this deployment is configured with) so a GitHub
+          Enterprise Server checkout is validated against its own host
+          instead of unconditionally requiring ``github.com``. ``None``
+          (the default) falls back to :func:`remote_url_matches`'s own
+          ``github.com`` default, preserving prior behavior for callers that
+          have no client handy.
     Postconditions:
-        - Returns True iff ``git remote get-url origin`` succeeds and the URL
-          it returns matches ``owner``/``repo`` on this deployment's expected
-          git host, per :func:`shared.git.git_utils.remote_url_matches` (the
-          same predicate ``unified_api``'s clone-or-fetch reuse path uses, so
-          the two never drift on URL-parsing edge cases). Returns False on
-          any git failure (no ``origin`` remote, git not installed, timeout —
-          ``_git`` never raises, it degrades to a non-zero return code) — an
-          unverifiable remote is treated the same as a mismatched one, never
-          assumed to match.
+        - Returns True iff BOTH ``git remote get-url origin`` (the fetch URL)
+          AND ``git remote get-url --push origin`` (the push URL) succeed and
+          match ``owner``/``repo`` on this deployment's expected git host, per
+          :func:`shared.git.git_utils.remote_url_matches` (the same predicate
+          ``unified_api``'s clone-or-fetch reuse path uses, so the two never
+          drift on URL-parsing edge cases). Checking the push URL too closes
+          a gap the fetch-URL-only check left open: git supports a separately
+          configured ``remote.origin.pushurl`` that can point at a different
+          repository than the fetch URL, so a checkout could pass fetch-URL
+          validation yet still ``git push`` code to an unrelated repo — when
+          no ``pushurl`` is configured, git's ``--push`` form already falls
+          back to the fetch URL, so this adds no false negatives for the
+          common case. Returns False on any git failure (no ``origin``
+          remote, git not installed, timeout — ``_git`` never raises, it
+          degrades to a non-zero return code) — an unverifiable remote is
+          treated the same as a mismatched one, never assumed to match.
     """
+    kwargs = {} if expected_host is None else {"expected_host": expected_host}
     rc, out = _git(repo_path, "remote", "get-url", "origin", timeout=10.0)
     if rc != 0:
         return False
-    return remote_url_matches(out, owner, repo)
+    if not remote_url_matches(out, owner, repo, **kwargs):
+        return False
+    rc, push_out = _git(repo_path, "remote", "get-url", "--push", "origin", timeout=10.0)
+    if rc != 0:
+        return False
+    return remote_url_matches(push_out, owner, repo, **kwargs)
 
 
 def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:

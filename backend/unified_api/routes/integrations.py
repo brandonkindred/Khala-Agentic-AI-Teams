@@ -42,7 +42,10 @@ from software_engineering_team.clone_workspace import (
     agent_cache_dir,
     clone_lock_path,
 )
-from software_engineering_team.github_source.client import _pr_detail_from_payload
+from software_engineering_team.github_source.client import (
+    _pr_detail_from_payload,
+    configured_web_host,
+)
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -2700,7 +2703,7 @@ def _ensure_repo_clone(
                         f"could not read the existing checkout's remote origin at {repo_path}: "
                         f"{_scrub_git_secret(url_check.stderr, token)}"
                     )
-                if not remote_url_matches(url_out, owner, repo):
+                if not remote_url_matches(url_out, owner, repo, expected_host=configured_web_host()):
                     # Redact any embedded credentials before surfacing the remote in the error.
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "

@@ -607,6 +607,27 @@ class CodingTeamWorkflow:
                 # key is stale (tokens are never reused) — drop them so retries
                 # across many pause rounds cannot grow durable workflow state.
                 self._buffered_signals.clear()
+                # KNOWN LIMITATION: this predicate only observes `submit_answers`
+                # signals — it has no way to notice this job's row being marked
+                # cancelled through the generic `/api/jobs/{team}/{job_id}/cancel`
+                # proxy, which patches job-service state only and never touches
+                # Temporal. A genuine Temporal-level cancel (`handle.cancel()` on
+                # THIS workflow's own id, `coding_team-<job_id>` — see
+                # `coding_team_start_workflow._workflow_id`) WOULD interrupt this
+                # wait_condition correctly (the SDK delivers it as
+                # `asyncio.CancelledError` at the next await point); the gap is
+                # that no code path in this repo currently issues that call for a
+                # coding_team workflow specifically. The one existing "cancel a
+                # workflow" helper wired to a job-cancel action
+                # (`start_workflow.cancel_run_team_workflow`) targets the
+                # DIFFERENT `se-run-team-<job_id>` id prefix used by the
+                # unrelated RunTeamWorkflow, so it cannot be reused here as-is.
+                # Closing this gap needs either a coding-team-specific cancel
+                # endpoint (calling `shared.temporal.runner.cancel_workflow_sync`
+                # with this workflow's own id) or teaching the generic job-cancel
+                # proxy about per-team Temporal id conventions — both are new
+                # plumbing, not a same-day fix, so this is left as a documented
+                # gap rather than a partial/speculative change.
                 await workflow.wait_condition(lambda: self._submitted_answers is not None)
                 request["acknowledged_resume_token"] = self._active_resume_token
                 self._submitted_answers = None

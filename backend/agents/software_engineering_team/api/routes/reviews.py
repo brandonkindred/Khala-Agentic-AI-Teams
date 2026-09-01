@@ -337,7 +337,7 @@ def post_address_comments(
             # (see the return below); the other three return values exist for the
             # background worker's own retry-resolve/re-triage logic
             # (address_comments._run_address_comments), not this admission check.
-            unresolved, _threads, _retry_resolve, _history = _address.unresolved_comments(
+            unresolved, _threads, _retry_resolve, _history, _ambiguous = _address.unresolved_comments(
                 client, request.owner, request.repo, pr_number
             )
         except ReviewThreadsUnavailableError as e:
@@ -373,7 +373,9 @@ def post_address_comments(
                 "real-issue fix needs one to implement and push to."
             ),
         )
-    if not _main._checkout_remote_matches(stripped, request.owner, request.repo):
+    if not _main._checkout_remote_matches(
+        stripped, request.owner, request.repo, expected_host=client.web_host
+    ):
         # `.git` existing alone doesn't rule out a checkout of a COMPLETELY
         # DIFFERENT repository — without this, this PR's remediation plan
         # could get committed and pushed to that unrelated repo's origin if

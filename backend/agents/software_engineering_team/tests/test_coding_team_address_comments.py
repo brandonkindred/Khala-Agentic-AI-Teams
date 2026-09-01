@@ -541,7 +541,7 @@ class TestUnresolvedComments:
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2,)),
         ]
         # Exercise the PUBLIC entry point the route depends on.
-        unresolved, by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [2]
         assert by_comment[2].id == "T2"
         assert retry_resolve == []
@@ -575,7 +575,7 @@ class TestUnresolvedComments:
         fake.threads = [
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4)),
         ]
-        unresolved, by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
         assert [c.id for c in unresolved] == [4]
         # The thread map still covers every message's id (callers only look up
         # ids drawn from `unresolved`, so the extra entries are harmless).
@@ -589,7 +589,7 @@ class TestUnresolvedComments:
             ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3)),
             ReviewThread(id="T5", is_resolved=False, comment_ids=(5,)),
         ]
-        unresolved, _by_comment, _retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, _retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
         # The relative order between independent threads is not part of the
         # contract — each unresolved thread contributes its latest comment,
         # but which thread's comment comes first is an implementation detail.
@@ -615,7 +615,7 @@ class TestUnresolvedComments:
             lambda owner, repo, pr_number, thread_id, reply_id: (thread_id, reply_id) == ("T2", 3),
         )
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
         assert retry_resolve == [("T2", 3)]
@@ -641,10 +641,14 @@ class TestUnresolvedComments:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history, ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
         assert retry_resolve == []
+        # P1 regression: dropped from both `unresolved` and `retry_resolve`,
+        # the thread must still surface somewhere a completion check can see
+        # it as blocking — see `ambiguous_threads` in `_unresolved_comments`.
+        assert ambiguous == [("T2", 3)]
 
     def test_recorded_failure_for_a_superseded_reply_does_not_authorize_retry(
         self, address_env, monkeypatch
@@ -667,7 +671,7 @@ class TestUnresolvedComments:
             lambda owner, repo, pr_number, thread_id, reply_id: (thread_id, reply_id) == ("T2", 3),
         )
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
         assert retry_resolve == []
@@ -687,7 +691,7 @@ class TestUnresolvedComments:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert [c.id for c in unresolved] == [4]
         assert retry_resolve == []
@@ -713,7 +717,7 @@ class TestUnresolvedComments:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3, 4))]
 
-        unresolved, _by_comment, retry_resolve, history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert [c.id for c in unresolved] == [3]
         assert retry_resolve == []
@@ -745,7 +749,7 @@ class TestUnresolvedComments:
             lambda owner, repo, pr_number, thread_id, reply_id: (thread_id, reply_id) == ("T2", 4),
         )
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
         assert retry_resolve == [("T2", 4)]
@@ -795,7 +799,7 @@ class TestUnresolvedComments:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=True, comment_ids=(2, 3))]
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert unresolved == []
         assert retry_resolve == []
@@ -848,7 +852,7 @@ class TestUnresolvedCommentsMarkerAuthentication:
         ]
         fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))]
 
-        unresolved, _by_comment, retry_resolve, _history = ac.unresolved_comments(fake, "o", "r", 7)
+        unresolved, _by_comment, retry_resolve, _history, _ambiguous = ac.unresolved_comments(fake, "o", "r", 7)
 
         assert [c.id for c in unresolved] == [2]
         assert retry_resolve == []
@@ -1944,6 +1948,39 @@ class TestRunAddressComments:
         assert fake.replies == []
         assert fake.resolved == []
 
+    def test_ambiguous_thread_blocks_run_from_reporting_full_success(
+        self, address_env
+    ) -> None:
+        """P1 regression: a thread whose latest message is Khala's own reply,
+        with no persisted resolve-failure evidence (an "ambiguous" possible
+        reviewer reopen — see `test_khala_marker_reply_with_no_recorded_
+        failure_is_ambiguous_and_skipped`), must keep blocking the run's
+        completion check. Before the fix, such a thread appeared in neither
+        `unresolved` nor `retry_resolve_threads`, so both the initial and
+        final-re-list completion checks saw nothing left owed and the run
+        reported full success (`status="completed"`) — silently burying a
+        reviewer's reopened conversation."""
+        ac, fake, req = address_env["ac"], address_env["fake"], address_env["request"]
+        fake.review_comments = [
+            _comment(2, body="please fix this"),
+            _khala_reply(ac, fake, 3),
+        ]
+        fake.threads = [ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))]
+
+        ac._run_address_comments("job1", req, "tok")
+
+        # Never resolved (correctly) — but also never reported "completed":
+        # the ambiguous thread is still genuinely unresolved on GitHub.
+        assert fake.resolved == []
+        final = [
+            u
+            for u in address_env["job_updates"]
+            if u.get("status") in ("completed", "completed_with_failures")
+        ]
+        assert final
+        assert final[-1]["status"] == "completed_with_failures"
+        assert fake.labels_set == []
+
     def test_stops_processing_when_pr_closes_mid_run(self, address_env, monkeypatch) -> None:
         """If the PR is merged/closed by someone else while an earlier
         comment's workflow was still running, the loop must stop rather than
@@ -2392,10 +2429,10 @@ class TestRunAddressComments:
                 return result
             # The final re-list (this run's second call) sees a brand-new
             # thread a reviewer opened while comment 2's workflow was running.
-            unresolved, by_comment, retry, history = result
+            unresolved, by_comment, retry, history, ambiguous = result
             by_comment = {**by_comment, 9: ReviewThread(id="T9", is_resolved=False, comment_ids=(9,))}
             history = {**history, 9: [new_thread_comment]}
-            return [*unresolved, new_thread_comment], by_comment, retry, history
+            return [*unresolved, new_thread_comment], by_comment, retry, history, ambiguous
 
         monkeypatch.setattr(ac, "_unresolved_comments", _stub)
 
@@ -2458,7 +2495,7 @@ class TestRunAddressComments:
             # since triage ran.
             edited_root = _comment(2, body="wait, this needs a null check")
             thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2, 3))
-            return [follow_up], {2: thread, 3: thread}, [], {3: [edited_root, follow_up]}
+            return [follow_up], {2: thread, 3: thread}, [], {3: [edited_root, follow_up]}, []
 
         monkeypatch.setattr(ac, "_unresolved_comments", _stub)
 
@@ -2489,7 +2526,7 @@ class TestRunAddressComments:
             # has changed since this run triaged it.
             edited = _comment(2, body="actually, please also check the edge case")
             thread = ReviewThread(id="T2", is_resolved=False, comment_ids=(2,))
-            return [edited], {2: thread}, [], {2: [edited]}
+            return [edited], {2: thread}, [], {2: [edited]}, []
 
         monkeypatch.setattr(ac, "_unresolved_comments", _stub)
 
