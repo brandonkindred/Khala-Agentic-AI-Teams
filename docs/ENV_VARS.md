@@ -832,10 +832,11 @@ verification, scope filtering, and the architecture / side-effect submission
 passes). This is the backstop for the budget baked into the tools themselves
 (40 calls, `false_positive_filter._MAX_TOTAL_TOOL_CALLS`), which only *asks*
 the model to stop and answer — a model that ignores that directive keeps
-emitting the same tool call forever, and the Strands event loop has no
-iteration limit of its own, so the run never terminates. Once this cap is
-reached the tools are withdrawn for one final turn and the turn's stop reason
-is forced to `end_turn`, so the loop always ends: the run finishes with
+emitting the same tool call forever, and nothing caps the iterations (Strands
+applies a turn budget only when the caller passes `limits`, which these callers
+do not), so the run never terminates. Once this cap is reached, every further
+tool-use block is dropped before Strands can execute it and a `tool_use` stop
+reason is rewritten to `end_turn`, so the loop always ends: the run finishes with
 whatever conclusion the model can state from what it already inspected (each
 pass then fails safe on an unusable answer — verification keeps its findings,
 a submission-pass batch degrades to no findings). Keep it above the tools'

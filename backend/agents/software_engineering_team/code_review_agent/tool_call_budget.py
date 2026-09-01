@@ -6,14 +6,16 @@ lookup and returns a stop directive asking the model to answer now. A model
 that ignores that directive keeps emitting the same tool call, Strands keeps
 executing it (a no-op that returns the same directive), and the event loop
 runs forever — the agent never reaches a ``stopReason`` other than
-``tool_use``, and Strands has no built-in iteration limit. Observed in
-production as a code-review run repeating one identical ``read_file`` call
-hundreds of times, burning an LLM round trip each time.
+``tool_use``, and nothing caps the iterations: Strands applies a turn budget
+only when the caller passes ``limits`` to the invocation, which none of these
+callers do. Observed in production as a code-review run repeating one
+identical ``read_file`` call hundreds of times, burning an LLM round trip
+each time.
 
-:class:`ToolCallBudgetModel` closes that loop at the only layer that can end
-it unilaterally: the model. It counts the tool uses a run has emitted and,
-once the cap is reached, serves one final tool-free turn whose tool-use
-blocks are suppressed and whose stop reason is forced to ``end_turn`` — so
+:class:`ToolCallBudgetModel` closes that loop at the layer that can end it
+unilaterally, whatever the caller configures: the model. It counts the tool
+uses a run has emitted and, once the cap is reached, drops every further
+tool-use block and rewrites a ``tool_use`` stop reason to ``end_turn`` — so
 the Strands event loop terminates no matter what the model emits.
 
 Invariants:
@@ -49,8 +51,8 @@ DEFAULT_AGENT_TOOL_CALL_CAP = 50
 _CAP_ENV = "CODE_REVIEW_AGENT_TOOL_CALL_CAP"
 
 _BUDGET_DIRECTIVE = (
-    "Your tool-call budget for this task is exhausted and the tools have been "
-    "withdrawn — no further tool calls are possible. Answer now, in prose, "
+    "Your tool-call budget for this task is exhausted: any further tool call "
+    "you make will be ignored and will return nothing. Answer now, in prose, "
     "using only what you have already inspected. If you could not finish "
     "investigating something, say so explicitly and be conservative in your "
     "conclusions rather than guessing."
@@ -89,6 +91,22 @@ def _is_tool_use_start(event: Any) -> bool:
     return isinstance(inner, dict) and "toolUse" in inner
 
 
+def _block_delta(event: Any) -> Dict[str, Any]:
+    """The ``contentBlockDelta.delta`` mapping of ``event``, or ``{}``.
+
+    Postconditions:
+        - Returns a dict; anything not shaped like a delta event (including a
+          truthy non-dict under either key) yields ``{}``. Never raises.
+    """
+    if not isinstance(event, dict):
+        return {}
+    block = event.get("contentBlockDelta")
+    if not isinstance(block, dict):
+        return {}
+    delta = block.get("delta")
+    return delta if isinstance(delta, dict) else {}
+
+
 def _has_text_delta(event: Any) -> bool:
     """Whether ``event`` carries assistant text.
 
@@ -96,18 +114,17 @@ def _has_text_delta(event: Any) -> bool:
         - ``True`` for a ``contentBlockDelta`` with a non-empty ``text``
           delta. Never raises on a malformed event.
     """
-    if not isinstance(event, dict):
-        return False
-    delta = (event.get("contentBlockDelta") or {}).get("delta")
-    return isinstance(delta, dict) and bool(delta.get("text"))
+    return bool(_block_delta(event).get("text"))
 
 
 def _is_tool_use_delta(event: Any) -> bool:
-    """Whether ``event`` is a ``toolUse`` input delta."""
-    if not isinstance(event, dict):
-        return False
-    delta = (event.get("contentBlockDelta") or {}).get("delta")
-    return isinstance(delta, dict) and "toolUse" in delta
+    """Whether ``event`` is a ``toolUse`` input delta.
+
+    Postconditions:
+        - ``True`` for a ``contentBlockDelta`` carrying ``toolUse``. Never
+          raises on a malformed event.
+    """
+    return "toolUse" in _block_delta(event)
 
 
 class ToolCallBudgetModel:
@@ -131,16 +148,17 @@ class ToolCallBudgetModel:
           parallel batch of ``toolUse`` blocks): each further block in that
           turn is dropped whole, so Strands never executes it, while the
           turn's other content passes through untouched.
-        - At/after the cap: exactly one further turn is issued, with
-          ``tool_specs=None`` and a directive appended to the messages; its
-          ``toolUse`` blocks are dropped and a ``tool_use`` stop reason is
-          rewritten to ``end_turn``, so the Strands event loop cannot
-          recurse. Any other stop reason passes through untouched — it
-          already ends the loop, and a terminal one such as ``max_tokens``
-          must keep reaching Strands so its truncation handling still fires.
-          A turn that yields no text at all gets one synthesized text block
-          so the caller sees an honest "no conclusion" answer rather than an
-          empty assistant message.
+        - At/after the cap: exactly one further turn is issued, carrying a
+          directive to answer now (``tool_specs`` is forwarded unchanged --
+          see ``_final_turn`` for why withdrawing it would break the request
+          under Anthropic). Its ``toolUse`` blocks are dropped and a
+          ``tool_use`` stop reason is rewritten to ``end_turn``, so the
+          Strands event loop cannot recurse. Any other stop reason passes
+          through untouched — it already ends the loop, and a terminal one
+          such as ``max_tokens`` must keep reaching Strands so its truncation
+          handling still fires. A turn that yields no text at all gets one
+          synthesized text block so the caller sees an honest "no conclusion"
+          answer rather than an empty assistant message.
 
     Invariants:
         - ``tool_calls_used`` is monotonically non-decreasing and never
@@ -204,14 +222,19 @@ class ToolCallBudgetModel:
 
         Postconditions:
             - Evaluates a ``Model`` property against this wrapper (so e.g.
-              ``context_window_limit`` reads through ``get_config``); raises
-              ``AttributeError`` when ``Model`` has no such attribute.
+              ``context_window_limit`` reads through ``get_config``), and binds
+              a method or other descriptor to this wrapper so calling it passes
+              the wrapper as ``self`` -- returning the raw function instead
+              would silently consume the caller's first argument as ``self``
+              (e.g. ``count_tokens(messages)``). Raises ``AttributeError``
+              when ``Model`` has no such attribute.
         """
         attr = inspect.getattr_static(_StrandsModel, name, _MISSING)
         if attr is _MISSING:
             raise AttributeError(name)
-        if isinstance(attr, property):
-            return attr.fget(self)  # type: ignore[misc]
+        getter = getattr(type(attr), "__get__", None)
+        if getter is not None:
+            return getter(attr, self, type(self))
         return attr
 
     # -- strands.models.Model interface ----------------------------------
@@ -263,7 +286,7 @@ class ToolCallBudgetModel:
             return
 
         self._note_cap_reached()
-        async for event in self._final_turn(messages, system_prompt, kwargs):
+        async for event in self._final_turn(messages, tool_specs, system_prompt, kwargs):
             yield event
 
     # -- internals -------------------------------------------------------
@@ -274,8 +297,8 @@ class ToolCallBudgetModel:
             return
         self._stopped = True
         logger.warning(
-            "%s: agent hit the hard tool-call cap (%d calls, %s); dropping further tool "
-            "calls, withdrawing the tools and forcing a final answer",
+            "%s: agent hit the hard tool-call cap (%d calls, %s); dropping every further "
+            "tool call and forcing a final answer",
             self._label,
             self._max_tool_calls,
             _CAP_ENV,
@@ -299,36 +322,64 @@ class ToolCallBudgetModel:
             - ``tool_calls_used`` never exceeds ``max_tool_calls``.
         """
         dropping = False
+        counted_block = False
         async for event in stream:
-            if _is_tool_use_start(event):
+            # A tool use normally opens with ``contentBlockStart``, but Strands
+            # also accepts one announced solely in a ``contentBlockDelta``
+            # (``streaming.handle_content_block_delta`` fills toolUseId/name
+            # from the delta). Both shapes must be counted, or such a model
+            # would slip past the cap entirely — and Strands would then re-derive
+            # ``stopReason="tool_use"`` from the surviving block, undoing the
+            # ``end_turn`` rewrite and restoring the very loop this guards.
+            opens_tool_use = _is_tool_use_start(event) or (
+                _is_tool_use_delta(event) and not dropping and not counted_block
+            )
+            if opens_tool_use:
                 if self._tool_calls_used >= self._max_tool_calls:
                     self._note_cap_reached()
                     dropping = True
+                    counted_block = False
                     continue
                 self._tool_calls_used += 1
                 dropping = False
+                counted_block = True
                 yield event
                 continue
-            if dropping:
-                if _is_tool_use_delta(event):
-                    continue
-                if isinstance(event, dict) and "contentBlockStop" in event:
-                    dropping = False
+            if dropping and _is_tool_use_delta(event):
+                continue
+            if isinstance(event, dict) and "contentBlockStop" in event:
+                # The block ends here either way: stop dropping, and let the
+                # next tool use (in whichever shape it arrives) count again.
+                was_dropping = dropping
+                dropping = False
+                counted_block = False
+                if was_dropping:
                     continue
             yield event
 
     async def _final_turn(
         self,
         messages: Any,
+        tool_specs: Optional[List[Any]],
         system_prompt: Optional[str],
         kwargs: Dict[str, Any],
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Yield one tool-free, guaranteed-terminal turn.
+        """Yield one guaranteed-terminal turn.
+
+        ``tool_specs`` is passed through unchanged rather than withdrawn. What
+        makes this turn terminal is the wrapper, not the absence of tools:
+        every ``toolUse`` block is dropped and a ``tool_use`` stop reason is
+        rewritten, so the loop ends whatever the model asks for. Withdrawing
+        the tools would additionally break the request itself under Anthropic
+        — the conversation still holds the run's ``tool_use``/``tool_result``
+        blocks, and ``ClaudeLLMClient`` omits ``tools`` entirely when the spec
+        list is empty, which Anthropic rejects ("requests which include
+        tool_use or tool_result blocks must define tools"). That 400 would
+        replace the graceful final answer with an exception.
 
         Postconditions:
-            - Tools are withdrawn (``tool_specs=None``) and a stop directive
-              is appended to ``messages`` (a copy — the caller's list is never
-              mutated).
+            - A stop directive is added to ``messages`` (a copy — the caller's
+              list is never mutated) and ``tool_specs`` is forwarded as given.
             - ``toolUse`` blocks are dropped (the budget is already spent, so
               ``_within_budget`` drops every one of them) and a
               ``stopReason`` of ``tool_use`` is rewritten to ``end_turn``, so
@@ -346,7 +397,7 @@ class ToolCallBudgetModel:
         async for event in self._within_budget(
             self._inner.stream(
                 self._with_directive(messages),
-                tool_specs=None,
+                tool_specs=tool_specs,
                 system_prompt=system_prompt,
                 **kwargs,
             )
@@ -385,16 +436,34 @@ class ToolCallBudgetModel:
 
     @staticmethod
     def _with_directive(messages: Any) -> Any:
-        """``messages`` plus a trailing user directive to answer now.
+        """``messages`` carrying a trailing user directive to answer now.
+
+        The directive is appended *into* the final user message when there is
+        one — the common case, since the turn that spent the budget ends with
+        the tool results, which Strands carries as a user message. Adding a
+        second user message instead would put two consecutive user turns on
+        the wire, which the OpenAI-compatible translator passes straight
+        through and Anthropic can reject. Only when the conversation does not
+        end in a user message is a new one appended.
 
         Postconditions:
-            - Returns a new list; ``messages`` is never mutated. A
-              non-list ``messages`` (a test double's own shape) is returned
-              unchanged rather than coerced.
+            - Returns a new list and never mutates ``messages`` or any message
+              or content block inside it (the trailing message is copied, not
+              edited in place). A non-list ``messages`` (a test double's own
+              shape) is returned unchanged rather than coerced.
+            - Exactly one copy of the directive is present, as the last text
+              the model sees.
         """
         if not isinstance(messages, list):
             return messages
-        return [*messages, {"role": "user", "content": [{"text": _BUDGET_DIRECTIVE}]}]
+        directive_block = {"text": _BUDGET_DIRECTIVE}
+        last = messages[-1] if messages else None
+        if isinstance(last, dict) and last.get("role") == "user":
+            content = last.get("content")
+            if isinstance(content, list):
+                merged = {**last, "content": [*content, directive_block]}
+                return [*messages[:-1], merged]
+        return [*messages, {"role": "user", "content": [directive_block]}]
 
 
 __all__ = [

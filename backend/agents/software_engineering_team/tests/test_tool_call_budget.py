@@ -16,6 +16,8 @@ import pytest
 from software_engineering_team.code_review_agent.tool_call_budget import (
     DEFAULT_AGENT_TOOL_CALL_CAP,
     ToolCallBudgetModel,
+    _has_text_delta,
+    _is_tool_use_delta,
     resolve_agent_tool_call_cap,
 )
 
@@ -102,12 +104,21 @@ class _AlwaysToolCallsModel:
             for event in _text_events(json.dumps({"verdict": "kept"})):
                 yield event
             return
-        if self._final_text is not None and not tool_specs:
+        if self._final_text is not None and _sees_budget_directive(messages):
             for event in _text_events(self._final_text):
                 yield event
             return
         for event in _tool_use_events("call_0", "read_file", {"path": "app/main.py"}):
             yield event
+
+
+def _sees_budget_directive(messages: Any) -> bool:
+    """Whether the wrapper's "budget exhausted" directive is in `messages`.
+
+    This is how a real model tells the final turn apart: the tools stay
+    attached, so their absence is not the signal.
+    """
+    return "budget for this task is exhausted" in json.dumps(messages, default=str)
 
 
 def _drain(model: Any, **kwargs: Any) -> List[Dict]:
@@ -158,12 +169,15 @@ def test_at_cap_withdraws_tools_and_forces_end_turn() -> None:
     messages = [{"role": "user", "content": [{"text": "Review this"}]}]
     events = _drain(model, messages=messages, tool_specs=[{"name": "read_file"}])
 
-    # Tools withdrawn, directive appended, caller's list untouched.
-    assert inner.calls[1]["tool_specs"] is None
-    assert len(messages) == 1
+    # Tools stay attached (withdrawing them would break the request under
+    # Anthropic); the directive rides in the trailing user message rather than
+    # a second consecutive user turn, and the caller's list is untouched.
+    assert inner.calls[1]["tool_specs"] == [{"name": "read_file"}]
+    assert messages == [{"role": "user", "content": [{"text": "Review this"}]}]
     sent = inner.calls[1]["messages"]
-    assert len(sent) == 2
-    assert "budget" in sent[-1]["content"][0]["text"]
+    assert len(sent) == 1
+    assert [block["text"] for block in sent[-1]["content"]][0] == "Review this"
+    assert "budget for this task is exhausted" in sent[-1]["content"][-1]["text"]
 
     # The model kept asking for a tool; nothing tool-shaped survives, and the
     # turn ends the loop.
@@ -273,7 +287,7 @@ class _ParallelBatchModel:
         return None
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
-        if not tool_specs:
+        if _sees_budget_directive(messages):
             for event in _text_events("done"):
                 yield event
             return
@@ -346,7 +360,7 @@ class _TruncatedFinalTurnModel:
         return None
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
-        if tool_specs:
+        if not _sees_budget_directive(messages):
             for event in _tool_use_events("call_0", "read_file", {"path": "app/main.py"}):
                 yield event
             return
@@ -366,3 +380,84 @@ def test_final_turn_preserves_a_terminal_stop_reason() -> None:
 
     stops = [event["messageStop"] for event in events if "messageStop" in event]
     assert stops == [{"stopReason": "max_tokens"}]
+
+
+class _DeltaAnnouncedToolUseModel:
+    """Announces its tool use in the delta only — a shape Strands accepts.
+
+    `streaming.handle_content_block_delta` fills toolUseId/name from the delta
+    when `contentBlockStart` carried none, and `handle_message_stop` re-derives
+    `stopReason="tool_use"` from any surviving tool-use block — so a block in
+    this shape that slipped past the cap would restore the infinite loop.
+    """
+
+    stateful = False
+
+    def get_config(self) -> Dict[str, Any]:
+        return {}
+
+    def update_config(self, **overrides: Any) -> None:
+        return None
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        yield {"messageStart": {"role": "assistant"}}
+        yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
+        yield {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {
+                    "toolUse": {
+                        "toolUseId": "call_0",
+                        "name": "read_file",
+                        "input": json.dumps({"path": "app/main.py"}),
+                    }
+                },
+            },
+        }
+        yield {"contentBlockStop": {"contentBlockIndex": 0}}
+        yield {"messageStop": {"stopReason": "tool_use"}}
+
+
+def test_delta_announced_tool_use_counts_against_the_cap() -> None:
+    model = ToolCallBudgetModel(_DeltaAnnouncedToolUseModel(), 1)
+
+    first = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+    assert model.tool_calls_used == 1
+    assert any(_is_tool_use_delta(event) for event in first)
+
+    # Budget spent: the next turn's delta-announced tool use is dropped and the
+    # loop is ended, rather than sailing past the cap.
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+    assert model.tool_calls_used == 1
+    assert not any(_is_tool_use_delta(event) for event in events)
+    assert not any("toolUse" in json.dumps(event) for event in events)
+    assert [event["messageStop"] for event in events if "messageStop" in event] == [
+        {"stopReason": "end_turn"}
+    ]
+
+
+def test_malformed_delta_events_do_not_raise() -> None:
+    """The helpers promise never to raise on a malformed event."""
+    for bogus in ({"contentBlockDelta": "nope"}, {"contentBlockDelta": {"delta": 7}}, "junk", None):
+        assert _has_text_delta(bogus) is False
+        assert _is_tool_use_delta(bogus) is False
+
+
+def test_strands_model_defaults_are_bound_to_the_wrapper() -> None:
+    """A `Model` method reached through the fallback must bind `self`."""
+
+    class _Bare:
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs):
+            for event in _text_events("done"):
+                yield event
+
+    model = ToolCallBudgetModel(_Bare(), 3)
+
+    # `context_window_limit` is a Model property: evaluated against the wrapper.
+    assert model.context_window_limit is None
+    # `count_tokens` is a Model method: the wrapper must be bound as `self`, so
+    # the caller's first argument stays its first argument.
+    import asyncio
+
+    tokens = asyncio.run(model.count_tokens([{"role": "user", "content": [{"text": "hi"}]}]))
+    assert isinstance(tokens, int)
