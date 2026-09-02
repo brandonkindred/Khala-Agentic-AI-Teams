@@ -47,6 +47,9 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
 
     Raises:
         HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank.
+        HTTPException(422, "planning_failed"): when the planning stage raises PlanningError
+            (detail includes failure_reason).
+        HTTPException(500): when the pipeline fails for any other reason.
     """
     from agents.blogging.api import main as _main
 
