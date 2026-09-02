@@ -1840,6 +1840,67 @@ def resolve_bracket_attachments(
     return _as_bracket_attachment_pair(attachments)
 
 
+# A rule is resting-eligible only for the entry_price/market variant migrated
+# here (basis/style) with 0 < pct < 1.0 — the open bound matching
+# ``ExitLegSpec.pct``'s own ``(0, 1)`` constraint. That bound also excludes,
+# by construction, the ``pct=1.0`` short-safety auto-stop
+# ``TradingService.__init__`` injects when a spec allows shorts with no
+# explicit stop covering them: that rule is a deliberate no-op for longs
+# (``entry * (1 - 1.0) == 0``) and would fail ``ExitLegSpec``'s strict
+# upper bound if fed through this path. Excluding it leaves it exactly as
+# it behaves today — bar-close-only — rather than crashing every long
+# entry on a spec where shorts are possible.
+def _is_resting_stop_loss(rule: Any) -> bool:
+    return (
+        isinstance(rule, StopLossRule)
+        and rule.basis == "entry_price"
+        and rule.style == "market"
+        and 0.0 < rule.pct < 1.0
+    )
+
+
+def _stop_loss_rule_to_leg_specs(rule: StopLossRule) -> List[ExitLegSpec]:
+    """Translate a resting-eligible ``StopLossRule`` into a generic exit leg.
+
+    Preconditions: ``_is_resting_stop_loss(rule)`` is True.
+    Postconditions: returns ``[ExitLegSpec(kind=STOP, pct=rule.pct)]`` —
+    the same shape :func:`_bracket_to_leg_specs` builds for a market-style
+    bracket stop leg, so :func:`resolve_exit_leg_attachments` resolves
+    identical price math for both (see ``rule_compiler._stop_loss_level``,
+    which this mirrors: ``ref_price * (1 ∓ pct)``).
+    """
+    assert _is_resting_stop_loss(rule), (
+        "_stop_loss_rule_to_leg_specs requires a resting-eligible StopLossRule "
+        f"(basis='entry_price', style='market', 0 < pct < 1.0); got "
+        f"basis={rule.basis!r} style={rule.style!r} pct={rule.pct!r}"
+    )
+    return [ExitLegSpec(kind=OrderType.STOP, pct=rule.pct)]
+
+
+def resolve_resting_stop_loss_attachment(
+    rule: StopLossRule, side: OrderSide, ref_price: float
+) -> StopAttachment:
+    """Resolve a resting-eligible ``StopLossRule`` into an entry-order attachment.
+
+    Thin adapter over the generalized :func:`resolve_exit_leg_attachments`,
+    parallel to :func:`resolve_bracket_attachments`: translates the rule
+    into a single :class:`ExitLegSpec` via :func:`_stop_loss_rule_to_leg_specs`
+    and unwraps the one-element result. See
+    :func:`resolve_exit_leg_attachments` for the shared price-resolution
+    contract (anchoring, sign convention, and raises).
+
+    Preconditions: ``_is_resting_stop_loss(rule)`` is True; ``ref_price`` is
+    a finite number ``> 0``; ``side`` is the entry's ``OrderSide``.
+    Postconditions: returns a :class:`StopAttachment` whose ``stop_price``
+    is finite, strictly positive, and strictly on the protective side of
+    ``ref_price``.
+    """
+    attachments = resolve_exit_leg_attachments(_stop_loss_rule_to_leg_specs(rule), side, ref_price)
+    (attachment,) = attachments
+    assert isinstance(attachment, StopAttachment)
+    return attachment
+
+
 @dataclass
 class _EngineEntryDispatcher:
     """Per-run owner of engine-side entry-rule enforcement.
@@ -1903,6 +1964,15 @@ class _EngineEntryDispatcher:
         self._bracket: Optional[OcoBracketRule] = next(
             (r for r in self.exit_rules if isinstance(r, OcoBracketRule)), None
         )
+        # First resting-eligible entry_price/market StopLossRule (if any),
+        # attached to every entry order the same way ``self._bracket`` is —
+        # see ``_is_resting_stop_loss`` for the eligibility bound and why the
+        # short-safety auto-stop is deliberately excluded. "First" mirrors
+        # ``first_side_stop_factor``'s spec-order precedent for picking among
+        # multiple candidate stop rules.
+        self._resting_stop_loss: Optional[StopLossRule] = next(
+            (r for r in self.exit_rules if _is_resting_stop_loss(r)), None
+        )
 
     def maybe_emit(
         self,
@@ -1953,6 +2023,7 @@ class _EngineEntryDispatcher:
         self._next_seq += 1
         side = OrderSide.LONG if rule.side == "long" else OrderSide.SHORT
         attached_stop_loss, attached_take_profit = self._bracket_attachments(side, cur_bar.close)
+        attached_exits = self._resting_stop_loss_attachments(side, cur_bar.close)
         req = OrderRequest(
             client_order_id=f"e_entry_{self._next_seq}",
             symbol=sym,
@@ -1962,6 +2033,7 @@ class _EngineEntryDispatcher:
             tif=TimeInForce.DAY,
             attached_stop_loss=attached_stop_loss,
             attached_take_profit=attached_take_profit,
+            attached_exits=attached_exits,
             reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
             # Every dispatcher-emitted order is clamped to ``max_position_pct`` at
             # the sizing price (see ``_cap_position``), so it is presized: this
@@ -2023,6 +2095,23 @@ class _EngineEntryDispatcher:
             _bracket_to_leg_specs(self._bracket), side, ref_price
         )
         return _as_bracket_attachment_pair(attachments)
+
+    def _resting_stop_loss_attachments(
+        self, side: OrderSide, ref_price: float
+    ) -> List[StopAttachment]:
+        """Resolve this run's resting-eligible ``StopLossRule`` (if any) into
+        an ``attached_exits`` entry.
+
+        Kept on ``attached_exits`` rather than the fixed ``attached_stop_loss``
+        field so this mechanism can never collide with a bracket's stop leg —
+        a spec carrying both an ``OcoBracketRule`` and a resting-eligible
+        standalone ``StopLossRule`` (unusual, but not DSL-forbidden) attaches
+        both without either overwriting the other. Returns ``[]`` when the
+        spec has no resting-eligible stop-loss rule.
+        """
+        if self._resting_stop_loss is None:
+            return []
+        return [resolve_resting_stop_loss_attachment(self._resting_stop_loss, side, ref_price)]
 
     def _compute_qty(
         self,
