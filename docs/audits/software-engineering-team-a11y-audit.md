@@ -29,9 +29,9 @@ routes and by a repo-wide grep for its class name/selector — **none has a live
 consumer**:
 
 ```
-grep -rl "RunTeamFormComponent\|app-run-team-form" src/app --include=*.ts --include=*.html
-grep -rl "ExecutionTasksComponent\|app-execution-tasks" src/app --include=*.ts --include=*.html
-grep -rl "import.*JobStatusComponent.*from.*job-status/job-status" src/app --include=*.ts
+grep -rl "RunTeamFormComponent\|app-run-team-form" user-interface/src/app --include=*.ts --include=*.html
+grep -rl "ExecutionTasksComponent\|app-execution-tasks" user-interface/src/app --include=*.ts --include=*.html
+grep -rl "import.*JobStatusComponent.*from.*job-status/job-status" user-interface/src/app --include=*.ts
 # etc. — all empty except the component's own files
 ```
 
@@ -165,8 +165,8 @@ All `.ts:` / `.html:` citations in this table refer to
 | stalled | MISSING | `shared/stall-warning` exists in the codebase but is imported only by the two dead components (`run-team-tracking`, `job-status`) — **not used anywhere live**, despite this panel's polling being exactly the kind of long-running-job surface it exists for. Scoped search: `grep -rl StallWarning src/app/components/coding-team-page src/app/components/coding-team-monitor` → no match. |
 | failed | HANDLED | Failed runs show in Recent with a status badge that always pairs color with literal status text. |
 | permission-denied / backend-unconfigured | HANDLED | GitHub-not-configured renders a clear message + link (marred by A11Y-3's contrast). `.html:66-73`. A `listJobs()` 401/403 lands in `runsError` → `<app-inline-banner variant="error">`, which is `role="alert"`. `.ts:927-930`, `.html:377` |
-| offline / API-error | HANDLED | Same `runsError`/inline-banner path — this is the *correct* version of the pattern SE-dashboard's STATE-1 gets wrong. |
-| stale-data | HANDLED | No explicit "as of" timestamp, but a failed refresh surfaces `runsError` inline, which functions as the staleness signal (the visible list may be behind, and the banner says so). |
+| offline / API-error | HANDLED | Same `runsError`/inline-banner path. It gets the part STATE-1's page gets wrong — the poll survives the failure — but not last-good retention: see the `stale-data` row. |
+| stale-data | MISSING | The panel does not go stale on a failed poll; it goes **empty**. `catchError` returns `of([] as CodingTeamJobListItem[])` (`coding-team-page.component.ts:931-934`), the subscription feeds that into `applyRuns` (`:939`), and `applyRuns` assigns `this.runs = mine` unconditionally (`:969`) — so a single failed poll clears the list and re-renders the `runs.length === 0` empty state (`coding-team-page.component.html:380`) beneath the error banner. There is no "as of" timestamp and no retained last-good list, so the user cannot tell how old the view is; they are shown "No runs yet" for runs that exist. |
 
 ### `/software-engineering/code-review`
 
@@ -183,7 +183,7 @@ All `.ts:` / `.html:` citations in this table refer to
 | failed | HANDLED | Status badge with a full human-readable mapping table for every backend status, including a safe fallback. `review-metrics.ts:145-236` |
 | permission-denied / backend-unconfigured | HANDLED | GitHub-not-configured empty state (marred by A11Y-3). For the repo/PR fetches themselves, confirmed `error:` handlers exist on every subscribe (not merely inferred): `.ts:181,207,270`. |
 | offline / API-error | HANDLED | Same confirmed `error:` handlers. |
-| stale-data | HANDLED | Same reasoning as Coding Team — a failed refresh surfaces an inline error that doubles as the staleness signal. |
+| stale-data | HANDLED | Unlike Coding Team, this page genuinely retains the last-good list: the `error:` handler at `code-review-dashboard.component.ts:207-210` sets `repoError` and clears the loading flag but never touches `this.repos`, so the previously loaded rows stay rendered beneath the inline error. No "as of" timestamp, but the error is the staleness signal and the data behind it is real. This is the better of the two in-team patterns and the one STATE-1's fix should be measured against. |
 
 ## Findings
 
@@ -201,15 +201,27 @@ All `.ts:` / `.html:` citations in this table refer to
 - **Why it's a problem**: this is the primary landing surface for the SE team's whole
   job list; silently breaking it defeats the entire "hand it a spec, get a merged PR"
   promise the dashboard's own subtitle makes. Compare with
-  `coding-team-page.component.ts:917-934`, which polls the *same kind* of job list
-  correctly — `catchError` at the inner observable keeps the `timer` alive and surfaces
-  `runsError` via an inline `role="alert"` banner. That's the fix to copy.
-- **Recommended change**: give the poll the same shape as Coding Team's. The error path
-  must emit **nothing** rather than an empty response — returning
-  `of({ jobs: [] })` would run the `next` handler with an empty array and blank the
-  visible list on a transient failure, which is the opposite of the stale-data behavior
-  this audit credits Coding Team for (the last-good list stays on screen, the banner
-  signals it may be behind):
+  `coding-team-page.component.ts:917-940`, which polls the *same kind* of job list and
+  gets the survival half right — `catchError` on the **inner** observable keeps the outer
+  `timer` alive and surfaces `runsError` via an inline `role="alert"` banner. That is the
+  part to copy, and it is exactly what the SE dashboard lacks.
+- **Recommended change**: adopt Coding Team's inner-`catchError` structure, then go one
+  step further than it does on the error path. Be precise about what is house pattern and
+  what is new here, because the two differ:
+  - **Copied from Coding Team**: `catchError` inside the `switchMap` so the inner
+    observable completes and the outer `timer` survives, plus a `tap` that clears the
+    error only on success, plus an inline `role="alert"` banner.
+  - **A deliberate refinement, not a copy**: emitting `EMPTY` instead of an empty
+    payload. Coding Team returns `of([] as CodingTeamJobListItem[])`
+    (`coding-team-page.component.ts:931-934`), which flows into `applyRuns` and assigns
+    `this.runs = mine` unconditionally (`:969`) — so its panel *clears* on a failed poll
+    and shows "No runs yet" under the error banner. Copying that here would blank the SE
+    job list on any transient failure, telling the user they have no jobs when they do.
+    `EMPTY` completes the inner observable without emitting, so `next` never runs and the
+    last-good list stays on screen behind the banner.
+  If last-good retention is the behavior the house wants, `coding-team-page`'s own
+  `catchError` needs the same change — that is a separate, unfiled question this audit
+  raises rather than answers:
   ```ts
   this.jobsSub = timer(0, POLL_JOBS_MS).pipe(
     switchMap(() => this.api.getRunningJobs(false).pipe(
@@ -348,7 +360,7 @@ All `.ts:` / `.html:` citations in this table refer to
 
 ### A11Y-3 — The only way out of "GitHub not configured" is a near-invisible link
 - **Severity**: High
-- **Location**: root cause at `user-interface/src/styles.scss:132-140` (global `a { color: var(--kh-accent-text); text-decoration: none; }`, hover-only color change, no compensating underline); reproduction sites at `code-review-dashboard.component.html:26` and `coding-team-page.component.html:71`.
+- **Location**: root cause at `user-interface/src/styles.scss:132-140` (global `a { color: var(--kh-accent-text); text-decoration: none; }`, hover-only color change, no compensating underline); reproduction sites at `user-interface/src/app/components/code-review-dashboard/code-review-dashboard.component.html:26` and `user-interface/src/app/components/coding-team-page/coding-team-page.component.html:71`.
 - **What the user hits**: reproduced live — the Code Review page's "GitHub integration
   is not configured" state renders `<a routerLink="/integrations">Set up GitHub</a>`
   inline in a sentence. axe's `link-in-text-block` rule measured **1.18:1** contrast
@@ -472,13 +484,23 @@ All `.ts:` / `.html:` citations in this table refer to
   <a [routerLink]="team.route" routerLinkActive="active" #rla="routerLinkActive"
      [attr.aria-current]="rla.isActive ? 'page' : null">
   ```
-  in `dashboard-shell.component.html` (mirroring `app-shell`'s existing `isActive()`
-  helper), and add `{label: 'Code Review', route: '/software-engineering/code-review'}`
-  to the `subTeams` array in `software-engineering-dashboard.component.html:5-8`.
-- **Cost**: S. The `aria-current` half is a shared primitive (every team dashboard using
-  `subTeams`); the missing-link half is SE-specific.
+  in `dashboard-shell.component.html`; add `{label: 'Code Review', route:
+  '/software-engineering/code-review'}` to the `subTeams` array in
+  `software-engineering-dashboard.component.html:5-8`; **and add an `.active` rule to
+  `dashboard-shell.component.scss`**, which currently has none (`grep -n active
+  user-interface/src/app/shared/dashboard-shell/dashboard-shell.component.scss` returns
+  nothing). Without it, `routerLinkActive="active"` binds a class with no stylesheet
+  behind it and the visual half of this finding stays unfixed — a sighted user still
+  cannot tell which sub-team page they are on. Mirror the global nav's treatment in
+  `app-shell.component.scss` (its `&.active` rules at `:122`, `:218`, `:246`, `:270`,
+  `:353`) using `--kh-*` tokens rather than inventing a new accent.
+- **Cost**: S, three parts: the `aria-current` binding and the new `.active` rule are
+  both in the shared primitive (reaching every team dashboard that passes `subTeams`);
+  the missing-link half is SE-specific.
 - **Verification**: `dashboard-shell.component.spec.ts` — assert `aria-current="page"`
-  is present when a `subTeams` route matches the current URL.
+  is present when a `subTeams` route matches the current URL, and that the matching link
+  carries the `active` class. The visual half needs an eyeball: a spec can prove the
+  class is bound but not that the rule renders a perceptible difference.
 
 ### A11Y-7 — Supplementary info surfaced only via hover-only `matTooltip`
 - **Severity**: Medium
