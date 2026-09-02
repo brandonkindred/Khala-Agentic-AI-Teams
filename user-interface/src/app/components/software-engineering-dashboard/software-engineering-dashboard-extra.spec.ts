@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi, beforeEach } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
@@ -23,6 +24,7 @@ describe('SoftwareEngineeringDashboardComponent (extra coverage)', () => {
       imports: [SoftwareEngineeringDashboardComponent, NoopAnimationsModule],
       providers: [
         provideHttpClient(),
+        provideHttpClientTesting(),
         provideRouter([]),
         { provide: SoftwareEngineeringApiService, useValue: api },
       ],
@@ -90,5 +92,65 @@ describe('SoftwareEngineeringDashboardComponent (extra coverage)', () => {
     component.ngOnDestroy();
     // No throw
     expect(component).toBeTruthy();
+  });
+
+  describe('focus management', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('showNewProject moves focus into the new-project region', () => {
+      fixture.detectChanges();
+      vi.useFakeTimers();
+      component.showNewProject();
+      fixture.detectChanges();
+      vi.runAllTimers();
+      const region = fixture.nativeElement.querySelector('.new-project-view');
+      expect(region).not.toBeNull();
+      expect(document.activeElement).toBe(region);
+    });
+
+    it('showJobs moves focus into the jobs list view', () => {
+      fixture.detectChanges();
+      vi.useFakeTimers();
+      component.showJobs();
+      fixture.detectChanges();
+      vi.runAllTimers();
+      const region = fixture.nativeElement.querySelector('.jobs-list-view');
+      expect(region).not.toBeNull();
+      expect(document.activeElement).toBe(region);
+    });
+
+    it('onWorkflowLaunched recovers focus into the jobs list view', () => {
+      fixture.detectChanges();
+      vi.useFakeTimers();
+      component.onWorkflowLaunched({ job_id: 'j1', conversation_id: 'c1' });
+      fixture.detectChanges();
+      vi.runAllTimers();
+      const region = fixture.nativeElement.querySelector('.jobs-list-view');
+      expect(region).not.toBeNull();
+      expect(document.activeElement).toBe(region);
+    });
+
+    it('the poll-driven empty-to-jobs flip does not move focus', () => {
+      api.getRunningJobs.mockReturnValue(of({
+        jobs: [{ job_id: 'a', status: 'running' }],
+      }));
+      const before = document.activeElement;
+      vi.useFakeTimers();
+      fixture.detectChanges();
+      vi.runAllTimers();
+      expect(component.activeView).toBe('jobs');
+      expect(document.activeElement).toBe(before);
+    });
+
+    it('ngOnDestroy clears a pending focus timer', () => {
+      fixture.detectChanges();
+      vi.useFakeTimers();
+      component.showNewProject();
+      fixture.detectChanges();
+      component.ngOnDestroy();
+      expect(() => vi.runAllTimers()).not.toThrow();
+    });
   });
 });
