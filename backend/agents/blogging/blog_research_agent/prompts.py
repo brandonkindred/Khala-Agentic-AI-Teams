@@ -86,14 +86,16 @@ DOC_SCORE_AND_SUMMARIZE_PROMPT = (
     + "\n\n## Summarization\n\n"
     + DOC_SUMMARIZATION_PROMPT
     + "\n\n## Response shape\n\n"
-    "Return a single JSON object only (no markdown, no code fence) that "
-    "carries all six keys from both tasks above:\n"
-    "- relevance_score: float between 0 and 1\n"
-    "- authority_score: float between 0 and 1\n"
-    "- accuracy_score: float between 0 and 1\n"
-    "- type: string\n"
-    "- summary: string\n"
-    "- key_points: list of strings"
+    + (
+        "Return a single JSON object only (no markdown, no code fence) that "
+        "carries all six keys from both tasks above:\n"
+        "- relevance_score: float between 0 and 1\n"
+        "- authority_score: float between 0 and 1\n"
+        "- accuracy_score: float between 0 and 1\n"
+        "- type: string\n"
+        "- summary: string\n"
+        "- key_points: list of strings"
+    )
 )
 
 
