@@ -267,6 +267,7 @@ def test_llm_service_record_call_emits_otel_span(span_exporter) -> None:
 
 
 def test_build_span_exporter_selects_the_grpc_transport(monkeypatch) -> None:
+    """OTEL_EXPORTER_OTLP_PROTOCOL=grpc picks the gRPC exporter over the HTTP default."""
     pytest.importorskip("opentelemetry.exporter.otlp.proto.grpc.trace_exporter")
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
@@ -275,10 +276,13 @@ def test_build_span_exporter_selects_the_grpc_transport(monkeypatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4317")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
 
-    assert isinstance(_build_span_exporter(), OTLPSpanExporter)
+    exporter = _build_span_exporter()
+    assert isinstance(exporter, OTLPSpanExporter)
+    exporter.shutdown()
 
 
 def test_build_metric_exporter_selects_the_grpc_transport(monkeypatch) -> None:
+    """The metric path honors the same transport selector as the span path."""
     pytest.importorskip("opentelemetry.exporter.otlp.proto.grpc.metric_exporter")
     from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 
@@ -288,7 +292,9 @@ def test_build_metric_exporter_selects_the_grpc_transport(monkeypatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
     monkeypatch.delenv("OTEL_METRICS_EXPORTER", raising=False)
 
-    assert isinstance(_build_metric_exporter(), OTLPMetricExporter)
+    exporter = _build_metric_exporter()
+    assert isinstance(exporter, OTLPMetricExporter)
+    exporter.shutdown()
 
 
 def test_build_span_exporter_returns_none_when_the_package_is_missing(monkeypatch) -> None:
@@ -305,6 +311,7 @@ def test_build_span_exporter_returns_none_when_the_package_is_missing(monkeypatc
 
 
 def test_build_metric_exporter_returns_none_when_the_package_is_missing(monkeypatch) -> None:
+    """The metric path degrades the same way as the span path when its package is absent."""
     import sys
 
     from shared.observability.otel import _build_metric_exporter
@@ -318,6 +325,7 @@ def test_build_metric_exporter_returns_none_when_the_package_is_missing(monkeypa
 
 
 def test_install_global_instrumentors_swallows_missing_packages(monkeypatch) -> None:
+    """Instrumentation is best-effort: absent packages must not fail init."""
     import sys
 
     from shared.observability.otel import _install_global_instrumentors
@@ -334,6 +342,7 @@ def test_install_global_instrumentors_swallows_missing_packages(monkeypatch) -> 
 
 
 def test_instrument_fastapi_app_is_a_no_op_when_otel_is_disabled(monkeypatch) -> None:
+    """When OTel is disabled the app is left completely untouched — no sentinel either."""
     from shared.observability import otel as otel_module
 
     monkeypatch.setattr(otel_module, "_enabled", False)
@@ -365,6 +374,7 @@ def test_instrument_fastapi_app_swallows_instrumentor_failures(monkeypatch) -> N
 
 
 def test_get_tracer_falls_back_to_a_noop_tracer(monkeypatch) -> None:
+    """Callers may request a tracer unconditionally, SDK present or not."""
     import sys
 
     from shared.observability.otel import _NoopTracer, get_tracer
@@ -375,6 +385,7 @@ def test_get_tracer_falls_back_to_a_noop_tracer(monkeypatch) -> None:
 
 
 def test_get_meter_falls_back_to_a_noop_meter(monkeypatch) -> None:
+    """Same unconditional-call contract as get_tracer, on the metrics side."""
     import sys
 
     from shared.observability.otel import _NoopMeter, get_meter
@@ -385,6 +396,7 @@ def test_get_meter_falls_back_to_a_noop_meter(monkeypatch) -> None:
 
 
 def test_get_tracer_and_get_meter_return_sdk_objects_when_available() -> None:
+    """The fallbacks are a last resort — a live SDK must yield real instruments."""
     from shared.observability.otel import _NoopMeter, _NoopTracer, get_meter, get_tracer
 
     assert not isinstance(get_tracer("shared.observability.tests"), _NoopTracer)
@@ -410,6 +422,7 @@ class _FailingProvider:
 
 
 def test_shutdown_otel_flushes_both_providers(monkeypatch) -> None:
+    """The happy path: each provider is flushed exactly once."""
     from shared.observability import otel as otel_module
 
     tracer_provider = _RecordingProvider()
@@ -434,6 +447,7 @@ def test_shutdown_otel_swallows_provider_failures(monkeypatch) -> None:
 
 
 def test_shutdown_otel_is_safe_before_initialization(monkeypatch) -> None:
+    """A lifespan hook may fire even when init never ran."""
     from shared.observability import otel as otel_module
 
     monkeypatch.setattr(otel_module, "_tracer_provider", None)
@@ -443,6 +457,7 @@ def test_shutdown_otel_is_safe_before_initialization(monkeypatch) -> None:
 
 
 def test_shutdown_otel_skips_providers_without_a_shutdown_hook(monkeypatch) -> None:
+    """A provider that predates the shutdown protocol is skipped, not called blindly."""
     from shared.observability import otel as otel_module
 
     monkeypatch.setattr(otel_module, "_tracer_provider", object())
@@ -476,6 +491,7 @@ def test_noop_span_exit_does_not_suppress_exceptions() -> None:
 
 
 def test_noop_tracer_yields_noop_spans() -> None:
+    """Both span factories hand back something safe to use as a context manager."""
     from shared.observability.otel import _NoopSpan, _NoopTracer
 
     tracer = _NoopTracer()
@@ -485,6 +501,7 @@ def test_noop_tracer_yields_noop_spans() -> None:
 
 
 def test_noop_meter_yields_noop_instruments() -> None:
+    """Every instrument factory yields a recorder that absorbs add/record."""
     from shared.observability.otel import _NoopInstrument, _NoopMeter
 
     meter = _NoopMeter()
@@ -523,6 +540,7 @@ def reinitializable_otel(monkeypatch):
 
 
 def test_init_otel_honors_otel_sdk_disabled(reinitializable_otel, monkeypatch) -> None:
+    """The standard opt-out short-circuits before any provider is built."""
     monkeypatch.setenv("OTEL_SDK_DISABLED", "TRUE")
 
     assert reinitializable_otel.init_otel(service_name="x", team_key="x") is False
@@ -561,10 +579,23 @@ def test_init_otel_wires_exporters_when_they_resolve(reinitializable_otel, monke
     tracer_provider.shutdown()
 
 
-def test_init_otel_is_latched_after_the_first_call() -> None:
-    """A second call returns the first call's verdict without re-running init."""
+def test_init_otel_is_latched_after_the_first_call(monkeypatch) -> None:
+    """A second call returns the first call's verdict without re-running init.
+
+    The spy is the load-bearing half: returning the same verdict proves nothing on
+    its own, since a broken latch would re-run initialization and still report the
+    same result. An exporter rebuild is the cheapest observable side effect of that
+    re-run, so its absence is what pins the latch.
+    """
     from shared.observability import otel as otel_module
 
-    first = otel_module.init_otel(service_name="ignored", team_key="ignored")
+    build_calls: list[int] = []
+    monkeypatch.setattr(
+        otel_module, "_build_span_exporter", lambda: build_calls.append(1) or None
+    )
 
-    assert otel_module.init_otel(service_name="also-ignored", team_key="also") is first
+    first = otel_module.init_otel(service_name="ignored", team_key="ignored")
+    second = otel_module.init_otel(service_name="also-ignored", team_key="also")
+
+    assert second is first
+    assert build_calls == []

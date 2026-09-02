@@ -249,5 +249,6 @@ def test_parse_json_model_raises_when_no_object_is_present() -> None:
 
 
 def test_parse_json_model_propagates_undecodable_json() -> None:
-    with pytest.raises(Exception):
+    """Both failure modes are ValueErrors: JSONDecodeError and pydantic's ValidationError."""
+    with pytest.raises(ValueError):
         _parse_json_model("{not json at all}", _Model)
