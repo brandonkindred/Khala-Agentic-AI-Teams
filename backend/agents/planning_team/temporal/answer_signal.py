@@ -24,6 +24,7 @@ class will use it.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import workflow
@@ -51,15 +52,24 @@ SUBMIT_PLANNING_ANSWERS_SIGNAL = "submit_planning_answers"
 def _option_confidence(option: Dict[str, Any]) -> float:
     """``option``'s confidence as a float, 0.0 when absent or unusable.
 
-    Postconditions: never raises; a missing, non-numeric or bool ``confidence``
-        scores 0.0, so a malformed option can never outrank a well-formed one.
-        ``bool`` is excluded explicitly because it is an ``int`` subclass and
-        ``True`` would otherwise score 1.0 -- ahead of every real option.
+    Postconditions: never raises; a missing, non-numeric, bool or non-finite
+        ``confidence`` scores 0.0, so a malformed option can never outrank a
+        well-formed one. Two exclusions are not obvious:
+
+        - ``bool`` is an ``int`` subclass, so ``True`` would otherwise score
+          1.0 -- ahead of every real option.
+        - ``NaN`` passes the numeric check but loses every ``>`` comparison, so
+          ``max`` KEEPS a leading NaN option over later, higher-confidence
+          ones. That is a malformed option outranking well-formed ones, which
+          is exactly what this postcondition rules out. ``json.loads`` accepts
+          a bare ``NaN`` token, and these dicts originate from LLM-parsed
+          output, so it is reachable rather than theoretical.
     """
     value = option.get("confidence")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
-    return float(value)
+    confidence = float(value)
+    return confidence if math.isfinite(confidence) else 0.0
 
 
 def _default_answer(question: Dict[str, Any]) -> Dict[str, Any]:
@@ -160,8 +170,10 @@ def build_temporal_planning_answer_callback(
           answer for a question the submitter did answer, and never overrides one
           with a default.
         - When any well-formed question has no matching answer and ``allow_repause``
-          is true, ``cb`` raises ``PlanningAnswerPauseSignal`` on a freshly minted
-          token rather than submitting a set the route would reject. That covers
+          is true, ``cb`` raises ``PlanningAnswerPauseSignal`` rather than submitting
+          a set the route would reject -- on a freshly minted token when
+          ``next_resume_token`` was given, else on the original ``resume_token``
+          (see that parameter's precondition). That covers
           both "the submitter skipped this one" and "the replay opened a question
           nobody has seen"; either way the answer that would let Planning proceed
           does not exist yet, and inventing one is the silent auto-answer both

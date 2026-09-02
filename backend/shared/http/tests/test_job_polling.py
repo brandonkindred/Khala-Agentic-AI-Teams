@@ -829,3 +829,25 @@ async def test_async_post_json_returns_none_when_client_closed_mid_flight():
     client.post = AsyncMock(side_effect=RuntimeError("Cannot send a request, as the client has been closed."))
     with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
         assert await async_post_json("http://x/run", {}) is None
+
+
+def test_poll_rejects_a_non_exception_passthrough_entry():
+    """A bad entry would otherwise surface as a TypeError chained onto whatever
+    on_poll actually raised, mid-poll and far from the call site — the failure
+    mode the file's other preconditions use asserts to avoid."""
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=(str,),  # type: ignore[arg-type]
+        )
+
+
+def test_poll_rejects_a_bare_class_passed_as_passthrough_exceptions():
+    """The parameter is a *tuple* of types; a bare class is iterated character
+    by... no — it is not iterable at all, so `all(...)` raises TypeError rather
+    than asserting. Pin the tuple requirement explicitly."""
+    with pytest.raises((AssertionError, TypeError)):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=_PauseSignal,  # type: ignore[arg-type]
+        )

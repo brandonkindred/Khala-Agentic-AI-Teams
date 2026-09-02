@@ -829,12 +829,20 @@ def test_run_agent_via_reasoning_wraps_the_reasoning_model_only_with_tools(
 
     class _RecordingAgent:
         def __init__(self, **kwargs: Any) -> None:
+            # Each instance remembers its OWN model, so what it returns depends on
+            # which agent is called rather than on how many have been constructed.
+            # A construction count only works while the wiring builds agent 1,
+            # calls it, then builds agent 2; construct both up front or reuse one
+            # instance and the prose reaches the JSON-parsing pass, failing as an
+            # opaque validation error instead of naming the wiring change this
+            # test exists to pin.
+            model = kwargs.get("model")
+            inner = getattr(model, "inner", model)
+            self._wants_json = getattr(inner, "config", {}).get("response_format") == "json"
             agent_calls.append(kwargs)
 
         def __call__(self, prompt: str) -> str:
-            if len(agent_calls) == 1:
-                return "REVIEW PROSE"
-            return '{"approved": true, "summary": "ok"}'
+            return '{"approved": true, "summary": "ok"}' if self._wants_json else "REVIEW PROSE"
 
     class _ClonableModel:
         def __init__(self) -> None:

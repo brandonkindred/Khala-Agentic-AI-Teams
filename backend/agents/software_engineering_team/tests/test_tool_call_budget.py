@@ -123,6 +123,20 @@ def _sees_budget_directive(system_prompt: Any) -> bool:
     return "budget for this task is exhausted" in json.dumps(system_prompt, default=str)
 
 
+def _spend_budget(model: ToolCallBudgetModel, n: int) -> None:
+    """Put ``model`` in the state a run that already emitted ``n`` tool calls
+    would be in, without driving a whole turn to get there.
+
+    The private write is deliberate and centralized: these tests need the at-cap
+    regime as a *precondition*, not as the thing under test, and draining a setup
+    turn first would make each one exercise two code paths. Keeping the coupling
+    in one place means a rename of the counter breaks here, with this name in the
+    traceback, rather than silently becoming a dead write in four tests that then
+    fail with "toolUse leaked through".
+    """
+    model._tool_calls_used = n
+
+
 def _drain(model: Any, **kwargs: Any) -> List[Dict]:
     async def _run() -> List[Dict]:
         return [event async for event in model.stream(**kwargs)]
@@ -235,7 +249,13 @@ def test_delegates_unknown_attributes_and_config() -> None:
 
 def test_config_helpers_tolerate_a_bare_model() -> None:
     class _Bare:
-        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs):
+        async def stream(
+            self,
+            messages: Any,
+            tool_specs: Optional[List[Any]] = None,
+            system_prompt: Optional[str] = None,
+            **kwargs: Any,
+        ):
             for event in _text_events("done"):
                 yield event
 
@@ -464,7 +484,13 @@ def test_strands_model_defaults_are_bound_to_the_wrapper() -> None:
     """A `Model` method reached through the fallback must bind `self`."""
 
     class _Bare:
-        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs):
+        async def stream(
+            self,
+            messages: Any,
+            tool_specs: Optional[List[Any]] = None,
+            system_prompt: Optional[str] = None,
+            **kwargs: Any,
+        ):
             for event in _text_events("done"):
                 yield event
 
@@ -532,7 +558,7 @@ def test_dropped_tool_use_keeps_its_block_stop_when_text_shares_the_block() -> N
     a semantic-exhaustion error instead of a graceful degrade.
     """
     model = ToolCallBudgetModel(_TextAndToolUseInOneBlockModel(), 1)
-    model._tool_calls_used = 1  # budget already spent: this is the final turn
+    _spend_budget(model, 1)  # budget already spent: this is the final turn
 
     events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
 
@@ -583,8 +609,7 @@ def test_drop_state_is_scoped_to_the_block_that_opened_it() -> None:
             yield {"messageStop": {"stopReason": "tool_use"}}
 
     model = ToolCallBudgetModel(_InterleavedModel(), 1)
-    model._tool_calls_used = 1
-
+    _spend_budget(model, 1)
     events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
 
     # The text block survives intact, including its own stop.
@@ -756,7 +781,7 @@ def test_an_unrelated_blocks_stop_does_not_discard_another_blocks_text() -> None
             yield {"messageStop": {"stopReason": "tool_use"}}
 
     model = ToolCallBudgetModel(_InterleavedTextAndToolUse(), 1)
-    model._tool_calls_used = 1  # budget spent: this is the final turn
+    _spend_budget(model, 1)  # budget spent: this is the final turn
 
     events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
 
@@ -866,7 +891,7 @@ def test_a_forwarded_block_start_keeps_its_stop_even_when_its_tool_use_is_droppe
             yield {"messageStop": {"stopReason": "tool_use"}}
 
     model = ToolCallBudgetModel(_PlainStartThenOverCapToolDelta(), 1)
-    model._tool_calls_used = 1  # budget spent: the tool use is dropped
+    _spend_budget(model, 1)  # budget spent: the tool use is dropped
 
     events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
 

@@ -3169,7 +3169,7 @@ class TradingService:
                         # children when the strategy attached protective legs;
                         # non-bracket entries pay zero overhead (flag is False).
                         # One predicate, not a hand-rolled OR: an entry whose
-                        # exit legs live only in `attached_exits` must register
+                        # exit legs live only in ``attached_exits`` must register
                         # as bracket-eligible too, or materializing its children
                         # on fill raises "not a known top-level order id".
                         expect_brackets=req.has_attached_exits,

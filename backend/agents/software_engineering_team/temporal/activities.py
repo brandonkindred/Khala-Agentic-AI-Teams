@@ -507,10 +507,14 @@ def plan_project_activity(
     than inherited via contextvars. ``resume_token``/``submitted_answers`` are supplied by
     the calling workflow when re-invoking this activity after a prior pause was resolved by
     a ``submit_planning_answers`` signal; omitted on a fresh (unpaused) invocation.
-    ``allow_repause=False`` forbids a further pause outright, so this activity always
-    returns a ``PlanResult``: the calling workflow passes it on the last round of its
-    bounded pause loop, because Planning's question ids are LLM-minted and can drift
-    across a replay, which would otherwise re-pause forever.
+    ``allow_repause=False`` suppresses a further pause *via the answer callback* (see
+    ``build_temporal_planning_answer_callback``), which is what the calling workflow
+    passes on the last round of its bounded pause loop -- Planning's question ids are
+    LLM-minted and can drift across a replay, which would otherwise re-pause forever.
+    It is not enforced in this function: a persisted pause replayed on re-entry, or a
+    ``PlanningAnswerPauseSignal`` raised anyway, still returns ``{"outcome": "paused"}``
+    here and the calling workflow fails the run non-retryably. The end-to-end guarantee
+    holds across the two files; this one does not promise it alone.
     """
     with bind_trace_id(trace_id or new_trace_id()):
         return _plan_project_activity_body(
@@ -693,6 +697,15 @@ def _plan_project_activity_body(
         ).model_dump()
 
     except PlanningAnswerPauseSignal as exc:
+        if not allow_repause:
+            # The callback was told not to pause and did anyway. The workflow will
+            # fail the run non-retryably on the next loop check, so say why here --
+            # otherwise the only trace is a workflow failure with no local cause.
+            logger.warning(
+                "plan_project_activity paused despite allow_repause=False for job %s",
+                job_id,
+                extra={"trace_id": current_trace_id()},
+            )
         from software_engineering_team.orchestrator import _structure_planning_questions
 
         structured = _structure_planning_questions(exc.pending_questions, source="planning")

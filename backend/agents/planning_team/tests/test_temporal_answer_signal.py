@@ -661,3 +661,48 @@ def test_callback_rejects_a_non_callable_next_resume_token() -> None:
             submitted_answers=[],
             next_resume_token="tok-2",  # type: ignore[arg-type]
         )
+
+
+def test_default_answer_ignores_a_nan_confidence() -> None:
+    """NaN passes the numeric check but loses every ``>`` comparison, so ``max``
+    keeps a LEADING NaN option over later, higher-confidence ones — a malformed
+    option outranking well-formed ones, which the postcondition rules out.
+
+    Order matters here: the NaN option is first, which is the only arrangement
+    that exposes the bug.
+    """
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[], allow_repause=False)
+
+    result = cb(
+        [
+            {
+                "id": "q1",
+                "options": [
+                    {"id": "opt-nan", "confidence": float("nan")},
+                    {"id": "opt-real", "confidence": 0.4},
+                ],
+            }
+        ]
+    )
+
+    assert result[0]["selected_option_id"] == "opt-real"
+
+
+def test_default_answer_ignores_an_infinite_confidence() -> None:
+    """``inf`` is finite-checked for the same reason: it would outrank every real
+    option rather than being treated as the malformed value it is."""
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[], allow_repause=False)
+
+    result = cb(
+        [
+            {
+                "id": "q1",
+                "options": [
+                    {"id": "opt-inf", "confidence": float("inf")},
+                    {"id": "opt-real", "confidence": 0.4},
+                ],
+            }
+        ]
+    )
+
+    assert result[0]["selected_option_id"] == "opt-real"

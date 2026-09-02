@@ -73,9 +73,15 @@ def now_iso() -> str:
     leaving rows written through that path formatted differently from every other
     row in the same column.
 
-    Postconditions: returns an ISO-8601 string in UTC with an explicit offset.
+    Postconditions: returns an ISO-8601 string in UTC with an explicit offset and
+        microsecond precision. ``timespec`` is pinned rather than left to default
+        because ``isoformat()`` omits the fractional part entirely when
+        ``microsecond == 0`` -- so the shape would vary once every million-odd
+        calls, which is exactly the drift this shared formatter exists to prevent.
+        Rows already written without a fraction still order correctly against it
+        ("+" < "." in ASCII, and the microsecond-zero stamp is the earlier one).
     """
-    return datetime.now(tz=timezone.utc).isoformat()
+    return datetime.now(tz=timezone.utc).isoformat(timespec="microseconds")
 
 
 def _validate_pagination(limit: Optional[int], offset: int) -> None:

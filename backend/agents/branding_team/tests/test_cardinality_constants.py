@@ -405,6 +405,7 @@ def test_now_iso_is_utc_with_an_explicit_offset() -> None:
     postcondition the docstring states. It lives here rather than beside the store
     tests because those are gated on a real Postgres and this needs none.
     """
+    import re
     from datetime import datetime, timedelta
 
     from branding_team.store import now_iso
@@ -415,5 +416,7 @@ def test_now_iso_is_utc_with_an_explicit_offset() -> None:
     assert parsed.tzinfo is not None
     assert parsed.utcoffset() == timedelta(0)
     assert value.endswith("+00:00")
-    # Microsecond precision: two stamps in the same second must still order.
-    assert "." in value.split("+")[0]
+    # Microsecond precision, pinned via timespec in now_iso itself: without it
+    # isoformat() omits the fraction whenever microsecond == 0, so this assertion
+    # would fail against a correct implementation roughly once in a million runs.
+    assert re.fullmatch(r".*T\d{2}:\d{2}:\d{2}\.\d{6}", value.split("+")[0])
