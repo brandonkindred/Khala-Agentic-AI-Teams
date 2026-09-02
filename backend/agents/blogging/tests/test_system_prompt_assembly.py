@@ -1,0 +1,42 @@
+"""Tests for the shared build_blogging_system_prompt_content() helper."""
+
+from __future__ import annotations
+
+from agents.blogging.shared.system_prompt_assembly import build_blogging_system_prompt_content
+
+from llm_service import CacheBreakpoint
+
+
+def test_both_texts_present_join_into_single_cache_breakpoint() -> None:
+    result = build_blogging_system_prompt_content("brand spec text", "writing guideline text")
+
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert isinstance(result[0], CacheBreakpoint)
+    assert result[0].text == "brand spec text\n\nwriting guideline text"
+
+
+def test_brand_spec_only_returns_single_cache_breakpoint() -> None:
+    result = build_blogging_system_prompt_content("brand spec text", "")
+
+    assert result == [CacheBreakpoint("brand spec text")]
+
+
+def test_writing_guideline_only_returns_single_cache_breakpoint() -> None:
+    result = build_blogging_system_prompt_content("", "writing guideline text")
+
+    assert result == [CacheBreakpoint("writing guideline text")]
+
+
+def test_both_empty_returns_none() -> None:
+    assert build_blogging_system_prompt_content("", "") is None
+
+
+def test_whitespace_only_texts_return_none() -> None:
+    assert build_blogging_system_prompt_content("   \n", "\t  ") is None
+
+
+def test_mixed_blank_and_whitespace_one_side() -> None:
+    result = build_blogging_system_prompt_content("brand spec text", "   \n")
+
+    assert result == [CacheBreakpoint("brand spec text")]
