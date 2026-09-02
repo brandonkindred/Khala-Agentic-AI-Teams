@@ -38,7 +38,7 @@ router = APIRouter()
     summary="Run full blog pipeline with gates",
     description=(
         "Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all "
-        "artifacts. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset "
+        "artifacts. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset or blank "
         "(see GET /health)."
     ),
 )
@@ -46,7 +46,7 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
     """Run the full brand-aligned pipeline with artifact persistence and gates.
 
     Raises:
-        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset.
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank.
     """
     from agents.blogging.api import main as _main
 
@@ -112,7 +112,7 @@ def health() -> dict:
     summary="Start full pipeline asynchronously",
     description=(
         "Starts the full blog pipeline in the background. Returns a job_id for polling "
-        "status. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset "
+        "status. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset or blank "
         "(see GET /health)."
     ),
 )
@@ -123,7 +123,7 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
         HTTPException(501): when the job store module is unavailable -- checked
             before the web-search precondition, so a broken deployment is
             reported as unavailable rather than as a configuration error.
-        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset.
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank.
     """
     from agents.blogging.api import main as _main
 

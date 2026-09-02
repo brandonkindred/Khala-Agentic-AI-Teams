@@ -194,6 +194,26 @@ def test_restart_job_422_when_web_search_not_configured_leaves_state_untouched(
     assert bjs.get_blog_job(job_id)["status"] == "completed"
 
 
+def test_resume_job_501_takes_precedence_over_web_search_422(
+    client: TestClient, monkeypatch
+) -> None:
+    """Job-store unavailability (501) is reported even when the web-search key is also unset."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(_api_main, "get_blog_job", None)
+    r = client.post("/job/anything/resume")
+    assert r.status_code == 501
+
+
+def test_restart_job_501_takes_precedence_over_web_search_422(
+    client: TestClient, monkeypatch
+) -> None:
+    """Job-store unavailability (501) is reported even when the web-search key is also unset."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(_api_main, "get_blog_job", None)
+    r = client.post("/job/anything/restart")
+    assert r.status_code == 501
+
+
 def test_restart_job_clears_research_cache(client: TestClient, monkeypatch, tmp_path: Path) -> None:
     """Restart must wipe the job's research checkpoint cache and packet, not just
     job-store fields — otherwise a "from scratch" restart with an unchanged brief

@@ -277,7 +277,7 @@ def delete_job(job_id: str) -> DeleteJobResponse:
         "Re-dispatch the pipeline for an interrupted job. The pipeline re-runs with "
         "the same inputs and work_dir, leveraging existing artifacts (planning cache, "
         "draft files) to skip completed work where possible. Rejects with 422 "
-        "web_search_not_configured if OLLAMA_API_KEY is unset (see GET /health)."
+        "web_search_not_configured if OLLAMA_API_KEY is unset or blank (see GET /health)."
     ),
 )
 def resume_blog_job(job_id: str) -> StartPipelineResponse:
@@ -287,7 +287,7 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
         HTTPException(501): when the job store is unavailable -- checked before
             the web-search precondition, so a broken deployment is reported as
             unavailable rather than as a configuration error.
-        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset.
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank.
         HTTPException(404): when the job does not exist.
         HTTPException(400): when the job is not in a resumable state, or its
             stored request payload is missing.
@@ -343,7 +343,7 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     summary="Restart a blog pipeline job from scratch",
     description=(
         "Reset the job and re-run the full pipeline with the same inputs. Rejects with "
-        "422 web_search_not_configured if OLLAMA_API_KEY is unset (see GET /health) "
+        "422 web_search_not_configured if OLLAMA_API_KEY is unset or blank (see GET /health) "
         "before any research state is staged or reset."
     ),
 )
@@ -354,7 +354,7 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
         HTTPException(501): when the job store is unavailable -- checked before
             the web-search precondition, so a broken deployment is reported as
             unavailable rather than as a configuration error.
-        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset,
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank,
             raised before any research-state staging or job reset.
         HTTPException(404): when the job does not exist.
         HTTPException(400): when the job is not in a restartable state, or its

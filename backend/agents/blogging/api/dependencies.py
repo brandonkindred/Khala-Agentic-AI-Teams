@@ -7,11 +7,14 @@ job-in-expected-state check (400). Also home to
 entry point (fresh start, resume, restart) calls before creating or mutating
 a job.
 
-Every dependency here re-imports ``agents.blogging.api.main`` at call time
-rather than capturing a reference at declaration time. Route handlers rely on
-this same late-binding so tests can monkeypatch individual helpers on the
-``main`` module to force the 501/404/400 branches; capturing a reference up
-front would silently stop observing those monkeypatches.
+Every dependency here re-imports its helper module at call time
+(``agents.blogging.api.main`` for the job-store helpers,
+``agents.blogging.blog_research_agent.tools.web_search`` for
+``require_web_search_configured``) rather than capturing a reference at
+declaration time. Route handlers rely on this same late-binding so tests can
+monkeypatch individual helpers to force the 501/404/400/422 branches;
+capturing a reference up front would silently stop observing those
+monkeypatches.
 """
 
 from __future__ import annotations
@@ -66,8 +69,8 @@ def require_web_search_configured() -> None:
             detail={
                 "error": "web_search_not_configured",
                 "message": (
-                    "OLLAMA_API_KEY is not set. The research stage requires an Ollama "
-                    "API key for web search (e.g. from https://ollama.com/settings/keys)."
+                    "OLLAMA_API_KEY is not set or is blank. The research stage requires "
+                    "an Ollama API key for web search (e.g. from https://ollama.com/settings/keys)."
                 ),
             },
         )

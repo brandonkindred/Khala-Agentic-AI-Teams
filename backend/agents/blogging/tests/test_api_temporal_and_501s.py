@@ -94,6 +94,16 @@ def test_full_pipeline_async_501_when_create_blog_job_none(client: TestClient, m
     assert r.status_code == 501
 
 
+def test_full_pipeline_async_501_takes_precedence_over_web_search_422(
+    client: TestClient, monkeypatch
+) -> None:
+    """Job-store unavailability (501) is reported even when the web-search key is also unset."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(_api_main, "create_blog_job", None)
+    r = client.post("/full-pipeline-async", json={"brief": "x"})
+    assert r.status_code == 501
+
+
 def test_full_pipeline_async_422_when_web_search_not_configured(
     client: TestClient, monkeypatch
 ) -> None:
