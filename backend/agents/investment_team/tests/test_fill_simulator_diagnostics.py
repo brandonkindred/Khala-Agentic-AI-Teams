@@ -311,10 +311,11 @@ def test_continuation_insufficient_capital_emits_rejected_event() -> None:
 
     Two symbols decouple the capital shortfall from the (per-symbol)
     concentration/leverage gates, same technique as the initial-entry test
-    above: 1) AAA takes a clean $900k position, leaving $100k cash: 2) BBB
-    (qty=1,800) gets a 50% participation-capped partial fill for $90k,
-    leaving only $10k cash; 3) BBB's continuation on a high-volume bar
-    targets the full $90k remainder — concentration/leverage stay low
+    above: 1) AAA takes a clean $900k position, leaving $100k cash; 2) BBB
+    (qty=1,800) gets a 10%-participation-capped partial fill — the bar's
+    9,000-share volume caps the fill at 0.10 * 9,000 = 900 shares, for
+    $90k — leaving only $10k cash; 3) BBB's continuation on a high-volume
+    bar targets the full $90k remainder — concentration/leverage stay low
     (BBB is a small fraction of $1M equity throughout), but cash can't
     cover it.
     """
