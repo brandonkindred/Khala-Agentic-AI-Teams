@@ -28,6 +28,34 @@ def _schema():
         cur.execute("TRUNCATE se_learnings, se_events, se_agent_traces")
 
 
+class _TraceRecord:
+    """A duck-typed stand-in for llm_service.telemetry.LLMCallRecord, with
+    sane defaults overridable per test via keyword arguments — one shared
+    builder for every trace_store round-trip test in this file."""
+
+    def __init__(self, **overrides: object) -> None:
+        self.timestamp = datetime.now(tz=timezone.utc).timestamp()
+        self.team = "software_engineering"
+        self.agent_key = "backend"
+        self.job_id = "j0"
+        self.task_id = "t0"
+        self.phase = "execution"
+        self.model = "m"
+        self.prompt_tokens = 10
+        self.completion_tokens = 5
+        self.total_tokens = 15
+        self.cache_read_tokens = 0
+        self.cache_creation_tokens = 0
+        self.cost_usd = 0.01
+        self.latency_ms = 100
+        self.status = "success"
+        self.outcome = "success"
+        self.objective = "o"
+        self.request_id = "r0"
+        for k, v in overrides.items():
+            setattr(self, k, v)
+
+
 def test_learnings_upsert_dedup_and_retrieve(_schema) -> None:
     """Upserting the same fingerprint bumps occurrences and refreshes the counter-measure."""
     from software_engineering_team.shared import learnings_store as ls
@@ -214,27 +242,21 @@ def test_trace_write_and_cost(_schema, monkeypatch) -> None:
     from shared.postgres import get_conn
     from software_engineering_team.shared import trace_store
 
-    class _Rec:
-        timestamp = datetime.now(tz=timezone.utc).timestamp()
-        team = "software_engineering"
-        agent_key = "backend"
-        job_id = "j9"
-        task_id = "t1"
-        phase = "execution"
-        model = "deepseek-v4-pro:cloud"
-        prompt_tokens = 1000
-        completion_tokens = 500
-        total_tokens = 1500
-        cache_read_tokens = 300
-        cache_creation_tokens = 0
-        cost_usd = 0.42
-        latency_ms = 1200
-        status = "success"
-        outcome = "success"
-        objective = "write code"
-        request_id = "rid1"
+    rec = _TraceRecord(
+        job_id="j9",
+        task_id="t1",
+        model="deepseek-v4-pro:cloud",
+        prompt_tokens=1000,
+        completion_tokens=500,
+        total_tokens=1500,
+        cache_read_tokens=300,
+        cost_usd=0.42,
+        latency_ms=1200,
+        objective="write code",
+        request_id="rid1",
+    )
 
-    assert trace_store.write_trace(_Rec()) is True
+    assert trace_store.write_trace(rec) is True
     summary = trace_store.fetch_cost_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
     assert summary["total_cost_usd"] == pytest.approx(0.42)
     assert summary["by_job"]["j9"] == pytest.approx(0.42)
@@ -254,46 +276,13 @@ def test_trace_write_cache_creation_and_no_cache_usage(_schema, monkeypatch) -> 
     from shared.postgres import get_conn
     from software_engineering_team.shared import trace_store
 
-    class _RecCreate:
-        timestamp = datetime.now(tz=timezone.utc).timestamp()
-        team = "software_engineering"
-        agent_key = "backend"
-        job_id = "jCreate"
-        task_id = "t1"
-        phase = "execution"
-        model = "m"
-        prompt_tokens = 10
-        completion_tokens = 5
-        total_tokens = 15
-        cache_read_tokens = 0
-        cache_creation_tokens = 200
-        cost_usd = 0.01
-        latency_ms = 100
-        status = "success"
-        outcome = "success"
-        objective = "o"
-        request_id = "rc1"
+    rec_create = _TraceRecord(
+        job_id="jCreate", task_id="t1", cache_creation_tokens=200, request_id="rc1"
+    )
+    rec_none = _TraceRecord(job_id="jNone", task_id="t1", request_id="rn1")
 
-    class _RecNone:
-        timestamp = datetime.now(tz=timezone.utc).timestamp()
-        team = "software_engineering"
-        agent_key = "backend"
-        job_id = "jNone"
-        task_id = "t1"
-        phase = "execution"
-        model = "m"
-        prompt_tokens = 10
-        completion_tokens = 5
-        total_tokens = 15
-        cost_usd = 0.01
-        latency_ms = 100
-        status = "success"
-        outcome = "success"
-        objective = "o"
-        request_id = "rn1"
-
-    assert trace_store.write_trace(_RecCreate()) is True
-    assert trace_store.write_trace(_RecNone()) is True
+    assert trace_store.write_trace(rec_create) is True
+    assert trace_store.write_trace(rec_none) is True
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -312,30 +301,13 @@ def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
     from software_engineering_team.shared import trace_store
 
     recs = [
-        type(
-            "_R",
-            (),
-            {
-                "timestamp": datetime.now(tz=timezone.utc).timestamp(),
-                "team": "software_engineering",
-                "agent_key": "backend",
-                "job_id": "jB",
-                "task_id": f"t{i}",
-                "phase": "execution",
-                "model": "m",
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-                "cache_read_tokens": 50 * (i + 1),
-                "cache_creation_tokens": 0,
-                "cost_usd": 0.01 * (i + 1),
-                "latency_ms": 100,
-                "status": "success",
-                "outcome": "success",
-                "objective": "o",
-                "request_id": f"r{i}",
-            },
-        )()
+        _TraceRecord(
+            job_id="jB",
+            task_id=f"t{i}",
+            cache_read_tokens=50 * (i + 1),
+            cost_usd=0.01 * (i + 1),
+            request_id=f"r{i}",
+        )
         for i in range(3)
     ]
     rows = [trace_store._record_to_row(r) for r in recs]
@@ -356,38 +328,11 @@ def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
         assert [r[0] for r in cur.fetchall()] == [50, 100, 150]
 
 
-def _trace_rec(job_id: str, task_id: str, ts: float):
-    """A duck-typed record for trace_store._record_to_row, honoring an
-    explicit epoch `ts` so callers can backdate rows without raw SQL."""
-    return type(
-        "_R",
-        (),
-        {
-            "timestamp": ts,
-            "team": "software_engineering",
-            "agent_key": "backend",
-            "job_id": job_id,
-            "task_id": task_id,
-            "phase": "execution",
-            "model": "m",
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15,
-            "cache_read_tokens": 0,
-            "cache_creation_tokens": 0,
-            "cost_usd": 0.01,
-            "latency_ms": 100,
-            "status": "success",
-            "outcome": "success",
-            "objective": "o",
-            "request_id": f"r{job_id}{task_id}",
-        },
-    )()
-
-
 def test_prune_traces_deletes_only_stale_rows(_schema, monkeypatch) -> None:
     """prune_traces deletes rows older than the retention window and leaves
-    recent ones intact, returning the exact count removed."""
+    recent ones intact, returning the exact count removed — and does so with
+    SE_TRACE_TO_POSTGRES disabled, proving it doesn't gate on that flag (rows
+    written while tracing was on must still be pruned after it's turned off)."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     from shared.postgres import get_conn
     from software_engineering_team.shared import trace_store
@@ -395,31 +340,38 @@ def test_prune_traces_deletes_only_stale_rows(_schema, monkeypatch) -> None:
     now = datetime.now(tz=timezone.utc)
     old_ts = (now - timedelta(days=40)).timestamp()
     recent_ts = (now - timedelta(days=5)).timestamp()
-    recs = [_trace_rec("jOld", f"told{i}", old_ts) for i in range(3)] + [
-        _trace_rec("jNew", f"tnew{i}", recent_ts) for i in range(2)
+    recs = [
+        _TraceRecord(job_id="jOld", task_id=f"told{i}", timestamp=old_ts, request_id=f"rold{i}")
+        for i in range(3)
+    ] + [
+        _TraceRecord(job_id="jNew", task_id=f"tnew{i}", timestamp=recent_ts, request_id=f"rnew{i}")
+        for i in range(2)
     ]
     assert trace_store.write_rows([trace_store._record_to_row(r) for r in recs]) == 5
 
+    monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
     removed = trace_store.prune_traces(retention_days=30)
     assert removed == 3
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT job_id FROM se_agent_traces")
+        cur.execute("SELECT DISTINCT job_id FROM se_agent_traces WHERE job_id IN ('jOld', 'jNew')")
         remaining_jobs = {r[0] for r in cur.fetchall()}
     assert remaining_jobs == {"jNew"}
 
 
 def test_prune_traces_zero_retention_is_noop(_schema, monkeypatch) -> None:
     """A retention_days of 0 (or less) prunes nothing, matching the existing
-    _retention_days()<=0 short-circuit — no accidental full-table wipe."""
+    _retention_days()<=0 short-circuit — no accidental full-table wipe. Also
+    runs with SE_TRACE_TO_POSTGRES disabled, same reasoning as the test above."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     from shared.postgres import get_conn
     from software_engineering_team.shared import trace_store
 
     old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=400)).timestamp()
-    rec = _trace_rec("jAncient", "t0", old_ts)
+    rec = _TraceRecord(job_id="jAncient", task_id="t0", timestamp=old_ts, request_id="r0")
     assert trace_store.write_rows([trace_store._record_to_row(rec)]) == 1
 
+    monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
     assert trace_store.prune_traces(retention_days=0) == 0
 
     with get_conn() as conn, conn.cursor() as cur:

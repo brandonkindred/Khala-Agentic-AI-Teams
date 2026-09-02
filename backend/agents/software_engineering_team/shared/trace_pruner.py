@@ -58,13 +58,14 @@ def register_trace_pruner() -> None:
 
     Postconditions:
         - A background heartbeat is running that calls prune_traces() on the
-          configured interval, ticking once immediately on start (beat_first)
-          so a restart landing more often than the interval still gets a
-          sweep in. Safe to call more than once (a no-op after the first
-          successful call). A heartbeat construction/start failure is logged
-          and leaves state as if this call never happened, rather than
-          propagating into _se_startup's shared try/except and skipping the
-          registrations after it.
+          configured interval, floored at 60s to prevent busy-looping, and
+          ticking once immediately on start (beat_first) so a restart landing
+          more often than the interval still gets a sweep in. Safe to call
+          more than once (a no-op after the first successful call). A
+          heartbeat construction/start failure is logged and leaves state as
+          if this call never happened, rather than propagating into
+          _se_startup's shared try/except and skipping the registrations
+          after it.
     """
     global _heartbeat
     with _register_lock:
@@ -105,11 +106,7 @@ def _is_registered() -> bool:
 
 def _reset_for_test() -> None:
     """Clear all module state between tests (heartbeat)."""
-    global _heartbeat
-    hb = _heartbeat
-    _heartbeat = None
-    if hb is not None:
-        hb.stop()
+    unregister()
 
 
 __all__ = [

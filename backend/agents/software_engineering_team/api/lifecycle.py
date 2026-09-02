@@ -88,8 +88,12 @@ async def _se_startup() -> None:
 
         register_cost_observer()
         register_trace_flusher()
-        register_trace_pruner()
         register_transcript_flusher()
+        # Registered last: register_trace_pruner() already catches its own
+        # BackgroundHeartbeat construction/start failures internally (see its
+        # docstring), but keeping it last is cheap extra defense-in-depth so a
+        # future regression there still can't take the others down with it.
+        register_trace_pruner()
     except Exception as e:
         logger.warning("Could not register SE telemetry observers: %s", e)
     from software_engineering_team.temporal.worker import start_se_temporal_worker_thread

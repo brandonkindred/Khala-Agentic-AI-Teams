@@ -519,12 +519,10 @@ Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`
 ### SE_TRACE_PRUNE_INTERVAL_S
 Seconds between background prune sweeps that enforce `SE_TRACE_RETENTION_DAYS`
 via `trace_store.prune_traces` (default `21600` = 6 hours; garbage → `21600`).
-Registration floors the resolved value at `60s` unconditionally — not just for
-negative/garbage input, but also a valid, deliberately-configured value below
-60 — so the sweep never busy-loops; there is no warning logged when this floor
-overrides an explicit setting. Mirrors `SE_TRACE_FLUSH_INTERVAL_S`'s pattern at
-a much slower cadence — retention is day-granularity, so a tighter interval
-buys nothing.
+Registration floors the resolved value at `60s` regardless of why it's low —
+including a deliberately-configured value under 60, silently, with no warning
+— so the sweep never busy-loops. Mirrors `SE_TRACE_FLUSH_INTERVAL_S`'s pattern
+at a much slower cadence; retention is day-granularity, so tighter buys nothing.
 
 ### SE_LEARNINGS_TOPN
 Number of past-sprint learnings injected into the Tech Lead's Design prompt

@@ -220,8 +220,10 @@ def test_trace_retention_days_env(monkeypatch) -> None:
     assert trace_store._retention_days() == 30.0  # bad value → default
 
 
-def test_prune_traces_noop() -> None:
+def test_prune_traces_noop(monkeypatch) -> None:
     """prune_traces is a safe no-op without Postgres configured."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("SE_TRACE_RETENTION_DAYS", raising=False)
     assert trace_store.prune_traces(0) == 0
     assert trace_store.prune_traces(30) == 0
     assert trace_store.prune_traces() == 0  # uses SE_TRACE_RETENTION_DAYS default

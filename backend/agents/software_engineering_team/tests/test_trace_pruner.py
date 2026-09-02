@@ -4,8 +4,11 @@
 dead code until this heartbeat wired it up (mirrors ``trace_flusher``'s
 ``BackgroundHeartbeat`` pattern, at an hours-scale cadence instead of
 ``trace_flusher``'s ~2s). These tests pin the register/unregister lifecycle,
-the interval env parsing, and confirm a prune failure — or a heartbeat
-construction/start failure — can never propagate out of registration.
+the interval env parsing, and confirm a heartbeat construction/start failure
+can never propagate out of registration. A prune-tick failure never
+propagating is BackgroundHeartbeat's own generic contract (see
+``shared/concurrency/tests/test_heartbeat.py``) and isn't re-tested here,
+matching ``trace_flusher``'s own convention of trusting that contract.
 """
 
 from __future__ import annotations
@@ -16,8 +19,19 @@ from software_engineering_team.shared import trace_pruner, trace_store
 
 
 @pytest.fixture(autouse=True)
-def _reset_pruner():
-    """Start each test with no registered heartbeat; clean up afterward."""
+def _reset_pruner(monkeypatch):
+    """Start each test with no registered heartbeat; clean up afterward.
+
+    Also default-mocks trace_store.prune_traces to a harmless no-op: several
+    tests call the real register_trace_pruner(), which (with beat_first=True)
+    fires a real tick within the test's own runtime. Without this guard, a
+    developer running this file with POSTGRES_HOST configured locally (a
+    documented, legitimate local-dev setup) would have "pure bookkeeping"
+    tests silently DELETE real se_agent_traces rows, since prune_traces()
+    intentionally does not gate on SE_TRACE_TO_POSTGRES. Tests that care what
+    prune_traces does override this locally.
+    """
+    monkeypatch.setattr(trace_store, "prune_traces", lambda: 0)
     trace_pruner._reset_for_test()
     yield
     trace_pruner._reset_for_test()
@@ -36,24 +50,15 @@ def test_prune_interval_env_default_and_garbage(monkeypatch) -> None:
     assert trace_pruner._prune_interval_s() == 0.0  # clamped to floor
 
 
-def test_register_floors_interval_to_avoid_busy_loop(monkeypatch) -> None:
-    """A 0/garbage-clamped interval is floored to 60s at registration so the
-    heartbeat can never busy-loop. The floor is unconditional (see the
-    ENV_VARS.md entry): it also overrides a valid-but-small explicit value."""
+def test_register_configures_heartbeat_with_floor_and_beat_first(monkeypatch) -> None:
+    """register_trace_pruner floors a 0/garbage-clamped interval to 60s (so the
+    heartbeat can never busy-loop) and enables beat_first (so a restart landing
+    more often than the interval still gets a sweep in)."""
     monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "0")
 
     trace_pruner.register_trace_pruner()
 
-    assert trace_pruner._heartbeat is not None
     assert trace_pruner._heartbeat._interval_s == 60.0
-
-
-def test_register_sets_beat_first() -> None:
-    """register_trace_pruner enables beat_first so a sweep runs immediately on
-    startup, not only after a full interval — otherwise a process that
-    restarts more often than the interval could never complete a first sweep."""
-    trace_pruner.register_trace_pruner()
-
     assert trace_pruner._heartbeat._beat_first is True
 
 
@@ -78,41 +83,14 @@ def test_prune_tick_silent_when_nothing_removed(monkeypatch, caplog) -> None:
     assert not any("pruned" in r.message for r in caplog.records)
 
 
-def test_prune_tick_failure_is_swallowed_by_heartbeat(monkeypatch) -> None:
-    """A prune_traces failure never raises through a real BackgroundHeartbeat tick.
-
-    trace_store.prune_traces already swallows and logs its own failures in
-    production; this simulates a hypothetical raise to prove the heartbeat
-    layer is a genuine second line of defense. Constructs a BackgroundHeartbeat
-    directly (no registration, no thread ever started) since only the tick
-    behavior is under test here — the registration lifecycle is covered
-    separately.
-    """
-    monkeypatch.setattr(
-        trace_store, "prune_traces", lambda: (_ for _ in ()).throw(RuntimeError("pg down"))
-    )
-    hb = trace_pruner.BackgroundHeartbeat(trace_pruner._prune_tick, 3600.0)
-
-    still_running = hb._tick()
-
-    assert still_running is True
-
-
-def test_register_starts_heartbeat_idempotent(monkeypatch) -> None:
+def test_register_starts_heartbeat_idempotent() -> None:
     """register_trace_pruner starts exactly one heartbeat even when called twice."""
-    started: list = []
-    real_start = trace_pruner.BackgroundHeartbeat.start
-
-    def fake_start(self):
-        started.append(self)
-        return real_start(self)
-
-    monkeypatch.setattr(trace_pruner.BackgroundHeartbeat, "start", fake_start)
-
     trace_pruner.register_trace_pruner()
+    first = trace_pruner._heartbeat
+
     trace_pruner.register_trace_pruner()  # idempotent — second call is a no-op
 
-    assert len(started) == 1
+    assert trace_pruner._heartbeat is first
     assert trace_pruner._is_registered()
 
 
@@ -140,7 +118,6 @@ def test_unregister_stops_heartbeat() -> None:
     trace_pruner.unregister()
 
     assert trace_pruner._is_registered() is False
-    assert trace_pruner._heartbeat is None
 
 
 def test_unregister_when_not_registered_is_noop() -> None:
