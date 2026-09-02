@@ -152,11 +152,10 @@ def make_discovery_auditor() -> Agent:
         agent is routed through the ``branding_strategic_core`` agent_key
         tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="discovery_auditor",
         description="Analyses current brand perception, SWOT, and stakeholder insights.",
-        system_prompt=render_agent_prompt(_DISCOVERY_AUDITOR_PROMPT),
-        structured_output=BrandDiscoveryAudit,
+        prompt=_DISCOVERY_AUDITOR_PROMPT,
         agent_key=_PHASE1_AGENT_KEY,
     )
 
@@ -178,11 +177,10 @@ def make_purpose_vision_writer() -> Agent:
         agent is routed through the ``branding_strategic_core`` agent_key
         tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="purpose_vision_writer",
         description="Crafts brand purpose, mission statement, and vision statement.",
-        system_prompt=render_agent_prompt(_PURPOSE_VISION_PROMPT),
-        structured_output=PurposeVisionOutput,
+        prompt=_PURPOSE_VISION_PROMPT,
         agent_key=_PHASE1_AGENT_KEY,
     )
 
@@ -206,11 +204,10 @@ def make_values_articulator() -> Agent:
         definition and observable behaviors. The agent is routed through
         the ``branding_strategic_core`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="values_articulator",
         description="Defines core values with behavioral definitions and observable behaviors.",
-        system_prompt=render_agent_prompt(_VALUES_ARTICULATOR_PROMPT),
-        structured_output=CoreValuesOutput,
+        prompt=_VALUES_ARTICULATOR_PROMPT,
         agent_key=_PHASE1_AGENT_KEY,
     )
 
@@ -235,11 +232,10 @@ def make_audience_segmenter() -> Agent:
         with pain points, goals, and decision drivers. The agent is
         routed through the ``branding_strategic_core`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="audience_segmenter",
         description="Segments target audience with psychographic depth.",
-        system_prompt=render_agent_prompt(_AUDIENCE_SEGMENTER_PROMPT),
-        structured_output=AudienceSegmentsOutput,
+        prompt=_AUDIENCE_SEGMENTER_PROMPT,
         agent_key=_PHASE1_AGENT_KEY,
     )
 
@@ -265,11 +261,10 @@ def make_differentiation_mapper() -> Agent:
         context. The agent is routed through the ``branding_strategic_core``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="differentiation_mapper",
         description="Maps competitive differentiation pillars with proof points.",
-        system_prompt=render_agent_prompt(_DIFFERENTIATION_MAPPER_PROMPT),
-        structured_output=DifferentiationPillarsOutput,
+        prompt=_DIFFERENTIATION_MAPPER_PROMPT,
         agent_key=_PHASE1_AGENT_KEY,
     )
 
@@ -294,11 +289,10 @@ def make_positioning_synthesizer() -> Agent:
         promise. The agent is routed through the ``branding_strategic_core``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="positioning_synthesizer",
         description="Synthesises all Phase 1 fragments into positioning statement and brand promise.",
-        system_prompt=render_agent_prompt(_POSITIONING_SYNTHESIZER_PROMPT),
-        structured_output=PositioningOutput,
+        prompt=_POSITIONING_SYNTHESIZER_PROMPT,
         agent_key=_PHASE1_AGENT_KEY,
     )
 
