@@ -3,7 +3,7 @@
 Lives in ``technical_writers``.
 Shares the same Strands ``documentation`` model alias so we don't add a
 new model surface for one prompt; the input/output contracts and prompt
-are owned here. Issue #371 (Phase 3 of #243).
+are owned here.
 
 Failure mode: the agent never raises — if the LLM call or JSON parse
 goes sideways it returns a deterministic fallback markdown body with

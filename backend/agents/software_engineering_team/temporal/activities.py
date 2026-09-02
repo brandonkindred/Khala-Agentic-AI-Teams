@@ -496,6 +496,7 @@ def plan_project_activity(
     trace_id: str = "",
     resume_token: Optional[str] = None,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
+    asked_question_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Phase 2: Run Planning workflow.
 
@@ -506,10 +507,18 @@ def plan_project_activity(
     than inherited via contextvars. ``resume_token``/``submitted_answers`` are supplied by
     the calling workflow when re-invoking this activity after a prior pause was resolved by
     a ``submit_planning_answers`` signal; omitted on a fresh (unpaused) invocation.
+    ``asked_question_ids`` is every question id already presented across this run's pause
+    rounds, which is what decides whether a replayed batch pauses again (see
+    ``build_temporal_planning_answer_callback``).
     """
     with bind_trace_id(trace_id or new_trace_id()):
         return _plan_project_activity_body(
-            job_id, repo_path, spec_parse_result, resume_token, submitted_answers
+            job_id,
+            repo_path,
+            spec_parse_result,
+            resume_token,
+            submitted_answers,
+            asked_question_ids,
         )
 
 
@@ -519,6 +528,7 @@ def _plan_project_activity_body(
     spec_parse_result: Dict[str, Any],
     resume_token: Optional[str] = None,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
+    asked_question_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block.
 
@@ -587,10 +597,11 @@ def _plan_project_activity_body(
     answer_callback = build_temporal_planning_answer_callback(
         resume_token,
         submitted_answers=submitted_answers,
-        # A resumed run can still hit a question batch these answers were not
-        # submitted for; that pauses again, and a pause round needs its own
-        # token (mint_resume_token: never reused across rounds).
+        # A resumed run can still reach a question nobody has been shown; that
+        # pauses again, and a pause round needs its own token
+        # (mint_resume_token: never reused across rounds).
         next_resume_token=lambda: mint_resume_token(job_id),
+        asked_question_ids=asked_question_ids,
     )
 
     try:

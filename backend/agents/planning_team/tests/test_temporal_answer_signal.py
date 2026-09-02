@@ -281,7 +281,9 @@ def test_callback_returns_resolved_answers_filtered_by_question_id() -> None:
         {"question_id": "q1", "selected_option_id": "opt-a"},
         {"question_id": "q2", "selected_option_id": "opt-b"},
     ]
-    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=submitted)
+    cb = build_temporal_planning_answer_callback(
+        "tok-1", submitted_answers=submitted, asked_question_ids=["q1", "q2", "q3"]
+    )
 
     result = cb([{"id": "q1"}])
 
@@ -310,7 +312,10 @@ def test_callback_pauses_again_on_a_batch_from_a_later_round() -> None:
     """Planning re-runs from scratch on resume and can re-identify its questions."""
     submitted = [{"question_id": "q1", "selected_option_id": "opt-a"}]
     cb = build_temporal_planning_answer_callback(
-        "tok-1", submitted_answers=submitted, next_resume_token=lambda: "tok-2"
+        "tok-1",
+        submitted_answers=submitted,
+        next_resume_token=lambda: "tok-2",
+        asked_question_ids=["q1"],
     )
 
     # The batch these answers belong to still resolves normally.
@@ -330,13 +335,54 @@ def test_empty_submitted_answers_resolves_instead_of_pausing_forever() -> None:
 
     Re-pausing on it would re-ask the same batch on every resume with nothing
     new for the submitter to supply — an unterminating loop, which is strictly
-    worse than proceeding on their explicit choice.
+    worse than proceeding on their explicit choice. The batch was asked, so it
+    resolves; that it resolves to nothing is the submitter's call.
     """
     cb = build_temporal_planning_answer_callback(
-        "tok-1", submitted_answers=[], next_resume_token=lambda: "tok-2"
+        "tok-1",
+        submitted_answers=[],
+        next_resume_token=lambda: "tok-2",
+        asked_question_ids=["q1"],
     )
 
     assert cb([{"id": "q1"}]) == []
+
+
+def test_a_declined_batch_still_resolves_on_a_later_round() -> None:
+    """The escape hatch must survive round 1, or accumulation reinstates the loop.
+
+    Answers accumulate across rounds, so by round 2 `submitted_answers` is
+    non-empty even when the submitter answered nothing this time. Deciding on
+    matches would re-pause the declined batch on every replay; deciding on what
+    was asked resolves it.
+    """
+    cb = build_temporal_planning_answer_callback(
+        "tok-2",
+        submitted_answers=[{"question_id": "q1", "selected_option_id": "a"}],
+        next_resume_token=lambda: "tok-3",
+        asked_question_ids=["q1", "q3"],
+    )
+
+    # Round 1's batch still resolves.
+    assert cb([{"id": "q1"}]) == [{"question_id": "q1", "selected_option_id": "a"}]
+    # Round 2's batch was presented and declined — it proceeds, not re-asks.
+    assert cb([{"id": "q3"}]) == []
+
+
+def test_a_new_question_alongside_an_answered_one_still_pauses() -> None:
+    """One stale match must not carry brand-new questions through unanswered."""
+    cb = build_temporal_planning_answer_callback(
+        "tok-2",
+        submitted_answers=[{"question_id": "q1", "selected_option_id": "a"}],
+        next_resume_token=lambda: "tok-3",
+        asked_question_ids=["q1"],
+    )
+
+    with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
+        cb([{"id": "q1"}, {"id": "q4"}, {"id": "q5"}])
+
+    assert excinfo.value.resume_token == "tok-3"
+    assert excinfo.value.pending_questions == [{"id": "q1"}, {"id": "q4"}, {"id": "q5"}]
 
 
 def test_callback_reuses_its_token_when_no_minter_is_given() -> None:
@@ -359,7 +405,10 @@ def test_callback_returns_partial_matches_without_pausing() -> None:
     """
     submitted = [{"question_id": "q1", "selected_option_id": "opt-a"}]
     cb = build_temporal_planning_answer_callback(
-        "tok-1", submitted_answers=submitted, next_resume_token=lambda: "tok-2"
+        "tok-1",
+        submitted_answers=submitted,
+        next_resume_token=lambda: "tok-2",
+        asked_question_ids=["q1", "q2"],
     )
 
     assert cb([{"id": "q1"}, {"id": "q2"}]) == submitted
@@ -376,7 +425,9 @@ def test_callback_ignores_malformed_question_entries() -> None:
     """A non-dict question entry is not matched against any submitted answer --
     fails closed rather than crashing."""
     submitted = [{"question_id": "q1", "selected_option_id": "opt-a"}]
-    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=submitted)
+    cb = build_temporal_planning_answer_callback(
+        "tok-1", submitted_answers=submitted, asked_question_ids=["q1"]
+    )
 
     result = cb(["not-a-dict", {"id": "q1"}])
 
@@ -394,6 +445,7 @@ def test_callback_skips_answer_with_unhashable_question_id() -> None:
             {"question_id": [], "selected_option_id": "opt-a"},
             {"question_id": "q1", "selected_option_id": "opt-b"},
         ],
+        asked_question_ids=["q1"],
     )
 
     result = cb([{"id": "q1"}])
@@ -407,6 +459,7 @@ def test_callback_skips_question_with_non_str_id() -> None:
     cb = build_temporal_planning_answer_callback(
         "tok-1",
         submitted_answers=[{"question_id": "q1", "selected_option_id": "opt-a"}],
+        asked_question_ids=["q1"],
     )
 
     result = cb([{"id": []}, {"id": "q1"}])
@@ -423,6 +476,7 @@ def test_callback_skips_malformed_submitted_answer_entries() -> None:
     cb = build_temporal_planning_answer_callback(
         "tok-1",
         submitted_answers=["bad", {"question_id": "q1", "selected_option_id": "opt-a"}],
+        asked_question_ids=["q1"],
     )
 
     result = cb([{"id": "q1"}])

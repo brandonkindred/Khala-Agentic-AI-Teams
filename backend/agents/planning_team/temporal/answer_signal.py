@@ -49,6 +49,7 @@ def build_temporal_planning_answer_callback(
     resume_token: str,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
     next_resume_token: Optional[Callable[[], str]] = None,
+    asked_question_ids: Optional[List[str]] = None,
 ) -> Callable[[list], list]:
     """Build a ``Callable[[list], list]`` satisfying Planning's ``answer_callback``
     contract (``planning_team.orchestrator.resolve_pra_answers``), backed by the
@@ -69,6 +70,12 @@ def build_temporal_planning_answer_callback(
           pause again. Omitted, a re-pause reuses ``resume_token``, which is
           still preferable to answering a batch silently but leaves the two
           rounds sharing one token.
+        - ``asked_question_ids``, when given, is every question id already
+          PRESENTED to a submitter across this run's pause rounds (the
+          workflow accumulates it from each pause's ``pending_questions``).
+          Omitted, it is empty, so any non-empty batch pauses -- correct for
+          the first round, which is the only round a caller that does not
+          track it can be in.
     Postconditions:
         - Returns a callable ``cb(questions) -> list``.
         - When ``submitted_answers`` is ``None``: calling ``cb`` never returns —
@@ -81,13 +88,16 @@ def build_temporal_planning_answer_callback(
           order. Never fabricates an answer for a question with no matching
           entry, and never returns a default — a question with no matching
           submitted answer is simply absent from the result.
-        - Exception: a non-empty batch where ``submitted_answers`` is itself
-          non-empty and NOTHING in it matches raises
-          ``PlanningAnswerPauseSignal`` rather than returning ``[]``. An
-          explicitly EMPTY ``submitted_answers`` resolves every batch with
-          ``[]`` instead: that is a submitter saying "proceed without
-          answers", and re-pausing on it would re-ask forever with nothing
-          new to supply. Such a
+        - Exception: a batch containing any question NOT in
+          ``asked_question_ids`` raises ``PlanningAnswerPauseSignal`` rather
+          than answering it. Such a question has never been put to a
+          submitter, and letting Planning proceed on it is the silent
+          auto-answer both modes exist to prevent.
+        - A batch every question of which has already been asked resolves with
+          whatever the submitter gave for it — including ``[]``. That is the
+          difference between "declined" and "never seen", and it is what makes
+          this terminate: an empty or partial submission proceeds on the
+          submitter's choice rather than being re-asked on every replay. Such a
           batch is not the one these answers were submitted for (Planning
           re-runs from scratch on resume, and its questions are LLM-driven, so
           a re-run can re-identify them or open a further round), and
@@ -119,31 +129,47 @@ def build_temporal_planning_answer_callback(
         return _pause_cb
 
     resolved = list(submitted_answers)
+    already_asked = {qid for qid in (asked_question_ids or []) if isinstance(qid, str)}
 
     def _resolved_cb(questions: list) -> list:
         question_ids = {
             q.get("id") for q in questions if isinstance(q, dict) and isinstance(q.get("id"), str)
         }
-        matched = [
+        # Only well-formed entries can be "unasked": a malformed one (non-dict,
+        # or an id that is not a str) carries no question a submitter could
+        # ever answer, so pausing on it would re-ask something unanswerable on
+        # every replay. It is skipped here and never matches below either --
+        # failing closed on the answer, not on the loop.
+        unasked = [
+            q
+            for q in questions
+            if isinstance(q, dict) and isinstance(q.get("id"), str) and q["id"] not in already_asked
+        ]
+        if unasked:
+            # At least one question here has never been put to anyone. Planning
+            # replays from scratch on resume and its questions are LLM-driven,
+            # so a re-run can open a further clarification round or
+            # re-identify what it asks. Answering such a batch with whatever
+            # happens to match would let Planning proceed on a question nobody
+            # has seen — the silent auto-answer both modes exist to prevent.
+            # Pause instead, exactly as the first round did.
+            #
+            # Deciding this on what was ASKED, not on what was answered, is
+            # what keeps it terminating: a batch the submitter has already seen
+            # resolves with whatever they gave (including nothing), so an empty
+            # or partial submission proceeds on their choice instead of being
+            # re-asked forever.
+            raise PlanningAnswerPauseSignal(
+                next_resume_token() if next_resume_token is not None else resume_token,
+                list(questions),
+            )
+        return [
             a
             for a in resolved
             if isinstance(a, dict)
             and isinstance(a.get("question_id"), str)
             and a.get("question_id") in question_ids
         ]
-        if questions and resolved and not matched:
-            # This batch is not the one these answers were submitted for:
-            # Planning re-runs from scratch on resume and its questions are
-            # LLM-driven, so a re-run can ask differently-identified questions
-            # or open a second clarification round once the first is satisfied.
-            # Returning [] here would answer that batch with nothing and let
-            # Planning proceed — the silent auto-answer both modes exist to
-            # prevent. Pause again instead, exactly as the first round did.
-            raise PlanningAnswerPauseSignal(
-                next_resume_token() if next_resume_token is not None else resume_token,
-                list(questions),
-            )
-        return matched
 
     return _resolved_cb
 

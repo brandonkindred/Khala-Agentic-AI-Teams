@@ -132,21 +132,6 @@ def _block_index(event: Any) -> Any:
     return _MISSING
 
 
-def _same_block(index: Any, event: Any) -> bool:
-    """Whether ``event`` belongs to the block identified by ``index``.
-
-    Postconditions:
-        - ``True`` when the indices match, and when either side carries no
-          index at all (a stream that omits ``contentBlockIndex`` is treated
-          as strictly sequential, which is how Strands reads it). Never
-          raises.
-    """
-    if index is _MISSING:
-        return True
-    other = _block_index(event)
-    return other is _MISSING or other == index
-
-
 def _has_text_delta(event: Any) -> bool:
     """Whether ``event`` carries assistant text.
 
@@ -509,8 +494,12 @@ class ToolCallBudgetModel:
                     continue
                 yield event
                 continue
-            if _block_delta(event):
-                state.forwarded = True
+            # Anything of this block that reaches Strands makes its
+            # ``contentBlockStop`` load-bearing -- a forwarded
+            # ``contentBlockStart`` opens a block there that only its stop
+            # closes, so swallowing that stop would leave the block open and
+            # the next block's content would accumulate under it.
+            state.forwarded = True
             yield event
 
     async def _final_turn(

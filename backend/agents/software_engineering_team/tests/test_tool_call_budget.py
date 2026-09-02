@@ -824,3 +824,49 @@ def test_a_falsy_tool_use_start_is_not_a_tool_call() -> None:
     )
     for falsy in (None, {}, ""):
         assert not _is_tool_use_start({"contentBlockStart": {"start": {"toolUse": falsy}}}), falsy
+
+
+def test_a_forwarded_block_start_keeps_its_stop_even_when_its_tool_use_is_dropped() -> None:
+    """A block whose start reached Strands must be closed by its own stop.
+
+    Strands opens a content block on `contentBlockStart` and closes it on
+    `contentBlockStop`. If the start was forwarded and the stop swallowed, the
+    block stays open there and the NEXT block's content accumulates into it,
+    committing under the wrong boundary. That is reachable whenever a
+    delta-announced tool use is the only thing in an already-opened block.
+    """
+
+    class _PlainStartThenOverCapToolDelta:
+        stateful = False
+
+        def get_config(self) -> Dict[str, Any]:
+            return {}
+
+        def update_config(self, **overrides: Any) -> None:
+            return None
+
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+            yield {"messageStart": {"role": "assistant"}}
+            # A plain start (no toolUse) — forwarded, so Strands opens a block.
+            yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
+            yield {
+                "contentBlockDelta": {
+                    "contentBlockIndex": 0,
+                    "delta": {"toolUse": {"toolUseId": "c1", "name": "read_file", "input": "{}"}},
+                },
+            }
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": "tool_use"}}
+
+    model = ToolCallBudgetModel(_PlainStartThenOverCapToolDelta(), 1)
+    model._tool_calls_used = 1  # budget spent: the tool use is dropped
+
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    assert not any("toolUse" in json.dumps(event) for event in events)
+    # Count only the model's own block (index 0) — the synthesized
+    # "no conclusion" fallback contributes an unindexed block of its own.
+    starts = [e for e in events if (e.get("contentBlockStart") or {}).get("contentBlockIndex") == 0]
+    stops = [e for e in events if (e.get("contentBlockStop") or {}).get("contentBlockIndex") == 0]
+    # The block Strands opened is the block Strands closes.
+    assert len(starts) == len(stops) == 1

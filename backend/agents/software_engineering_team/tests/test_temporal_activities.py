@@ -1105,6 +1105,11 @@ def test_plan_project_activity_resumes_with_submitted_answers(
         {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
         resume_token="pp-resume:abc123",
         submitted_answers=[{"question_id": "q1", "selected_option_id": "okta"}],
+        # The question this resume answers was presented in the pause round the
+        # workflow is resuming from; the workflow accumulates those ids and
+        # passes them, which is what tells an already-asked batch apart from a
+        # brand-new one (see build_temporal_planning_answer_callback).
+        asked_question_ids=["q1"],
     )
 
     assert captured["answers"] == [{"question_id": "q1", "selected_option_id": "okta"}]

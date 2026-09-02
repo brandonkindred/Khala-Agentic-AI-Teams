@@ -139,11 +139,69 @@ def test_run_team_workflow_v2_pauses_and_resumes_on_planning_answer_signal():
         "plan_project_activity",
         "execute_coding_team_activity",
     ]
-    # The re-invocation carries the same resume_token and the resolved answers.
+    # The re-invocation carries the same resume_token, the resolved answers,
+    # and the ids already presented (empty here: the fake pause carried no
+    # pending_questions).
     _, _, second_plan_args = (c[1] for c in calls[:3])
-    assert second_plan_args[-2:] == [
+    assert second_plan_args[-3:] == [
         "job-7:tok1",
         [{"question_id": "q1", "selected_option_id": "a"}],
+        [],
+    ]
+
+
+def test_run_team_workflow_v2_accumulates_answers_and_asked_ids_across_pause_rounds():
+    """Two pause rounds must hand the activity everything gathered so far.
+
+    Planning replays from scratch on every resume, so round 2's invocation
+    re-encounters round 1's questions. Carrying only the newest batch leaves
+    those unmatched, pauses on them again, and ping-pongs between the rounds
+    forever; carrying only the newest asked-ids makes an already-declined batch
+    look brand new and re-asks it on every replay. Both lists accumulate.
+    """
+    calls: list = []
+    plan_calls = {"n": 0}
+
+    def _fake_plan(args):
+        plan_calls["n"] += 1
+        if plan_calls["n"] == 1:
+            return {
+                "outcome": "paused",
+                "resume_token": "job-8:tok1",
+                "pending_questions": [{"id": "q1"}],
+            }
+        if plan_calls["n"] == 2:
+            return {
+                "outcome": "paused",
+                "resume_token": "job-8:tok2",
+                "pending_questions": [{"id": "q2"}],
+            }
+        return {"outcome": "completed", "requirements_title": "Widget"}
+
+    workflow_obj = wfmod.RunTeamWorkflowV2()
+    answers = {
+        "job-8:tok1": [{"question_id": "q1", "selected_option_id": "a"}],
+        "job-8:tok2": [{"question_id": "q2", "selected_option_id": "b"}],
+    }
+
+    async def _fake_wait_condition(pred, timeout=None):
+        token = workflow_obj._active_resume_token
+        workflow_obj.submit_planning_answers({"resume_token": token, "answers": answers[token]})
+        assert pred()
+
+    with _driver({"plan_project_activity": _fake_plan}, calls):
+        with mock.patch.object(_wf, "wait_condition", _fake_wait_condition):
+            asyncio.run(workflow_obj.run("job-8", "/repo"))
+
+    plan_args = [c[1] for c in calls if c[0] == "plan_project_activity"]
+    assert len(plan_args) == 3
+    # Round 2 carries round 1's answer and asked id.
+    assert plan_args[1][-3:] == ["job-8:tok1", answers["job-8:tok1"], ["q1"]]
+    # Round 3 carries BOTH rounds', in order.
+    assert plan_args[2][-3:] == [
+        "job-8:tok2",
+        answers["job-8:tok1"] + answers["job-8:tok2"],
+        ["q1", "q2"],
     ]
 
 
