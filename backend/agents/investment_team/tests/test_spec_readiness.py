@@ -863,7 +863,10 @@ def test_check_sizing_realisable_directly_catches_unknown_asset_class_value_erro
 
 
 def test_check_sizing_realisable_directly_emits_volatility_target_warning() -> None:
-    """Direct probe of the rule's volatility-target abstention path."""
+    """Direct probe of the rule's volatility-target plausibility-warning path
+    — Rule 5 no longer abstains on this kind (it runs the full worst-case
+    bound computation), but this particular spec's bound fits within
+    capital, so the only result is the informational warning."""
     from investment_team.strategy_lab.quality_gates.spec_readiness import (
         SpecReadinessCtx,
         SpecReadinessGate,
