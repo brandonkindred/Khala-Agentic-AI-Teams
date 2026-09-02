@@ -3,9 +3,9 @@
 ``trace_store.prune_traces()`` enforces ``SE_TRACE_RETENTION_DAYS`` but was
 dead code until this heartbeat wired it up (mirrors ``trace_flusher``'s
 ``BackgroundHeartbeat`` pattern, at an hours-scale cadence instead of
-``trace_flusher``'s ~2s). These tests pin the register/unregister/shutdown
-lifecycle, the interval env parsing, and confirm a prune failure can never
-propagate out of the heartbeat.
+``trace_flusher``'s ~2s). These tests pin the register/unregister lifecycle,
+the interval env parsing, and confirm a prune failure — or a heartbeat
+construction/start failure — can never propagate out of registration.
 """
 
 from __future__ import annotations
@@ -38,13 +38,23 @@ def test_prune_interval_env_default_and_garbage(monkeypatch) -> None:
 
 def test_register_floors_interval_to_avoid_busy_loop(monkeypatch) -> None:
     """A 0/garbage-clamped interval is floored to 60s at registration so the
-    heartbeat can never busy-loop."""
+    heartbeat can never busy-loop. The floor is unconditional (see the
+    ENV_VARS.md entry): it also overrides a valid-but-small explicit value."""
     monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "0")
 
     trace_pruner.register_trace_pruner()
 
     assert trace_pruner._heartbeat is not None
     assert trace_pruner._heartbeat._interval_s == 60.0
+
+
+def test_register_sets_beat_first() -> None:
+    """register_trace_pruner enables beat_first so a sweep runs immediately on
+    startup, not only after a full interval — otherwise a process that
+    restarts more often than the interval could never complete a first sweep."""
+    trace_pruner.register_trace_pruner()
+
+    assert trace_pruner._heartbeat._beat_first is True
 
 
 def test_prune_tick_calls_prune_traces_and_logs_when_removed(monkeypatch, caplog) -> None:
@@ -69,21 +79,21 @@ def test_prune_tick_silent_when_nothing_removed(monkeypatch, caplog) -> None:
 
 
 def test_prune_tick_failure_is_swallowed_by_heartbeat(monkeypatch) -> None:
-    """A prune_traces failure never raises through the registered heartbeat.
+    """A prune_traces failure never raises through a real BackgroundHeartbeat tick.
 
     trace_store.prune_traces already swallows and logs its own failures in
     production; this simulates a hypothetical raise to prove the heartbeat
-    layer is a genuine second line of defense, not just an assumption.
+    layer is a genuine second line of defense. Constructs a BackgroundHeartbeat
+    directly (no registration, no thread ever started) since only the tick
+    behavior is under test here — the registration lifecycle is covered
+    separately.
     """
     monkeypatch.setattr(
         trace_store, "prune_traces", lambda: (_ for _ in ()).throw(RuntimeError("pg down"))
     )
-    trace_pruner.register_trace_pruner()
+    hb = trace_pruner.BackgroundHeartbeat(trace_pruner._prune_tick, 3600.0)
 
-    # Invoke the constructed heartbeat's tick directly — proves the end-to-end
-    # wiring is safe without re-deriving BackgroundHeartbeat's own (separately
-    # tested) swallow-and-continue contract.
-    still_running = trace_pruner._heartbeat._tick()
+    still_running = hb._tick()
 
     assert still_running is True
 
@@ -106,27 +116,26 @@ def test_register_starts_heartbeat_idempotent(monkeypatch) -> None:
     assert trace_pruner._is_registered()
 
 
-def test_register_propagates_heartbeat_construction_failure(monkeypatch) -> None:
-    """Unlike trace_flusher, register_trace_pruner has no internal try/except:
-    there is no external llm_service call to guard here, so a construction
-    failure propagates to the caller (_se_startup's shared try/except around
-    all telemetry registrations is the intended guard)."""
+def test_register_swallows_heartbeat_construction_failure(monkeypatch, caplog) -> None:
+    """A BackgroundHeartbeat construction/start failure is caught and logged,
+    not propagated — so it can't abort registrations that run after this one
+    in _se_startup's shared try/except (e.g. register_transcript_flusher)."""
+    caplog.set_level("WARNING", logger="software_engineering_team.shared.trace_pruner")
 
     def boom(*args, **kwargs):
         raise RuntimeError("thread start failed")
 
     monkeypatch.setattr(trace_pruner, "BackgroundHeartbeat", boom)
 
-    with pytest.raises(RuntimeError):
-        trace_pruner.register_trace_pruner()
+    trace_pruner.register_trace_pruner()  # must not raise
 
     assert trace_pruner._is_registered() is False
+    assert any("could not start" in r.message for r in caplog.records)
 
 
 def test_unregister_stops_heartbeat() -> None:
     """unregister stops the heartbeat and clears registration state."""
-    trace_pruner._mark_registered_for_test()
-    trace_pruner._set_heartbeat_for_test()
+    trace_pruner.register_trace_pruner()
 
     trace_pruner.unregister()
 
@@ -137,21 +146,4 @@ def test_unregister_stops_heartbeat() -> None:
 def test_unregister_when_not_registered_is_noop() -> None:
     """unregister() on a fresh (unregistered) state is a no-op, not an error."""
     trace_pruner.unregister()  # must not raise
-    assert trace_pruner._is_registered() is False
-
-
-def test_shutdown_calls_unregister(monkeypatch) -> None:
-    """shutdown() is a lifecycle alias for unregister() (no final drain needed
-    — pruning is idempotent, unlike trace_flusher's buffered writes)."""
-    called = {"unregister": False}
-    monkeypatch.setattr(trace_pruner, "unregister", lambda: called.__setitem__("unregister", True))
-
-    trace_pruner.shutdown()
-
-    assert called["unregister"] is True
-
-
-def test_shutdown_when_not_registered_is_noop() -> None:
-    """shutdown() on a fresh (unregistered) state is a no-op, not an error."""
-    trace_pruner.shutdown()  # must not raise
     assert trace_pruner._is_registered() is False

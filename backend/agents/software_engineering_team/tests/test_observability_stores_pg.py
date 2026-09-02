@@ -356,28 +356,49 @@ def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
         assert [r[0] for r in cur.fetchall()] == [50, 100, 150]
 
 
-def test_prune_traces_deletes_only_stale_rows(_schema) -> None:
+def _trace_rec(job_id: str, task_id: str, ts: float):
+    """A duck-typed record for trace_store._record_to_row, honoring an
+    explicit epoch `ts` so callers can backdate rows without raw SQL."""
+    return type(
+        "_R",
+        (),
+        {
+            "timestamp": ts,
+            "team": "software_engineering",
+            "agent_key": "backend",
+            "job_id": job_id,
+            "task_id": task_id,
+            "phase": "execution",
+            "model": "m",
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cost_usd": 0.01,
+            "latency_ms": 100,
+            "status": "success",
+            "outcome": "success",
+            "objective": "o",
+            "request_id": f"r{job_id}{task_id}",
+        },
+    )()
+
+
+def test_prune_traces_deletes_only_stale_rows(_schema, monkeypatch) -> None:
     """prune_traces deletes rows older than the retention window and leaves
     recent ones intact, returning the exact count removed."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     from shared.postgres import get_conn
     from software_engineering_team.shared import trace_store
 
     now = datetime.now(tz=timezone.utc)
-    old_ts = now - timedelta(days=40)
-    recent_ts = now - timedelta(days=5)
-    insert_sql = (
-        "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
-        "input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, "
-        "cost_usd, latency_ms, status, outcome, objective, request_id) VALUES "
-        "(%s, 'software_engineering', 'backend', %s, %s, 'execution', 'm', 10, 5, 15, 0, 0, "
-        "0.01, 100, 'success', 'success', 'o', %s)"
-    )
-
-    with get_conn() as conn, conn.cursor() as cur:
-        for i in range(3):
-            cur.execute(insert_sql, (old_ts, "jOld", f"told{i}", f"rold{i}"))
-        for i in range(2):
-            cur.execute(insert_sql, (recent_ts, "jNew", f"tnew{i}", f"rnew{i}"))
+    old_ts = (now - timedelta(days=40)).timestamp()
+    recent_ts = (now - timedelta(days=5)).timestamp()
+    recs = [_trace_rec("jOld", f"told{i}", old_ts) for i in range(3)] + [
+        _trace_rec("jNew", f"tnew{i}", recent_ts) for i in range(2)
+    ]
+    assert trace_store.write_rows([trace_store._record_to_row(r) for r in recs]) == 5
 
     removed = trace_store.prune_traces(retention_days=30)
     assert removed == 3
@@ -388,22 +409,16 @@ def test_prune_traces_deletes_only_stale_rows(_schema) -> None:
     assert remaining_jobs == {"jNew"}
 
 
-def test_prune_traces_zero_retention_is_noop(_schema) -> None:
+def test_prune_traces_zero_retention_is_noop(_schema, monkeypatch) -> None:
     """A retention_days of 0 (or less) prunes nothing, matching the existing
     _retention_days()<=0 short-circuit — no accidental full-table wipe."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     from shared.postgres import get_conn
     from software_engineering_team.shared import trace_store
 
-    old_ts = datetime.now(tz=timezone.utc) - timedelta(days=400)
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
-            "input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, "
-            "cost_usd, latency_ms, status, outcome, objective, request_id) VALUES "
-            "(%s, 'software_engineering', 'backend', 'jAncient', 't0', 'execution', 'm', 10, 5, "
-            "15, 0, 0, 0.01, 100, 'success', 'success', 'o', 'r0')",
-            (old_ts,),
-        )
+    old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=400)).timestamp()
+    rec = _trace_rec("jAncient", "t0", old_ts)
+    assert trace_store.write_rows([trace_store._record_to_row(rec)]) == 1
 
     assert trace_store.prune_traces(retention_days=0) == 0
 

@@ -132,7 +132,7 @@ def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown
     except Exception as e:
         logger.warning("Could not flush SE traces on shutdown: %s", e)
     try:
-        from software_engineering_team.shared.trace_pruner import shutdown as prune_shutdown
+        from software_engineering_team.shared.trace_pruner import unregister as prune_shutdown
 
         prune_shutdown()
     except Exception as e:
