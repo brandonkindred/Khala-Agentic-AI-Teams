@@ -182,7 +182,9 @@ def _round_price(price: float) -> float:
     return round(price, _decimals_for(price))
 
 
-def entry_price_basis(raw_open: float, side: str, entry_slippage_bps: float) -> float:
+def entry_price_basis(
+    raw_open: float, side: Literal["long", "short"], entry_slippage_bps: float
+) -> float:
     """The post-slippage entry anchor every modeled stop level hangs off.
 
     Production resolves ``basis="entry_price"`` levels and seeds trailing
@@ -272,12 +274,23 @@ def working_exit_rules(spec: StrategySpec) -> List[ExitRule]:
     and combined replays or their ``exit_rule_index`` attributions disagree.
 
     Preconditions: ``spec`` is a validated ``StrategySpec`` with
-    ``requires_custom_code`` False.
+    ``requires_custom_code`` False — enforced below rather than trusted, since
+    a custom-code spec's real entries and quantities come from LLM-authored
+    strategy code and not from ``spec.entry_rules``. Replaying its rules would
+    produce a ledger with no relationship to what production traded: not an
+    error anywhere, just a confidently wrong oracle. This is the boundary where
+    that is still cheap to say.
     Postconditions: returns a NEW list — ``spec.exit_rules`` is never mutated —
     equal to ``spec.exit_rules`` when the spec has no short entry rule or
     already carries an effective short-side stop, else that list with one
     synthetic ``StopLossRule`` appended at index ``len(spec.exit_rules)``.
+    Raises ``ValueError`` when the precondition above is violated.
     """
+    if spec.requires_custom_code:
+        raise ValueError(
+            "reference-ledger replay is out of scope for a requires_custom_code "
+            "spec: its entries come from strategy_code, not spec.entry_rules"
+        )
     rules: List[ExitRule] = list(spec.exit_rules)
     shorts_possible = any(rule.side == "short" for rule in spec.entry_rules)
     if shorts_possible and first_side_stop_factor(rules, "short") is None:
@@ -286,7 +299,7 @@ def working_exit_rules(spec: StrategySpec) -> List[ExitRule]:
 
 
 def stop_loss_rules_for_side(
-    rules: Sequence[ExitRule], side: str
+    rules: Sequence[ExitRule], side: Literal["long", "short"]
 ) -> List[Tuple[int, StopLossRule]]:
     """The ``StopLossRule``\\ s that can actually fire for ``side``, spec order.
 

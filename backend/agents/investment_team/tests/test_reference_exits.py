@@ -69,6 +69,16 @@ def _flat(price: float, ts: str = "2024-01-01T00:00:00") -> _Bar:
 def _entry(
     side: str = "long", entry_bar: int = 1, symbol: str = "AAA", price: float = 100.0
 ) -> ReferenceEntryFill:
+    """A filled entry at ``price`` on bar ``entry_bar``.
+
+    ``price`` is load-bearing, not incidental: at the suite's default
+    ``entry_slippage_bps=0`` it becomes the post-slippage anchor every stop
+    level and trailing watermark hangs off, so ``100.0`` is what makes the
+    round percentages in these tests land on round levels (a 5% stop at 95).
+    ``entry_bar=1`` leaves bar 0 free as pre-entry history and makes bar 2 the
+    first bar a resting stop is eligible on. ``entry_date`` is never read by
+    the exit model — only ``exit_date`` is derived, from the fill bar.
+    """
     return ReferenceEntryFill(
         symbol=symbol,
         side=side,
@@ -227,6 +237,28 @@ def test_bracket_stop_leg_suppresses_the_injection():
         entry_side="short",
     )
     assert len(working_exit_rules(spec)) == 1
+
+
+def test_working_exit_rules_rejects_a_custom_code_spec():
+    """The documented precondition, enforced rather than trusted.
+
+    A ``requires_custom_code`` spec's real entries come from LLM-authored
+    strategy code, not ``spec.entry_rules``, so replaying its rules would
+    produce a ledger unrelated to what production traded — a confidently wrong
+    oracle that raises nothing. Fail at the boundary instead.
+    """
+    spec = _spec()
+    spec.requires_custom_code = True
+    with pytest.raises(ValueError, match="requires_custom_code"):
+        working_exit_rules(spec)
+
+
+def test_replay_rejects_a_custom_code_spec():
+    """The guard reaches the public entry point too, not just the helper."""
+    spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
+    spec.requires_custom_code = True
+    with pytest.raises(ValueError, match="requires_custom_code"):
+        replay_stop_loss_exits(spec, {"AAA": [_flat(101.0), _flat(100.0)]})
 
 
 def test_working_exit_rules_does_not_mutate_the_spec():
