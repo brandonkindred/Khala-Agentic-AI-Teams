@@ -72,7 +72,11 @@ def attach_conversation_to_brand(
     Postconditions:
         On :attr:`AttachConversationResult.OK`, the conversation row now has
         ``brand_id`` set to *brand_id*, the brand's ``conversation_id`` is set
-        to *conversation_id*, and the updated :class:`Brand` is returned.
+        to *conversation_id*, the brand's ``updated_at`` is restamped with the
+        shared :func:`store.now_iso` formatter (the same one every other write
+        path through ``BrandingStore`` uses, so rows written here are not
+        formatted differently from the rest of the column), and the updated
+        :class:`Brand` is returned.
 
         When *mission* is provided, ``mission_json`` is overwritten with it.
         When *mission* is omitted (``None``), ``mission_json`` is left as

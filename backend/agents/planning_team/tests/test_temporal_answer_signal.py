@@ -561,15 +561,21 @@ def test_callback_still_pauses_on_an_unanswered_batch_when_repause_allowed() -> 
         cb([{"id": "q-never-shown"}])
 
 
-def test_callback_rejects_non_bool_allow_repause() -> None:
-    """``allow_repause`` decides whether Phase 2 can terminate; a truthy
-    non-bool (or a None threaded through by mistake) must fail loudly at the
-    boundary rather than silently picking a branch."""
-    with pytest.raises(AssertionError):
+@pytest.mark.parametrize("bad_value", [None, 1, 0, "yes", [True]])
+def test_callback_rejects_non_bool_allow_repause(bad_value: object) -> None:
+    """``allow_repause`` decides whether Phase 2 can terminate; anything but a
+    bool must fail loudly at the boundary rather than silently picking a branch.
+
+    Parametrized over truthy AND falsy non-bools, not just ``None``: a guard
+    that regressed to ``if allow_repause is None: raise`` plus plain truthiness
+    would still reject ``None`` while letting ``1`` or ``"yes"`` select a
+    termination branch the caller never asked for.
+    """
+    with pytest.raises(AssertionError, match="allow_repause"):
         build_temporal_planning_answer_callback(
             "tok-1",
             submitted_answers=[],
-            allow_repause=None,  # type: ignore[arg-type]
+            allow_repause=bad_value,  # type: ignore[arg-type]
         )
 
 

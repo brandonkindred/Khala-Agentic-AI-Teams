@@ -556,10 +556,15 @@ def _plan_project_activity_body(
         instead of a blocking poll loop.
 
         ``allow_repause=False`` suppresses a *further* pause on a resume: the callback then
-        resolves every batch with whatever answers match and logs a warning, so this returns
-        a ``PlanResult`` rather than another ``{"outcome": "paused"}``. The calling workflow
-        uses it to bound its pause loop -- see ``build_temporal_planning_answer_callback``
-        for why an unbounded one cannot be relied on to terminate.
+        resolves every batch with whatever answers match AND defaults every question left
+        unanswered (see ``build_temporal_planning_answer_callback``'s ``_default_answer``),
+        logging a warning naming them. Defaulting is the load-bearing half: the answers
+        route rejects a batch missing any required question and every PRA question is
+        required, so resolving with only the matches would leave the sub-job waiting out its
+        poll timeout instead of resuming. So this returns a ``PlanResult`` rather than
+        another ``{"outcome": "paused"}``. The calling workflow uses it to bound its pause
+        loop -- see ``build_temporal_planning_answer_callback`` for why an unbounded one
+        cannot be relied on to terminate.
     """
     from planning_team.temporal.answer_signal import (
         PlanningAnswerPauseSignal,

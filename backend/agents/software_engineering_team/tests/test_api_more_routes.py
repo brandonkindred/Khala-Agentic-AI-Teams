@@ -409,18 +409,31 @@ def test_submit_pending_answers_temporal_native_still_advertises_a_later_pause(
         job_id,
         waiting_for_answers=True,
         resume_token=f"{job_id}:tok-1",
-        pending_questions=[{"id": "q1", "question_text": "Q1?", "required": True}],
+        pending_questions=[
+            {
+                "id": "q1",
+                "question_text": "Q1?",
+                "required": True,
+                "options": [{"id": "a", "label": "A"}],
+            }
+        ],
     )
     monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", lambda *_a, **_k: None)
     monkeypatch.setattr(hitl_mod, "signal_workflow_sync", lambda *_a, **_k: None)
 
-    client.post(
+    resp = client.post(
         f"/run-team/{job_id}/answers",
         json={
-            "answers": [{"question_id": "q1", "selected_option_id": None}],
+            "answers": [{"question_id": "q1", "selected_option_id": "a"}],
             "resume_token": f"{job_id}:tok-1",
         },
     )
+    # Assert the submission landed, and that the marker it set is visible.
+    # Without this the test proves nothing: a rejected POST sets no marker, the
+    # projection falls back to the raw envelope, and the round-2 assertions
+    # below would pass for the opposite reason.
+    assert resp.status_code == 200
+    assert client.get(f"/run-team/{job_id}").json()["waiting_for_answers"] is False
 
     # The activity consumed round 1 and paused again on a fresh token.
     fake_job_client.update_job(

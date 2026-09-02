@@ -399,8 +399,10 @@ def poll_until_terminal(
         - If no terminal status is observed within ``total_timeout`` seconds,
           returns ``{status_key: "failed", "error": f"Timed out waiting for
           {log_context}"}``.
-        - Never raises; never sleeps past a terminal/None/exception
-          short-circuit.
+        - Never raises on its own; the only exceptions that escape are those
+          listed in ``passthrough_exceptions`` and raised by ``on_poll`` (see
+          above), which is empty by default. Never sleeps past a
+          terminal/None/exception short-circuit.
     """
     assert poll_interval > 0, f"poll_interval must be positive, got {poll_interval!r}"
     assert total_timeout > 0, f"total_timeout must be positive, got {total_timeout!r}"

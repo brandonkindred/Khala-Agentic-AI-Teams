@@ -88,6 +88,16 @@ def wait_for_product_analysis_completion(
     Poll status until completed or failed. If waiting_for_answers and answer_callback
     is provided, call answer_callback(pending_questions) and submit answers then resume.
     Returns final status dict; status key is 'completed' or 'failed'.
+
+    Raises:
+        PlanningAnswerPauseSignal: when a durable-HITL ``answer_callback`` signals that
+            no answer is available yet. It is whitelisted through ``poll_until_terminal``
+            deliberately, for a Temporal activity boundary to catch and translate into a
+            paused result -- folding it into a failed status here is what left the whole
+            pause feature inert. A caller that does not handle it must not pass such a
+            callback. Every OTHER callback error is still folded into a failed status by
+            ``poll_until_terminal`` (fail-closed), so this is the only exception that
+            escapes.
     """
 
     def _on_poll(status: Dict[str, Any]) -> None:

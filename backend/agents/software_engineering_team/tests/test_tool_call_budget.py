@@ -8,6 +8,7 @@ has no iteration limit of its own.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
@@ -123,8 +124,6 @@ def _sees_budget_directive(system_prompt: Any) -> bool:
 
 
 def _drain(model: Any, **kwargs: Any) -> List[Dict]:
-    import asyncio
-
     async def _run() -> List[Dict]:
         return [event async for event in model.stream(**kwargs)]
 
@@ -341,12 +340,16 @@ def test_cap_bounds_tool_calls_within_a_single_parallel_batch() -> None:
     assert _tool_use_ids(events) == ["call_0", "call_1"]
     assert model.tool_calls_used == 2
     assert sum(1 for event in events if "contentBlockStop" in event) == 2
-    assert not any(
-        "toolUse" in (event.get("contentBlockDelta", {}).get("delta") or {})
-        and json.loads(event["contentBlockDelta"]["delta"]["toolUse"]["input"])["path"]
-        not in {"f0.py", "f1.py"}
+    # Positive, not "nothing extra leaked": this is the one path where a KEPT
+    # block's input deltas run through the wrapper's filter, so a defect that
+    # dropped every tool-use delta would satisfy an absence check while handing
+    # Strands two tool-use blocks with no input at all.
+    tool_use_paths = [
+        json.loads(event["contentBlockDelta"]["delta"]["toolUse"]["input"])["path"]
         for event in events
-    )
+        if "toolUse" in (event.get("contentBlockDelta", {}).get("delta") or {})
+    ]
+    assert tool_use_paths == ["f0.py", "f1.py"]
     # The turn's own stop reason is untouched here — the next turn is the one
     # that ends the loop, with the tools still attached and a directive on the
     # system prompt (withdrawing the specs would break the Anthropic request).
