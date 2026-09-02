@@ -93,6 +93,38 @@ from .models import (
 )
 from .prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 
+
+def _build_spec_agent(
+    *, name: str, description: str, prompt: AgentPromptSpec, agent_key: str
+) -> Agent:
+    """Build an agent whose prompt and structured output both come from an AgentPromptSpec.
+
+    Preconditions:
+        ``prompt.structured_output is not None`` — ``prompt`` must be a
+        schema-derived spec (built with ``structured_output=``, not
+        ``fields=``), since this helper reads the output schema directly
+        from the spec instead of taking a separate ``structured_output``
+        argument.
+
+    Postconditions:
+        Returns an ``Agent`` built via ``build_agent`` with the given
+        ``name``, ``description``, and ``agent_key``, whose system prompt
+        is ``render_agent_prompt(prompt)`` and whose structured output is
+        ``prompt.structured_output``.
+    """
+    assert prompt.structured_output is not None, (
+        "_build_spec_agent requires prompt.structured_output to be set "
+        "(prompt must be a structured_output-based AgentPromptSpec, not a fields-based one)"
+    )
+    return build_agent(
+        name=name,
+        description=description,
+        system_prompt=render_agent_prompt(prompt),
+        structured_output=prompt.structured_output,
+        agent_key=agent_key,
+    )
+
+
 # ===================================================================
 # Phase 1 — Strategic Core  (Graph: fan-out / fan-in)
 # ===================================================================
