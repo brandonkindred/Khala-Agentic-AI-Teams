@@ -12,6 +12,11 @@ def test_merged_prompt_contains_both_source_bodies_verbatim() -> None:
     assert DOC_SUMMARIZATION_PROMPT in DOC_SCORE_AND_SUMMARIZE_PROMPT
 
 
+def test_merged_prompt_has_scoring_and_summarization_sections() -> None:
+    assert "## Scoring" in DOC_SCORE_AND_SUMMARIZE_PROMPT
+    assert "## Summarization" in DOC_SCORE_AND_SUMMARIZE_PROMPT
+
+
 def test_merged_prompt_names_all_six_response_keys() -> None:
     for key in (
         "relevance_score",
