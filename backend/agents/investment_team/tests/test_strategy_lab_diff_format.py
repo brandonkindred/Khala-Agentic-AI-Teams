@@ -1,8 +1,10 @@
 """Unit coverage for :func:`diff_or_full`.
 
-Covers the three acceptance-criteria cases for the code-string diff utility:
-no previous round (full text), a small incremental change (diff), and a
-near-total-rewrite (falls back to full text).
+Covers each case the code-string diff utility distinguishes: no previous
+round (full text), a small incremental change (diff), a near-total rewrite
+(falls back to full text), identical rounds (falls back to full text rather
+than yielding an empty diff), an empty — but not ``None`` — previous round,
+and inputs whose final line carries no trailing newline.
 """
 
 from __future__ import annotations
@@ -42,11 +44,11 @@ def test_near_total_rewrite_falls_back_to_full_text():
 def test_identical_code_returns_full_text_not_an_empty_diff():
     """A no-op round must resend the full code, never an empty diff.
 
-    This assertion is deliberately inverted from the one this test carried
-    when the utility was introduced (#7409), where it pinned the raw length
-    rule while ``diff_or_full`` was still standalone and "not yet wired into
-    refinement.py's prompt path" — an empty return had no consumer and so no
-    consequence. #7424 wired it in, which turned this case into a live defect:
+    This assertion is deliberately inverted from the one this test originally
+    carried. It was written while ``diff_or_full`` was still a standalone
+    utility with no caller, where it pinned the raw length rule and an empty
+    return had no consumer and so no consequence. Wiring the utility into
+    ``RefinementAgent``'s prompt path turned that case into a live defect:
 
     ``unified_diff`` yields nothing for identical inputs, and
     ``len("") < len(current_code)`` holds for any non-empty code, so the old
