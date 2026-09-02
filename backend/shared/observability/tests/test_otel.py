@@ -472,6 +472,7 @@ def test_shutdown_otel_skips_providers_without_a_shutdown_hook(monkeypatch) -> N
 
 
 def test_noop_span_is_a_context_manager_that_absorbs_every_call() -> None:
+    """Every span method is absorbed, so callers need no SDK guard."""
     from shared.observability.otel import _NoopSpan
 
     with _NoopSpan() as span:
@@ -483,6 +484,7 @@ def test_noop_span_is_a_context_manager_that_absorbs_every_call() -> None:
 
 
 def test_noop_span_exit_does_not_suppress_exceptions() -> None:
+    """The no-op must behave like a real span: it records, it never swallows."""
     from shared.observability.otel import _NoopSpan
 
     with pytest.raises(RuntimeError, match="propagated"):
@@ -548,6 +550,12 @@ def test_init_otel_honors_otel_sdk_disabled(reinitializable_otel, monkeypatch) -
 
 
 def test_init_otel_returns_false_when_the_sdk_is_missing(reinitializable_otel, monkeypatch) -> None:
+    """A missing opentelemetry.sdk.trace degrades init to a False verdict, never a crash.
+
+    Poisoning the ``sys.modules`` entry with None is how the absent package is
+    simulated: it makes the ``from … import …`` inside init_otel raise ImportError
+    without uninstalling anything.
+    """
     import sys
 
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)

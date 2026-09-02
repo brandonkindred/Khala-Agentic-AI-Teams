@@ -146,7 +146,7 @@ def test_extract_node_output_uses_the_last_agent_result() -> None:
         ),
         pytest.param(_result_with_text("n", ""), id="empty-text"),
         pytest.param(_result_with_text("n", "prose with no json at all"), id="no-json"),
-        pytest.param(_result_with_text("n", '{"score": "not-a-number"}'), id="unparseable-json"),
+        pytest.param(_result_with_text("n", '{"score": "not-a-number"}'), id="schema-invalid-json"),
         pytest.param(object(), id="not-a-multiagent-result"),
     ],
 )
