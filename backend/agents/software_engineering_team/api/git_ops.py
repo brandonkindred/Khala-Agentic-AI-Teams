@@ -392,7 +392,13 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     # resolution error" postcondition holds for that failure mode too.
     try:
         deletable = _is_deletable_ephemeral_checkout(resolved)
-    except OSError:
+    except OSError as e:
+        # Logged, not silently swallowed: without this an operator cannot tell a
+        # routine refusal ("not a platform-owned per-issue/per-PR checkout") from
+        # an environmental one (a permission error stopped the safety check).
+        # ``_locked_rmtree`` logs the identical failure mode at its own
+        # validation site, so the two behave the same way for the same failure.
+        logger.debug("Could not validate ephemeral checkout target %s: %s", resolved, e)
         return None
     if not deletable:
         return None
@@ -1072,6 +1078,12 @@ def _prepare_issue_branch(
         - ``expected_base_sha``, when provided, is the ``default_branch`` HEAD
           SHA observed at triage time (before this activity ran) -- used only
           as a freshness check, never passed to git as a ref.
+        - Both optional SHA parameters use ONE presence convention: ``None``
+          means "not provided" (the check is skipped) and any other value --
+          including ``""`` -- means "provided" and is compared against the live
+          ref. A SHA is never legitimately empty, so an empty string is a caller
+          bug that fails the job closed rather than silently disabling the
+          freshness check the caller asked for.
     Postconditions (success):
         - integration_branch is checked out with a clean working tree;
           khala.active-issue records issue_number when provided; every commit
@@ -1149,7 +1161,7 @@ def _prepare_issue_branch(
     # This freshness check must also precede dirty-tree recovery, same as the
     # unsafe-ref checks above: a job whose plan is already known stale must
     # not commit WIP or create rescue branches on its way to being rejected.
-    if expected_base_sha and base_ref != expected_base_sha:
+    if expected_base_sha is not None and base_ref != expected_base_sha:
         return (
             False,
             f"base branch `{default_branch}` moved from `{expected_base_sha}` to "

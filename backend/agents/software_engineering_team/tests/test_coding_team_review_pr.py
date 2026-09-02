@@ -144,8 +144,16 @@ class TestGetPullRequest:
             client.get_pull_request("o", "r", 7)
 
     def test_head_repo_full_name_missing_repo_is_empty(self) -> None:
-        """No head.repo at all (the default fixture shape) parses as ''."""
-        client = _client_with(lambda _req: httpx.Response(200, json=_pr_payload(7)))
+        """No head.repo at all parses as ''.
+
+        The head block is passed explicitly (``overrides`` REPLACES it
+        wholesale) so the case stands on its own: relying on the shared default
+        fixture to omit ``repo`` would make this test start failing --
+        confusingly, and for a scenario it no longer constructs -- the day
+        someone adds a ``repo`` key there for another test.
+        """
+        payload = _pr_payload(7, head={"ref": "feature", "sha": "abc123"})
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
         pr = client.get_pull_request("o", "r", 7)
         assert pr.head_repo_full_name == ""
 

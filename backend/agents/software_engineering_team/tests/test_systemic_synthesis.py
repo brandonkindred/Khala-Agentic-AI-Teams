@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import pytest
 from code_review_agent.models import CodeReviewIssue
 from code_review_agent.systemic_synthesis import (
     MIN_FINDINGS_FOR_SYNTHESIS,
     _parse_systemic_findings,
+    _scrub_token_from_text,
     synthesize_systemic_findings,
 )
 
@@ -286,3 +288,32 @@ def test_parse_systemic_findings_defensive() -> None:
             ],
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "no credentials here",
+        "clone https://x-access-token:ghp_AAAAAAAAAAAAAAAAAAAAAA@github.com/o/r",
+        "token gho_abcdef0123456789abcdef01 quoted inside a finding",
+        "ghu_BBBBBBBBBBBBBBBBBBBBBB and ghs_CCCCCCCCCCCCCCCCCCCCCC and ghr_DDDDDDDDDDDDDDDDDDDDDD",
+        "https://user@example.com/path plus ghp_EEEEEEEEEEEEEEEEEEEEEE",
+        "short ghp_tooshort is left alone",
+    ],
+)
+def test_local_scrubber_stays_in_lockstep_with_github_source(text: str) -> None:
+    """The local copy must behave IDENTICALLY to the canonical scrubber.
+
+    ``systemic_synthesis`` deliberately carries its own copy of
+    ``github_source.client.scrub_token_from_text`` (``code_review_agent`` is the
+    generic review engine and must not depend on the PR-specific package), and
+    that copy is otherwise guarded only by a comment. If the canonical regex is
+    later widened (a new credential prefix, say) and the copy is not, a
+    credential quoted inside a code-review finding would reach the synthesis
+    prompt un-redacted -- exactly the leak the scrubber exists to prevent. This
+    test is what makes the documented lockstep enforceable.
+    """
+    from software_engineering_team.github_source.client import scrub_token_from_text
+
+    assert _scrub_token_from_text(text) == scrub_token_from_text(text)

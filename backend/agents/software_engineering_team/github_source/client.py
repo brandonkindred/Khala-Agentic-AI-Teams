@@ -566,7 +566,11 @@ def web_host_for_api_base_url(base_url: str) -> str:
           not the API path. Falls back to the raw ``base_url`` on any parse
           error OR an empty parsed ``netloc`` (e.g. a relative-path base
           URL) rather than raising, since this only feeds a display/
-          clone-URL convenience, never an auth-relevant decision.
+          clone-URL convenience, never an auth-relevant decision — except
+          that a bare ``api.github.com`` host string with no scheme (which
+          parses to an empty ``netloc`` too) is still recognized as the cloud
+          API host and maps to ``"github.com"``, since that is what such a
+          string names.
     """
     try:
         parsed = urlsplit(base_url)
@@ -1219,8 +1223,11 @@ class GitHubClient(_GitHubHttpMixin):
               :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` page (only the first
               page's ids are yielded).
             - A thread whose ``comments`` payload is UNREADABLE (not a dict, or
-              its ``nodes`` not a list) is SKIPPED in both modes, never yielded
-              with an empty comment tuple. A consumer cannot distinguish "this
+              its ``nodes`` not a list) is never yielded with an empty comment
+              tuple — the guarantee that holds in BOTH modes. What happens
+              instead differs by mode: strict aborts the walk with
+              ``ReviewThreadsUnavailableError``, non-strict skips the thread and
+              announces the loss with the warning. A consumer cannot distinguish "this
               thread has no comments" from "this thread's comments could not be
               read", and reads the former as "nothing outstanding here" —
               enough for ``address_comments`` to resolve a thread whose real
@@ -1322,7 +1329,10 @@ class GitHubClient(_GitHubHttpMixin):
                     )
                     return
                 if not isinstance(node, dict):
-                    _unavailable(f"skipping invalid review-thread node: {node!r}")
+                    _unavailable(
+                        f"invalid review-thread node: {node!r}; a non-strict caller "
+                        "would skip it"
+                    )
                     continue
                 thread_id = node.get("id")
                 if not isinstance(thread_id, str) or not thread_id:
@@ -1341,7 +1351,8 @@ class GitHubClient(_GitHubHttpMixin):
                     # point here gets.
                     _unavailable(
                         "review-thread node has a missing or invalid isResolved (expected "
-                        f"bool, got {is_resolved_raw!r}); coercing with bool()"
+                        f"bool, got {is_resolved_raw!r}); a non-strict caller would coerce "
+                        "with bool()"
                     )
                 is_resolved = bool(is_resolved_raw)
                 comments = node.get("comments")
@@ -1356,7 +1367,7 @@ class GitHubClient(_GitHubHttpMixin):
                     # already avoids by skipping, so this matches it.
                     _unavailable(
                         f"invalid review-thread comments payload (thread {thread_id!r}): "
-                        f"{comments!r}; skipping the thread"
+                        f"{comments!r}; a non-strict caller would skip the thread"
                     )
                     continue
                 # Per-thread comment pagination is checked in BOTH modes: a
@@ -1662,7 +1673,7 @@ class GitHubClient(_GitHubHttpMixin):
     def get_file_contents_detailed(
         self, owner: str, repo: str, path: str, ref: str
     ) -> tuple[Optional[str], bool]:
-        """Like :meth:`get_file_contents`, but also reports whether the path is confirmed absent.
+        """Like :meth:`get_file_contents`, but also reports whether GitHub responded 404.
 
         Preconditions:
             - Same as :meth:`get_file_contents`.

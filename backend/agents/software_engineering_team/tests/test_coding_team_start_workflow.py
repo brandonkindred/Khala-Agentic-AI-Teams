@@ -119,7 +119,10 @@ def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
     result = sw.execute_coding_team_workflow("parent:comment:2", "/repo", plan_input, github)
 
     assert result["status"] == "completed"
-    assert captured["workflow_id"] == "coding_team-parent:comment:2"
+    # Composed from the constant, not a copy of its value: the behavior under
+    # test is the dispatcher composing PREFIX + job_id, so a deliberate change
+    # to WORKFLOW_ID_PREFIX must not fail this test for an unrelated reason.
+    assert captured["workflow_id"] == f"{WORKFLOW_ID_PREFIX}parent:comment:2"
     assert captured["task_queue"] == TASK_QUEUE
     # The WHOLE payload, not just its `github` block: `plan_input` and
     # `repo_path` are what the workflow actually runs on, and a regression that
@@ -384,3 +387,25 @@ def test_is_token_key_matches_a_tuple_key_containing_a_marker():
     assert sw._is_token_key(("token", 0)) is True
     assert sw._is_token_key(123) is False
     assert sw._is_token_key(("owner", "repo")) is False
+
+
+@pytest.mark.parametrize("falsy", [[], "", 0, False], ids=["list", "str", "int", "bool"])
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        lambda bad: sw.start_coding_team_workflow("job-7", "/repo", bad),
+        lambda bad: sw.execute_coding_team_workflow("job-7", "/repo", bad, dict(_VALID_GITHUB)),
+    ],
+    ids=["start", "execute"],
+)
+def test_dispatchers_reject_falsy_non_dict_plan_input(monkeypatch, dispatch, falsy):
+    """A FALSY non-dict is neither `None` nor a plan, and must be rejected too.
+
+    `None` is the single spelling for "no plan". A truthiness guard here would
+    let `[]`/`""`/`0`/`False` through unvalidated and forward them verbatim
+    across the durable Temporal workflow boundary -- the one input path this
+    validator exists to close, and the contract the docstring states.
+    """
+    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="requires plan_input to be a dict when provided"):
+        dispatch(falsy)

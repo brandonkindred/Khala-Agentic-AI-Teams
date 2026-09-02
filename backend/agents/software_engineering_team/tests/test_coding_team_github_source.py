@@ -1813,14 +1813,12 @@ class TestEndpointHappyPath:
         assert raw_git_error not in resp.text
         assert "ghp_SECRETSECRETSECRETSECRET" not in resp.text
 
-        # The job row was already created before the SHA check ran; it must be
-        # marked failed here or every retry for this issue would 409 forever
-        # against an orphaned 'pending' job that nothing ever dispatched.
-        jobs = patched_app["jobs"].list_jobs()
-        assert len(jobs) == 1
-        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
-        assert job["status"] == "failed"
-        assert job["error"] == "unable to resolve base branch head sha"
+        # NO job row exists: the row is written only after every fallible
+        # preparation step has succeeded, so this failure leaves nothing that a
+        # later retry could be 409-wedged against. (A row created before the SHA
+        # check would have to be terminalized here, and any UNANTICIPATED
+        # failure in the same span would strand it in 'pending' forever.)
+        assert patched_app["jobs"].list_jobs() == []
         # Sanitized in the disclosed surfaces, and the diagnostic that reaches
         # the operator through the log is redacted too: the surrounding git
         # message survives (it is what makes the log useful), the credential
@@ -1828,6 +1826,40 @@ class TestEndpointHappyPath:
         assert "fatal: could not read from" in caplog.text
         assert "ghp_SECRETSECRETSECRETSECRET" not in caplog.text
         assert "example/r" in caplog.text
+
+    def test_run_from_github_creates_no_job_when_preparation_raises_unexpectedly(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """An UNEXPECTED exception during preparation must leave no job row.
+
+        The two designed preparation failures (unresolvable base, unresolvable
+        base SHA) are handled explicitly, but an exception escaping
+        ``resolve_remote_branch_sha``'s ``(ok, err)`` tuple contract (a git
+        subprocess timeout, a missing binary) is handled by NOT having created
+        the row yet: there is no orphaned 'pending' job to 409-wedge every later
+        retry for this issue against.
+        """
+        import software_engineering_team.api.coding_team_main as api_main
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("git subprocess timed out")
+
+        monkeypatch.setattr(api_main, "resolve_remote_branch_sha", _boom)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        with pytest.raises(RuntimeError, match="git subprocess timed out"):
+            patched_app["client"].post(
+                "/run-from-github",
+                json=_body(1, repo_path=patched_app["repo_path"]),
+            )
+
+        assert patched_app["jobs"].list_jobs() == []
 
     def test_run_from_github_persists_github_context_in_the_create_call(
         self, patched_app, monkeypatch
@@ -1871,14 +1903,15 @@ class TestEndpointHappyPath:
         # Nothing had to be patched in afterwards.
         assert not [u for u in updates if "github_context" in u]
 
-    def test_run_from_github_returns_500_and_fails_job_when_base_branch_unresolvable(
+    def test_run_from_github_returns_500_and_creates_no_job_when_base_branch_unresolvable(
         self, patched_app
     ) -> None:
         """When neither request.base_branch nor the repo's default_branch is
-        available, the job row created just above must be marked failed rather
-        than left 'pending' -- an orphaned pending job is non-terminal, so it
-        would wedge this checkout's admission lock for every later
-        run-from-github/address-comments request until manually cleaned up."""
+        available, NO job row may be created -- an orphaned pending job is
+        non-terminal, so it would wedge this checkout's admission lock for every
+        later run-from-github/address-comments request until manually cleaned
+        up. The route defers ``create_job`` until after this resolution, so the
+        window does not exist rather than being handled."""
         gh = _FakeClient(
             issues=[_issue(1, title="Add feature")],
             sub_map={1: []},
@@ -1894,28 +1927,20 @@ class TestEndpointHappyPath:
         assert resp.status_code == 500
         assert "unable to resolve base branch" in resp.json()["detail"]
 
-        jobs = patched_app["jobs"].list_jobs()
-        assert len(jobs) == 1
-        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
-        assert job["status"] == "failed"
-        assert "unable to resolve base branch" in job["error"]
+        assert patched_app["jobs"].list_jobs() == []
 
-        # Prove the docstring's rationale rather than merely asserting the row is
-        # terminal: an identical retry must NOT be 409-wedged by the first
-        # attempt's job. It re-fails the same way (500) and creates its own
-        # second job row -- which it could not do if the first were still
-        # holding admission as a non-terminal 'pending'.
+        # Prove the docstring's rationale rather than merely asserting the row
+        # is absent: an identical retry must NOT be 409-wedged by the first
+        # attempt. It re-fails the same way (500) and still leaves no row --
+        # which it could not do if the first attempt had persisted a
+        # non-terminal 'pending' job holding admission.
         retry = patched_app["client"].post(
             "/run-from-github",
             json=_body(1, repo_path=patched_app["repo_path"]),
         )
         assert retry.status_code == 500
         assert "unable to resolve base branch" in retry.json()["detail"]
-        retry_jobs = patched_app["jobs"].list_jobs()
-        assert len(retry_jobs) == 2
-        assert all(
-            patched_app["jobs"].get_job(j["job_id"])["status"] == "failed" for j in retry_jobs
-        )
+        assert patched_app["jobs"].list_jobs() == []
 
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
@@ -2656,6 +2681,23 @@ class TestPrepareIssueBranch:
         )
         assert ok is True, msg
 
+    def test_empty_expected_base_sha_is_treated_as_provided(self, api, tmp_path) -> None:
+        """``""`` means "provided", not "absent" -- the same convention
+        ``expected_head_sha`` uses.
+
+        A SHA is never legitimately empty, so a truthiness guard here would
+        silently DISABLE the freshness check a caller asked for (and the two
+        optional SHA parameters would answer the same question two different
+        ways). Failing closed surfaces the caller bug instead.
+        """
+        repo = self._init_repo(tmp_path)
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha=""
+        )
+        assert ok is False
+        assert "moved" in (msg or "")
+
     def test_stale_expected_base_sha_rejected_before_any_checkout(self, api, tmp_path) -> None:
         """The base moved since triage: fail closed, before touching the checkout."""
 
@@ -2733,11 +2775,13 @@ class TestPrepareIssueBranch:
         perform the check at all -- prep succeeds regardless of the branch's
         live tip, exactly as before this parameter existed.
 
-        Regression coverage: the branch is advanced a SECOND time after the
-        commit a caller might have observed, so a live-tip check that fired
-        despite the ``None`` default would see a moved tip and fail -- proving
-        the check is actually skipped, not just trivially unexercised because
-        the tip never moved."""
+        Regression coverage: the branch already carries several commits when
+        prep runs, so a check that fired despite the ``None`` default (comparing
+        ``None``, or anything else it resolved internally, against the live tip)
+        would fail here -- proving the check is gated on the parameter rather
+        than merely unexercised. No caller-observed SHA is captured because with
+        ``expected_head_sha=None`` there is nothing for a misfiring check to
+        compare against."""
         repo = self._init_repo(tmp_path)
         commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
         commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
@@ -3447,6 +3491,34 @@ class TestEphemeralCheckoutCleanup:
         # An embedded null byte makes Path.resolve() raise ValueError → treated as unsafe.
         assert api._is_ephemeral_checkout_path("bad\x00path") is False
 
+    def test_ephemeral_path_gate_logs_the_swallowed_oserror(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """A filesystem read failure in the content gate returns None AND logs.
+
+        Without the log an operator cannot tell an ordinary refusal ("this is
+        not a platform-owned per-issue/per-PR checkout") from an environmental
+        one (a permission error stopped the safety check) -- the caller only
+        reports "unsafe path, left in place" either way.
+        """
+        import logging
+
+        from software_engineering_team.api import git_ops
+
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        target = tmp_path / "issue-7"
+        target.mkdir()
+        (target / ".git").mkdir()
+
+        def _boom(*_a, **_kw):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(git_ops, "_is_deletable_ephemeral_checkout", _boom)
+
+        with caplog.at_level(logging.DEBUG, logger=git_ops.__name__):
+            assert git_ops._is_ephemeral_checkout_path(str(target)) is False
+        assert "permission denied" in caplog.text
+
     def test_cleanup_helper_swallows_rmtree_failure_and_keeps_lock(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
@@ -3748,6 +3820,28 @@ class TestFileContentsAndTree:
 
         with pytest.raises(GitHubAPIError):
             _client_with(handler).get_file_contents("o", "r", "a.py", "sha1")
+
+    def test_get_file_contents_detailed_success_is_not_missing(self) -> None:
+        """A decodable file payload reports (decoded_text, missing=False).
+
+        The most common case, and the one the flag is load-bearing for: an
+        address-comments caller reads ``missing=True`` as "the file is gone".
+        Pinned explicitly rather than left implied by the sibling
+        ``get_file_contents`` test, which discards the second tuple element.
+        """
+        body = "class Model:\n    pass\n"
+        encoded = base64.b64encode(body.encode()).decode()
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"type": "file", "encoding": "base64", "content": encoded}
+            )
+
+        content, missing = _client_with(handler).get_file_contents_detailed(
+            "o", "r", "pkg/models.py", "sha1"
+        )
+        assert content == body
+        assert missing is False
 
     def test_get_file_contents_detailed_confirms_404_as_missing(self) -> None:
         """A 404 is reported as (None, missing=True) -- distinguishable from a

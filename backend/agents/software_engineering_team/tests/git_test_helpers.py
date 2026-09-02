@@ -36,10 +36,15 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
           test running against the wrong HEAD.
 
     Preconditions:
-        - ``repo`` is an existing on-disk git checkout with a ``main`` branch
-          already checked out (or at least existing) — this helper always
-          returns to ``main`` afterwards, so a repo without one leaves the
-          checkout in an unexpected state.
+        - ``repo`` is an existing on-disk git checkout with ``main`` **checked
+          out** — not merely existing. The new commit is based on the current
+          HEAD, which this precondition pins to ``main``'s tip (the
+          ``checkout -B`` note below depends on exactly that), and the helper
+          always returns to ``main`` afterwards. If some OTHER branch is HEAD,
+          the commit is parented on that branch's tip instead while the helper
+          still reports success and returns to ``main``, so the returned SHA
+          would not be reachable from ``main``; a repo with no ``main`` at all
+          leaves the checkout in an unexpected state.
         - ``repo`` already has a committer identity configured (``git config
           user.email``/``user.name``, local or global) — this helper does not
           set one itself, and ``git commit`` fails without it. Both current

@@ -16,6 +16,14 @@ import software_engineering_team.resolve_attempt_store as store
 
 
 class _FakeCursor:
+    """Cursor fake recording every executed ``(query, params)`` pair.
+
+    ``fetchone`` always returns the single preset ``fetchone_result``, so a test
+    pins the store's read path by construction, and ``executed`` lets a test
+    assert on the exact statements the store issued (and on the ones it did
+    NOT).
+    """
+
     def __init__(self, fetchone_result=None) -> None:
         self.fetchone_result = fetchone_result
         self.executed: list[tuple] = []
@@ -34,6 +42,13 @@ class _FakeCursor:
 
 
 class _FakeConn:
+    """Context-manager connection fake handing out ONE shared ``_FakeCursor``.
+
+    ``cursor()`` deliberately returns the same instance on every call rather
+    than a fresh one, so a test inspecting ``executed`` sees every statement the
+    store issued across all of its cursors, not just the last one's.
+    """
+
     def __init__(self, cursor: _FakeCursor) -> None:
         self._cursor = cursor
 
@@ -232,6 +247,14 @@ class _SqliteCursor:
 
 
 class _SqliteConn:
+    """Context-manager wrapper around a real sqlite connection that COMMITS on exit.
+
+    Mirrors the transaction boundary the production store relies on around
+    ``get_conn()``: without the commit-on-exit, a write made inside one ``with``
+    block would not be visible to the next one and the offline round-trip tests
+    would pass or fail for the wrong reason.
+    """
+
     def __init__(self, conn) -> None:
         self._conn = conn
 

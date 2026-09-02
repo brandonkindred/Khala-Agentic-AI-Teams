@@ -1123,5 +1123,14 @@ class TestGitHubNameValidation:
 
     @pytest.mark.parametrize("good", ["acme", "Acme-Corp", "a.b_c-d", "0day"])
     def test_well_formed_names_are_accepted(self, good: str) -> None:
+        """Both names round-trip unchanged on every model.
+
+        Asserting ``repo`` too is what keeps ``test_malformed_repo_is_rejected``
+        honest: on a model that did NOT declare a ``repo`` field but forbids
+        extras, that test would pass on the unknown-field error rather than on
+        value validation, and nothing else here would notice.
+        """
         for model, extras in self._models():
-            assert model(owner=good, repo=good, **extras).owner == good
+            built = model(owner=good, repo=good, **extras)
+            assert built.owner == good
+            assert built.repo == good

@@ -48,16 +48,16 @@ def _fail_new_job(
 ) -> NoReturn:
     """Terminalize a freshly-created job as failed and raise the matching HTTPException.
 
-    Shared by ``post_run_from_github``'s admission block for the three ways a
-    job that was already created (and so already counts as active for
-    ``_running_job_for_issue``/checkout-admission purposes) can fail before a
-    workflow is actually dispatched: an unresolvable base branch, an
-    unresolvable base-branch head SHA, and a Temporal dispatch failure.
-    Leaving the row 'pending' in any of these cases would make every retry
-    409 forever with nothing left to terminalize it, and could wedge the
-    checkout admission lock the caller holds. Callers are expected to log
-    their own context (``logger.error``/``logger.exception``) BEFORE calling
-    this, since the right log level and message differ per site.
+    Used by ``post_run_from_github``'s admission block for the one failure that
+    can strike AFTER the job row exists: a Temporal dispatch failure. (Every
+    other way that block can fail — an unresolvable base branch, an unresolvable
+    base-branch head SHA, an unexpected exception in either — happens before the
+    row is created at all, so there is nothing to terminalize.) Leaving the row
+    'pending' would make every retry 409 forever with nothing left to
+    terminalize it, and could wedge the checkout admission lock the caller
+    holds. Callers are expected to log their own context
+    (``logger.error``/``logger.exception``) BEFORE calling this, since the right
+    log level and message differ per site.
 
     Preconditions:
         - ``job_id`` names a job row this request already created.
@@ -96,7 +96,12 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
           either directly or through the configured environment.
     Postconditions:
         - A job record is created and tagged with GitHub context for the selected
-          ready issue. When a token encryption key is configured, the encrypted
+          ready issue. It is written only once EVERY fallible preparation step
+          (base-branch resolution, base-head-SHA resolution) has succeeded, so a
+          preparation failure — anticipated (400/500/502) or not — leaves no row
+          behind: an orphaned 'pending' row counts as active for
+          ``_running_job_for_issue`` and would 409 every later retry for this
+          issue with nothing left to terminalize it. When a token encryption key is configured, the encrypted
           token is stored on the job record too, so a later resume can re-drive
           the GitHub publish flow without the caller supplying it again.
         - The CodingTeamWorkflow is started with a GitHub payload that contains
@@ -200,31 +205,24 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         encrypted = encrypt_token(token)
         if encrypted:
             job_fields["github_token_encrypted"] = encrypted
-        # ONE write, not create-then-update. A second call to persist the context
-        # would leave a window — an exception, but also a hard crash (SIGKILL,
-        # OOM, deploy restart) between two adjacent service calls — in which the
-        # row exists as 'pending' with no context. ``_running_job_for_issue``
-        # treats a pending row as active, so every retry for this issue would 409
-        # forever with nothing left to terminalize it. Creating the row already
-        # complete removes the window entirely rather than handling one of its
-        # two causes: if this call raises, no row exists to orphan.
-        _main.create_job(
-            job_id=job_id,
-            repo_path=request.repo_path,
-            plan_input=plan.model_dump(),
-            extra_fields=job_fields,
-        )
 
+        # NOTHING is persisted until every fallible preparation step below has
+        # succeeded. A row created earlier would have to be terminalized on each
+        # way this preparation can fail, and any way NOT anticipated (a git
+        # subprocess timeout, a missing binary, an internal error escaping the
+        # ``(ok, err)`` tuple contract) would leave it 'pending' forever:
+        # ``_running_job_for_issue`` treats a pending row as active, so every
+        # retry for this issue would 409 with nothing left to terminalize it.
+        # Preparing first removes that window entirely rather than handling more
+        # of its causes — there is simply no row to orphan. The checkout
+        # admission lock taken above is held across preparation AND dispatch, so
+        # deferring the write costs no serialization.
         base = request.base_branch or default_branch
         if not base:
-            # The job row already exists (created above) and _running_job_for_issue
-            # treats a pending job as active, so leaving it pending here would make
-            # every retry for this issue 409 forever with nothing left to
-            # terminalize it, and would also wedge the checkout admission lock
-            # this route just took above. Mark it failed, same as the base-sha
-            # and Temporal-dispatch failure handlers below.
-            logger.error("Unable to resolve base branch for GitHub-issue run job_id=%s", job_id)
-            _fail_new_job(job_id, 500, "unable to resolve base branch for GitHub-issue run")
+            logger.error("Unable to resolve base branch for GitHub-issue run")
+            raise HTTPException(
+                status_code=500, detail="unable to resolve base branch for GitHub-issue run"
+            )
         # Pin branch prep to the exact commit the plan above was grounded on: if
         # `base` moves between now and when the Temporal branch-prep activity
         # actually runs (queueing, retries, worker restarts), that activity must
@@ -233,14 +231,10 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             request.repo_path, request.remote, base, token
         )
         if not sha_ok:
-            # The job row already exists (created above) and _running_job_for_issue
-            # treats a pending job as active, so leaving it pending here would make
-            # every retry for this issue 409 forever with nothing left to
-            # terminalize it. Mark it failed, same as a Temporal dispatch failure.
-            # The full git diagnostic stays in the log only: the stored ``error``
-            # is echoed verbatim by GET /api/jobs/{team}, so it carries a fixed
-            # summary instead of remote-supplied text, per ``_fail_new_job``'s
-            # safe-to-disclose contract.
+            # The full git diagnostic stays in the log only: the HTTP detail
+            # carries a fixed summary instead of remote-supplied text, matching
+            # ``_fail_new_job``'s safe-to-disclose contract for the sibling
+            # dispatch-failure path.
             #
             # The LOG is exactly where a leaked credential persists longest
             # (aggregators, retention), so it gets its own redaction rather than
@@ -252,13 +246,32 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                 "Unable to resolve base branch head sha: %s",
                 redact_secret(str(base_sha_or_err), token),
             )
-            _fail_new_job(job_id, 502, "unable to resolve base branch head sha")
+            raise HTTPException(status_code=502, detail="unable to resolve base branch head sha")
         integration_branch = integration_branch_for(issue.number)
+        # ONE source for the serialized plan: the persisted job row and the
+        # workflow payload below must carry the same plan by construction, not
+        # by two identical calls that a later edit could let drift apart.
+        plan_payload = plan.model_dump()
+        # ONE write, not create-then-update, and placed immediately before
+        # dispatch. A second call to persist the context would leave a window —
+        # an exception, but also a hard crash (SIGKILL, OOM, deploy restart)
+        # between two adjacent service calls — in which the row exists as
+        # 'pending' with no context; creating the row already complete removes
+        # that window, and creating it here (rather than before the preparation
+        # above) means the only statement that can run between the write and the
+        # dispatch ``try`` is the dispatch itself. If this call raises, no row
+        # exists to orphan.
+        _main.create_job(
+            job_id=job_id,
+            repo_path=request.repo_path,
+            plan_input=plan_payload,
+            extra_fields=job_fields,
+        )
         try:
             start_coding_team_workflow(
                 job_id,
                 request.repo_path,
-                plan.model_dump(),
+                plan_payload,
                 github={
                     # Shared context first (see ``github_context`` above), then
                     # the run-scoped keys only the workflow needs. ``base`` is

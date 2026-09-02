@@ -859,12 +859,12 @@ def _format_existing_issues(
           :data:`_SIMILARITY_SYSTEM_PROMPT` instructs the model to treat
           anything inside those tags strictly as data, never as instructions.
           Fencing, DEFUSING and SCRUBBING are three separate controls and all
-          apply: every title and body is passed through
-          :func:`scrub_token_from_text` (so a credential pasted into an issue is
-          not shipped to the LLM provider) and then through
-          :func:`_defuse_fences` (so a title or body containing a literal
-          ``</existing_issue>`` cannot close its own fence and render the rest
-          of itself as prompt structure). This cap is prompt-budget-specific and
+          apply to every attacker-influenceable field — title, body AND each
+          label: each is passed through :func:`scrub_token_from_text` (so a
+          credential pasted into an issue is not shipped to the LLM provider)
+          and then through :func:`_defuse_fences` (so a value containing a
+          literal ``</existing_issue>`` cannot close its own fence and render
+          the rest of itself as prompt structure). This cap is prompt-budget-specific and
           deliberately tighter than the caller's own snapshot cap
           (:func:`duplicate_check_max_open_issues`, default 100): the snapshot
           bounds GitHub round-trips, this bounds the model's context window.
@@ -881,10 +881,13 @@ def _format_existing_issues(
         if len(body) > _PROMPT_BODY_TRUNCATE_CHARS:
             body = body[:_PROMPT_BODY_TRUNCATE_CHARS] + "..."
         # Labels are attacker-influenceable too on a public repo (anyone who
-        # can open an issue on some repos can name a label), so they are
-        # defused on the same terms as the title and body.
+        # can open an issue on some repos can name a label), so they get BOTH
+        # controls on the same terms as the title and body: scrubbing (a
+        # credential pasted into a label must not be shipped to the LLM
+        # provider) and then defusing (a label spelling a literal closing tag
+        # must not close its own fence).
         labels_str = (
-            ", ".join(_defuse_fences(str(label)) for label in issue.labels)
+            ", ".join(_defuse_fences(scrub_token_from_text(str(label))) for label in issue.labels)
             if issue.labels
             else "none"
         )

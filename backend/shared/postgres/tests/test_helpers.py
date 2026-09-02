@@ -255,8 +255,13 @@ def test_best_effort_write_invokes_the_write() -> None:
 
 
 def test_best_effort_write_returns_none_on_success() -> None:
-    """No return channel: callers must not branch on a result that isn't there."""
-    assert best_effort_write("my_table", "record_thing", lambda: None) is None
+    """No return channel: callers must not branch on a result that isn't there.
+
+    The callable returns a TRUTHY value, so a regression that forwarded it
+    (``return write_fn()``) is detected. A callable returning ``None`` would
+    make this assertion hold under exactly that regression.
+    """
+    assert best_effort_write("my_table", "record_thing", lambda: "leaked") is None
 
 
 def test_best_effort_write_swallows_and_logs_the_failure(

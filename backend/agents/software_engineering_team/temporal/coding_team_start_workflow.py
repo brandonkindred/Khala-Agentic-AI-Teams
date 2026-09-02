@@ -18,6 +18,14 @@ from software_engineering_team.temporal.coding_team_workflow import CodingTeamWo
 
 logger = logging.getLogger(__name__)
 
+# Client-side wait window for ``execute_coding_team_workflow``. An
+# address-comments run dispatches the FULL SE pipeline (plan, codegen, lint,
+# review, QA, merge) for one review thread, so it is bounded by the same
+# worst-case as an ordinary issue run rather than by a comment-sized edit. Four
+# hours is that bound with headroom for LLM retries and queueing. It is only a
+# WAIT window, never a kill switch: on expiry this caller reattaches to the
+# still-running workflow (``reattach_on_timeout=True``), so a value that proves
+# too small delays the caller's observation, it does not terminate the run.
 _COMMENT_WORKFLOW_TIMEOUT_S = 4 * 60 * 60
 
 
@@ -152,7 +160,7 @@ def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: st
           ``token``, ``secret``, ``password``, ``api_key``/``api-key``,
           ``authorization``, ``credential``) at any nesting depth.
     Raises:
-        ValueError: ``plan_input`` is truthy but not a ``dict`` (a bare truthy
+        ValueError: ``plan_input`` is not ``None`` and not a ``dict`` (a
             non-dict, e.g. a token string, would otherwise bypass
             :func:`_contains_token_key`'s dict/list/tuple-only traversal and be
             serialized into the durable workflow payload verbatim — the same
@@ -160,7 +168,12 @@ def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: st
             or ``plan_input`` contains a credential-named key at any nesting
             depth (see :func:`_contains_token_key`).
     """
-    if plan_input and not isinstance(plan_input, dict):
+    # ``is not None``, not truthiness: a falsy NON-dict (``[]``, ``""``, ``0``,
+    # ``False``) is neither "absent" nor a plan, and a truthiness guard would
+    # forward it verbatim across the durable workflow boundary — the one input
+    # path this validator exists to close. ``None`` remains the single spelling
+    # for "no plan".
+    if plan_input is not None and not isinstance(plan_input, dict):
         raise ValueError(f"{caller} requires plan_input to be a dict when provided")
     if plan_input and _contains_token_key(plan_input):
         raise ValueError(f"{caller} requires plan_input to not include a token")
@@ -220,6 +233,16 @@ def _build_workflow_payload(
 ) -> Dict[str, Any]:
     """Build the ``CodingTeamWorkflow.run`` argument dict shared by both dispatchers.
 
+    Preconditions:
+        - ``job_id``/``repo_path`` have already passed
+          :func:`_validate_common_args`, and ``github``/``plan_input`` have
+          already passed :func:`_validate_github_arg` /
+          :func:`_validate_plan_input_arg`. This builder performs NO validation
+          of its own and copies both payload dicts VERBATIM into the durable
+          Temporal workflow argument, so a caller that skips the validators
+          bypasses the credential screen entirely — and Temporal event history
+          is permanent.
+
     Postconditions:
         - Returns ``{"job_id", "repo_path", "plan_input"}`` plus ``"github"``
           when ``github`` is truthy (omitted entirely when falsy/``None``, so a
@@ -262,8 +285,9 @@ def start_coding_team_workflow(
           included on the payload under ``"github"``; otherwise that key is
           omitted.
     Raises:
-        ValueError: ``job_id`` or ``repo_path`` is empty; ``github`` or
-            ``plan_input`` is truthy but not a ``dict``; or ``github`` or
+        ValueError: ``job_id`` or ``repo_path`` is empty; ``github`` is truthy
+            but not a ``dict``; ``plan_input`` is not ``None`` and not a
+            ``dict``; or ``github`` or
             ``plan_input`` contains a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS`) at any
             nesting depth (see :func:`_contains_token_key`).
         RuntimeError: the worker's Temporal client never becomes available
@@ -321,7 +345,7 @@ def execute_coding_team_workflow(
           keep blocking — there is no request deadline to respect here.
     Raises:
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
-            non-empty dict, ``plan_input`` is truthy but not a dict, or
+            non-empty dict, ``plan_input`` is not ``None`` and not a dict, or
             ``github`` or ``plan_input`` contains a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS`)
             at any nesting depth (see :func:`_contains_token_key`).
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result; the

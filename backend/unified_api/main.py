@@ -1621,7 +1621,14 @@ async def delete_job(team: str, job_id: str) -> dict[str, Any]:
 
 @app.post("/api/jobs/{team}/{job_id}/cancel", tags=["jobs"])
 async def cancel_job(team: str, job_id: str) -> dict[str, Any]:
-    """Force-cancel a running or pending job by setting its status to cancelled."""
+    """Force-cancel a running or pending job by setting its status to cancelled.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
@@ -1633,7 +1640,14 @@ async def cancel_job(team: str, job_id: str) -> dict[str, Any]:
 
 @app.post("/api/jobs/{team}/{job_id}/interrupt", tags=["jobs"])
 async def interrupt_job(team: str, job_id: str) -> dict[str, Any]:
-    """Mark a job as interrupted (e.g. after detecting it's stale)."""
+    """Mark a job as interrupted (e.g. after detecting it's stale).
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
@@ -1645,7 +1659,14 @@ async def interrupt_job(team: str, job_id: str) -> dict[str, Any]:
 
 @app.post("/api/jobs/{team}/{job_id}/resume", tags=["jobs"])
 async def resume_job(team: str, job_id: str) -> dict[str, Any]:
-    """Reset a failed/interrupted/cancelled job back to running so its team can pick it up."""
+    """Reset a failed/interrupted/cancelled job back to running so its team can pick it up.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
@@ -1657,7 +1678,14 @@ async def resume_job(team: str, job_id: str) -> dict[str, Any]:
 
 @app.post("/api/jobs/{team}/{job_id}/restart", tags=["jobs"])
 async def restart_job(team: str, job_id: str) -> dict[str, Any]:
-    """Reset a job to pending so its team re-executes it from scratch."""
+    """Reset a job to pending so its team re-executes it from scratch.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
