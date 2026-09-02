@@ -366,11 +366,14 @@
         <mat-icon aria-hidden="true">engineering</mat-icon>
         Runs
       </h2>
-      <mat-icon
+      <button
+        type="button"
         class="jobs-panel__legend"
         matTooltip="Runs stay here while they work and after they finish. Pick a run to expand its live progress."
         aria-label="About the Runs list"
-      >help_outline</mat-icon>
+      >
+        <mat-icon aria-hidden="true">help_outline</mat-icon>
+      </button>
     </div>
 
     @if (runsError) {
@@ -503,7 +506,13 @@
                 <span class="github-job-panel__label">Tasks</span>
                 <div class="github-job-tasks__list">
                   @for (task of jobStatus.task_graph_snapshot; track task.id) {
-                    <div class="github-task-chip github-task-chip--{{ task.status }}" [matTooltip]="task.title">
+                    <div
+                      class="github-task-chip github-task-chip--{{ task.status }}"
+                      tabindex="0"
+                      role="img"
+                      [attr.aria-label]="task.title"
+                      [matTooltip]="task.title"
+                    >
                       {{ task.title | slice:0:40 }}
                       <span class="github-task-chip__status">{{ task.status }}</span>
                     </div>
