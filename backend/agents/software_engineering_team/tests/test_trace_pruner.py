@@ -165,12 +165,25 @@ def test_register_swallows_heartbeat_construction_failure(monkeypatch, caplog) -
     assert any("could not start" in r.message for r in caplog.records)
 
 
-def test_unregister_stops_heartbeat() -> None:
-    """unregister stops the heartbeat and clears registration state."""
+def test_unregister_stops_heartbeat(monkeypatch) -> None:
+    """unregister stops the heartbeat and clears registration state.
+
+    Observes the stop() call itself, not just the state-clearing side effect:
+    a regression that cleared _heartbeat without calling stop() on it would
+    leave a live background thread still ticking (and still calling
+    trace_store.prune_traces() on the old interval) while this test's old,
+    state-only assertion kept passing.
+    """
     trace_pruner.register_trace_pruner()
+    stopped = []
+    real_stop = trace_pruner._heartbeat.stop
+    monkeypatch.setattr(
+        trace_pruner._heartbeat, "stop", lambda: stopped.append(True) or real_stop()
+    )
 
     trace_pruner.unregister()
 
+    assert stopped, "unregister() must call stop() on the registered heartbeat"
     assert trace_pruner._is_registered() is False
 
 
