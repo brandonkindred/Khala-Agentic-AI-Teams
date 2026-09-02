@@ -137,24 +137,39 @@ def test_learnings_retention_days_env(monkeypatch) -> None:
 
 
 def test_trace_enabled_env(monkeypatch) -> None:
-    """_trace_enabled defaults to False and follows the SE_TRACE_TO_POSTGRES flag."""
+    """_trace_enabled defaults to True (unset) and follows explicit SE_TRACE_TO_POSTGRES overrides."""
     monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
-    assert trace_store._trace_enabled() is False
+    assert trace_store._trace_enabled() is True
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     assert trace_store._trace_enabled() is True
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "no")
     assert trace_store._trace_enabled() is False
 
 
-def test_write_trace_disabled_by_default() -> None:
-    """write_trace returns False when tracing is disabled by default."""
+class _TraceRec:
+    """Minimal write_trace-shaped stub shared by the tests below."""
 
-    class _Rec:
-        timestamp = 0.0
-        team = "software_engineering"
-        job_id = "j"
+    timestamp = 0.0
+    team = "software_engineering"
+    job_id = "j"
 
-    assert trace_store.write_trace(_Rec()) is False
+
+def test_write_trace_noop_without_postgres_when_enabled_by_default(monkeypatch) -> None:
+    """write_trace returns False when Postgres is unconfigured, even though the sink is
+    enabled by default (unset SE_TRACE_TO_POSTGRES) — pg_cursor yields no cursor."""
+    monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
+    monkeypatch.delenv(
+        "POSTGRES_HOST", raising=False
+    )  # force the documented "Postgres disabled" no-op path
+
+    assert trace_store.write_trace(_TraceRec()) is False
+
+
+def test_write_trace_disabled_explicitly(monkeypatch) -> None:
+    """write_trace returns False when the sink is explicitly opted out."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "false")
+
+    assert trace_store.write_trace(_TraceRec()) is False
 
 
 def test_fetch_cost_empty_without_postgres() -> None:
