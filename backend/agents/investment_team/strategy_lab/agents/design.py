@@ -868,8 +868,9 @@ class DesignAgent:
         #
         # The sizing carve-out only applies to gate-owned sizing kinds; a
         # ``volatility_target`` plausibility objection (which the deterministic
-        # gate abstains on) must keep blocking, so resolve ``sizing_owned`` from
-        # the draft's sizing kind rather than assuming it.
+        # gate only partially owns — worst-case concurrency, not
+        # target_annual_vol plausibility) must keep blocking, so resolve
+        # ``sizing_owned`` from the draft's sizing kind rather than assuming it.
         sizing_kind = (strategy_dict.get("sizing") or {}).get("kind")
         return _coerce_critique(
             parsed,
