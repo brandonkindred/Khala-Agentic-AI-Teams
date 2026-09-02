@@ -440,7 +440,6 @@ def test_build_editor_prompt_includes_optional_context() -> None:
             target_word_count=1000,
         ),
         draft,
-        has_style_guide=True,
     )
     assert "CONTENT PROFILE / LENGTH GUIDANCE" in prompt
     assert "Keep sections tight" in prompt
@@ -462,7 +461,6 @@ def test_build_editor_prompt_without_style_guide() -> None:
     prompt = agent._build_editor_prompt(
         CopyEditorInput(draft=draft, soft_min_words=None, soft_max_words=None),
         draft,
-        has_style_guide=False,
     )
     assert "No style guidelines were provided" in prompt
 

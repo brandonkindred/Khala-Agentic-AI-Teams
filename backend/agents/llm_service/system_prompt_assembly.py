@@ -30,11 +30,12 @@ def build_system_prompt_with_content(
 ) -> "str | List[Any]":
     """Combine persona text with extra system-content segments.
 
-    When ``system_prompt_content`` is provided, returns a list suitable for
-    Strands ``Agent(system_prompt=...)`` — the persona wrapped as a native
-    ``{"text": ...}`` block, followed by each segment (bare strings normalized
-    to ``{"text": str}``; ``CacheBreakpoint`` and dict blocks passed through
-    as-is). When absent, returns the plain string unchanged.
+    When ``system_prompt_content`` contains at least one segment, returns a
+    list suitable for Strands ``Agent(system_prompt=...)`` — the persona
+    wrapped as a native ``{"text": ...}`` block, followed by each segment
+    (bare strings normalized to ``{"text": str}``; ``CacheBreakpoint`` and
+    dict blocks passed through as-is). When ``system_prompt_content`` is
+    ``None`` or empty, returns the plain string unchanged.
 
     Only **trusted** metadata (spec excerpts, architecture overviews) should
     be placed in ``system_prompt_content``. Untrusted content (code under

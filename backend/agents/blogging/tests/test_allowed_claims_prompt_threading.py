@@ -316,11 +316,10 @@ def test_writer_run_keeps_numeric_requirement_when_no_artifact(monkeypatch) -> N
 
 def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
     """``build_revise_all_items_prompt`` is a free function that takes its
-    style/brand/model inputs explicitly rather than a ``BlogWriterAgent``
-    instance (see revision.py), so this reaches into ``make_writer_agent()``'s
-    private ``_brand_section_for_prompt()``/``_model`` purely to obtain
-    realistic values to pass in -- it is not asserting on agent internals,
-    just supplying them as plain arguments."""
+    model input explicitly rather than a ``BlogWriterAgent`` instance (see
+    revision.py), so this reaches into ``make_writer_agent()``'s private
+    ``_model`` purely to obtain a realistic value to pass in -- it is not
+    asserting on agent internals, just supplying it as a plain argument."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent import revision
     from agents.blogging.blog_writer_agent.agent import _render_allowed_claims_section
@@ -344,9 +343,7 @@ def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
         revise_input.draft,
         revise_input.feedback_items,
         "revision plan text",
-        "Style guide text.",
         revise_input,
-        brand_section=a._brand_section_for_prompt(),
         llm=a._model,
         allowed_claims_section=_render_allowed_claims_section(revise_input.allowed_claims),
     )
@@ -371,9 +368,7 @@ def test_build_revise_all_items_prompt_omits_allowed_claims_when_absent() -> Non
         revise_input.draft,
         revise_input.feedback_items,
         "revision plan text",
-        "Style guide text.",
         revise_input,
-        brand_section=a._brand_section_for_prompt(),
         llm=a._model,
     )
     assert "ALLOWED CLAIMS" not in prompt

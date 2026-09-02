@@ -225,7 +225,10 @@ def test_blog_writer_agent_run_with_research_references() -> None:
 
 
 def test_draft_prompt_includes_provided_brand_spec() -> None:
-    """When brand_spec_content is provided, the draft prompt includes it in the BRAND AND STYLE section."""
+    """When brand_spec_content is provided, it reaches the cached system-prompt
+    segment (not the user-turn draft prompt, which no longer embeds it)."""
+    from llm_service import CacheBreakpoint
+
     llm = _PromptCapturingLLM()
     agent = make_writer_agent(
         llm_client=llm,
@@ -237,10 +240,16 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
         content_plan=_minimal_plan(),
     )
     agent.run(draft_input)
-    # First prompt is the draft generation; subsequent ones are self-review
+
+    assert len(agent._system_prompt_content) == 1
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert "MyBrand: Test brand." in segment.text
+    assert "--- BRAND SPEC ---" in segment.text
+    # The user-turn draft prompt no longer embeds the brand spec.
     draft_prompt = llm.all_prompts[0]
-    assert "MyBrand: Test brand." in draft_prompt
-    assert "BRAND AND STYLE" in draft_prompt
+    assert "MyBrand: Test brand." not in draft_prompt
+    assert "BRAND AND STYLE" not in draft_prompt
 
 
 def test_outline_for_prompt_includes_section_titles() -> None:

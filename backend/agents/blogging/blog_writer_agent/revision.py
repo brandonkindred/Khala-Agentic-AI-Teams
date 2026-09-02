@@ -162,18 +162,19 @@ def build_revise_all_items_prompt(
     draft: str,
     feedback_items: list[Any],
     revision_plan: str,
-    style_guide_text: str,
     revise_input: ReviseWriterInput,
     *,
-    brand_section: str,
     llm: Any,
     allowed_claims_section: str = "",
 ) -> str:
     """Build one revision prompt that applies every copy-editor feedback item.
 
+    The brand spec and writing style guide are not embedded here: the caller
+    delivers them via a cacheable ``Agent(system_prompt=...)`` segment (see
+    ``BlogWriterAgent._writing_system_prompt_with_content``) instead, so this
+    prompt carries only the content plan, feedback, and draft.
+
     Preconditions:
-        - ``brand_section`` is the caller's rendered brand/style section
-          (e.g. an agent's ``_brand_section_for_prompt()`` output).
         - ``llm`` is the ``LLMClient`` passed to ``compact_text`` when the
           content plan exceeds ``COMPACT_OUTLINE_CHARS`` (e.g. an agent's
           ``self._model``).
@@ -182,10 +183,9 @@ def build_revise_all_items_prompt(
           ``agent._render_allowed_claims_section(revise_input.allowed_claims)``),
           or ``""`` when no allowed-claims artifact was supplied.
     Postconditions:
-        - Returns a prompt string embedding the brand/style sections, the
-          content plan, every feedback item formatted via
-          ``_format_feedback_item_line``, ``revision_plan`` as planning
-          context, and the current draft.
+        - Returns a prompt string embedding the content plan, every feedback
+          item formatted via ``_format_feedback_item_line``, ``revision_plan``
+          as planning context, and the current draft.
         - When present on ``revise_input``: ``revise_input.persistent_issues``
           is inserted before the feedback block; ``previous_feedback_items``
           (capped at ``MAX_PREVIOUS_FEEDBACK_ITEMS``) is inserted after it;
@@ -205,16 +205,6 @@ def build_revise_all_items_prompt(
     cp = compact_text(revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, llm, "content plan")
     prompt_parts = [
         REVISION_TASK_INSTRUCTIONS,
-        "",
-        "---",
-        "BRAND AND STYLE (mandatory for every sentence):",
-        "---",
-        brand_section,
-        "",
-        "---",
-        "STYLE GUIDE (follow in the revised draft):",
-        "---",
-        style_guide_text,
         "",
         "---",
         "CONTENT PLAN (preserve section intent and narrative flow):",

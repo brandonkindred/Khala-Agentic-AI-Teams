@@ -112,29 +112,26 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         self,
         copy_editor_input: CopyEditorInput,
         draft: str,
-        *,
-        has_style_guide: bool,
     ) -> str:
         """
         Assemble the per-request editor context from length intent, author/context
         signals, the content plan, and the draft itself.
 
-        The base instructions (``COPY_EDITOR_PROMPT``) and, when
-        ``has_style_guide`` is True, the brand/style guide text itself are
-        delivered via the Agent's ``system_prompt`` in
+        The base instructions (``COPY_EDITOR_PROMPT``) and, when a brand/style
+        segment was attached at construction, the brand/style guide text
+        itself are delivered via the Agent's ``system_prompt`` in
         :meth:`_invoke_editor_llm` (as a cached segment), so neither is
         repeated here.
 
         Preconditions:
             - draft is the stripped, non-empty draft text to review.
-            - ``has_style_guide`` reflects whether a brand/style
-              system-content segment was attached (``bool(self._system_prompt_content)``).
         Postconditions:
             - Returns the assembled context (draft last), as one string.
             - Has no side effects on self or the inputs.
             - Word count is computed via :func:`count_words`, a naive
               whitespace-token heuristic (not a linguistic word count).
         """
+        has_style_guide = self._system_prompt_content is not None
         actual_word_count = count_words(draft)
         target_word_count = copy_editor_input.target_word_count
         soft_min = copy_editor_input.soft_min_words
@@ -184,7 +181,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
                     "---",
                     "EVALUATION INSTRUCTION:",
                     "---",
-                    "Evaluate the draft against the brand spec and writing style guidance "
+                    "Evaluate the draft against the brand spec and/or writing style guidance "
                     "provided in your system instructions. Apply every rule present there.",
                     "",
                 ]
@@ -496,9 +493,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
 
         actual_word_count = count_words(draft)
 
-        prompt = self._build_editor_prompt(
-            copy_editor_input, draft, has_style_guide=has_style_guide
-        )
+        prompt = self._build_editor_prompt(copy_editor_input, draft)
         data = self._invoke_editor_llm(prompt, on_llm_request=on_llm_request)
 
         raw_summary = data.get("summary")

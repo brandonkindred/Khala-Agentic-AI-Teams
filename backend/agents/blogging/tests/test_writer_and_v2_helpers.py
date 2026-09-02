@@ -107,6 +107,7 @@ def test_writer_agent_system_prompt_content_merge() -> None:
         writing_style_guide_content="Style A",
         brand_spec_content="Brand B",
     )
+    assert len(a._system_prompt_content) == 1
     segment = a._system_prompt_content[0]
     assert isinstance(segment, CacheBreakpoint)
     segment_text = segment.text

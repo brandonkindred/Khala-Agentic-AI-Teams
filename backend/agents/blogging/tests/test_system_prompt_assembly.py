@@ -69,3 +69,11 @@ def test_with_content_normalizes_bare_string_segments() -> None:
     result = build_system_prompt_with_content("Persona.", ["extra context"])
 
     assert result == [{"text": "Persona."}, {"text": "extra context"}]
+
+
+def test_with_content_reexport_is_llm_service_implementation() -> None:
+    """This module re-exports llm_service's implementation rather than owning
+    a second copy — pin the identity so import-path drift is caught here."""
+    import llm_service
+
+    assert build_system_prompt_with_content is llm_service.build_system_prompt_with_content

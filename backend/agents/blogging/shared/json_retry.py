@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, Union
 
 from strands import Agent
 from strands.types.exceptions import EventLoopException
@@ -178,7 +178,7 @@ def _unwrap_event_loop_exception(exc: Exception) -> Exception:
 
 def run_json_gate(
     model: Any,
-    system_prompt: Union[str, list],
+    system_prompt: Union[str, List[Any]],
     prompt: str,
     *,
     strict_json_suffix: str = _DEFAULT_STRICT_JSON_SUFFIX,
