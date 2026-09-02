@@ -153,10 +153,19 @@ _MAX_DRAWDOWN_LIMIT_RE = re.compile(
 
 # Sizing kinds whose realisability/coherence the deterministic gate FULLY owns
 # (Rule 5 realisability + Rule 9 deployed-vs-cap). ``volatility_target`` is
-# deliberately absent: ``SpecReadinessGate._check_sizing_realisable`` abstains on
-# it and only emits a *warning* (e.g. an implausible ``target_annual_vol``),
-# which the orchestrator treats as ready — so for vol-target the LLM reviewer's
-# sizing objection is the ONLY substantive check and must keep blocking.
+# deliberately absent: ``SpecReadinessGate._check_sizing_realisable`` now
+# validates volatility_target's worst-case-concurrency invariant against the
+# ATR-independent ``risk_limits.max_position_pct`` clamp — the one bound the
+# engine's ``_compute_qty`` unconditionally enforces regardless of realised
+# ATR (an ATR-floor estimate is deliberately NOT used, since ``_compute_qty``
+# accepts any positive ATR with no enforced minimum, so an assumed floor could
+# underestimate the true worst case) — and can emit a genuine critical for it.
+#
+# But that is only a *partial* realisability check — it says nothing about
+# whether the declared ``target_annual_vol`` itself is plausible, which only
+# the LLM reviewer's sizing critique evaluates. So for vol-target the LLM
+# reviewer's sizing objection remains a necessary, non-duplicative check and
+# must keep blocking.
 _GATE_OWNED_SIZING_KINDS: frozenset[str] = frozenset({"fixed_fraction", "fixed_notional"})
 
 
@@ -165,8 +174,10 @@ def _sizing_owned_by_gate(sizing_kind: object) -> bool:
 
     Pre: ``sizing_kind`` is the spec's ``sizing.kind`` (str) or None.
     Post: True iff ``sizing_kind`` is a gate-owned static kind; False for
-    ``volatility_target`` (gate abstains) and for unknown/missing kinds (fail
-    safe — keep a sizing objection blocking when we cannot confirm ownership).
+    ``volatility_target`` (gate only partially owns it — worst-case
+    concurrency, not target_annual_vol plausibility) and for unknown/missing
+    kinds (fail safe — keep a sizing objection blocking when we cannot
+    confirm ownership).
     """
     return sizing_kind in _GATE_OWNED_SIZING_KINDS
 
@@ -756,9 +767,10 @@ def _coerce_critique(
     ``sizing`` objections *when* ``sizing_owned`` (the spec's sizing kind is one
     the gate fully validates), and any objection referencing the retired
     max-drawdown *limit* (max drawdown is not a constraint). ``sizing_owned`` is
-    ``False`` for ``volatility_target`` (the gate abstains and only warns, so the
-    reviewer's plausibility objection is the only substantive check) — such a
-    sizing objection keeps blocking. Non-drawdown ``risk_limits`` objections
+    ``False`` for ``volatility_target`` (the gate only partially owns it —
+    worst-case concurrency, not target_annual_vol plausibility — so the
+    reviewer's plausibility objection remains the only check of the latter) —
+    such a sizing objection keeps blocking. Non-drawdown ``risk_limits`` objections
     (e.g. ``max_gross_leverage=0``) are likewise never demoted. A not-ready
     verdict whose ONLY blocking objections were demotable ones is promoted to
     ``ready=True`` (with an audit-trail ``info`` note) rather than left to churn
@@ -807,7 +819,7 @@ def _coerce_critique(
     # ``info``: the deterministic gate owns sizing for gate-owned kinds and max
     # drawdown is not a constraint, so the reviewer must not veto on them (see
     # ``_is_demotable_issue``). A ``volatility_target`` sizing objection (gate
-    # abstains) and non-drawdown ``risk_limits`` critiques (e.g.
+    # only partially owns it) and non-drawdown ``risk_limits`` critiques (e.g.
     # ``max_gross_leverage=0``) are left untouched so genuine mechanically-
     # unusable settings still block. ``demoted_blocking`` records
     # how many *blocking* (warning/critical) issues were demoted this way, so a

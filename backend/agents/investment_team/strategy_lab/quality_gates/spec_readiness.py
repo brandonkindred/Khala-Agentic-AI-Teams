@@ -928,6 +928,36 @@ class SpecReadinessGate(GateResultsMixin):
     # Rule 5: Sizing realisable.
     # ------------------------------------------------------------------
     def _check_sizing_realisable(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        """Verify the spec's sizing rule can actually be filled at runtime.
+
+        Covers all three sizing kinds (``fixed_fraction``, ``fixed_notional``,
+        ``volatility_target``): per-symbol price validity and whole-lot
+        fillability, plus a worst-case-concurrency check — the largest
+        ``risk_limits.max_open_positions`` positions (capped by the target
+        universe size) filling simultaneously, slippage-inflated — against
+        ``initial_capital``. ``volatility_target``'s worst-case notional is
+        bounded by the ``risk_limits.max_position_pct`` clamp alone (not an
+        assumed ATR floor — see the ``elif`` branch below for why no such
+        floor is provably safe), so it is only a partial realisability
+        check: it says nothing about whether the declared
+        ``target_annual_vol`` itself is plausible.
+
+        Preconditions: ``ctx.spec`` is a :class:`StrategySpec`.
+        Postconditions: returns an iterable (concretely a tuple) of
+        :class:`QualityGateResult`. A single critical when the sizing rule
+        cannot be filled at all (broken/non-positive price data, an
+        unsupported or unresolvable asset class/universe, a sub-lot target on
+        a whole-lot class) or when the worst-case concurrent notional would
+        exceed ``initial_capital``; otherwise empty for ``fixed_fraction`` /
+        ``fixed_notional``, or a single informational warning for
+        ``volatility_target`` (its actual deployed size depends on realised
+        volatility, unknowable here) — plus, for any kind, a warning instead
+        of a critical when every target symbol's price sample is
+        persistently unavailable on a fractional (crypto/forex) asset class.
+        Returns empty when ``ctx.config`` (the backtest config carrying
+        ``initial_capital``) is ``None``, since no notional can be sized
+        against it.
+        """
         assert isinstance(ctx.spec, StrategySpec)
         config = ctx.config
         if config is None:
@@ -954,22 +984,6 @@ class SpecReadinessGate(GateResultsMixin):
             )
 
         kind = getattr(ctx.spec.sizing, "kind", None)
-
-        # Volatility-target sizing depends on realised volatility, which we
-        # cannot estimate at design time. Emit a warning so the operator
-        # notices that Rule 5 abstained — a silent skip would let an
-        # implausibly low ``target_annual_vol`` (e.g. 0.001) bypass the
-        # implementability check entirely.
-        if kind == "volatility_target":
-            tav = getattr(ctx.spec.sizing, "target_annual_vol", None)
-            return (
-                self._warning(
-                    "Sizing realisability: volatility_target sizing requires "
-                    "realised vol and cannot be evaluated at readiness time. "
-                    f"Confirm target_annual_vol={tav!r} is sensible "
-                    "(typical range: 0.05–0.30)."
-                ),
-            )
 
         # Resolve the universe to size against. ``_default_universe_for`` now
         # raises on unknown asset classes (previously it silently fell back to
@@ -1035,14 +1049,64 @@ class SpecReadinessGate(GateResultsMixin):
         # inflate the worst-case notional by the configured slippage before
         # comparing.
         slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
+        # Display form of the configured slippage, read directly from
+        # ``config.slippage_bps`` rather than reverse-derived from
+        # ``slippage_multiplier`` (a ``/ 10_000`` then ``* 10_000`` round
+        # trip accumulates float error that can shift the ``.1f``-rounded
+        # value by 0.1bps from what was actually configured, e.g.
+        # slippage_bps=0.15 round-tripping to display as "0.2"). Shared by
+        # every sizing kind's critical message below so a future wording
+        # change is a one-line edit instead of a multi-template drift risk.
+        slippage_bps_display = float(config.slippage_bps)
+        # Whether the display value is worth mentioning at all: guards
+        # against the *rounded* value, not the raw one, since a small enough
+        # positive slippage_bps still rounds to "0.0" at the messages'
+        # one-decimal precision — computed once and shared by every sizing
+        # kind's slippage clause below, so a future precision change can't
+        # fix this in one message template and miss another.
+        slippage_bps_is_displayable = round(slippage_bps_display, 1) > 0
+        slippage_note = (
+            f", inflated {slippage_bps_display:.1f}bps for configured slippage"
+            if worst_case_concurrent > 1 and slippage_bps_is_displayable
+            else ""
+        )
 
-        # Notional is symbol-independent for both supported kinds, so resolve
-        # it once.
-        if kind == "fixed_fraction":
+        # Notional is symbol-independent for all three supported kinds, so
+        # resolve it once.
+        is_fixed_fraction = kind == "fixed_fraction"
+        is_fixed_notional = kind == "fixed_notional"
+        # ``is_vol_target`` does double duty: it selects the notional
+        # derivation branch immediately below, AND (at the end of this
+        # function) gates the informational plausibility warning appended
+        # when no critical fires — the check can't confirm the *actual*
+        # deployed vol is sensible, only that the worst-case bound fits.
+        is_vol_target = kind == "volatility_target"
+        if is_fixed_fraction:
             fraction = float(ctx.spec.sizing.fraction)
             notional = capital * fraction
-        elif kind == "fixed_notional":
+        elif is_fixed_notional:
             notional = float(ctx.spec.sizing.notional_usd)
+        elif is_vol_target:
+            # Volatility-target sizing depends on realised volatility, which
+            # we cannot know exactly at design time. Unlike the two static
+            # sizing kinds above, that doesn't let Rule 5 abstain entirely:
+            # ``target_annual_vol`` still cannot be turned into a provable
+            # worst-case bound via an assumed ATR floor, though — the engine's sizing formula
+            # (``raw_qty = equity * target_annual_vol / (close * atr_val)`` in
+            # ``_compute_qty``) accepts ANY positive ``atr_val`` with no
+            # enforced minimum — a smaller realised ATR than any floor we
+            # assume here yields a LARGER deployed notional, so an
+            # ATR-floor-derived estimate can silently underestimate the true
+            # worst case (a false pass on a spec that can genuinely
+            # overcommit). The one bound the engine DOES unconditionally
+            # enforce, regardless of ATR, is the ``max_position_pct`` clamp
+            # every ``volatility_target`` order is capped to before it's
+            # placed (``_compute_qty``'s ``_cap_position`` path /
+            # ``_cap_qty_to_position``) — so that clamp alone is the only
+            # value provably safe to size the worst case against. Changing
+            # the dispatcher's runtime sizing to itself enforce an ATR floor
+            # is a separate, larger change and out of scope here.
+            notional = capital * float(ctx.spec.risk_limits.max_position_pct) / 100.0
         else:
             # Unknown sizing kind — covered by spec_dsl validation, but be
             # defensive: nothing further to evaluate.
@@ -1139,30 +1203,57 @@ class SpecReadinessGate(GateResultsMixin):
         )
         fundable_capital = capital * cash_bound_multiplier
         if effective_worst_case_notional > fundable_capital:
-            if kind == "fixed_fraction":
+            # ``fixed_fraction`` and ``volatility_target`` both report the
+            # overcommit as a multiple of equity, differing only in the
+            # lead-in clause naming what's being sized — share one tail so a
+            # future wording change is a single edit instead of two
+            # independently-maintained templates drifting apart.
+            # ``fixed_notional`` reports in absolute dollars against a
+            # different closing clause, so it isn't forced into this shape.
+            if is_fixed_fraction or is_vol_target:
                 worst_case_fraction = effective_worst_case_notional / capital
-                slippage_note = (
-                    f", inflated {(slippage_multiplier - 1) * 10_000:.1f}bps for "
-                    "configured slippage"
-                    if worst_case_concurrent > 1
-                    else ""
+                worst_case_tail = (
+                    f"× worst-case concurrency {worst_case_concurrent} (min of "
+                    f"{len(symbols)} target symbol(s) and risk_limits."
+                    f"max_open_positions "
+                    f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
+                    f"whole-lot share flooring where applicable{slippage_note}) = "
+                    f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
+                    f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
+                    f"${capital:.0f}) if all concurrent positions filled "
+                    "simultaneously."
                 )
+                if is_fixed_fraction:
+                    return (
+                        self._critical(
+                            f"Sizing realisability: fixed_fraction {fraction:.4f} {worst_case_tail}"
+                        ),
+                    )
+                # ``worst_case_tail`` opens with a bare "×", so it needs a
+                # numeric left operand immediately before it (mirroring
+                # ``fixed_fraction``'s "{fraction:.4f} ×") rather than
+                # trailing the explanatory clause directly — otherwise the
+                # multiplication reads as dangling, with the reader unable
+                # to tell what quantity the concurrency count multiplies.
+                max_position_fraction = float(ctx.spec.risk_limits.max_position_pct) / 100.0
                 return (
                     self._critical(
-                        f"Sizing realisability: fixed_fraction {fraction:.4f} × "
-                        f"worst-case concurrency {worst_case_concurrent} (min of "
-                        f"{len(symbols)} target symbol(s) and risk_limits."
-                        f"max_open_positions "
-                        f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring where applicable{slippage_note}) = "
-                        f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
-                        f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
-                        f"${capital:.0f}) if all concurrent positions filled "
-                        "simultaneously."
+                        "Sizing realisability: volatility_target worst-case notional, "
+                        f"bounded by the engine's unconditional risk_limits."
+                        f"max_position_pct {ctx.spec.risk_limits.max_position_pct:.2f}% "
+                        "clamp (the only provably safe bound — target_annual_vol has no "
+                        "enforced ATR floor, so a low realised ATR can deploy up to this "
+                        f"clamp regardless of target_annual_vol) {max_position_fraction:.4f} "
+                        f"{worst_case_tail}"
                     ),
                 )
             # fixed_notional
             if worst_case_concurrent > 1:
+                slippage_clause = (
+                    f" and {slippage_bps_display:.1f}bps configured slippage"
+                    if slippage_bps_is_displayable
+                    else ""
+                )
                 return (
                     self._critical(
                         f"Sizing realisability: fixed_notional ${notional:.0f} × "
@@ -1170,9 +1261,8 @@ class SpecReadinessGate(GateResultsMixin):
                         f"{len(symbols)} target symbol(s) and risk_limits."
                         f"max_open_positions "
                         f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring and "
-                        f"{(slippage_multiplier - 1) * 10_000:.1f}bps configured "
-                        f"slippage) = ${effective_worst_case_notional:.0f}, which "
+                        f"whole-lot share flooring{slippage_clause}) = "
+                        f"${effective_worst_case_notional:.0f}, which "
                         f"exceeds the cash-bound fundable capital "
                         f"${fundable_capital:.0f} if all concurrent positions filled "
                         "simultaneously."
@@ -1203,11 +1293,39 @@ class SpecReadinessGate(GateResultsMixin):
                 ),
             )
 
+        # The worst-case concurrency bound fits (or was never checkable due to
+        # missing price data below), but volatility_target's *actual* deployed
+        # size still depends on realised vol, which cannot be known at
+        # readiness time — surface a warning so the operator notices the
+        # plausibility of target_annual_vol itself was never confirmed, only
+        # that the conservative worst-case bound is fundable. Built as its own
+        # tuple (not an early return) so it can be appended to, rather than
+        # masked by, the NaN-price warning below when both apply.
+        vol_target_warning = (
+            (
+                self._warning(
+                    "Sizing realisability: volatility_target sizing requires "
+                    "realised vol and cannot be evaluated exactly at readiness "
+                    f"time. Confirm target_annual_vol={ctx.spec.sizing.target_annual_vol!r} "
+                    "is sensible (typical range: 0.05–0.30); the worst-case "
+                    "concurrency bound (risk_limits.max_position_pct, the only "
+                    "provably safe ceiling given target_annual_vol has no enforced "
+                    "ATR floor) fits within initial_capital."
+                ),
+            )
+            if is_vol_target
+            else ()
+        )
+
         # Only fractional asset classes reach here with unresolved NaN samples.
         # A NaN that affected *every* symbol (no finite sample anywhere) is a
         # persistently broken provider, but fractional sizing stays
         # implementable once data returns, so warn rather than fail closed. A
         # NaN alongside a finite sample is a transient gap and is ignored.
+        # Appends (rather than replaces) the vol-target plausibility warning
+        # above — a broken price provider says nothing about whether
+        # target_annual_vol is itself sensible, so returning only one would
+        # silently drop the other's guidance.
         if nan_symbols and not saw_finite_price:
             return (
                 self._warning(
@@ -1215,8 +1333,9 @@ class SpecReadinessGate(GateResultsMixin):
                     f"({ctx.spec.asset_class}); market-data provider may be down. Proceeding "
                     "since fractional sizing stays implementable once data returns."
                 ),
-            )
-        return ()
+            ) + vol_target_warning
+
+        return vol_target_warning
 
     # ------------------------------------------------------------------
     # Rule 6: Hypothesis–rule consistency.
@@ -1392,7 +1511,9 @@ class SpecReadinessGate(GateResultsMixin):
         # express the notional as a fraction, so it is skipped without config.
         # ``volatility_target`` is dynamic (depends on realised vol), so the
         # deployed fraction is unknown at design time and stays ``None`` —
-        # consistent with Rule 5 abstaining on the same kind.
+        # Rule 5 validates volatility_target's worst-case-concurrency
+        # invariant, but that says nothing about the deployed fraction this
+        # check needs, so this Check A stays skipped for it too.
         pos_fraction: Optional[float] = None
         if kind == "fixed_fraction":
             pos_fraction = float(ctx.spec.sizing.fraction)

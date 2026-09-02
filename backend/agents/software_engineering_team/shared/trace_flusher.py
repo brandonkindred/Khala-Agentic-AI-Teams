@@ -4,7 +4,7 @@ The trace observer used to call :func:`trace_store.write_trace` synchronously on
 the LLM-call thread — one blocking Postgres round-trip per call (see the
 guidance at ``llm_service/telemetry.py`` that observers must not block). This
 module keeps the observer on the call path but makes it do **zero DB I/O**: it
-builds the 16-column row tuple (pure Python, via
+builds the 18-column row tuple (pure Python, via
 :func:`trace_store._record_to_row`) and appends it to a bounded in-memory deque.
 
 A :class:`BackgroundHeartbeat` daemon thread drains the deque on an interval and
@@ -18,10 +18,13 @@ Invariants:
       the oldest row and logs at WARNING once per sustained burst (throttled so
       a DB outage or sustained burst cannot flood the log; bounded memory,
       never blocks callers).
-    - When the Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` off,
-      the default) the observer enqueues nothing — the drain would drop these
-      rows anyway, so buffering them only adds per-call work and can fill the
-      buffer with never-persisted rows.
+    - When the Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES``
+      explicitly set to a falsy value; enabled by default) or Postgres itself
+      is unconfigured (``POSTGRES_HOST`` unset) the observer enqueues nothing
+      — the drain would drop these rows anyway, so buffering them only adds
+      per-call work and can fill the buffer with never-persisted rows. This
+      keeps a no-Postgres environment (e.g. local dev, ``pytest``) genuinely
+      free of the per-call buffering/locking work, not just free of writes.
     - A flush failure never raises into the heartbeat thread or the caller; it
       is logged at DEBUG and the rows are dropped (telemetry must not break the
       LLM call path or the flusher).
@@ -35,6 +38,7 @@ from collections import deque
 from typing import Any, Optional
 
 from shared.concurrency.heartbeat import BackgroundHeartbeat
+from shared.postgres import is_postgres_enabled
 from software_engineering_team.shared import trace_store
 from software_engineering_team.shared.env_config import env_float, env_int
 
@@ -84,13 +88,20 @@ def _trace_observer(record: Any) -> None:
     mutation of the record by the caller cannot corrupt the buffered row.
 
     Skips the per-call ``_record_to_row`` + enqueue work entirely when the
-    Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` off, the default):
-    the background drain would drop these rows anyway (``write_rows`` re-checks
-    the flag), and on a high-throughput job buffering them would fill the buffer
-    and emit drop warnings for rows that are never persisted.
+    Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` explicitly set to
+    a falsy value; enabled by default) or when Postgres itself is unconfigured
+    (``POSTGRES_HOST`` unset): the background drain would drop these rows
+    anyway (``write_rows`` re-checks both), and on a high-throughput job
+    buffering them would fill the buffer and emit drop warnings for rows that
+    are never persisted. The Postgres check matters now that the sink defaults
+    on — without it, every environment that merely lacks Postgres (rather than
+    explicitly opting out) would still pay the per-call buffering/locking cost
+    and run the drain heartbeat forever, for rows that can never be written.
     """
     global _overflow_warned
     if not trace_store._trace_enabled():
+        return
+    if not is_postgres_enabled():
         return
     team = getattr(record, "team", "") or ""
     if not getattr(record, "job_id", "") or team not in _SE_TEAMS:
@@ -152,9 +163,16 @@ def drain() -> int:
 def register_trace_flusher() -> None:
     """Register the observer + start the background drain heartbeat (idempotent).
 
-    The observer and the batched write are both no-ops unless
-    ``SE_TRACE_TO_POSTGRES`` is set, so registering unconditionally at startup
-    is safe and cheap. Safe to call from app startup more than once.
+    The observer is a no-op when ``SE_TRACE_TO_POSTGRES`` is explicitly
+    disabled or Postgres is unconfigured, so registering it unconditionally at
+    startup is safe and cheap. The background heartbeat, however, is a
+    long-lived daemon thread — it is only started when Postgres is configured
+    (``POSTGRES_HOST`` set) at registration time, so a no-Postgres process
+    (local dev, most CI jobs) never runs a thread whose only job would be an
+    empty drain on every tick. Postgres configuration is expected to be fixed
+    for the life of the process (set via env vars before startup), so this
+    check needs to happen only once, here. Safe to call from app startup more
+    than once.
     """
     global _heartbeat, _registered
     with _register_lock:
@@ -164,6 +182,9 @@ def register_trace_flusher() -> None:
             _register_call_observer(_trace_observer)
         except Exception:
             logger.warning("could not register SE trace flusher observer", exc_info=True)
+            return
+        if not is_postgres_enabled():
+            _registered = True
             return
         _heartbeat = BackgroundHeartbeat(
             _drain,

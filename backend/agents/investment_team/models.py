@@ -794,6 +794,10 @@ OrderLifecycleEventType = Literal[
     # max_position_pct). Recorded so a zero-trade run is explainable rather than a
     # silent no-emit; carries no order (it never reached the order book).
     "risk_capped_skip",
+    # An entry-signal evaluation skipped because the symbol already has an open
+    # position. Recorded so a zero/sparse-trade run is explainable as
+    # concurrency-limited rather than a dead entry predicate; carries no order.
+    "already_in_position_skip",
     # A stop-limit order that triggered (stop level crossed) but gapped through
     # its limit price, so it could not fill this bar and stays resting with the
     # position open — the intended, defining risk of a stop-limit order.
@@ -873,6 +877,10 @@ class BacktestExecutionDiagnostics(BaseModel):
     # max_position_pct). Drives the ``ALL_ENTRIES_RISK_CAPPED`` zero-trade category
     # so a run suppressed by risk sizing is not mis-triaged as a dead entry predicate.
     risk_capped_entries: int = Field(default=0, ge=0)
+    # Entry-signal evaluations skipped because the symbol already had an open
+    # position. Distinguishes a concurrency-limited zero/sparse-trade run from
+    # one where the entry predicate simply never matched.
+    already_in_position_skips: int = Field(default=0, ge=0)
     entries_filled: int = Field(default=0, ge=0)
     exits_emitted: int = Field(default=0, ge=0)
     closed_trades: int = Field(default=0, ge=0)

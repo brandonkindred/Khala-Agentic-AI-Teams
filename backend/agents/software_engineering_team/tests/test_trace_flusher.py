@@ -4,49 +4,30 @@ The flusher moves ``se_agent_traces`` INSERTs off the LLM call path: the
 observer builds a row tuple (pure Python, no I/O) and appends to a bounded
 deque; a background heartbeat drains the deque via ``executemany``. These
 tests pin the three properties from the refactor spec — buffer/overflow
-semantics, the 16-column INSERT order, and zero DB I/O on enqueue.
+semantics, the 18-column INSERT order, and zero DB I/O on enqueue.
 """
 
 from __future__ import annotations
-
-from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 
 from software_engineering_team.shared import trace_flusher, trace_store
 
-
-class _Rec:
-    """Minimal stand-in for ``llm_service.telemetry.LLMCallRecord``."""
-
-    def __init__(self, **overrides: Any) -> None:
-        self.timestamp = datetime.now(tz=timezone.utc).timestamp()
-        self.team = "software_engineering"
-        self.agent_key = "backend"
-        self.job_id = "j9"
-        self.task_id = "t1"
-        self.phase = "execution"
-        self.model = "deepseek-v4-pro:cloud"
-        self.prompt_tokens = 1000
-        self.completion_tokens = 500
-        self.total_tokens = 1500
-        self.cost_usd = 0.42
-        self.latency_ms = 1200
-        self.status = "success"
-        self.outcome = "success"
-        self.objective = "write code"
-        self.request_id = "rid1"
-        for k, v in overrides.items():
-            setattr(self, k, v)
+from ._observability_test_doubles import TraceCallRecord as _Rec
 
 
 @pytest.fixture(autouse=True)
 def _reset_flusher(monkeypatch):
     """Start each test with an empty buffer, no registered observer/heartbeat,
-    and the trace sink enabled (SE_TRACE_TO_POSTGRES=1) so the observer exercises
-    the enqueue path by default; tests that want the disabled-sink path delenv it."""
+    the trace sink enabled (SE_TRACE_TO_POSTGRES=1), and Postgres configured
+    (POSTGRES_HOST set) so the observer exercises the enqueue path by default;
+    tests that want the disabled-sink path setenv SE_TRACE_TO_POSTGRES to an
+    explicit falsy value (e.g. "false"), and tests that want the
+    Postgres-unconfigured path delenv POSTGRES_HOST — the sink now defaults
+    on, so delenv'ing SE_TRACE_TO_POSTGRES alone no longer reaches either
+    disabled path."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "1")
+    monkeypatch.setenv("POSTGRES_HOST", "test-postgres")
     trace_flusher._reset_for_test()
     yield
     trace_flusher._reset_for_test()
@@ -86,12 +67,22 @@ def test_observer_ignores_non_se_and_missing_job() -> None:
 
 
 def test_observer_skips_when_sink_disabled(monkeypatch) -> None:
-    """When SE_TRACE_TO_POSTGRES is off (the default), the observer skips the
+    """When SE_TRACE_TO_POSTGRES is explicitly opted out, the observer skips the
     per-call _record_to_row + enqueue work — the drain would drop these rows
     anyway (write_rows re-checks the flag), and on a high-throughput job
     buffering them would fill the buffer and emit drop warnings for rows that
     are never persisted."""
-    monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "false")
+    trace_flusher._trace_observer(_Rec())
+    assert trace_flusher._buffer_size() == 0
+
+
+def test_observer_skips_when_postgres_unconfigured(monkeypatch) -> None:
+    """Even with the sink enabled (the default), the observer must not enqueue
+    when Postgres itself is unconfigured (POSTGRES_HOST unset) — otherwise
+    every no-Postgres environment (local dev, pytest) would pay per-call
+    buffering/locking overhead for rows write_rows can never persist."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
     trace_flusher._trace_observer(_Rec())
     assert trace_flusher._buffer_size() == 0
 
@@ -218,6 +209,27 @@ def test_register_starts_heartbeat_and_registers_observer(monkeypatch) -> None:
 
     # Clean up the started heartbeat so it doesn't outlive the test.
     trace_flusher._reset_for_test()
+
+
+def test_register_skips_heartbeat_when_postgres_unconfigured(monkeypatch) -> None:
+    """register_trace_flusher still registers the (cheap, no-op) observer when
+    Postgres is unconfigured, but must not start the background heartbeat —
+    a long-lived daemon thread whose only job would be an empty drain on
+    every tick, forever, in every no-Postgres process (local dev, most CI)."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    registered: list = []
+    monkeypatch.setattr(trace_flusher, "_register_call_observer", registered.append, raising=False)
+    started: list = []
+    monkeypatch.setattr(
+        trace_flusher.BackgroundHeartbeat, "start", lambda self: started.append(self)
+    )
+
+    trace_flusher.register_trace_flusher()
+
+    assert registered == [trace_flusher._trace_observer]
+    assert started == []  # heartbeat never constructed/started
+    assert trace_flusher._heartbeat is None
+    assert trace_flusher._is_registered()
 
 
 def test_unregister_stops_heartbeat_and_removes_observer(monkeypatch) -> None:
