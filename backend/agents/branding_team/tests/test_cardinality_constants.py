@@ -392,3 +392,28 @@ def test_boilerplate_variants_fixed_count_single_sourced() -> None:
     assert re.search(pattern, make_storyteller().system_prompt), (
         f"expected an unambiguous {m.BOILERPLATE_VARIANTS_COUNT} versions count in the rendered prompt"
     )
+
+
+def test_now_iso_is_utc_with_an_explicit_offset() -> None:
+    """``now_iso`` is public API precisely so ``coordination.py`` can share it, and
+    its shape is load-bearing beyond "it parses".
+
+    Every branding write path stamps ``updated_at`` with it, so a silent change of
+    format -- a ``Z`` suffix, a coarser ``timespec`` -- would break lexicographic
+    ordering of that column against rows already written, without breaking any
+    existing test: those only exercise that a write succeeds. This pins the
+    postcondition the docstring states. It lives here rather than beside the store
+    tests because those are gated on a real Postgres and this needs none.
+    """
+    from datetime import datetime, timedelta
+
+    from branding_team.store import now_iso
+
+    value = now_iso()
+    parsed = datetime.fromisoformat(value)
+
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+    assert value.endswith("+00:00")
+    # Microsecond precision: two stamps in the same second must still order.
+    assert "." in value.split("+")[0]

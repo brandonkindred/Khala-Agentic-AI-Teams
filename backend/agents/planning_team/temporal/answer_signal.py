@@ -48,17 +48,46 @@ SUBMIT_PLANNING_ANSWERS_SIGNAL = "submit_planning_answers"
 # where existing callers already look for it.
 
 
+def _option_confidence(option: Dict[str, Any]) -> float:
+    """``option``'s confidence as a float, 0.0 when absent or unusable.
+
+    Postconditions: never raises; a missing, non-numeric or bool ``confidence``
+        scores 0.0, so a malformed option can never outrank a well-formed one.
+        ``bool`` is excluded explicitly because it is an ``int`` subclass and
+        ``True`` would otherwise score 1.0 -- ahead of every real option.
+    """
+    value = option.get("confidence")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
 def _default_answer(question: Dict[str, Any]) -> Dict[str, Any]:
     """Build a submittable answer for a question nobody answered.
+
+    The selection policy is deliberately identical to
+    ``product_requirements_analysis_agent.user_communication.get_default_option``,
+    which thread mode's auto-answer path uses: the ``is_default`` option, else the
+    highest-confidence one, else ``None``. Only the input shape differs -- that
+    function takes an ``OpenQuestion``, this one the wire dicts
+    ``convert_to_pending_questions`` emits, which carry ``confidence`` on every
+    option. Diverging here (e.g. falling back to list order) would mean the SAME
+    question gets a different defaulted answer depending on which runtime mode
+    spent its pause budget.
 
     Preconditions:
         - ``question`` is a dict whose ``"id"`` is a str (the caller filters).
     Postconditions:
         - Returns an ``{"question_id", "selected_option_id", "other_text"}`` dict
-          shaped for ``shared.hitl.models.AnswerSubmission``. The option chosen is
-          the batch's own ``is_default`` one, else its first well-formed option,
-          else ``None`` -- ``selected_option_id`` is Optional there, and a question
-          with no options carries a free-text placeholder anyway.
+          shaped for ``shared.hitl.models.AnswerSubmission``.
+        - The option chosen is the first flagged ``is_default``; failing that the
+          highest-confidence well-formed option (ties broken by list order, since
+          ``max`` returns the first maximal element -- matching
+          ``get_default_option``'s stable sort); failing that ``None``.
+          ``selected_option_id`` is Optional on that model, and a question with no
+          options carries a free-text placeholder anyway.
+        - Malformed options (non-dict, or a non-str ``id``) are skipped rather
+          than raising, so a garbled batch still yields a submittable answer.
     """
     options = question.get("options")
     chosen: Optional[Dict[str, Any]] = None
@@ -66,9 +95,9 @@ def _default_answer(question: Dict[str, Any]) -> Dict[str, Any]:
         well_formed = [
             opt for opt in options if isinstance(opt, dict) and isinstance(opt.get("id"), str)
         ]
-        chosen = next((opt for opt in well_formed if opt.get("is_default")), None) or next(
-            iter(well_formed), None
-        )
+        chosen = next((opt for opt in well_formed if opt.get("is_default")), None)
+        if chosen is None and well_formed:
+            chosen = max(well_formed, key=_option_confidence)
     return {
         "question_id": question["id"],
         "selected_option_id": chosen["id"] if chosen else None,
@@ -142,8 +171,10 @@ def build_temporal_planning_answer_callback(
           question (see :func:`_default_answer`) and logs a warning naming them.
           The pause budget is spent, so the choice is between a defaulted answer and
           a sub-job that waits until it times out; a default that is announced beats
-          a hang, and it is the same fallback ``user_communication.apply_all_defaults``
-          already applies when no answer callback is supplied at all.
+          a hang. The option it picks follows the same policy
+          ``user_communication.get_default_option`` applies on the thread-mode
+          auto-answer path -- is_default, else highest confidence -- so the two
+          runtime modes default a given question identically.
         - A malformed question entry (non-dict, or an ``id`` that is not a str)
           carries nothing a submitter could ever answer and nothing the route would
           accept, so it neither matches, blocks, nor gets a default -- it is skipped

@@ -12,6 +12,7 @@ for ``CodingTeamWorkflow``.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -502,49 +503,119 @@ def test_callback_defaults_unanswered_questions_when_repause_is_forbidden() -> N
     ]
 
 
-def test_default_answer_falls_back_to_the_first_option_then_to_none() -> None:
+def test_default_answer_falls_back_to_highest_confidence_then_to_none() -> None:
     """Not every pending question carries an ``is_default`` option, and one with
     no options at all carries only a free-text placeholder -- neither may crash
-    the final round or emit an option id the route never saw."""
+    the final round or emit an option id the route never saw.
+
+    With no ``is_default``, the pick is the highest-confidence option, NOT the
+    first: that is the policy ``user_communication.get_default_option`` applies
+    on thread mode's auto-answer path, and falling back to list order here would
+    default the same question differently depending on which runtime mode spent
+    its pause budget.
+    """
     cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[], allow_repause=False)
 
     result = cb(
         [
-            {"id": "q-no-default", "options": [{"id": "opt-first"}, {"id": "opt-second"}]},
+            {
+                "id": "q-no-default",
+                "options": [
+                    {"id": "opt-low", "confidence": 0.2},
+                    {"id": "opt-high", "confidence": 0.9},
+                ],
+            },
             {"id": "q-no-options", "options": []},
             {"id": "q-malformed-options", "options": ["not-a-dict", {"id": 7}]},
         ]
     )
 
-    assert [a["selected_option_id"] for a in result] == ["opt-first", None, None]
+    assert [a["selected_option_id"] for a in result] == ["opt-high", None, None]
 
 
-def test_callback_warns_when_defaulting_an_unanswered_question() -> None:
-    """Choosing an answer nobody gave is the silent auto-answer this callback
-    otherwise exists to prevent -- when the budget forces it, it must not be
-    silent."""
-    import logging
+def test_default_answer_matches_get_default_option_on_the_same_question() -> None:
+    """Pin the parity the docstring claims, against the real thread-mode helper.
 
-    cb = build_temporal_planning_answer_callback(
-        "tok-1",
-        submitted_answers=[],
-        allow_repause=False,
+    The two consume different shapes -- ``OpenQuestion`` there, the wire dicts
+    ``convert_to_pending_questions`` emits here -- so nothing but a test stops
+    them drifting apart again.
+    """
+    from software_engineering_team.product_requirements_analysis_agent.models import (
+        OpenQuestion,
+        QuestionOption,
+    )
+    from software_engineering_team.product_requirements_analysis_agent.user_communication import (
+        convert_to_pending_questions,
+        get_default_option,
     )
 
-    logger = logging.getLogger("planning_team.temporal.answer_signal")
-    records: list[logging.LogRecord] = []
-    handler = logging.Handler()
-    handler.emit = records.append  # type: ignore[method-assign]
-    logger.addHandler(handler)
-    try:
+    for options in (
+        [
+            QuestionOption(id="a", label="A", is_default=False, confidence=0.2),
+            QuestionOption(id="b", label="B", is_default=False, confidence=0.9),
+        ],
+        [
+            QuestionOption(id="a", label="A", is_default=True, confidence=0.1),
+            QuestionOption(id="b", label="B", is_default=False, confidence=0.9),
+        ],
+        [
+            QuestionOption(id="a", label="A", is_default=False, confidence=0.5),
+            QuestionOption(id="b", label="B", is_default=False, confidence=0.5),
+        ],
+    ):
+        question = OpenQuestion(id="q1", question_text="Which?", options=options)
+        pending = convert_to_pending_questions([question])
+        cb = build_temporal_planning_answer_callback(
+            "tok-1", submitted_answers=[], allow_repause=False
+        )
+
+        thread_mode = get_default_option(question)
+        temporal_mode = cb(pending)[0]
+
+        assert thread_mode is not None
+        assert temporal_mode["selected_option_id"] == thread_mode.id
+
+
+def test_default_answer_ignores_a_bool_confidence() -> None:
+    """``bool`` is an ``int`` subclass, so a malformed ``confidence: True`` would
+    otherwise score 1.0 and outrank every real option."""
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[], allow_repause=False)
+
+    result = cb(
+        [
+            {
+                "id": "q1",
+                "options": [
+                    {"id": "opt-bogus", "confidence": True},
+                    {"id": "opt-real", "confidence": 0.4},
+                ],
+            }
+        ]
+    )
+
+    assert result[0]["selected_option_id"] == "opt-real"
+
+
+def test_callback_warns_when_defaulting_an_unanswered_question(caplog) -> None:
+    """Choosing an answer nobody gave is the silent auto-answer this callback
+    otherwise exists to prevent -- when the budget forces it, it must not be
+    silent.
+
+    ``caplog.at_level`` rather than a hand-attached handler: it forces the level
+    for the block, so an ambient ``logging.disable`` or a raised level on the
+    ``planning_team`` hierarchy cannot silently suppress the record and turn this
+    into an unexplained failure.
+    """
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[], allow_repause=False)
+
+    with caplog.at_level(logging.WARNING, logger="planning_team.temporal.answer_signal"):
         assert cb([{"id": "q-never-shown"}]) == [
             {"question_id": "q-never-shown", "selected_option_id": None, "other_text": None}
         ]
-    finally:
-        logger.removeHandler(handler)
 
     assert any(
-        rec.levelno == logging.WARNING and "q-never-shown" in rec.getMessage() for rec in records
+        rec.levelno == logging.WARNING and "q-never-shown" in rec.getMessage()
+        for rec in caplog.records
     )
 
 

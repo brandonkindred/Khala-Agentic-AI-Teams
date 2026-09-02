@@ -636,6 +636,10 @@ def test_final_turn_wire_shape_has_no_consecutive_user_turns() -> None:
 
     # The wrapper forwards these messages verbatim; only the system prompt grows.
     system, anthropic_messages = _to_anthropic_messages(_strands_messages_to_openai(messages))
+    # The translator must not be the thing that carries the directive -- the wrapper
+    # puts it on the system prompt (asserted separately below), and a translator that
+    # started synthesizing one would make that assertion pass for the wrong reason.
+    assert "budget for this task is exhausted" not in (system or "")
     roles = [message["role"] for message in anthropic_messages]
     assert roles == ["user", "assistant", "user"]
     assert all(roles[i] != roles[i + 1] for i in range(len(roles) - 1)), (

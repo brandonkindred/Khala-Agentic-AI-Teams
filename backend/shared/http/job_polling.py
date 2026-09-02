@@ -399,9 +399,13 @@ def poll_until_terminal(
         - If no terminal status is observed within ``total_timeout`` seconds,
           returns ``{status_key: "failed", "error": f"Timed out waiting for
           {log_context}"}``.
-        - Never raises on its own; the only exceptions that escape are those
-          listed in ``passthrough_exceptions`` and raised by ``on_poll`` (see
-          above), which is empty by default. Never sleeps past a
+        - Never raises on its own. Two things escape: exceptions listed in
+          ``passthrough_exceptions`` and raised by ``on_poll`` (see above), which
+          is empty by default; and anything outside the ``Exception`` tree
+          (``KeyboardInterrupt``, ``SystemExit``, ``asyncio.CancelledError``),
+          since both ``try`` blocks below catch ``Exception``, not
+          ``BaseException`` -- a cancellation must not be laundered into a
+          "failed" status dict the caller then acts on. Never sleeps past a
           terminal/None/exception short-circuit.
     """
     assert poll_interval > 0, f"poll_interval must be positive, got {poll_interval!r}"

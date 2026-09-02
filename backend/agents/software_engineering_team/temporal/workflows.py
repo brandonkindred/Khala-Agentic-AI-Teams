@@ -140,7 +140,7 @@ class RunTeamWorkflowV2(PlanningAnswerSignalMixin):
         # batch. ``MAX_PLANNING_PAUSE_ROUNDS`` is what makes this terminate --
         # the final round runs with ``allow_repause=False``, which forbids the
         # activity from pausing again and forces it to return a plan.
-        collected_answers: list[dict[str, Any]] = []
+        collected_answers: List[Dict[str, Any]] = []
         pause_round = 0
         while plan_result.get("outcome") == "paused":
             if pause_round >= MAX_PLANNING_PAUSE_ROUNDS:

@@ -367,8 +367,16 @@ def test_submit_pending_answers_temporal_native_stops_advertising_the_answered_p
             }
         ],
     )
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
+
     monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", lambda *_a, **_k: None)
     monkeypatch.setattr(hitl_mod, "signal_workflow_sync", lambda *_a, **_k: None)
+    # Pins the route's temporal-native/thread-mode discriminator explicitly. Without
+    # it a regressed discriminator would run the real store against the fake client
+    # and surface as an opaque store error rather than a named assertion.
+    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
 
     resp = client.post(
         f"/run-team/{job_id}/answers",
@@ -418,8 +426,16 @@ def test_submit_pending_answers_temporal_native_still_advertises_a_later_pause(
             }
         ],
     )
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
+
     monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", lambda *_a, **_k: None)
     monkeypatch.setattr(hitl_mod, "signal_workflow_sync", lambda *_a, **_k: None)
+    # Pins the route's temporal-native/thread-mode discriminator explicitly. Without
+    # it a regressed discriminator would run the real store against the fake client
+    # and surface as an opaque store error rather than a named assertion.
+    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
 
     resp = client.post(
         f"/run-team/{job_id}/answers",
