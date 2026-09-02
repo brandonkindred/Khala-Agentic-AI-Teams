@@ -359,7 +359,26 @@ def _pr_from_payload(payload: dict[str, Any]) -> PullRequest:
     )
 
 
-def _pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
+def pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
+    """Map one raw GitHub pull-request REST payload onto a :class:`PullRequestDetail`.
+
+    Public (no leading underscore) for the same reason :func:`default_api_base`
+    is: callers OUTSIDE this package parse the same GitHub PR payload —
+    ``unified_api.routes.integrations`` builds its PR-panel model from one —
+    and a second hand-rolled extraction is exactly how the null-``head.repo``
+    and missing-field handling below drifts between modules. Reaching across
+    the service boundary for an underscore-private name would pin this
+    module's internals as an accidental contract instead.
+
+    Preconditions:
+        - ``payload`` is a decoded GitHub pull-request object carrying at
+          least ``number`` (the one field with no default; a payload without
+          it raises ``KeyError``/``ValueError`` rather than inventing a PR).
+    Postconditions:
+        - Returns a fully populated :class:`PullRequestDetail`; every field
+          other than ``number`` falls back to its empty/false default when
+          absent or null. Pure — no network, no mutation of ``payload``.
+    """
     head = payload.get("head") or {}
     base = payload.get("base") or {}
     # ``head.repo`` is null when the fork the PR was opened from has since been
@@ -472,6 +491,11 @@ def web_host_for_api_base_url(base_url: str) -> str:
     Postconditions:
         - Returns ``"github.com"`` for the default ``api.github.com`` host
           (github.com Cloud's API and web hosts differ by an "api." prefix).
+          The host comparison is case-INSENSITIVE: RFC 3986 defines the host
+          component as case-insensitive, so an operator's
+          ``https://Api.GitHub.com`` must resolve to the same web host as the
+          lowercase spelling rather than being mistaken for a GHES instance
+          and returned as its own web host.
         - For any other host (a GitHub Enterprise Server instance, whose API
           and web UI share one host, typically at an ``/api/v3`` path),
           returns that host unchanged — GHES's clone URLs use the bare host,
@@ -484,8 +508,11 @@ def web_host_for_api_base_url(base_url: str) -> str:
         host = urlsplit(base_url).netloc or base_url
     except ValueError:
         return base_url
-    if host == "api.github.com":
+    if host.lower() == "api.github.com":
         return "github.com"
+    # A GHES host is returned in its ORIGINAL casing (only the comparison
+    # casefolds): the value feeds clone/browse URLs, where echoing the
+    # operator's own spelling back is friendlier than a silently lowercased one.
     return host
 
 
@@ -974,7 +1001,7 @@ class GitHubClient(_GitHubHttpMixin):
               on any non-2xx.
         """
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}"))
-        return _pr_detail_from_payload(r.json())
+        return pr_detail_from_payload(r.json())
 
     def get_pull_request_files(self, owner: str, repo: str, number: int) -> list[PullRequestFile]:
         """List every file a pull request changes, following ``Link`` pagination.
@@ -1109,7 +1136,50 @@ class GitHubClient(_GitHubHttpMixin):
               or malformed JSON response still propagates as an ordinary
               exception in this mode too, for the caller's own broad
               ``except`` to catch.
+            - EVERY degrade point is announced in both modes — strict raises,
+              non-strict logs a warning naming ``owner``/``repo``/``number``
+              (see the ``_unavailable`` helper below) — so this generator has
+              no path that silently returns less data than it found. That
+              includes the two cases where non-strict still yields the thread:
+              a non-bool ``isResolved`` (coerced via ``bool()``, which would
+              otherwise turn a truthy non-bool like the string ``"false"``
+              into ``True`` and SKIP an unresolved thread), and a thread whose
+              comments do not fit one
+              :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` page (only the first
+              page's ids are yielded).
+            - A threads page whose ``pageInfo`` is a dict but carries a
+              missing or non-bool ``hasNextPage`` is an anomaly, not an
+              implicit "no more pages": strict raises and non-strict warns
+              before ending the walk, since ending pagination on unknown state
+              is exactly the silent partial result strict mode exists to
+              prevent.
         """
+        def _unavailable(message: str) -> None:
+            """Fail closed (``strict``) or log-and-degrade (non-strict) for one anomaly.
+
+            The strict/non-strict duality is the same at every one of this
+            generator's degrade points, so it lives here ONCE instead of being
+            re-spelled inline per site: the caller decides what to do with
+            control flow afterwards (``return``, ``continue``, or yield a
+            partial thread), this decides only whether the anomaly is fatal.
+
+            Preconditions:
+                - ``message`` describes the anomaly and is safe to log (it is
+                  also the ``ReviewThreadsUnavailableError`` detail in strict
+                  mode).
+            Postconditions:
+                - ``strict``: raises :class:`ReviewThreadsUnavailableError`
+                  carrying ``owner``/``repo``/``number`` and ``message``.
+                - Non-strict: logs a warning naming ``owner``/``repo``/
+                  ``number`` and ``message``, and returns ``None`` — the call
+                  site then degrades however it chooses. Never raises.
+            """
+            if strict:
+                raise ReviewThreadsUnavailableError(owner, repo, number, message)
+            logger.warning(
+                "_iter_review_thread_nodes: %s/%s#%s: %s", owner, repo, number, message
+            )
+
         after: Optional[str] = None
         seen = 0
         while True:
@@ -1121,207 +1191,116 @@ class GitHubClient(_GitHubHttpMixin):
             }
             payload = self._execute_graphql(query, variables)
             if not isinstance(payload, dict):
-                if not strict:
-                    logger.warning(
-                        "_iter_review_thread_nodes: non-object GraphQL response for %s/%s#%s: %r",
-                        owner,
-                        repo,
-                        number,
-                        payload,
-                    )
-                    return
-                raise ReviewThreadsUnavailableError(
-                    owner, repo, number, f"non-object GraphQL response: {payload!r}"
-                )
+                _unavailable(f"non-object GraphQL response: {payload!r}")
+                return
             if payload.get("errors"):
-                if not strict:
-                    logger.warning(
-                        "_iter_review_thread_nodes: GraphQL errors for %s/%s#%s: %s",
-                        owner,
-                        repo,
-                        number,
-                        payload["errors"],
-                    )
-                    return
-                raise ReviewThreadsUnavailableError(
-                    owner, repo, number, f"GraphQL errors: {payload['errors']}"
-                )
+                _unavailable(f"GraphQL errors: {payload['errors']}")
+                return
             data = payload.get("data")
             repository = data.get("repository") if isinstance(data, dict) else None
             pr_data = repository.get("pullRequest") if isinstance(repository, dict) else None
             if not isinstance(pr_data, dict):
-                if not strict:
-                    logger.warning(
-                        "_iter_review_thread_nodes: missing pullRequest payload for %s/%s#%s",
-                        owner,
-                        repo,
-                        number,
-                    )
-                    return
-                raise ReviewThreadsUnavailableError(
-                    owner, repo, number, "missing pullRequest payload"
-                )
+                _unavailable("missing pullRequest payload")
+                return
             review_threads = pr_data.get("reviewThreads")
             if not isinstance(review_threads, dict) or not isinstance(
                 review_threads.get("nodes"), list
             ):
-                if not strict:
-                    logger.warning(
-                        "_iter_review_thread_nodes: invalid reviewThreads payload for %s/%s#%s: %r",
-                        owner,
-                        repo,
-                        number,
-                        review_threads,
-                    )
-                    return
-                raise ReviewThreadsUnavailableError(
-                    owner, repo, number, "invalid reviewThreads payload"
-                )
+                _unavailable(f"invalid reviewThreads payload: {review_threads!r}")
+                return
             for node in review_threads["nodes"]:
                 seen += 1
                 if seen > MAX_REVIEW_THREADS_TRAVERSED:
-                    if not strict:
-                        logger.warning(
-                            "_iter_review_thread_nodes hit MAX_REVIEW_THREADS_TRAVERSED=%d for "
-                            "%s/%s#%s; stopping",
-                            MAX_REVIEW_THREADS_TRAVERSED,
-                            owner,
-                            repo,
-                            number,
-                        )
-                        return
-                    # Exceeding the cap means the listing is incomplete; fail closed
-                    # rather than yielding a partial view a caller could mistake for
-                    # the full set.
-                    raise ReviewThreadsUnavailableError(
-                        owner,
-                        repo,
-                        number,
-                        f"exceeded MAX_REVIEW_THREADS_TRAVERSED={MAX_REVIEW_THREADS_TRAVERSED}",
+                    # Exceeding the cap means the listing is incomplete; strict
+                    # fails closed rather than yielding a partial view a caller
+                    # could mistake for the full set.
+                    _unavailable(
+                        f"exceeded MAX_REVIEW_THREADS_TRAVERSED={MAX_REVIEW_THREADS_TRAVERSED}; "
+                        "stopping"
                     )
+                    return
                 if not isinstance(node, dict):
-                    if not strict:
-                        logger.warning(
-                            "_iter_review_thread_nodes: skipping invalid review-thread node "
-                            "for %s/%s#%s: %r",
-                            owner,
-                            repo,
-                            number,
-                            node,
-                        )
-                        continue
-                    raise ReviewThreadsUnavailableError(
-                        owner, repo, number, "invalid review-thread node"
-                    )
+                    _unavailable(f"skipping invalid review-thread node: {node!r}")
+                    continue
                 thread_id = node.get("id")
                 if not isinstance(thread_id, str) or not thread_id:
-                    if strict:
-                        raise ReviewThreadsUnavailableError(
-                            owner,
-                            repo,
-                            number,
-                            "review-thread node has a missing or invalid id "
-                            f"(expected non-empty str, got {thread_id!r})",
-                        )
-                    logger.warning(
-                        "_iter_review_thread_nodes: review-thread node for %s/%s#%s has a "
-                        "missing or invalid id (%r); yielding it with a None id",
-                        owner,
-                        repo,
-                        number,
-                        thread_id,
+                    _unavailable(
+                        "review-thread node has a missing or invalid id (expected non-empty "
+                        f"str, got {thread_id!r}); yielding it with a None id"
                     )
                     thread_id = None
                 is_resolved_raw = node.get("isResolved")
-                if strict and not isinstance(is_resolved_raw, bool):
-                    raise ReviewThreadsUnavailableError(
-                        owner,
-                        repo,
-                        number,
-                        "review-thread node has a missing or invalid isResolved "
-                        f"(expected bool, got {is_resolved_raw!r})",
+                if not isinstance(is_resolved_raw, bool):
+                    # Non-strict coerces, but never silently: a truthy non-bool
+                    # (the string "false", say) coerces to True, which SKIPS an
+                    # actually-unresolved thread — data loss, not a benign
+                    # widening, so it gets the same warning every other degrade
+                    # point here gets.
+                    _unavailable(
+                        "review-thread node has a missing or invalid isResolved (expected "
+                        f"bool, got {is_resolved_raw!r}); coercing with bool()"
                     )
                 is_resolved = bool(is_resolved_raw)
                 comments = node.get("comments")
                 if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list):
-                    if not strict:
-                        logger.warning(
-                            "_iter_review_thread_nodes: invalid review-thread comments payload "
-                            "for %s/%s#%s (thread %r): %r; yielding no comment ids",
-                            owner,
-                            repo,
-                            number,
-                            thread_id,
-                            comments,
-                        )
-                        yield thread_id, is_resolved, ()
-                        continue
-                    raise ReviewThreadsUnavailableError(
-                        owner, repo, number, "invalid review-thread comments payload"
+                    _unavailable(
+                        f"invalid review-thread comments payload (thread {thread_id!r}): "
+                        f"{comments!r}; yielding no comment ids"
                     )
-                if strict:
-                    comments_page_info = comments.get("pageInfo")
-                    if not isinstance(comments_page_info, dict):
-                        raise ReviewThreadsUnavailableError(
-                            owner, repo, number, "invalid review-thread comments pageInfo"
-                        )
-                    if comments_page_info.get("hasNextPage"):
-                        raise ReviewThreadsUnavailableError(
-                            owner,
-                            repo,
-                            number,
-                            f"review thread has more than {_REVIEW_THREAD_COMMENTS_PAGE_SIZE} comments",
-                        )
+                    yield thread_id, is_resolved, ()
+                    continue
+                # Per-thread comment pagination is checked in BOTH modes: a
+                # thread with more comments than one page holds would otherwise
+                # yield only its first page's ids in non-strict mode, and the
+                # address-comments run would reply to and resolve a thread whose
+                # later comments it never saw. Strict fails closed; non-strict
+                # warns and proceeds with the first page.
+                comments_page_info = comments.get("pageInfo")
+                if not isinstance(comments_page_info, dict):
+                    _unavailable(
+                        f"invalid review-thread comments pageInfo (thread {thread_id!r}): "
+                        f"{comments_page_info!r}; yielding only the first page of comment ids"
+                    )
+                elif comments_page_info.get("hasNextPage"):
+                    _unavailable(
+                        f"review thread {thread_id!r} has more than "
+                        f"{_REVIEW_THREAD_COMMENTS_PAGE_SIZE} comments; yielding only the "
+                        "first page of comment ids"
+                    )
                 comment_ids_list: list[int] = []
                 for comment in comments["nodes"]:
                     if not isinstance(comment, dict) or not isinstance(
                         comment.get("databaseId"), int
                     ):
-                        if not strict:
-                            logger.warning(
-                                "_iter_review_thread_nodes: skipping review comment with a "
-                                "missing or invalid databaseId for %s/%s#%s (thread %r): %r",
-                                owner,
-                                repo,
-                                number,
-                                thread_id,
-                                comment,
-                            )
-                            continue
-                        raise ReviewThreadsUnavailableError(
-                            owner, repo, number, "review comment missing databaseId"
+                        _unavailable(
+                            "review comment missing databaseId (thread "
+                            f"{thread_id!r}): {comment!r}"
                         )
+                        continue
                     comment_ids_list.append(comment["databaseId"])
                 yield thread_id, is_resolved, tuple(comment_ids_list)
             page_info = review_threads.get("pageInfo")
             if not isinstance(page_info, dict):
-                if not strict:
-                    logger.warning(
-                        "_iter_review_thread_nodes: invalid reviewThreads pageInfo for %s/%s#%s: %r",
-                        owner,
-                        repo,
-                        number,
-                        page_info,
-                    )
-                    return
-                raise ReviewThreadsUnavailableError(
-                    owner, repo, number, "invalid reviewThreads pageInfo"
+                _unavailable(f"invalid reviewThreads pageInfo: {page_info!r}")
+                return
+            # ``hasNextPage`` must be PRESENT and a bool: a page whose pageInfo
+            # is a dict but carries no (or a non-bool) hasNextPage tells us
+            # nothing about whether more threads exist, so treating it as
+            # "no more pages" would end pagination on unknown state — exactly
+            # the silent partial result strict mode exists to prevent.
+            has_next_page = page_info.get("hasNextPage")
+            if not isinstance(has_next_page, bool):
+                _unavailable(
+                    "reviewThreads pageInfo has a missing or invalid hasNextPage "
+                    f"(expected bool, got {has_next_page!r})"
                 )
-            if not page_info.get("hasNextPage"):
+                return
+            if not has_next_page:
                 return
             after = page_info.get("endCursor")
             if not after:
-                if not strict:
-                    logger.warning(
-                        "_iter_review_thread_nodes: reviewThreads page missing endCursor for %s/%s#%s",
-                        owner,
-                        repo,
-                        number,
-                    )
-                    return
-                raise ReviewThreadsUnavailableError(
-                    owner, repo, number, "reviewThreads page missing endCursor"
-                )
+                _unavailable("reviewThreads page missing endCursor")
+                return
 
     def get_resolved_review_thread_comment_ids(
         self, owner: str, repo: str, number: int

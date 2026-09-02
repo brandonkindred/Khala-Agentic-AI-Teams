@@ -732,9 +732,29 @@ def test_remote_url_matches_rejects_incidental_port_wrong_host() -> None:
     host -- only the port is forgiven, not the host itself."""
     assert (
         remote_url_matches(
-            "https://evil.example.com:443/acme/widget.git", "acme", "widget", expected_host="github.com"
+            "https://evil.example.com:443/acme/widget.git",
+            "acme",
+            "widget",
+            expected_host="github.com",
         )
         is False
+    )
+
+
+@pytest.mark.parametrize("suffix", [".git", ".GIT", ".Git"])
+def test_remote_url_matches_strips_dot_git_case_insensitively(suffix: str) -> None:
+    """The ``.git`` strip must casefold like every other identity comparison in
+    this function. A remote spelled ``.../acme/widget.GIT`` otherwise keeps the
+    suffix, so the last path segment compares as ``widget.git`` != ``widget``
+    and a legitimate checkout is rejected as the wrong repository."""
+    assert (
+        remote_url_matches(
+            f"https://github.com/acme/widget{suffix}",
+            "acme",
+            "widget",
+            expected_host="github.com",
+        )
+        is True
     )
 
 

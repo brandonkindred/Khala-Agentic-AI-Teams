@@ -13,28 +13,31 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-# The `git_ops` <-> `coding_team_main` module-scope import cycle is unwound once
-# for the whole package in `tests/conftest.py`; no per-module dummy import needed.
 from software_engineering_team.api import git_ops
 
 
 def _patch_git(
     monkeypatch, responses: Dict[Tuple[str, ...], Tuple[int, str]]
-) -> List[Tuple[str, ...]]:
+) -> List[Tuple[str, Tuple[str, ...]]]:
     """Stub `git_ops._git` to answer canned ``args -> (rc, out)`` responses.
 
-    Returns the list of ``args`` tuples the stub was called with, in order,
-    so a test can assert both the outcome and that the expected git
-    subcommands were actually issued.
+    Returns the list of ``(repo_path, args)`` pairs the stub was called with,
+    in order, so a test can assert the outcome, that the expected git
+    subcommands were issued, AND that they were issued against the repo under
+    validation. ``repo_path`` is recorded rather than dropped because these
+    tests exist to prove `_checkout_remote_matches` validates THE CHECKOUT IT
+    WAS HANDED: a regression that queried the workspace root or the process
+    CWD instead would answer with some other repo's remote and still return
+    True, and a stub keyed on args alone would pass the whole suite.
 
     An invocation with no canned response fails the test with an
     ``AssertionError`` naming the unexpected args, rather than a bare
     ``KeyError`` that says nothing about which git call went unstubbed.
     """
-    calls: List[Tuple[str, ...]] = []
+    calls: List[Tuple[str, Tuple[str, ...]]] = []
 
     def _fake_git(repo_path: str, *args: str, timeout: float = 120.0, env=None):
-        calls.append(args)
+        calls.append((repo_path, args))
         if args not in responses:
             raise AssertionError(f"Unexpected git invocation: {args!r}")
         return responses[args]
@@ -56,8 +59,12 @@ def test_matching_fetch_and_push_url_passes(monkeypatch) -> None:
     )
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is True
-    assert ("remote", "get-url", "origin") in calls
-    assert ("remote", "get-url", "--push", "--all", "origin") in calls
+    assert ("/repo", ("remote", "get-url", "origin")) in calls
+    assert ("/repo", ("remote", "get-url", "--push", "--all", "origin")) in calls
+    # Every git call must target the checkout under validation -- querying any
+    # other directory (workspace root, CWD) would validate the wrong repo's
+    # remote and still return True.
+    assert {repo_path for repo_path, _args in calls} == {"/repo"}
 
 
 def test_mismatched_push_url_fails_even_when_fetch_url_matches(monkeypatch) -> None:
@@ -89,7 +96,7 @@ def test_mismatched_fetch_url_fails_without_checking_push_url(monkeypatch) -> No
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
     # Short-circuits on the fetch-URL mismatch; never bothers checking push.
-    assert ("remote", "get-url", "--push", "--all", "origin") not in calls
+    assert all(args != ("remote", "get-url", "--push", "--all", "origin") for _p, args in calls)
 
 
 def test_push_url_lookup_failure_fails_closed(monkeypatch) -> None:
@@ -121,7 +128,7 @@ def test_fetch_url_lookup_failure_fails_closed(monkeypatch) -> None:
     )
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
-    assert ("remote", "get-url", "--push", "--all", "origin") not in calls
+    assert all(args != ("remote", "get-url", "--push", "--all", "origin") for _p, args in calls)
 
 
 def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:
@@ -149,7 +156,7 @@ def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:
     # expected_host is supplied (returning True off the fetch comparison
     # alone), silently eroding the guarantee. Pin that the push lookup was
     # actually issued.
-    assert ("remote", "get-url", "--push", "--all", "origin") in calls
+    assert ("/repo", ("remote", "get-url", "--push", "--all", "origin")) in calls
     # Without the expected_host override, the same GHES remote fails against
     # the github.com default.
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
@@ -171,7 +178,7 @@ def test_second_pushurl_pointing_elsewhere_fails(monkeypatch) -> None:
     )
 
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
-    assert ("remote", "get-url", "--push", "--all", "origin") in calls
+    assert ("/repo", ("remote", "get-url", "--push", "--all", "origin")) in calls
 
 
 def test_ssh_fetch_and_https_push_url_both_match(monkeypatch) -> None:

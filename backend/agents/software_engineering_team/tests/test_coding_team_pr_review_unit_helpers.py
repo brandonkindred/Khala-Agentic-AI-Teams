@@ -28,6 +28,12 @@ from software_engineering_team.github_source import PullRequestFile
 
 _STALE_S = pr_review._REVIEW_GUARD_HEARTBEAT_STALE_S
 
+# Read off the PRODUCTION set rather than restated here: a regression that
+# narrowed the terminal set (to just "completed", say) would still satisfy a
+# hardcoded list, and the orphan-detection test below would keep passing while
+# every other terminal parent silently wedged its checkout forever.
+_TERMINAL_STATUSES = sorted(pr_review._RECOGNIZED_TERMINAL_STATUSES)
+
 
 def _iso(delta_seconds: float) -> str:
     """ISO timestamp ``delta_seconds`` from now (negative = future, positive = past)."""
@@ -277,18 +283,25 @@ class TestRunningSiblingOnCheckoutUnit:
         assert sibling["job_id"] == "<job-scan-unavailable>"
         assert sibling["repo_path"] == "/tmp/repo"
 
+    @pytest.mark.parametrize("parent_status", _TERMINAL_STATUSES)
     def test_orphaned_child_with_terminal_parent_is_skipped_and_marked_failed(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, parent_status: str
     ) -> None:
         """A child job (parent_job_id set) whose parent has already terminalized
         can never be terminalized itself -- only the parent runs a heartbeat --
         so it must not be reported as a live sibling (that would wedge the
-        checkout's admission forever), and should be best-effort marked failed."""
+        checkout's admission forever), and should be best-effort marked failed.
+
+        Parametrized over EVERY status production recognizes as terminal, not
+        just "completed": each one must orphan-kill the child, and a stub of one
+        status alone would let a narrowed terminal set pass unnoticed."""
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
         child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
-        monkeypatch.setattr(main, "get_job", lambda job_id: {"job_id": "parent-1", "status": "completed"})
+        monkeypatch.setattr(
+            main, "get_job", lambda job_id: {"job_id": "parent-1", "status": parent_status}
+        )
         updates = []
         monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
 

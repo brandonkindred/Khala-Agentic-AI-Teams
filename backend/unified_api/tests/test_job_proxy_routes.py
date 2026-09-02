@@ -9,6 +9,8 @@ and the ``/api/se/metrics`` DORA-metrics alias. Each handler opens a fresh
 
 from __future__ import annotations
 
+import inspect
+import logging
 import sys
 from functools import partial
 from pathlib import Path
@@ -25,6 +27,7 @@ if str(_agents) not in sys.path:
 
 from fastapi.testclient import TestClient
 
+from unified_api import main
 from unified_api.main import app
 
 client = TestClient(app)
@@ -131,6 +134,64 @@ def test_single_job_routes_redact_encrypted_github_token(monkeypatch: pytest.Mon
     assert resp.status_code == 200
     assert resp.json() == {"job": {"job_id": "abc"}}
     assert "gAAAAAsecret" not in resp.text
+
+
+def test_redact_job_secrets_warns_on_unrecognized_wrapper_key(caplog) -> None:
+    """An unrecognized wrapper must not pass through in SILENCE.
+
+    Redaction keys off ``"jobs"``/``"job"``. If the job service ever renames
+    its wrapper, the credential resumes flowing to clients -- and with no
+    signal, nothing anywhere would say so. The warning is the tripwire.
+    """
+    payload = {"records": [{"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}]}
+    with caplog.at_level(logging.WARNING, logger="unified_api"):
+        assert main._redact_job_secrets(payload) is payload
+    assert any("neither 'jobs' nor 'job'" in r.getMessage() for r in caplog.records)
+    # The tripwire names the KEYS it saw, never the values it declined to redact.
+    assert "gAAAAAsecret" not in caplog.text
+
+
+def test_redact_job_secrets_warns_when_jobs_is_not_a_list(caplog) -> None:
+    payload = {"jobs": {"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}}
+    with caplog.at_level(logging.WARNING, logger="unified_api"):
+        out = main._redact_job_secrets(payload)
+    assert out == payload
+    assert any("not a list" in r.getMessage() for r in caplog.records)
+
+
+def test_redact_job_secrets_stays_quiet_on_recognized_shapes(caplog) -> None:
+    """The tripwire must not cry wolf on the two shapes it DOES handle, or the
+    warning becomes noise no operator reads."""
+    with caplog.at_level(logging.WARNING, logger="unified_api"):
+        main._redact_job_secrets({"jobs": [{"job_id": "a"}]})
+        main._redact_job_secrets({"job": {"job_id": "a"}})
+    assert not [r for r in caplog.records if "_redact_job_secrets" in r.getMessage()]
+
+
+def test_every_job_returning_proxy_route_redacts() -> None:
+    """Completeness guard for the redaction added alongside these proxies.
+
+    A future job-returning proxy added without ``_redact_job_secrets`` is a
+    silent credential leak, and no per-route test would catch its absence. So
+    assert it structurally: every ``/api/jobs`` route whose upstream returns a
+    job record must mention the redactor in its own source.
+
+    ``delete_job`` and ``mark_all_interrupted`` are deliberately exempt --
+    their job-service counterparts return ``{"deleted": bool}`` and
+    ``{"interrupted_job_ids": [...]}``, neither of which carries a job record.
+    """
+    exempt = {"delete_job", "mark_all_interrupted"}
+    unredacted: list[str] = []
+    for route in main.app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        path = getattr(route, "path", "")
+        if endpoint is None or not path.startswith("/api/jobs"):
+            continue
+        if endpoint.__name__ in exempt:
+            continue
+        if "_redact_job_secrets" not in inspect.getsource(endpoint):
+            unredacted.append(f"{path} ({endpoint.__name__})")
+    assert unredacted == [], f"job-returning proxy routes missing redaction: {unredacted}"
 
 
 def test_delete_job_forwards_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:

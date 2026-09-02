@@ -261,7 +261,14 @@ class AddressCommentsRequest(BaseModel):
     repo: str = Field(..., min_length=1, description="GitHub repository name")
     repo_path: str = Field(
         default="",
-        description="Local checkout path, accepted for parity with /review-pr.",
+        description=(
+            "Local git checkout of owner/repo to implement and push fixes in. "
+            "REQUIRED despite the empty default: the route rejects a blank value, a "
+            "path that is not an existing git checkout, or one whose origin remote "
+            "names a different repository, each with a 400. The default is empty "
+            "only so the 400 (which explains all three conditions) is what a caller "
+            "omitting it sees, rather than a generic 422."
+        ),
     )
     pr_number: Optional[int] = Field(
         default=None,
@@ -283,7 +290,7 @@ class AddressCommentsRequest(BaseModel):
         default=None,
         description=(
             "Overrides the PR's own base branch for branch preparation, mirroring "
-            "RunFromGithubRequest.base_branch's `request.base_branch or default_branch` "
+            "RunFromGitHubRequest.base_branch's `request.base_branch or default_branch` "
             "convention. When omitted (the common case), the PR's actual base (as "
             "reported by GitHub) is used, which is correct for almost every caller "
             "since an open PR already has a fixed base -- this exists only for the "

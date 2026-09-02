@@ -457,16 +457,34 @@ class CodingTeamWorkflow:
               never appear in activity args.
 
         Postconditions:
+            - Raises ``ValueError`` BEFORE any other work when ``github`` is a
+              non-empty dict carrying an unsupported ``publish_mode`` or
+              missing a required key for its mode. This validation runs first
+              deliberately: a bad payload is a caller-wiring bug, not an
+              activity failure, so it fails the workflow task outright rather
+              than burning a full pipeline run and then posting a misleading
+              "publish failed" notice. Nothing has been started at that point,
+              so no notice is posted and no job is marked failed — unlike
+              every other failure path below.
             - Without GitHub metadata, returns the activity's result dict.
               With GitHub metadata, prepares the integration branch before
               running the pipeline, posts a failure notice (and marks the job
               failed) when branch prep reports ``ok=False`` or raises, best-
               effort notices/mark-failed then re-raises the original error when
-              prep, the pipeline activity, or publish raises, returns
-              failed/cancelled/waiting-for-user pipeline results unchanged, and
-              publishes the integration branch after successful terminal
-              pipeline results (including deferred ``running``/``publishing``
-              success).
+              prep, the pipeline activity, or publish raises, and returns
+              failed/cancelled/waiting-for-user pipeline results unchanged.
+            - After a successful terminal pipeline result (including deferred
+              ``running``/``publishing`` success), which publish activity runs
+              depends on the mode established by the validation above:
+              * default (issue-driven) mode publishes the INTEGRATION branch
+                via ``github_publish_activity``, using the ``issue_number``/
+                ``issue_title`` extracted up front;
+              * ``publish_mode="existing_pr"`` (review-comment remediation)
+                instead publishes to the PR's own branch via
+                ``github_pr_publish_activity``, using ``pr_number`` and the
+                optional ``pr_url``.
+              Both receive the same ``cleanup_checkout_on_success`` flag, and
+              both return their result dict as this method's own.
             - ``run_pipeline_activity`` now always requests
               ``pause_strategy="return"`` and emits
               ``{"outcome": "paused", ...}`` whenever a HITL gate pauses, or

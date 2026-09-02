@@ -32,7 +32,10 @@ def raise_if_checkout_occupied(repo_path: str) -> None:
     Postconditions:
         - Returns ``None`` when no sibling job is running on ``repo_path``.
         - Raises ``HTTPException(409)`` when one is, with a detail naming the
-          sibling job id and its PR/issue label. Never raises otherwise.
+          sibling job id and its PR/issue label. Raises nothing else OF ITS
+          OWN: the delegated ``get_running_job_on_checkout`` lookup can still
+          raise (a job-store failure), and that propagates to the caller
+          unchanged rather than being swallowed into a false "no sibling".
     """
     from software_engineering_team.api import coding_team_main as _main
 

@@ -43,9 +43,9 @@ from software_engineering_team.clone_workspace import (
     clone_lock_path,
 )
 from software_engineering_team.github_source.client import (
-    _pr_detail_from_payload,
     configured_web_host,
     default_api_base,
+    pr_detail_from_payload,
 )
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
@@ -2381,11 +2381,11 @@ async def list_github_issues(
 def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
     """Map a raw GitHub pull-request payload onto the panel's PR model.
 
-    Field extraction is delegated to the coding team's ``_pr_detail_from_payload`` so
+    Field extraction is delegated to the coding team's ``pr_detail_from_payload`` so
     GitHub's PR payload shape is parsed in exactly one place; this only adapts the
     parsed detail to the panel's response model (truncating the body for preview).
     """
-    detail = _pr_detail_from_payload(raw)
+    detail = pr_detail_from_payload(raw)
     return GitHubPullRequestItem(
         number=detail.number,
         title=detail.title,

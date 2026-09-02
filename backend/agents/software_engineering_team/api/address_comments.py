@@ -2530,7 +2530,7 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                     pr.head_sha,
                     # `request.base_branch or pr.base` mirrors the same
                     # override convention already used by
-                    # RunFromGithubRequest.base_branch (see
+                    # RunFromGitHubRequest.base_branch (see
                     # `orchestration.py`/`routes/github.py`) -- the documented
                     # override is honored here rather than the PR's live base
                     # being unconditionally used.

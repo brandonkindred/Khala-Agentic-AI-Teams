@@ -56,9 +56,15 @@ from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 _STORE = "coding_team"
+# Named for the same reason ``review_history_store._REVIEW_RUNS_TABLE`` is: the
+# table name reaches the best-effort-write label and the SQL below, and a bare
+# literal in the ``partial`` drifts from the SQL silently. The SQL still spells
+# the name inline -- interpolating a table name into a query string is the one
+# habit worth not establishing here, even from a module constant.
+_RESOLVE_ATTEMPTS_TABLE = "address_comments_resolve_attempts"
 
 _best_effort_write: Callable[[str, Callable[[], None]], None] = partial(
-    _shared_best_effort_write, "address_comments_resolve_attempts"
+    _shared_best_effort_write, _RESOLVE_ATTEMPTS_TABLE
 )
 
 
@@ -136,7 +142,9 @@ def has_recorded_resolve_failure(
             return cur.fetchone() is not None
     except Exception:  # noqa: BLE001 - degrade to "no evidence" rather than error
         logger.warning(
-            "address_comments_resolve_attempts: has_recorded_resolve_failure failed", exc_info=True
+            "%s: has_recorded_resolve_failure failed",
+            _RESOLVE_ATTEMPTS_TABLE,
+            exc_info=True,
         )
         return False
 

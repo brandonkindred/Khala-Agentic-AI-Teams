@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import subprocess
 from dataclasses import replace
 from typing import Any, Callable, Optional
@@ -27,7 +28,10 @@ from software_engineering_team.github_source import (
     ReviewThread,
     ReviewThreadsUnavailableError,
 )
-from software_engineering_team.github_source.client import KHALA_COMMENT_MARKER
+from software_engineering_team.github_source.client import (
+    KHALA_COMMENT_MARKER,
+    web_host_for_api_base_url,
+)
 
 from .test_coding_team_github_source import _stub_heavy_modules
 
@@ -189,6 +193,176 @@ class TestListReviewThreads:
         client = _client_with(lambda _r: httpx.Response(200, json=payload))
         with pytest.raises(ReviewThreadsUnavailableError):
             client.list_review_threads("o", "r", 7)
+
+
+# ---------------------------------------------------------------------------
+# Client: _iter_review_thread_nodes degrade points (non-strict warn-then-degrade)
+# ---------------------------------------------------------------------------
+
+
+def _resolved_ids(client: GitHubClient) -> set[int]:
+    """Drive the generator's NON-strict mode (``get_resolved_review_thread_comment_ids``)."""
+    return client.get_resolved_review_thread_comment_ids("o", "r", 7)
+
+
+class TestReviewThreadNodesNonStrictDegrades:
+    """Every non-strict degrade point must announce itself.
+
+    ``strict=False`` is what production's resolution lookup uses, so a silent
+    truncation there is invisible data loss, not a benign relaxation.
+    """
+
+    def test_oversized_comment_page_warns_and_yields_first_page(self, caplog) -> None:
+        """A thread with more comments than one page holds must WARN in
+        non-strict mode, not silently yield the first page: the
+        address-comments run would otherwise reply to and resolve a thread
+        whose later comments it never fetched."""
+        payload = _threads_response(
+            nodes=[
+                {
+                    "id": "T1",
+                    "isResolved": True,
+                    "comments": {
+                        "nodes": [{"databaseId": 11}],
+                        "pageInfo": {"hasNextPage": True},
+                    },
+                }
+            ]
+        )
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == {11}
+        assert any(
+            "more than" in r.getMessage() and "o/r#7" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_invalid_comment_page_info_warns_and_yields_first_page(self, caplog) -> None:
+        payload = _threads_response(
+            nodes=[
+                {
+                    "id": "T1",
+                    "isResolved": True,
+                    "comments": {"nodes": [{"databaseId": 11}], "pageInfo": "nope"},
+                }
+            ]
+        )
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == {11}
+        assert any("comments pageInfo" in r.getMessage() for r in caplog.records)
+
+    def test_truthy_non_bool_is_resolved_warns_before_coercing(self, caplog) -> None:
+        """``bool("false")`` is ``True``, so coercing a malformed ``isResolved``
+        can SKIP an actually-unresolved thread. That is data loss, and must be
+        logged rather than treated as a benign documented coercion."""
+        payload = _threads_response(
+            nodes=[
+                {
+                    "id": "T1",
+                    "isResolved": "false",
+                    "comments": {
+                        "nodes": [{"databaseId": 11}],
+                        "pageInfo": {"hasNextPage": False},
+                    },
+                }
+            ]
+        )
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == {11}
+        assert any("isResolved" in r.getMessage() for r in caplog.records)
+
+    def test_missing_has_next_page_warns_and_stops(self, caplog) -> None:
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"endCursor": "c1"},
+                            "nodes": [
+                                {
+                                    "id": "T1",
+                                    "isResolved": True,
+                                    "comments": {
+                                        "nodes": [{"databaseId": 11}],
+                                        "pageInfo": {"hasNextPage": False},
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == {11}
+        assert any("hasNextPage" in r.getMessage() for r in caplog.records)
+
+
+class TestReviewThreadNodesStrictPageInfo:
+    def test_fails_closed_when_page_info_lacks_has_next_page(self) -> None:
+        """A ``pageInfo`` dict with no ``hasNextPage`` says NOTHING about
+        whether more threads exist. Treating it as "no more pages" ends
+        pagination on unknown state — the silent partial result strict mode
+        exists to prevent."""
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"endCursor": "c1"},
+                            "nodes": [],
+                        }
+                    }
+                }
+            }
+        }
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with pytest.raises(ReviewThreadsUnavailableError):
+            client.list_review_threads("o", "r", 7)
+
+    def test_fails_closed_when_has_next_page_is_not_a_bool(self) -> None:
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": "true", "endCursor": "c1"},
+                            "nodes": [],
+                        }
+                    }
+                }
+            }
+        }
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with pytest.raises(ReviewThreadsUnavailableError):
+            client.list_review_threads("o", "r", 7)
+
+
+# ---------------------------------------------------------------------------
+# Client: web_host_for_api_base_url
+# ---------------------------------------------------------------------------
+
+
+class TestWebHostForApiBaseUrl:
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://api.github.com",
+            "https://API.GITHUB.COM",
+            "https://Api.GitHub.com/",
+        ],
+    )
+    def test_github_cloud_host_match_is_case_insensitive(self, base_url: str) -> None:
+        """RFC 3986 hosts are case-insensitive, so an operator's mixed-case
+        ``GITHUB_API_URL`` must still resolve to the web host — not be mistaken
+        for a GHES instance and returned as its own (API) host."""
+        assert web_host_for_api_base_url(base_url) == "github.com"
+
+    def test_ghes_host_keeps_its_original_casing(self) -> None:
+        assert web_host_for_api_base_url("https://GitHub.Acme.com/api/v3") == "GitHub.Acme.com"
 
 
 # ---------------------------------------------------------------------------

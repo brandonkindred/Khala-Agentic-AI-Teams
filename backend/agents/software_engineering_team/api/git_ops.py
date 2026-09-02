@@ -3,6 +3,18 @@
 Monkeypatched collaborators are dereferenced through the ``main`` module object
 at call time so ``monkeypatch.setattr(main, ...)`` keeps taking effect after the
 split; models are imported directly.
+
+``coding_team_main`` is imported INSIDE each function that needs it, never at
+module scope. The two modules are mutually dependent -- ``coding_team_main``
+does a module-scope ``from ... git_ops import <names>`` -- so a module-scope
+import here closes a cycle: any entry point that reaches ``git_ops`` first (a
+script, a worker bootstrap, a test runner) would find ``coding_team_main``
+re-entering a half-initialized ``git_ops`` and failing on the not-yet-bound
+from-imports. Deferring to call time breaks the cycle at its only edge without
+changing what any call site sees: the import statement resolves the same live
+module object out of ``sys.modules``, so ``monkeypatch.setattr(main, ...)``
+still takes effect exactly as before, and the cost is one dict lookup against
+git subprocess calls.
 """
 
 from __future__ import annotations
@@ -25,7 +37,6 @@ from shared.git.git_utils import (
 from shared.git.git_utils import (
     resolve_remote_branch_sha as _shared_resolve_remote_branch_sha,
 )
-from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.clone_workspace import (
     clone_lock_path,
     is_per_issue_dir,
@@ -177,6 +188,7 @@ def _read_active_issue(repo_path: str) -> Optional[int]:
         - Returns the issue number, or None when the marker is absent or
           unparseable (treated as unattributed).
     """
+    from software_engineering_team.api import coding_team_main as _main
     rc, msg = _main._git(repo_path, "config", "--local", "--get", ACTIVE_ISSUE_CONFIG_KEY)
     if rc != 0:
         return None
@@ -188,11 +200,13 @@ def _read_active_issue(repo_path: str) -> Optional[int]:
 
 def _write_active_issue(repo_path: str, issue_number: int) -> None:
     """Record that a job for issue_number is mid-flight on this checkout."""
+    from software_engineering_team.api import coding_team_main as _main
     _main._git(repo_path, "config", "--local", ACTIVE_ISSUE_CONFIG_KEY, str(issue_number))
 
 
 def _clear_active_issue(repo_path: str) -> None:
     """Remove the marker; idempotent (unsetting a missing key is a no-op)."""
+    from software_engineering_team.api import coding_team_main as _main
     _main._git(repo_path, "config", "--local", "--unset", ACTIVE_ISSUE_CONFIG_KEY)
 
 
@@ -545,6 +559,7 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
 
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
     """True if ref resolves to a commit and has commits not reachable from base_ref."""
+    from software_engineering_team.api import coding_team_main as _main
     rc, _ = _main._git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
     if rc != 0:
         return False
@@ -559,6 +574,7 @@ def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
 
 def _reachable_from(repo_path: str, tip: str, container: str) -> bool:
     """True if tip is an ancestor of container (resetting container keeps tip reachable)."""
+    from software_engineering_team.api import coding_team_main as _main
     rc, _ = _main._git(repo_path, "merge-base", "--is-ancestor", tip, container)
     return rc == 0
 
@@ -571,6 +587,7 @@ def _rescue_branch_name(repo_path: str, issue: Optional[int]) -> Optional[str]:
           `khala/rescue/<ts>`, suffixed `-1`..`-9` on collision; None when
           all ten candidates exist.
     """
+    from software_engineering_team.api import coding_team_main as _main
     tag = f"issue-{issue}-" if issue is not None else ""
     base = f"{RESCUE_BRANCH_PREFIX}{tag}{_main._utc_timestamp()}"
     for cand in [base] + [f"{base}-{i}" for i in range(1, 10)]:
@@ -582,6 +599,7 @@ def _rescue_branch_name(repo_path: str, issue: Optional[int]) -> Optional[str]:
 
 def _latest_issue_rescue_ref(repo_path: str, issue_number: int) -> Optional[str]:
     """Newest rescue ref for the issue (timestamps sort lexicographically)."""
+    from software_engineering_team.api import coding_team_main as _main
     rc, out = _main._git(
         repo_path,
         "for-each-ref",
@@ -606,6 +624,7 @@ def _working_tree_dirty(repo_path: str) -> Tuple[bool, bool, Optional[str]]:
           clean) so conflicting paths can be surfaced without dumping file
           contents.
     """
+    from software_engineering_team.api import coding_team_main as _main
     rc, msg = _main._git(repo_path, "status", "--porcelain")
     if rc != 0:
         return False, True, msg or "git status failed"
@@ -632,6 +651,7 @@ def _recover_dirty_tree(
           issue_number, else None; note is operator-facing.
         - On failure (error set) nothing has been deleted.
     """
+    from software_engineering_team.api import coding_team_main as _main
     same_issue = marker is not None and issue_number is not None and marker == issue_number
     rc, head = _main._git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
     head_branch = head.strip() if rc == 0 else "HEAD"
@@ -681,6 +701,7 @@ def _preserve_if_would_orphan(
           holds the tip; returns an error string when preservation was
           needed but failed (callers must fail closed).
     """
+    from software_engineering_team.api import coding_team_main as _main
     if branch == seed:
         return None
     if not _is_ahead(repo_path, branch, base_ref):
@@ -725,6 +746,7 @@ def _reconcile_remote_issue_ref(
           stale remote-tracking ref (if it was ahead) has been pinned via a
           rescue ref and then dropped, so it can no longer pose as live state.
     """
+    from software_engineering_team.api import coding_team_main as _main
     rc_probe, probe_out = _main._git(
         repo_path,
         "ls-remote",
@@ -864,6 +886,7 @@ def _merge_recovered_wip(
           (``note`` may be ``None`` when no merge was needed), or ``(None, err)``
           when a failed merge could not be cleanly aborted (caller fails closed).
     """
+    from software_engineering_team.api import coding_team_main as _main
     if not (
         wip_tip
         and _is_safe_ref(wip_tip)
@@ -932,6 +955,7 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
           returned unchanged (never a name that failed to register) alongside
           a message describing the failure.
     """
+    from software_engineering_team.api import coding_team_main as _main
     if "://" not in remote:
         return remote, None
     # `--` ends option parsing before the name/URL positionals: the only caller
@@ -1077,6 +1101,7 @@ def _prepare_issue_branch(
           grounded on the expected SHA and must not be silently applied to
           different code.
     """
+    from software_engineering_team.api import coding_team_main as _main
     notes: List[str] = []
 
     # Defense-in-depth: reject ref names that could be parsed as git options.
@@ -1286,6 +1311,7 @@ def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, O
     to what the subsequent push expects (``branch`` points at ``source_ref``);
     the working tree is only ever left detached, never on a different branch.
     """
+    from software_engineering_team.api import coding_team_main as _main
     if not _is_safe_ref(branch) or not _is_safe_ref(source_ref):
         return False, f"unsafe ref: {branch!r} <- {source_ref!r}"
 
@@ -1327,6 +1353,7 @@ def _push_branch(
           remote registration, or a failed ``git push`` are all reported this
           way, never raised.
     """
+    from software_engineering_team.api import coding_team_main as _main
     if not _is_safe_ref(branch):
         return False, f"unsafe branch name: {branch!r}"
     remote_name, remote_err = _ensure_named_remote(repo_path, remote)

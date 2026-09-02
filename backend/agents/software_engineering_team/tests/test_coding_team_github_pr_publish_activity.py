@@ -66,7 +66,11 @@ def _stub_token(monkeypatch: pytest.MonkeyPatch, api: Any) -> None:
     monkeypatch.setattr(api, "get_job", lambda job_id, cache_dir=None: {"job_id": job_id})
     monkeypatch.setenv("GITHUB_TOKEN", "env-pat")
     monkeypatch.delenv("INTEGRATION_ENCRYPTION_KEY", raising=False)
-    assert os.environ["GITHUB_TOKEN"] == "env-pat"
+    # Assert the DELETION, not the setenv: re-reading back the value setenv just
+    # wrote cannot fail, whereas the key's absence genuinely varies -- it is the
+    # ambient-environment leak these tests are guarding against, and a key
+    # present here would silently route them down the encrypted-token branch.
+    assert "INTEGRATION_ENCRYPTION_KEY" not in os.environ
 
 
 class TestGithubPrPublishActivityValidation:

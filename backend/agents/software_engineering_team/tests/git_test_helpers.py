@@ -26,6 +26,15 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
     at ``repo``, and return the resulting commit SHA, leaving the checkout back
     on ``main``.
 
+    Postconditions:
+        - On SUCCESS, returns the new commit's SHA with the checkout back on
+          ``main``.
+        - On FAILURE (a failing ``add``/``commit`` raises ``AssertionError``),
+          the checkout is STILL returned to ``main`` before the error
+          propagates — the "back on main" guarantee is unconditional, so one
+          genuine failure cannot leave every later assertion in the calling
+          test running against the wrong HEAD.
+
     Preconditions:
         - ``repo`` is an existing on-disk git checkout with a ``main`` branch
           already checked out (or at least existing) — this helper always
@@ -69,14 +78,22 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
         return result.stdout.strip()
 
     _run("checkout", "-q", "-B", branch)
-    target = Path(repo) / filename
-    # A nested `filename` would otherwise fail with FileNotFoundError before git
-    # is ever reached; creating parents makes the helper usable for directory
-    # paths too, which is strictly more useful than documenting the limitation.
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(contents, encoding="utf-8")
-    _run("add", filename)
-    _run("commit", "-q", "--no-gpg-sign", "-m", f"{branch}: {filename}")
-    sha = _run("rev-parse", "HEAD")
-    _run("checkout", "-q", "main")
+    # try/finally, not a trailing call: the "leaves the checkout back on main"
+    # postcondition must hold on the FAILURE path too. A failing add/commit
+    # otherwise strands the repo on `branch`, and every later assertion in the
+    # calling test runs against the wrong HEAD -- turning one real failure into
+    # a cascade that hides its own cause.
+    try:
+        target = Path(repo) / filename
+        # A nested `filename` would otherwise fail with FileNotFoundError before
+        # git is ever reached; creating parents makes the helper usable for
+        # directory paths too, which is strictly more useful than documenting
+        # the limitation.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents, encoding="utf-8")
+        _run("add", filename)
+        _run("commit", "-q", "--no-gpg-sign", "-m", f"{branch}: {filename}")
+        sha = _run("rev-parse", "HEAD")
+    finally:
+        _run("checkout", "-q", "main")
     return sha

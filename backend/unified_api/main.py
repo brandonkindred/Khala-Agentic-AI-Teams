@@ -1503,11 +1503,31 @@ def _redact_job_secrets(payload: Any) -> Any:
           :data:`_REDACTED_JOB_FIELDS` key REMOVED (removed, not blanked, so a
           client cannot tell a redacted value from an absent one and no caller
           can mistake a placeholder for a usable token).
+        - A dict payload carrying NEITHER ``"jobs"`` nor ``"job"``, or a
+          ``"jobs"`` value that is not a list, is returned untouched AND
+          logged as a warning. Passing an unrecognized wrapper through in
+          silence is how this redaction fails open: if the job service ever
+          renames its wrapper key, credentials resume flowing to clients with
+          nothing anywhere saying so. The warning is the tripwire; it names no
+          field values, only the keys seen.
         - Never mutates ``payload`` in place; job dicts are copied. Never
           raises on an unexpected shape.
     """
     if not isinstance(payload, dict):
         return payload
+    if "jobs" not in payload and "job" not in payload:
+        logger.warning(
+            "_redact_job_secrets: job-service body has neither 'jobs' nor 'job'; "
+            "forwarding unredacted. Keys seen: %s",
+            sorted(payload),
+        )
+        return payload
+    if "jobs" in payload and not isinstance(payload["jobs"], list):
+        logger.warning(
+            "_redact_job_secrets: job-service body's 'jobs' is %s, not a list; "
+            "that branch is forwarded unredacted",
+            type(payload["jobs"]).__name__,
+        )
 
     def _clean(job: Any) -> Any:
         if not isinstance(job, dict):

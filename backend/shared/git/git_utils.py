@@ -63,7 +63,8 @@ def remote_url_matches(
           (b) the URL's last two
           ``/``-separated path segments equal ``owner``/``repo``
           case-insensitively (GitHub owner/repo names are case-insensitive)
-          after stripping a trailing ``.git`` — a substring match would give
+          after stripping a trailing ``.git`` (matched case-insensitively too,
+          so ``repo.GIT`` strips exactly like ``repo.git``) — a substring match would give
           false positives (``acme/widget`` inside ``acme/widget-extra``).
           Returns False for a malformed, empty, or too-short URL, or a host
           mismatch — never assumed to match on unverifiable input.
@@ -82,7 +83,10 @@ def remote_url_matches(
           mistaken for the scp form's host separator.
     """
     cleaned = remote_url.strip().rstrip("/")
-    if cleaned.endswith(".git"):
+    # Case-INSENSITIVE, like every other identity comparison in this function:
+    # a remote spelled ``.../owner/repo.GIT`` would otherwise keep the suffix
+    # and fail to match ``repo``.
+    if cleaned.lower().endswith(".git"):
         cleaned = cleaned[: -len(".git")]
     # A scheme prefix (https://, ssh://, git://) is scp-style syntax's one
     # distinguishing feature — scp syntax (`user@host:path`) never has one.

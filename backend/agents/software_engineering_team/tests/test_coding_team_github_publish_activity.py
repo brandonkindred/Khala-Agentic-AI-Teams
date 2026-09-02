@@ -196,6 +196,22 @@ def _activity():
     return github_publish_activity
 
 
+def _pr_publish_activity():
+    """The ``existing_pr`` sibling of :func:`_activity`.
+
+    Both are imported inside the helper, not at module scope, for the same
+    reason: the activities module pulls in the heavy SE API surface, which the
+    ``_stub_heavy_modules`` fixture must be allowed to install first. Two
+    activities, one access pattern -- a second function-local import spelled
+    out at each call site is how the two drift.
+    """
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_pr_publish_activity,
+    )
+
+    return github_pr_publish_activity
+
+
 def _stub_push_paths(
     monkeypatch: pytest.MonkeyPatch, api: Any
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str, str]]]:
@@ -635,14 +651,10 @@ def test_pr_publish_activity_pushes_existing_head_and_completes_child(
     fast-forwards the integration branch onto the development branch, pushes
     it to the PR remote, clears the PR marker from the store, and returns a
     'completed' status with the PR URL."""
-    from software_engineering_team.temporal.coding_team_github_activities import (
-        github_pr_publish_activity,
-    )
-
     store, _ = _install(monkeypatch, api, "job-1")
     fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
 
-    out = github_pr_publish_activity(_publish_request())
+    out = _pr_publish_activity()(_publish_request())
 
     assert fast_forwards == [("/repo", "feature/pr-7", api.DEVELOPMENT_BRANCH)]
     assert pushes == [("/repo", "origin", "feature/pr-7", "tok-123")]
@@ -661,10 +673,6 @@ def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
     issue-driven flow. _dispatch_implementation only treats an exact
     "completed" status as success, so this keeps the review thread open
     for retry instead of replying to and resolving over unfinished work."""
-    from software_engineering_team.temporal.coding_team_github_activities import (
-        github_pr_publish_activity,
-    )
-
     store, _ = _install(
         monkeypatch,
         api,
@@ -673,7 +681,7 @@ def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
     )
     fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
 
-    out = github_pr_publish_activity(_publish_request())
+    out = _pr_publish_activity()(_publish_request())
 
     assert out["status"] == "completed_with_failures"
     assert store.cleared_markers == [("/repo", 7)]
