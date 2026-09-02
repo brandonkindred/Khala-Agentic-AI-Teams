@@ -101,7 +101,7 @@ def _log_signal_diagnostic(msg: str, *args: Any) -> None:
           — so this adds an operator diagnostic trail without affecting
           determinism.
     """
-    if workflow.in_workflow():  # pragma: no cover -- only true inside a real Temporal workflow sandbox
+    if workflow.in_workflow():
         workflow.logger.warning(msg, *args)
 
 
@@ -112,15 +112,23 @@ def _validate_answer_batch(raw: Any) -> Optional[List[Dict[str, Any]]]:
         - None — ``raw`` is untrusted, signal-delivered data of arbitrary shape.
     Postconditions:
         - Returns ``None`` (never raises, for any input) if ``raw`` is not a
-          non-empty list, or any element is not a dict with all-``str`` keys,
-          or any element fails ``AnswerSubmission`` validation — the whole
-          batch is rejected on a single bad entry rather than silently
-          dropping just that entry, so a resume can never proceed with a
+          non-empty list, or any element is not a dict with all-``str`` keys
+          all of which are recognized ``AnswerSubmission`` fields, or any
+          element fails ``AnswerSubmission`` validation — the whole batch is
+          rejected on a single bad entry rather than silently dropping just
+          that entry, so a resume can never proceed with a
           partially-validated answer set. An empty list is rejected too:
           there is no content to apply, and accepting it would let a caller
           mistake "submitted, vacuously" for "not yet submitted" if it ever
           tests ``_submitted_answers`` for truthiness instead of ``is not
-          None``.
+          None``. An unrecognized key is rejected rather than silently
+          dropped: pydantic's default ``model_dump()`` behavior discards
+          extra fields, so without this check a sender's typo (e.g.
+          ``other_txt`` instead of ``other_text``) would "successfully"
+          submit an answer with its actual content quietly stripped —
+          exactly the partial-content failure mode whole-batch rejection
+          exists to prevent, just triggered by a misspelling instead of a
+          missing field.
         - Otherwise returns a new, non-empty list of plain dicts, one per
           input element, each normalized through ``AnswerSubmission`` (so
           every dict carries the schema's full field set, e.g. an omitted
@@ -131,6 +139,8 @@ def _validate_answer_batch(raw: Any) -> Optional[List[Dict[str, Any]]]:
     validated: List[Dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict) or not all(isinstance(key, str) for key in item):
+            return None
+        if not set(item).issubset(AnswerSubmission.model_fields):
             return None
         try:
             answer = AnswerSubmission(**item)
@@ -216,8 +226,8 @@ class HitlAnswerSignalMixin:
               like any other malformed payload.
         Postconditions:
             - A payload that is not a dict, or whose ``"answers"`` value fails
-              :func:`_validate_answer_batch` (missing, not a list, or any
-              element malformed), is ignored: returns without mutating any
+              :func:`_validate_answer_batch` (missing, empty, not a list, or
+              any element malformed), is ignored: returns without mutating any
               workflow state — the only action taken is the operator
               diagnostic log described at the end of this docstring — leaving
               the workflow's paused state exactly as it was (fails closed

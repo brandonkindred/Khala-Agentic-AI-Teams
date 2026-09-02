@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import shared.hitl.temporal_signal as _temporal_signal_module
 from shared.command_runner.error_parsing import (
     FailureClass,
     build_agent_feedback,
@@ -318,6 +319,42 @@ def test_hitl_signal_mixin_tolerates_zero_argument_delivery() -> None:
 
     assert wf._submitted_answers is None
     assert wf._buffered_signals == {}
+
+
+def test_hitl_signal_mixin_rejects_answer_entry_with_unrecognized_key() -> None:
+    """An unrecognized key (e.g. a misspelled field name) must reject the whole
+    batch -- pydantic's default model_dump() would otherwise silently drop it,
+    letting a typo'd submission "succeed" with its actual content stripped."""
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers(
+        {"resume_token": "tok-1", "answers": [{"question_id": "q1", "other_txt": "typo"}]}
+    )
+
+    assert wf._submitted_answers is None
+
+
+def test_hitl_signal_mixin_logs_diagnostic_inside_a_workflow(monkeypatch) -> None:
+    """_log_signal_diagnostic's in-workflow branch (guarded by
+    workflow.in_workflow()) is only reachable inside a real Temporal workflow
+    sandbox -- monkeypatch it here so the operator diagnostic trail this
+    module's postconditions promise is actually exercised by CI."""
+
+    class _FakeLogger:
+        def __init__(self) -> None:
+            self.warnings: list[tuple] = []
+
+        def warning(self, msg, *args) -> None:
+            self.warnings.append((msg, args))
+
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(_temporal_signal_module.workflow, "in_workflow", lambda: True)
+    monkeypatch.setattr(_temporal_signal_module.workflow, "logger", fake_logger)
+
+    _temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
+
+    assert fake_logger.warnings == [("submit_answers rejected: %r", ("reason",))]
 
 
 def test_hitl_signal_mixin_ignores_second_submission_for_same_token() -> None:

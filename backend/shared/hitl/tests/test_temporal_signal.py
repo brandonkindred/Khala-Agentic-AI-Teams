@@ -14,6 +14,7 @@ import typing
 
 from temporalio.converter import value_to_type
 
+import shared.hitl.temporal_signal as temporal_signal_module
 from shared.hitl.temporal_signal import (
     MAX_BUFFERED_SIGNALS,
     SUBMIT_ANSWERS_SIGNAL,
@@ -136,6 +137,20 @@ def test_submit_answers_rejects_answer_entry_with_non_string_keys() -> None:
     wf._active_resume_token = "tok-1"
 
     wf.submit_answers({"resume_token": "tok-1", "answers": [{1: "x", "question_id": "q1"}]})
+
+    assert wf._submitted_answers is None
+
+
+def test_submit_answers_rejects_answer_entry_with_unrecognized_key() -> None:
+    """An unrecognized key (e.g. a misspelled field name) must reject the
+    whole batch rather than silently succeed with the typo'd content
+    dropped -- pydantic's default model_dump() discards unknown fields,
+    which would otherwise let a sender's typo pass as a "successful"
+    submission missing its actual content."""
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [{"question_id": "q1", "other_txt": "typo"}]})
 
     assert wf._submitted_answers is None
 
@@ -306,3 +321,31 @@ def test_submit_answers_payload_annotation_survives_temporal_type_conversion() -
         "resume_token": "tok-1",
         "answers": [],
     }
+
+
+# --------------------------------------------------------------------------
+# _log_signal_diagnostic -- in-workflow branch
+# --------------------------------------------------------------------------
+
+
+class _FakeWorkflowLogger:
+    def __init__(self) -> None:
+        self.warnings: list[tuple[str, tuple]] = []
+
+    def warning(self, msg: str, *args) -> None:
+        self.warnings.append((msg, args))
+
+
+def test_log_signal_diagnostic_logs_via_workflow_logger_inside_a_workflow(monkeypatch) -> None:
+    """The in-workflow branch of _log_signal_diagnostic (guarded by
+    workflow.in_workflow()) is only reachable inside a real Temporal workflow
+    sandbox -- monkeypatch workflow.in_workflow/workflow.logger to exercise it
+    without one, proving the operator diagnostic trail this module's
+    postconditions promise is actually emitted, not just documented."""
+    fake_logger = _FakeWorkflowLogger()
+    monkeypatch.setattr(temporal_signal_module.workflow, "in_workflow", lambda: True)
+    monkeypatch.setattr(temporal_signal_module.workflow, "logger", fake_logger)
+
+    temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
+
+    assert fake_logger.warnings == [("submit_answers rejected: %r", ("reason",))]
