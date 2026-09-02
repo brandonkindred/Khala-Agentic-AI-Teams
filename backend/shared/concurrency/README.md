@@ -221,3 +221,40 @@ with file_locks.lock(physical_lock_keys):
 - A key's lock is never removed once created — this manager is meant to be
   constructed once and reused for an entire run (the same lifetime as the
   `all_files` dict it is intended to guard), not created per call.
+
+## `LazySingleton`
+
+A single-slot "build at most once, even under concurrent first access"
+primitive, consolidating the hand-rolled double-checked-locking idiom
+duplicated across `branding_team/store.py::get_default_store`,
+`branding_team/api/main.py::_get_assistant_agent`, and
+`shared/coro_runner.py`'s worker-pool singleton.
+
+```python
+from shared.concurrency import LazySingleton
+
+_store: LazySingleton[BrandingStore] = LazySingleton()  # module-scope, one per value
+
+def get_default_store() -> BrandingStore:
+    return _store.get_or_create(BrandingStore)
+```
+
+- `get_or_create(factory)` — returns the constructed value, calling
+  `factory()` to build it on the first call to succeed; every other call,
+  concurrent or not, returns that exact same object without invoking its own
+  `factory`.
+- A raising `factory` propagates the exception to that caller and leaves the
+  instance unconstructed, so the next call retries — this is what lets
+  `_get_assistant_agent`'s existing "raise `HTTPException`, retry on the next
+  request" contract carry over unchanged.
+- A `factory` that also needs a one-time side effect (e.g. `atexit`
+  registration) is just a closure — `get_or_create` doesn't care what
+  `factory` does beyond returning the value.
+- `None` is reserved as the "not yet constructed" sentinel, so `factory` must
+  never return `None` — the same assumption the hand-rolled call sites above
+  already made. Enforced: a `None`-returning `factory` raises `ValueError`
+  immediately rather than silently caching `None` and re-running `factory`
+  on every later call.
+- `factory` must not call `get_or_create` on the same instance, directly or
+  transitively — the internal lock isn't reentrant and is held for the
+  duration of `factory`, so re-entry deadlocks the calling thread.
