@@ -174,6 +174,9 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
     # _PLACEHOLDER_RE strips a leading "add " from the placeholder body, so
     # the topic recorded in the skip instruction is "a real story".
     assert "a real story" in user_feedback
+    # No narrative was collected on this skip-only path, so the running
+    # elicited_stories total passed through to the revision stays None.
+    assert captured["kwargs"]["elicited_stories"] is None
 
 
 def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) -> None:
@@ -192,6 +195,16 @@ def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) 
         _make_stub_ghost(narrative="I once debugged a production outage.", rounds_used=2),
     )
 
+    # Capture the kwargs revise_from_user_feedback was called with so we can
+    # confirm the newly collected narrative is forwarded via elicited_stories
+    # (not just merged into the return value).
+    captured: dict = {}
+
+    class _StubAgent:
+        def revise_from_user_feedback(self, **kw):
+            captured["kwargs"] = kw
+            return WriterOutput(draft="# Redraft with stories\nNarrative incorporated.")
+
     out_draft, out_stories = v2._fill_story_placeholders(
         draft_text="# Draft\n[Author: a debug story]\nBody.",
         plan=_plan(),
@@ -199,13 +212,14 @@ def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) 
         job_id=job_id,
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
-        draft_agent=_make_stub_draft_agent("# Redraft with stories\nNarrative incorporated.")(),
+        draft_agent=_StubAgent(),
         draft_input_kwargs=_full_draft_input_kwargs(),
         work_dir=tmp_path,
         iteration=1,
     )
     assert "Redraft" in out_draft.draft
     assert "debugged" in out_stories
+    assert "debugged" in captured["kwargs"]["elicited_stories"]
 
 
 def test_fill_story_placeholders_redraft_fails_keeps_original(monkeypatch, tmp_path) -> None:
@@ -401,6 +415,22 @@ def test_fill_story_placeholders_rejects_elicited_stories_in_kwargs() -> None:
     with pytest.raises(ValueError, match="elicited_stories"):
         _fill_story_placeholders(
             **_valid_fill_kwargs(draft_input_kwargs={"elicited_stories": "pre-set"})
+        )
+
+
+def test_fill_story_placeholders_rejects_missing_draft_input_kwargs_keys() -> None:
+    """draft_input_kwargs must carry every key revise_from_user_feedback needs,
+    checked once a placeholder is actually found (kwargs go unused otherwise)."""
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
+
+    with pytest.raises(ValueError, match="missing required keys"):
+        _fill_story_placeholders(
+            **_valid_fill_kwargs(
+                draft_text="# Draft\n[Author: a story]\nBody.",
+                draft_input_kwargs={"content_plan": _plan()},
+            )
         )
 
 

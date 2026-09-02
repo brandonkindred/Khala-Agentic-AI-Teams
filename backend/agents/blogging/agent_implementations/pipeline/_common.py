@@ -936,6 +936,19 @@ class _DraftAgent(Protocol):
     ) -> "WriterOutput": ...
 
 
+# Keys _fill_story_placeholders forwards from draft_input_kwargs to
+# revise_from_user_feedback by direct subscript; validated eagerly so a
+# missing key fails fast instead of being masked by the soft-failure guard.
+_REQUIRED_DRAFT_INPUT_KEYS = (
+    "audience",
+    "tone_or_purpose",
+    "selected_title",
+    "allowed_claims",
+    "target_word_count",
+    "length_guidance",
+)
+
+
 def _fill_story_placeholders(
     *,
     draft_text: str,
@@ -986,6 +999,12 @@ def _fill_story_placeholders(
           (this function passes the collected stories to
           ``revise_from_user_feedback`` separately, via its own
           ``elicited_stories`` parameter).
+        - When ``draft_text`` contains ``[Author: ...]`` placeholders,
+          ``draft_input_kwargs`` contains every key in
+          ``_REQUIRED_DRAFT_INPUT_KEYS`` (``audience``, ``tone_or_purpose``,
+          ``selected_title``, ``allowed_claims``, ``target_word_count``,
+          ``length_guidance``) — unchecked when there are no placeholders,
+          since ``draft_input_kwargs`` then goes unused.
     Postconditions:
         - Returns ``(updated_draft_result, updated_elicited_stories_text)``.
         - When no placeholders exist, returns a ``WriterOutput`` wrapping the
@@ -999,7 +1018,8 @@ def _fill_story_placeholders(
     Raises:
         TypeError: a precondition on ``draft_text``, ``plan``, ``llm_client``,
             or ``draft_agent`` is violated.
-        ValueError: ``draft_input_kwargs`` already contains ``elicited_stories``.
+        ValueError: ``draft_input_kwargs`` already contains ``elicited_stories``,
+            or is missing one of the keys in ``_REQUIRED_DRAFT_INPUT_KEYS``.
         CancelledError: a Temporal-native (or otherwise external) cancellation
             propagates unchanged from both the non-fatal story-bank-save
             guard below and the non-fatal revision guard — neither ever
@@ -1032,6 +1052,14 @@ def _fill_story_placeholders(
     placeholders = _extract_story_placeholders(draft_text)
     if not placeholders:
         return WriterOutput(draft=draft_text), elicited_stories_text
+
+    # draft_input_kwargs is only actually used once placeholders are found (it
+    # feeds the revise_from_user_feedback call below), so this is checked here
+    # rather than unconditionally — a caller whose draft has no placeholders
+    # never needs to supply it.
+    missing_keys = [k for k in _REQUIRED_DRAFT_INPUT_KEYS if k not in draft_input_kwargs]
+    if missing_keys:
+        raise ValueError("draft_input_kwargs is missing required keys: " + ", ".join(missing_keys))
 
     logger.info("Post-draft: found %d story placeholder(s) to fill", len(placeholders))
     job_updater(
