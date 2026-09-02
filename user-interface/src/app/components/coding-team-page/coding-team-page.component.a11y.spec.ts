@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { Subject, of } from 'rxjs';
 import type { CodingTeamJobListItem } from '../../models/coding-team.model';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
@@ -194,6 +194,22 @@ describe('CodingTeamPageComponent a11y', () => {
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('app-coding-team-monitor')).not.toBeNull();
     await expectNoAxeViolations(el);
+  }, 15000);
+
+  // This is a regression guard on the loading markup, not proof of WCAG 4.1.3 compliance —
+  // axe-core has no rule for status-message announcements; see coding-team-page.component.spec.ts
+  // for the role="status" DOM assertions that are the actual proof.
+  it('has no axe violations on the GitHub view while repositories are loading', async () => {
+    const reposSubject = new Subject<GitHubRepoItem[]>();
+    integrationsSpy.getGitHubRepos.mockReturnValue(reposSubject.asObservable());
+    await setup();
+    showView('github');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(component.loadingRepos).toBe(true);
+    expect(el.querySelector('app-loading-spinner')).not.toBeNull();
+    await expectNoAxeViolations(el);
+    reposSubject.next([REPO]);
+    reposSubject.complete();
   }, 15000);
 
   // NOTE: MatTooltip's overlay open-on-focus behavior relies on FocusMonitor's
