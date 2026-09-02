@@ -178,6 +178,65 @@ describe('CodingTeamPageComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  describe('loading states render via app-loading-spinner (role="status")', () => {
+    /** Every `[role="status"]` element currently rendered, for locating the one with the expected text. */
+    function statusRegions(): HTMLElement[] {
+      return Array.from(fixture.nativeElement.querySelectorAll('[role="status"]'));
+    }
+
+    it('shows "Checking GitHub integration…" via app-loading-spinner while isLoadingConfig is true', async () => {
+      const configSubject = new Subject<GitHubConfigResponse>();
+      integrationsSpy.getGitHubConfig.mockReturnValue(configSubject.asObservable());
+      await setup();
+      showView('github');
+      expect(component.isLoadingConfig).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('.github-section--loading')).toBeNull();
+      expect(statusRegions().some((el) => el.textContent?.includes('Checking GitHub integration…'))).toBe(true);
+      configSubject.next(CONFIGURED);
+      configSubject.complete();
+    });
+
+    it('shows "Loading repositories…" via app-loading-spinner while loadingRepos is true', async () => {
+      const reposSubject = new Subject<GitHubRepoItem[]>();
+      integrationsSpy.getGitHubRepos.mockReturnValue(reposSubject.asObservable());
+      await setup();
+      showView('github');
+      expect(component.loadingRepos).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
+      expect(statusRegions().some((el) => el.textContent?.includes('Loading repositories…'))).toBe(true);
+      reposSubject.next([REPO]);
+      reposSubject.complete();
+    });
+
+    it('shows "Loading issues…" via app-loading-spinner while loadingIssues is true', async () => {
+      const issuesSubject = new Subject<GitHubIssueItem[]>();
+      integrationsSpy.getGitHubIssues.mockReturnValue(issuesSubject.asObservable());
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      expect(component.loadingIssues).toBe(true);
+      expect(statusRegions().some((el) => el.textContent?.includes('Loading issues…'))).toBe(true);
+      issuesSubject.next(makeIssues(1));
+      issuesSubject.complete();
+    });
+
+    it('shows "Starting…" via app-loading-spinner for a selected run with no status yet', async () => {
+      await setup();
+      const run = ghRun({ status: 'running' });
+      component.runs = [run];
+      component.runningRuns = [run];
+      component.recentRuns = [];
+      component['buildRunVms']();
+      // toggleRun selects the run and (re)starts polling on a timer, so `jobStatus` stays null
+      // until the poller's first (async) tick — the window this "Starting…" branch covers.
+      component.toggleRun(run);
+      fixture.detectChanges();
+      expect(component.jobStatus).toBeNull();
+      expect(statusRegions().some((el) => el.textContent?.includes('Starting…'))).toBe(true);
+    });
+  });
+
   it('auto-loads the accessible repositories on init when GitHub is configured', async () => {
     await setup();
     expect(integrationsSpy.getGitHubConfig).toHaveBeenCalled();
