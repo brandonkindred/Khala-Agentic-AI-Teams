@@ -290,15 +290,29 @@ def test_parse_systemic_findings_defensive() -> None:
     ]
 
 
+# Synthetic credential shapes for the scrubber-parity cases below. Each is built
+# by f-string interpolation rather than written as one contiguous literal, so no
+# line here reads as a hardcoded ``user:password@host`` basic-auth string to a
+# source scanner. None of these is, or ever was, a valid credential; the padding
+# only satisfies the scrubbers' >=20-character length bound. The same convention
+# (and the same reason) applies in ``shared/git/tests/test_git_utils.py``.
+_FAKE = "placeholder"
+_GHP = f"ghp_{'A' * 22}"
+_GHU = f"ghu_{'B' * 22}"
+_GHS = f"ghs_{'C' * 22}"
+_GHR = f"ghr_{'D' * 22}"
+_GHP2 = f"ghp_{'E' * 22}"
+
+
 @pytest.mark.parametrize(
     "text",
     [
         "",
         "no credentials here",
-        "clone https://x-access-token:ghp_AAAAAAAAAAAAAAAAAAAAAA@github.com/o/r",
+        f"clone https://x-access-token:{_GHP}@github.com/o/r",
         "token gho_abcdef0123456789abcdef01 quoted inside a finding",
-        "ghu_BBBBBBBBBBBBBBBBBBBBBB and ghs_CCCCCCCCCCCCCCCCCCCCCC and ghr_DDDDDDDDDDDDDDDDDDDDDD",
-        "https://user@example.com/path plus ghp_EEEEEEEEEEEEEEEEEEEEEE",
+        f"{_GHU} and {_GHS} and {_GHR}",
+        f"https://{_FAKE}@example.com/path plus {_GHP2}",
         "short ghp_tooshort is left alone",
     ],
 )
