@@ -122,10 +122,10 @@ def _run_branding_core(
         - Cancellation is cooperative *during* the run, not only before it:
           ``should_continue`` is wired to ``_job_not_cancelled(job_id)``, over
           the same ``is_job_cancelled`` predicate the Temporal path checks
-          between phases (see that helper for its fail-open semantics) -- so a
-          cancel requested mid-run stops the orchestrator from issuing any
-          further phase, instead of letting every remaining phase burn its
-          LLM fan-out against a row that is already terminal. The run still
+          between phases (see ``_job_not_cancelled`` above for its fail-open
+          semantics) -- so a cancel requested mid-run stops the orchestrator
+          from issuing any further phase, instead of letting every remaining
+          phase burn its LLM fan-out against a row that is already terminal. The run still
           returns (a truncated) ``TeamOutput``, and the guarded
           ``mark_completed`` below no-ops against the CANCELLED row, so the
           row stays CANCELLED exactly as it did before the check existed.

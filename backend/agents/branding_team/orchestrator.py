@@ -703,17 +703,18 @@ class BrandingTeamOrchestrator:
               Temporal path (which calls ``run_single_phase`` directly and
               never this method) do not pass it and are unaffected -- Temporal
               runs its own equivalent between-phase cancel check. A
-              ``should_continue``-triggered stop
-              does **not** short-circuit compliance checks, integrations,
-              ``_assemble_team_output``, or ``store.append_brand_version``
-              below -- it only changes which phases ran, exactly like a
-              smaller ``target_phase`` would, and the resulting
-              (possibly-truncated) output is persisted the same way any
-              other ``run()`` output is. A future caller that wires this to
-              a real cancellation signal (e.g. a job-store cancel flag) owns
-              deciding whether and how to gate persistence on that outcome;
-              this method does not infer cancellation intent from a
-              truncated result, nor treat it specially.
+              ``should_continue``-triggered stop does **not** short-circuit
+              compliance checks, integrations, ``_assemble_team_output``, or
+              ``store.append_brand_version`` below -- it only changes which
+              phases ran, exactly like a smaller ``target_phase`` would, and
+              the resulting (possibly-truncated) output is persisted the same
+              way any other ``run()`` output is. Whether a truncated result
+              should be persisted at all is the wiring caller's decision, not
+              this method's: ``run`` does not infer cancellation intent from a
+              truncated result, nor treat it specially. The thread-path caller
+              does not currently gate persistence -- a cancel-truncated output
+              is still appended, a deliberate residual tracked separately from
+              the cancellation gate itself.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
