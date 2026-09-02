@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Literal, Mapping, Optional, Sequence, Set, Tuple
 
 from ...models import StrategySpec
 from ..spec_dsl import ExitRule, StopLossRule, first_side_stop_factor, stop_caps_side
@@ -207,12 +207,13 @@ def entry_price_basis(raw_open: float, side: str, entry_slippage_bps: float) -> 
     ``raw_open`` must additionally be large enough that the ROUNDED anchor
     stays positive: ``raw_open > 0`` alone does not guarantee it, since a price
     below the bucket's own resolution rounds to zero (``round(0.00004, 4)`` is
-    ``0.0``). That is a genuine input this function cannot model rather than a
-    value to coerce, so it is rejected below rather than returned.
+    ``0.0``). Such a price is an input this function cannot model, not a value
+    to coerce.
     Postconditions: returns ``round(raw_open * (1 + bps/10_000), dp)`` for a
     long and ``round(raw_open * (1 - bps/10_000), dp)`` for a short, with ``dp``
-    taken from ``raw_open``'s own bucket. Strictly positive — now enforced, not
-    merely asserted.
+    taken from ``raw_open``'s own bucket. The result is strictly positive: an
+    anchor that rounds to zero or below raises ``ValueError`` instead of being
+    returned.
     """
     if not (raw_open > 0 and math.isfinite(raw_open)):
         raise ValueError(f"raw_open must be a positive finite number, got {raw_open!r}")
@@ -356,7 +357,7 @@ class _RestingStopLoss:
         # enters the watermark.
         self._high_water = anchor
         self._low_water = anchor
-        self._armed: set[int] = set()
+        self._armed: Set[int] = set()
 
     def _position(self) -> PositionState:
         """Snapshot the position as the shared evaluator expects to see it.
