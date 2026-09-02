@@ -67,6 +67,13 @@ from .models import (
     get_phase_progress,
 )
 from .style_loader import load_style_file
+from .text_parsing import (
+    extract_draft_after_marker,
+    extract_json_array_from_text,
+    format_feedback_item_line,
+    looks_like_top_level_json_object,
+    unwrap_llm_cause,
+)
 from .word_count import count_words
 
 __all__ = [
@@ -120,4 +127,9 @@ __all__ = [
     "resolve_length_policy_from_request_dict",
     "series_context_block",
     "count_words",
+    "unwrap_llm_cause",
+    "extract_draft_after_marker",
+    "extract_json_array_from_text",
+    "looks_like_top_level_json_object",
+    "format_feedback_item_line",
 ]
