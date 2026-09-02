@@ -23,6 +23,8 @@ from typing import Any, Dict, Optional
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from shared.hitl.temporal_signal import HitlAnswerSignalMixin
+
 with workflow.unsafe.imports_passed_through():
     from planning_team.temporal import activities as _activities
     from planning_team.temporal.constants import (
@@ -79,8 +81,17 @@ LEGACY_RETRY_POLICY = RetryPolicy(
 
 
 @workflow.defn(name="PlanningWorkflow")
-class PlanningWorkflow:
-    """Durable, per-phase Planning orchestrator."""
+class PlanningWorkflow(HitlAnswerSignalMixin):
+    """Durable, per-phase Planning orchestrator.
+
+    Invariants:
+        - Inherits ``HitlAnswerSignalMixin``, registering the ``submit_answers``
+          Temporal signal (``shared.hitl.temporal_signal``) and its backing
+          buffer/reject/accept state machine. This registration is currently
+          unconsumed: no phase below arms a pause or reads
+          ``self._submitted_answers`` yet — durably waiting on a pause and
+          resuming with the delivered answers is separate, follow-on work.
+    """
 
     @workflow.run
     async def run(
