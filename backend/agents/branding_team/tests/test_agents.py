@@ -65,7 +65,7 @@ from branding_team.models import (
     IconographyOutput,
     OwnershipOutput,
 )
-from branding_team.prompt_spec import AgentPromptSpec
+from branding_team.prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 from branding_team.tests.conftest import make_mission
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
@@ -683,6 +683,52 @@ def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
             f"got {ast.unparse(system_prompt)}"
         )
     assert build_agent_calls > 0
+
+
+def test_build_spec_agent_rejects_fields_based_prompt() -> None:
+    """``_build_spec_agent`` requires a structured_output-based prompt spec.
+
+    Preconditions:
+        None (test only).
+    Postconditions:
+        Calling ``_build_spec_agent`` with a ``fields=``-based
+        ``AgentPromptSpec`` (``structured_output is None``) raises
+        ``AssertionError``.
+    """
+    fields_prompt = AgentPromptSpec(
+        opening="You are a Test Agent.",
+        fields=(PromptFieldSpec("thing", "a thing"),),
+    )
+    with pytest.raises(AssertionError, match="requires prompt.structured_output"):
+        branding_agents._build_spec_agent(
+            name="test_agent",
+            description="test",
+            prompt=fields_prompt,
+            agent_key="branding",
+        )
+
+
+def test_build_spec_agent_builds_agent_from_structured_output_spec() -> None:
+    """``_build_spec_agent`` builds an Agent from a structured_output-based prompt spec.
+
+    Preconditions:
+        None (test only).
+    Postconditions:
+        The returned ``Agent`` carries the given ``name`` and renders
+        ``system_prompt`` from ``prompt`` via ``render_agent_prompt``.
+    """
+    spec_prompt = AgentPromptSpec(
+        opening="You are a Test Agent.",
+        structured_output=BrandDiscoveryAudit,
+    )
+    agent = branding_agents._build_spec_agent(
+        name="test_agent",
+        description="test description",
+        prompt=spec_prompt,
+        agent_key="branding",
+    )
+    assert agent.name == "test_agent"
+    assert agent.system_prompt == render_agent_prompt(spec_prompt)
 
 
 # ---------------------------------------------------------------------------
