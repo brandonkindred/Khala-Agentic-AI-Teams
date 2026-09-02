@@ -61,12 +61,13 @@ class TraceCallRecord:
         confusing downstream assertion diff).
     Postconditions:
         The constructed instance exposes every field
-        :func:`trace_store._record_to_row` reads (``timestamp`` through
-        ``request_id``), with any ``overrides`` values applied on top. Neither
-        ``cache_read_tokens`` nor ``cache_creation_tokens`` is set unless passed
-        as an override — a bare ``TraceCallRecord()`` has no cache-token
-        attributes at all (not merely zero), which is what lets it double as
-        the "cache fields missing entirely" case without a separate stub.
+        :func:`trace_store._record_to_row` reads *except*
+        ``cache_read_tokens``/``cache_creation_tokens``, with any
+        ``overrides`` values applied on top of those defaults. The two cache
+        fields are set only when passed as an override — a bare
+        ``TraceCallRecord()`` has no cache-token attributes at all (not
+        merely zero), which is what lets it double as the "cache fields
+        missing entirely" case without a separate stub.
     """
 
     def __init__(self, **overrides: Any) -> None:

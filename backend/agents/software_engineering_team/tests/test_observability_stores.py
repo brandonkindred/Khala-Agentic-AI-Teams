@@ -566,6 +566,20 @@ def test_trace_call_record_fields_reach_record_to_row() -> None:
     )
 
 
+def test_trace_call_record_rejects_unknown_override() -> None:
+    """An override key that isn't in _FIELDS raises AttributeError with the
+    documented message, rather than silently creating an unused attribute or
+    raising some other exception type — the behavior the class docstring's
+    Preconditions promise but that no other test in this suite exercises,
+    since every other _Rec(...) call here passes only valid overrides."""
+    with pytest.raises(AttributeError, match="Unknown TraceCallRecord attribute: 'prompt_toknes'"):
+        _Rec(prompt_toknes=1)  # deliberately misspelled
+
+    # A valid override, including an optional cache field, still applies normally.
+    rec = _Rec(cache_read_tokens=7)
+    assert rec.cache_read_tokens == 7
+
+
 def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
     """write_trace (single-row path) carries cache_read_tokens through to the INSERT params."""
     cursor = _fake_cursor()

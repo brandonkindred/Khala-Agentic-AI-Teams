@@ -13,12 +13,14 @@ matching ``trace_flusher``'s own convention of trusting that contract.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from software_engineering_team.shared import trace_pruner, trace_store
 
 
-def _spy_on_heartbeat_init(monkeypatch) -> list:
+def _spy_on_heartbeat_init(monkeypatch) -> list[dict[str, Any]]:
     """Patch BackgroundHeartbeat.__init__ to record its call kwargs while still
     constructing a real, working instance (delegates to the real __init__).
 
@@ -28,7 +30,7 @@ def _spy_on_heartbeat_init(monkeypatch) -> list:
     internals a rename in either would otherwise break with no behavior
     change. Returns the list of captured kwargs dicts, one per construction.
     """
-    calls: list = []
+    calls: list[dict[str, Any]] = []
     real_init = trace_pruner.BackgroundHeartbeat.__init__
 
     def spy_init(self, **kwargs):
