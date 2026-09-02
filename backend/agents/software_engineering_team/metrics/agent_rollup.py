@@ -96,7 +96,12 @@ class CallRollup:
 
 @dataclass
 class AgentRollupMetrics:
-    """Per-``agent_key``/per-``phase`` rollup over a time window. See module docstring."""
+    """Per-``agent_key``/per-``phase`` rollup over a time window. See module docstring.
+
+    ``computed_at`` is an ISO 8601 UTC timestamp (e.g. ``"2026-09-02T00:00:00+00:00"``);
+    ``window_days`` is the length, in days, of the rolling window ending at
+    ``computed_at`` over which traces were aggregated.
+    """
 
     window_days: float
     computed_at: str
