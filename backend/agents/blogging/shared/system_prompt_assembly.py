@@ -43,7 +43,7 @@ def build_blogging_system_prompt_content(
         - Pure: no LLM client, no file I/O, no agent import, no module-level
           state; neither argument is mutated.
     """
-    parts = [t for t in (brand_spec_text, writing_guideline_text) if t and t.strip()]
+    parts = [t for t in (brand_spec_text, writing_guideline_text) if t.strip()]
     if not parts:
         return None
     return [CacheBreakpoint("\n\n".join(parts))]
