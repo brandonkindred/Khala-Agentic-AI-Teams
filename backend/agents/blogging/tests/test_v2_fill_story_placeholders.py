@@ -177,6 +177,15 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
     # No narrative was collected on this skip-only path, so the running
     # elicited_stories total passed through to the revision stays None.
     assert captured["kwargs"]["elicited_stories"] is None
+    # The remaining draft_input_kwargs-sourced fields must be read from
+    # draft_input_kwargs, not hard-coded or dropped — checked against the
+    # distinctive values _full_draft_input_kwargs() pins.
+    assert captured["kwargs"]["audience"] == "developers"
+    assert captured["kwargs"]["tone_or_purpose"] == "informative"
+    assert captured["kwargs"]["target_word_count"] == 1000
+    assert captured["kwargs"]["length_guidance"] == "Aim for 1000 words."
+    assert captured["kwargs"]["selected_title"] is None
+    assert captured["kwargs"]["allowed_claims"] is None
 
 
 def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) -> None:
@@ -220,6 +229,11 @@ def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) 
     assert "Redraft" in out_draft.draft
     assert "debugged" in out_stories
     assert "debugged" in captured["kwargs"]["elicited_stories"]
+    # content_plan_text must be built via content_plan_to_outline_markdown(plan),
+    # matching the two existing revise_from_user_feedback call sites in draft_stage.py.
+    from agents.blogging.shared.content_plan import content_plan_to_outline_markdown
+
+    assert captured["kwargs"]["content_plan_text"] == content_plan_to_outline_markdown(_plan())
 
 
 def test_fill_story_placeholders_redraft_fails_keeps_original(monkeypatch, tmp_path) -> None:
@@ -425,13 +439,26 @@ def test_fill_story_placeholders_rejects_missing_draft_input_kwargs_keys() -> No
         _fill_story_placeholders,
     )
 
-    with pytest.raises(ValueError, match="missing required keys"):
+    with pytest.raises(ValueError, match="missing required keys") as excinfo:
         _fill_story_placeholders(
             **_valid_fill_kwargs(
                 draft_text="# Draft\n[Author: a story]\nBody.",
                 draft_input_kwargs={"content_plan": _plan()},
             )
         )
+    # The message must actually name the missing keys, not just carry the
+    # generic prefix — otherwise a regression that reports an empty or
+    # partial list would still pass this test.
+    message = str(excinfo.value)
+    for key in (
+        "audience",
+        "tone_or_purpose",
+        "selected_title",
+        "allowed_claims",
+        "target_word_count",
+        "length_guidance",
+    ):
+        assert key in message
 
 
 def test_fill_story_placeholders_rejects_non_content_plan() -> None:

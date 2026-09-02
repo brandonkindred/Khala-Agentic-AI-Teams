@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Protocol, Tuple, Union
 
 if TYPE_CHECKING:
-    from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
     from agents.blogging.ghost_writer_agent.models import StoryGap
 
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
@@ -922,15 +922,25 @@ class _DraftAgent(Protocol):
     """Minimal draft-agent surface used by post-draft story placeholder fill.
 
     Preconditions:
-        - Implementers provide a callable ``run`` matching this signature.
+        - Implementers provide a callable ``revise_from_user_feedback``
+          matching this signature.
     Postconditions:
         - Structural typing only; no runtime registration.
     """
 
-    def run(
+    def revise_from_user_feedback(
         self,
-        draft_input: "WriterInput",
+        draft: str,
+        user_feedback: str,
+        content_plan_text: str,
         *,
+        audience: Optional[str] = None,
+        tone_or_purpose: Optional[str] = None,
+        selected_title: Optional[str] = None,
+        elicited_stories: Optional[str] = None,
+        allowed_claims: Optional[dict[str, Any]] = None,
+        target_word_count: int = 1000,
+        length_guidance: str = "",
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
     ) -> "WriterOutput": ...
