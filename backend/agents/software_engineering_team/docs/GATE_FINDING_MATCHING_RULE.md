@@ -42,29 +42,48 @@ decision on the raw code-review output, not a distinct matching pass.
 
 ## 2. Location resolution
 
-Each raw finding is resolved to a normalized `(file_path, line, line_end)`
-triple, or to `unresolved`. This is the only step that touches a gate's
-native fields for location purposes; everything after this section operates
-on the normalized triple.
+Each raw finding is resolved to exactly one of three normalized outcomes.
+This is the only step that touches a gate's native fields for location
+purposes; everything after this section operates on one of these three:
+
+1. **A full triple** `(file_path, line, line_end)` — both ends known, with
+   `line_end == line` for a single-line resolution (the "point" convention
+   used throughout §2.2 and §2.3) and `line_end > line` only for the §2.1
+   span case.
+2. **File-known, line-unresolved**, represented as `(file_path, None,
+   None)` — the file is known but no numeric line was recovered. §2.1's
+   `line: None` case, §2.2's non-numeric `line_or_section`, and §2.3's
+   digit-less match all resolve here.
+3. **`unresolved`** — no file at all (§2.4).
+
+Against a line-specific label, §4's location test requires outcome 1 —
+outcomes 2 and 3 both fail it, though for different reasons (2 has a file
+to compare but no line to test the tolerance against; 3 has neither).
+Against a file-wide label (`L.line` is `null`), §4 only compares
+`file_path`, so outcomes 1 and 2 both satisfy it and only outcome 3 fails.
 
 ### 2.1 Code review
 
 Already structured — no parsing. `file_path` is used as-is. `line: None`
-takes precedence and resolves to a file-wide finding: `file_path` known, no
-line — `start_line` is not consulted in that case, since a span end with no
-span start it anchors to is not meaningful (the inventory documents
-`start_line` as only ever set alongside a non-null `line`). Otherwise, when
-`start_line` is present the finding's range is `(start_line, line)` (`line`
-acts as the span's end, per `GATE_FINDING_INVENTORY.md` §1, "Location
-fields"); when absent, the range is the point `(line, line)`.
+takes precedence and resolves to outcome 2, `(file_path, None, None)` —
+`start_line` is not consulted in that case, since a span end with no span
+start it anchors to is not meaningful (the inventory documents `start_line`
+as only ever set alongside a non-null `line`). Otherwise, resolution
+produces outcome 1: when `start_line` is present, the normalized triple is
+`(file_path, start_line, line)` — native `start_line` becomes the
+normalized span start, and native `line` the normalized span end (per
+`GATE_FINDING_INVENTORY.md` §1, "Location fields", which documents `line`
+as acting as the span's end). When `start_line` is absent, the triple is
+the point `(file_path, line, line)`.
 
 ### 2.2 QA
 
 - **`fix_build` mode**: `file_path` is structured and used as-is.
   `line_or_section` is parsed as an integer only when it matches `^\d+$` (it
   may instead hold a function name such as `"def health"`, per
-  `GATE_FINDING_INVENTORY.md` §2) — a non-numeric value resolves to
-  file-known, line-unresolved.
+  `GATE_FINDING_INVENTORY.md` §2) — a numeric match resolves to outcome 1,
+  the point `(file_path, N, N)`; a non-numeric value resolves to outcome 2,
+  `(file_path, None, None)`.
 - **Every other mode** (default review, `write_tests`): no structured
   `file_path` exists at all. One fixed regex is attempted against the
   free-text `location` string (see §2.3). No other parsing is attempted.
@@ -86,9 +105,10 @@ search** — not a full-string match:
 — a path segment containing a `.`-extension, optionally followed by `:` and
 digits. The leftmost match in the string wins; any further match later in
 the same string is not considered. A match resolves `file_path` to the
-matched text with the optional `:digits` suffix stripped, and resolves the
-line to that suffix's digits when present, or to file-known/line-unresolved
-when absent. No match anywhere in the string resolves to fully `unresolved`.
+matched text with the optional `:digits` suffix stripped; when the digit
+group is present this is outcome 1, the point `(file_path, N, N)`, and when
+it is absent this is outcome 2, `(file_path, None, None)`. No match
+anywhere in the string is outcome 3, fully `unresolved`.
 
 The search being unanchored and leftmost, rather than a full-string match, is
 a deliberate, stated choice: `location: "see src/app.py:12 handler"` resolves
@@ -234,14 +254,16 @@ starting point rather than a final calibration:
   fields exist to describe — a model anchoring its report to any one of
   those lines should still count as locating the same defect.
 - A model that reports a line number relative to a diff hunk rather than
-  absolute to the file — a plausible failure mode, since gates review
-  chunked diffs — drifts by roughly the hunk's own size. 3 lines fully
-  absorbs that class of drift for a hunk up to 3 lines, like `CASE-0002`'s;
-  for a hunk one line larger, like `CASE-0001`'s 4-line addition, worst-case
-  hunk-relative drift is ~4 lines, one past this tolerance — an accepted
-  residual at this calibration rather than a claim that 3 lines absorbs
-  every hunk this size, and revisited per the final bullet below. Either way
-  it does not absorb drift from a hunk an order of magnitude larger.
+  absolute to the file is a related but *different* failure mode this
+  tolerance is not meant to cover, and is called out here rather than left
+  looking like an oversight: that drift equals the hunk's offset within the
+  file (a hunk starting at absolute line `S`, reported as if it started at
+  line 1, produces an error of `S - 1`), not the hunk's size — a 3-line
+  hunk near the top of a file drifts by only a line or two, but the same
+  3-line hunk at file line 500 drifts by roughly 499, regardless of the
+  ±3-line tolerance chosen. No small fixed tolerance addresses this in
+  general, so it is recorded as its own limitation (§7 item 9) rather than
+  folded into this calibration's justification.
 - 3 lines stays tighter than the typical vertical gap between distinct,
   blank-line-separated logical blocks in reasonably formatted code, so it
   does not casually credit a match against an unrelated adjacent statement.
@@ -340,6 +362,12 @@ matter; it is a stated, revisitable choice.
    immediately recognize the same file. This is distinct from item 3 above —
    the location here is not unresolved, it resolved successfully to a
    different string than the label's.
+9. **A finding whose reported line is confused between hunk-relative and
+   file-absolute numbering.** As §5 notes, that error's magnitude is the
+   hunk's offset within the file, not its size — unbounded in principle, not
+   a small drift the ±3-line tolerance is calibrated to absorb. A finding
+   affected by this scores as a miss like any other case whose drift exceeds
+   tolerance; the rule does not attempt to detect or correct for it.
 
 ## 8. Worked walkthrough
 
