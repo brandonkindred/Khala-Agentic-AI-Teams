@@ -46,6 +46,15 @@ from investment_team.tests.strategy_lab_temporal_fixtures import (
 )
 from shared.temporal.testing import workflow_environment as _workflow_environment
 
+#: The id this test starts its ``StrategyLabCycleWorkflow`` under. Bound to a
+#: constant because the workflow reads its own ``workflow.info().workflow_id``
+#: as the ``cycle_scope`` it filters captured checkpoints by (mirroring
+#: ``run_design_attempt_activity``, which stamps the dispatching workflow's id
+#: onto every checkpoint it captures). A checkpoint fixture whose
+#: ``cycle_scope`` drifted from this value would be silently rejected by that
+#: filter, turning a resume-path assertion into a vacuous one.
+_CYCLE_WORKFLOW_ID = "strategy-lab-cycle-workflow-replay-test"
+
 
 def _make_fake_activities(
     *,
@@ -166,7 +175,7 @@ async def _run_cycle_workflow_and_replay(
                 handle = await env.client.start_workflow(
                     StrategyLabCycleWorkflow.run,
                     cycle_input,
-                    id="strategy-lab-cycle-workflow-replay-test",
+                    id=_CYCLE_WORKFLOW_ID,
                     task_queue=TASK_QUEUE,
                 )
                 result = await handle.result()
@@ -202,8 +211,8 @@ async def test_replay_after_reentry_budget_exhausted_is_deterministic() -> None:
     """Every attempt re-enters until the budget is exhausted, reaching the
     terminal-guard ``require_short_circuit_inputs`` call (via ``dto.py``'s
     adapter into ``cycle_control.py``) and the short-circuit record build —
-    the path #7305's terminal-guard wiring covers — and still replays
-    without a nondeterminism error.
+    the path the terminal-guard wiring covers — and still replays without a
+    nondeterminism error.
     """
     result = await _run_cycle_workflow_and_replay(
         design_attempt_outcomes=[_reentry_outcome()],
@@ -230,7 +239,9 @@ def _review_checkpoint_json(**overrides: Any) -> Dict[str, Any]:
 
     base: Dict[str, Any] = {
         "run_id": "replay-test-run-1",
-        "cycle_scope": "replay-test-run-1-0",
+        # Must equal the id this test starts the cycle workflow under -- see
+        # ``_CYCLE_WORKFLOW_ID``.
+        "cycle_scope": _CYCLE_WORKFLOW_ID,
         "design_context": {
             "rounds": 1,
             "critiques": [],

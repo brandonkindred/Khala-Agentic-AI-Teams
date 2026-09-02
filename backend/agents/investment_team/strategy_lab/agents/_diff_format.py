@@ -25,11 +25,23 @@ def diff_or_full(previous_code: str | None, current_code: str) -> str:
     exists) or a string (the previous round's strategy code).
 
     Postconditions: returns a unified-diff-style string (``difflib.unified_diff``,
-    no timestamps) when ``previous_code`` is not ``None`` and that diff is
-    strictly shorter, in characters, than ``current_code`` itself. Otherwise
-    returns ``current_code`` unchanged — this covers both the no-previous-round
-    case and a near-total-rewrite whose diff would be as large as or larger
-    than just resending the full text. Never mutates either input.
+    no timestamps) when ``previous_code`` is not ``None``, that diff is
+    non-empty, and it is strictly shorter, in characters, than ``current_code``
+    itself. Otherwise returns ``current_code`` unchanged — this covers the
+    no-previous-round case, a near-total-rewrite whose diff would be as large as
+    or larger than just resending the full text, and the no-op case below.
+    Never mutates either input.
+
+    An *empty* diff (``previous_code == current_code``, so ``unified_diff``
+    yields nothing) is deliberately excluded from the "diff is shorter" branch
+    even though ``len("") < len(current_code)`` holds for any non-empty code.
+    Returning it would render the caller's diff section as an explanatory
+    preamble wrapping an empty fence — carrying no code at all — and because
+    that section is far shorter than the full text, the caller's own
+    shorter-section-wins comparison (``RefinementAgent.run``) would then
+    *select* it, sending the model "reconstruct the current file from context"
+    with nothing to reconstruct from. Falling back to the full text keeps a
+    no-op round byte-identical to a first round.
     """
     if previous_code is None:
         return current_code
@@ -44,7 +56,7 @@ def diff_or_full(previous_code: str | None, current_code: str) -> str:
         )
     )
 
-    if len(diff) < len(current_code):
+    if diff and len(diff) < len(current_code):
         return diff
 
     return current_code

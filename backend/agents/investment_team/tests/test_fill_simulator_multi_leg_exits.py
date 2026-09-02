@@ -1,18 +1,26 @@
-"""Multi-leg resting-exit materialization tests (issue #7509, step 2 of 3).
+"""Multi-leg resting-exit materialization tests (issue #7509 step 2, extended
+for issue #7524 step 3 of 3).
 
 Step 1 (#7494) generalized the pure ``resolve_exit_leg_attachments`` helper
 to resolve an arbitrary ordered list of leg specs into ``StopAttachment`` /
-``LimitAttachment`` objects. This step extends ``OrderRequest`` with a
+``LimitAttachment`` objects. Step 2 (#7509) extends ``OrderRequest`` with a
 generic ``attached_exits`` list and the fill simulator's materialization
 step (``FillSimulator._materialize_attached_exit_children``) to submit an
 arbitrary number of those as resting OCO children — not just the two fixed
-``attached_stop_loss``/``attached_take_profit`` bracket fields.
+``attached_stop_loss``/``attached_take_profit`` bracket fields. Step 3
+(#7524) closes the remaining coverage on that plumbing: every leg *kind*
+(not just LIMIT) independently firing and cancelling its siblings, an
+all-stop-family group with no LIMIT leg at all, and the ``"bps"``
+``trail_offset_kind`` pre-seed path for a generalized trailing leg (the
+shape ``resolve_exit_leg_attachments`` actually produces for a
+``TRAILING_STOP`` leg, as opposed to the ``"abs"`` default used by earlier
+tests in this file).
 
 No DSL/dispatcher wiring is exercised here (that's out of scope until the
 rule-kind migration issues); every request below is constructed directly,
 the same way ``test_exit_leg_attachments.py`` exercises the Step 1 resolver
 directly. The arm/latch/gap-through/trailing *lifecycle* itself is not
-touched by this step — these tests exist to prove that lifecycle, and OCO
+touched by these steps — these tests exist to prove that lifecycle, and OCO
 sibling cancellation, already work unchanged for N > 2 independently
 attached children; ``test_bracket_orders.py`` / ``test_bracket_stop_limit.py``
 cover the 2-leg bracket path and must keep passing unmodified.
@@ -425,3 +433,166 @@ def test_twap_age_out_materializes_attached_exits_legs_for_open_position() -> No
     assert sl.request.oco_group_id == expected_oco
     assert tp.request.oco_group_id == expected_oco
     assert portfolio.positions["AAA"].qty == pytest.approx(100.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Issue #7524, step 3: independent fill/cancel for every leg kind, an
+# all-stop-family group with no LIMIT sibling, and the "bps" trailing
+# pre-seed path.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_leg_fill_among_multiple_attached_exits_cancels_siblings() -> None:
+    """The existing N-way-cancel test (above) only ever drives the LIMIT leg
+    to fire first. This proves the mirror case: a plain STOP leg firing
+    among three independently-attached, mixed-kind siblings cancels *both*
+    others (a TRAILING_STOP and a LIMIT) — the fill/cancel outcome doesn't
+    depend on which leg *kind* happens to be the one that triggers."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            attached_exits=[
+                StopAttachment(stop_price=95.0),
+                StopAttachment(stop_price=80.0, trail_offset=15.0),
+                LimitAttachment(limit_price=200.0),
+            ],
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    assert len(order_book.children_of(parent.order_id)) == 3
+
+    # low=94 crosses the plain STOP (95) but stays well above the trailing
+    # leg's pre-seeded effective stop (100 - 15 = 85) and well below the
+    # LIMIT target (200) — only the STOP leg triggers this bar.
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=97.0, high=99.0, low=94.0, close=95.0))
+
+    assert len(outcome.exit_fills) == 1
+    assert outcome.exit_fills[0].price == pytest.approx(95.0, rel=1e-9)
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
+    assert order_book.all_pending() == []
+
+
+def test_attached_exits_all_stop_family_no_limit_sibling() -> None:
+    """An ``attached_exits`` group made entirely of STOP-family legs — STOP,
+    STOP_LIMIT, TRAILING_STOP — with no LIMIT leg at all still materializes
+    and fires/cancels correctly: nothing about arming, latching, or OCO
+    cancellation implicitly depends on a LIMIT sibling existing in the
+    group."""
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            attached_exits=[
+                StopAttachment(stop_price=95.0),
+                StopAttachment(stop_price=90.0, limit_offset=1.0),
+                StopAttachment(stop_price=80.0, trail_offset=15.0),
+            ],
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 3
+    types = [c.request.order_type for c in children]
+    assert types == [OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP]
+    assert OrderType.LIMIT not in types
+
+    # low=94 crosses only the plain STOP (95); the STOP_LIMIT (90) and the
+    # trailing leg's pre-seeded effective stop (100 - 15 = 85) are untouched.
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=97.0, high=99.0, low=94.0, close=95.0))
+
+    assert len(outcome.exit_fills) == 1
+    assert outcome.exit_fills[0].price == pytest.approx(95.0, rel=1e-9)
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
+    assert order_book.all_pending() == []
+
+
+def test_attached_exits_bps_trailing_leg_preseeds_and_ratchets_to_fill() -> None:
+    """``resolve_exit_leg_attachments`` always resolves a ``TRAILING_STOP``
+    leg's ``trail_offset`` as a ``"bps"`` value (see
+    ``test_exit_leg_attachments.py::test_single_trailing_stop_leg_sets_trail_offset``),
+    never ``"abs"`` — but every trailing leg materialized in this file so
+    far used the ``"abs"`` default, leaving the ``"bps"`` branch of the
+    entry-fill pre-seed (``_materialize_stop_child``'s
+    ``apply_bps_offset(entry_fill_price, sl.trail_offset)``) unexercised at
+    the materialization level (only covered for a *standalone* TRAILING_STOP
+    order in ``test_trailing_stop.py``, not for a leg attached via
+    ``attached_exits``). This drives one through pre-seed, ratchet, and
+    fill, alongside two siblings (a far STOP and a far LIMIT) that must be
+    cancelled when it fires.
+    """
+    sim, order_book, portfolio = _make_simulator()
+    parent = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            attached_exits=[
+                StopAttachment(stop_price=98.0, trail_offset=300.0, trail_offset_kind="bps"),
+                StopAttachment(stop_price=50.0),
+                LimitAttachment(limit_price=500.0),
+            ],
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=10_000_000.0,
+        expect_brackets=True,
+    )
+
+    # Entry fills at the bar's open (100.0): the trailing leg's pre-seed
+    # must use that actual fill price, not its own nominal stop_price
+    # preview (98.0) — trail_offset=300 bps of 100.0 is 3.0, so
+    # effective_stop_price = 100.0 - 3.0 = 97.0.
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 3
+    trailing_child = next(c for c in children if c.request.order_type == OrderType.TRAILING_STOP)
+    assert trailing_child.trailing_water == pytest.approx(100.0, rel=1e-9)
+    assert trailing_child.effective_stop_price == pytest.approx(97.0, rel=1e-9)
+
+    # Favorable bar: water ratchets to the new high (120), and since the
+    # offset is "bps" it re-derives from that *new* water each time
+    # (120 * (1 - 0.03) = 116.4), not a fixed 3.0 distance from entry.
+    # low=117 stays above 116.4 so this bar ratchets without triggering.
+    sim.process_bar(_bar("2024-01-03", open_price=110.0, high=120.0, low=117.0, close=118.0))
+    trailing_child = next(
+        c
+        for c in order_book.children_of(parent.order_id)
+        if c.request.order_type == OrderType.TRAILING_STOP
+    )
+    assert trailing_child.trailing_water == pytest.approx(120.0, rel=1e-9)
+    assert trailing_child.effective_stop_price == pytest.approx(116.4, rel=1e-9)
+
+    # Retrace bar: low=114 <= 116.4 triggers; fill = min(open=117, 116.4).
+    # The far STOP (50) and LIMIT (500) siblings never come into range.
+    outcome = sim.process_bar(
+        _bar("2024-01-04", open_price=117.0, high=118.0, low=114.0, close=115.0)
+    )
+
+    assert len(outcome.exit_fills) == 1
+    assert outcome.exit_fills[0].price == pytest.approx(116.4, rel=1e-9)
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
+    assert order_book.all_pending() == []

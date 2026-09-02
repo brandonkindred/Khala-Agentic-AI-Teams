@@ -1,9 +1,10 @@
-"""Optional Postgres sink for per-LLM-call traces (``se_agent_traces``).
+"""Postgres sink for per-LLM-call traces (``se_agent_traces``), enabled by default.
 
-When ``SE_TRACE_TO_POSTGRES`` is truthy, an :mod:`llm_service` call observer
-persists every SE-attributed LLM call as a row in ``se_agent_traces``. This is
-the substrate the DORA/cost endpoint reads for per-job and total spend, so cost
-metrics work even without an OTLP collector. Default off; always a no-op when
+Unless ``SE_TRACE_TO_POSTGRES`` is explicitly disabled, an :mod:`llm_service`
+call observer persists every SE-attributed LLM call as a row in
+``se_agent_traces``. This is the substrate the DORA/cost endpoint reads for
+per-job and total spend, so cost metrics work even without an OTLP collector.
+Default on (opt out with ``SE_TRACE_TO_POSTGRES=false``); always a no-op when
 Postgres is disabled. Writes never raise into the LLM call path.
 """
 
@@ -31,8 +32,8 @@ _INSERT_SQL = (
 
 
 def _trace_enabled() -> bool:
-    """True when ``SE_TRACE_TO_POSTGRES`` opts the Postgres trace sink in (default off)."""
-    return env_bool("SE_TRACE_TO_POSTGRES")
+    """True unless ``SE_TRACE_TO_POSTGRES`` opts the Postgres trace sink out (default on)."""
+    return env_bool("SE_TRACE_TO_POSTGRES", True)
 
 
 def _retention_days() -> float:
