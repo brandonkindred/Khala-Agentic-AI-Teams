@@ -95,6 +95,20 @@ def test_full_pipeline_sync_unknown_error(client: TestClient, monkeypatch) -> No
     assert "crash" in r.json()["detail"]
 
 
+def test_full_pipeline_sync_422_when_web_search_not_configured(
+    client: TestClient, monkeypatch
+) -> None:
+    """POST /full-pipeline rejects immediately (no run_pipeline call) when OLLAMA_API_KEY is unset."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(v2, "run_pipeline", _raise(AssertionError("should not be called")))
+
+    r = client.post("/full-pipeline", json={"brief": "x"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+
+
 # ---------------------------------------------------------------------------
 # Resume / restart with valid payload — happy path
 # ---------------------------------------------------------------------------
@@ -137,6 +151,67 @@ def test_restart_job_happy(client: TestClient, monkeypatch) -> None:
     job = bjs.get_blog_job(job_id)
     # After reset, status is pending
     assert job["status"] == "pending"
+
+
+def test_resume_job_422_when_web_search_not_configured(client: TestClient, monkeypatch) -> None:
+    """POST /job/{id}/resume rejects before touching the job when OLLAMA_API_KEY is unset."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    job_id = _create_job()
+    bjs.update_blog_job(job_id, status="interrupted", request_payload={"brief": "x"})
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    r = client.post(f"/job/{job_id}/resume")
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+    # Left untouched: still "interrupted", not bumped to "running".
+    assert bjs.get_blog_job(job_id)["status"] == "interrupted"
+
+
+def test_restart_job_422_when_web_search_not_configured_leaves_state_untouched(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    """POST /job/{id}/restart rejects before staging/discarding research state or
+    resetting the job record when OLLAMA_API_KEY is unset."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "stale-checkpoint.json").write_text("{}", encoding="utf-8")
+
+    job_id = _create_job()
+    bjs.update_blog_job(
+        job_id, status="completed", request_payload={"brief": "x"}, work_dir=str(work_dir)
+    )
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    r = client.post(f"/job/{job_id}/restart")
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+    # Research cache and job status both untouched -- no staging/reset happened.
+    assert cache_dir.exists()
+    assert bjs.get_blog_job(job_id)["status"] == "completed"
+
+
+def test_resume_job_501_takes_precedence_over_web_search_422(
+    client: TestClient, monkeypatch
+) -> None:
+    """Job-store unavailability (501) is reported even when the web-search key is also unset."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(_api_main, "get_blog_job", None)
+    r = client.post("/job/anything/resume")
+    assert r.status_code == 501
+
+
+def test_restart_job_501_takes_precedence_over_web_search_422(
+    client: TestClient, monkeypatch
+) -> None:
+    """Job-store unavailability (501) is reported even when the web-search key is also unset."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(_api_main, "get_blog_job", None)
+    r = client.post("/job/anything/restart")
+    assert r.status_code == 501
 
 
 def test_restart_job_clears_research_cache(client: TestClient, monkeypatch, tmp_path: Path) -> None:
