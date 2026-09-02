@@ -566,25 +566,36 @@ def test_init_otel_returns_false_when_the_sdk_is_missing(reinitializable_otel, m
 
 
 def test_init_otel_wires_exporters_when_they_resolve(reinitializable_otel, monkeypatch) -> None:
-    """The exporter-present branches: a batch span processor and a metric reader."""
+    """The exporter-present branches actually deliver spans, not just build providers."""
     pytest.importorskip("opentelemetry.sdk.trace")
     from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
         InMemorySpanExporter,
     )
 
+    span_exporter = InMemorySpanExporter()
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
-    monkeypatch.setattr(reinitializable_otel, "_build_span_exporter", InMemorySpanExporter)
+    monkeypatch.setattr(reinitializable_otel, "_build_span_exporter", lambda: span_exporter)
     monkeypatch.setattr(reinitializable_otel, "_build_metric_exporter", ConsoleMetricExporter)
 
     assert reinitializable_otel.init_otel(service_name="x", team_key="exporters") is True
 
     tracer_provider = reinitializable_otel._tracer_provider
     meter_provider = reinitializable_otel._meter_provider
-    assert tracer_provider is not None and meter_provider is not None
-    # Stop the periodic metric-export thread this test just started.
-    meter_provider.shutdown()
-    tracer_provider.shutdown()
+    try:
+        assert tracer_provider is not None and meter_provider is not None
+        tracer = tracer_provider.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            pass
+        tracer_provider.force_flush()
+        assert span_exporter.get_finished_spans(), "span never reached the wired exporter"
+    finally:
+        # Stop the periodic metric-export thread this test just started, even
+        # if an assertion above failed.
+        if meter_provider is not None:
+            meter_provider.shutdown()
+        if tracer_provider is not None:
+            tracer_provider.shutdown()
 
 
 def test_init_otel_is_latched_after_the_first_call(monkeypatch) -> None:
@@ -598,9 +609,7 @@ def test_init_otel_is_latched_after_the_first_call(monkeypatch) -> None:
     from shared.observability import otel as otel_module
 
     build_calls: list[int] = []
-    monkeypatch.setattr(
-        otel_module, "_build_span_exporter", lambda: build_calls.append(1) or None
-    )
+    monkeypatch.setattr(otel_module, "_build_span_exporter", lambda: build_calls.append(1))
 
     first = otel_module.init_otel(service_name="ignored", team_key="ignored")
     second = otel_module.init_otel(service_name="also-ignored", team_key="also")
