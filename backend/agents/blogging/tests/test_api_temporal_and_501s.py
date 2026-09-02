@@ -98,10 +98,14 @@ def test_full_pipeline_async_422_when_web_search_not_configured(
     client: TestClient, monkeypatch
 ) -> None:
     """POST /full-pipeline-async rejects before creating a job when OLLAMA_API_KEY is unset."""
+    from agents.blogging.shared import blog_job_store as bjs
+
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     r = client.post("/full-pipeline-async", json={"brief": "x"})
     assert r.status_code == 422
     assert r.json()["detail"]["error"] == "web_search_not_configured"
+    # Guard fired before create_blog_job -- no job record left behind.
+    assert bjs.list_blog_jobs() == []
 
 
 def test_get_job_status_501(client: TestClient, monkeypatch) -> None:

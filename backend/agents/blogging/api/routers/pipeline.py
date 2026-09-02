@@ -36,10 +36,18 @@ router = APIRouter()
     "/full-pipeline",
     response_model=FullPipelineResponse,
     summary="Run full blog pipeline with gates",
-    description="Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
+    description=(
+        "Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all "
+        "artifacts. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset "
+        "(see GET /health)."
+    ),
 )
 def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
-    """Run the full brand-aligned pipeline with artifact persistence and gates."""
+    """Run the full brand-aligned pipeline with artifact persistence and gates.
+
+    Raises:
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset.
+    """
     from agents.blogging.api import main as _main
 
     require_web_search_configured()
@@ -102,10 +110,18 @@ def health() -> dict:
     "/full-pipeline-async",
     response_model=StartPipelineResponse,
     summary="Start full pipeline asynchronously",
-    description="Starts the full blog pipeline in the background. Returns a job_id for polling status.",
+    description=(
+        "Starts the full blog pipeline in the background. Returns a job_id for polling "
+        "status. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset "
+        "(see GET /health)."
+    ),
 )
 def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResponse:
-    """Start the full pipeline asynchronously and return job_id for polling."""
+    """Start the full pipeline asynchronously and return job_id for polling.
+
+    Raises:
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset.
+    """
     from agents.blogging.api import main as _main
 
     require_web_search_configured()

@@ -276,11 +276,16 @@ def delete_job(job_id: str) -> DeleteJobResponse:
     description=(
         "Re-dispatch the pipeline for an interrupted job. The pipeline re-runs with "
         "the same inputs and work_dir, leveraging existing artifacts (planning cache, "
-        "draft files) to skip completed work where possible."
+        "draft files) to skip completed work where possible. Rejects with 422 "
+        "web_search_not_configured if OLLAMA_API_KEY is unset (see GET /health)."
     ),
 )
 def resume_blog_job(job_id: str) -> StartPipelineResponse:
-    """Resume a blog job from its last checkpoint."""
+    """Resume a blog job from its last checkpoint.
+
+    Raises:
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset.
+    """
     from agents.blogging.api import main as _main
 
     require_web_search_configured()
@@ -329,10 +334,19 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     "/job/{job_id}/restart",
     response_model=StartPipelineResponse,
     summary="Restart a blog pipeline job from scratch",
-    description="Reset the job and re-run the full pipeline with the same inputs.",
+    description=(
+        "Reset the job and re-run the full pipeline with the same inputs. Rejects with "
+        "422 web_search_not_configured if OLLAMA_API_KEY is unset (see GET /health) "
+        "before any research state is staged or reset."
+    ),
 )
 def restart_blog_job(job_id: str) -> StartPipelineResponse:
-    """Restart a blog job from the beginning."""
+    """Restart a blog job from the beginning.
+
+    Raises:
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset,
+            raised before any research-state staging or job reset.
+    """
     from agents.blogging.api import main as _main
 
     require_web_search_configured()

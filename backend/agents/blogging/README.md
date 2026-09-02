@@ -138,7 +138,7 @@ pip install -r requirements.txt
 
 2. **Configure environment**
 
-- Web search uses Ollama's web_search API and **requires** `OLLAMA_API_KEY` (e.g. from https://ollama.com/settings/keys). Without it, `/full-pipeline` and `/full-pipeline-async` reject the request with 422 before starting any work, and `GET /health` reports `web_search_configured: false`.
+- Web search uses Ollama's web_search API and **requires** `OLLAMA_API_KEY` (e.g. from https://ollama.com/settings/keys). Without it, `/full-pipeline`, `/full-pipeline-async`, `/job/{job_id}/resume`, and `/job/{job_id}/restart` all reject the request with 422 before starting any work, and `GET /health` reports `web_search_configured: false`.
 
 3. **Use the agent in Python**
 
