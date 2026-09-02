@@ -318,9 +318,9 @@ def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
     """``build_revise_all_items_prompt`` is a free function that takes its
     style/brand/model inputs explicitly rather than a ``BlogWriterAgent``
     instance (see revision.py), so this reaches into ``make_writer_agent()``'s
-    private ``_style_prompt``/``_brand_section_for_prompt()``/``_model`` purely
-    to obtain realistic values to pass in -- it is not asserting on agent
-    internals, just supplying them as plain arguments."""
+    private ``_brand_section_for_prompt()``/``_model`` purely to obtain
+    realistic values to pass in -- it is not asserting on agent internals,
+    just supplying them as plain arguments."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent import revision
     from agents.blogging.blog_writer_agent.agent import _render_allowed_claims_section
@@ -344,7 +344,7 @@ def test_build_revise_all_items_prompt_includes_allowed_claims() -> None:
         revise_input.draft,
         revise_input.feedback_items,
         "revision plan text",
-        a._style_prompt,
+        "Style guide text.",
         revise_input,
         brand_section=a._brand_section_for_prompt(),
         llm=a._model,
@@ -371,7 +371,7 @@ def test_build_revise_all_items_prompt_omits_allowed_claims_when_absent() -> Non
         revise_input.draft,
         revise_input.feedback_items,
         "revision plan text",
-        a._style_prompt,
+        "Style guide text.",
         revise_input,
         brand_section=a._brand_section_for_prompt(),
         llm=a._model,
