@@ -4,7 +4,7 @@ The trace observer used to call :func:`trace_store.write_trace` synchronously on
 the LLM-call thread — one blocking Postgres round-trip per call (see the
 guidance at ``llm_service/telemetry.py`` that observers must not block). This
 module keeps the observer on the call path but makes it do **zero DB I/O**: it
-builds the 16-column row tuple (pure Python, via
+builds the 18-column row tuple (pure Python, via
 :func:`trace_store._record_to_row`) and appends it to a bounded in-memory deque.
 
 A :class:`BackgroundHeartbeat` daemon thread drains the deque on an interval and
