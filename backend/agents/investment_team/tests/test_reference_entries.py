@@ -37,7 +37,9 @@ def _bar(o: float, h: float, low: float, c: float, ts: str = "2024-01-01T00:00:0
     return _Bar(open=o, high=h, low=low, close=c, timestamp=ts)
 
 
-def _spec(target_symbols: list[str] | None = None) -> StrategySpec:
+def _spec_with_rules(
+    entry_rules: list[EntryRule], target_symbols: list[str] | None = None
+) -> StrategySpec:
     return StrategySpec(
         strategy_id="strat-ref-entries-test",
         authored_by="test",
@@ -45,11 +47,31 @@ def _spec(target_symbols: list[str] | None = None) -> StrategySpec:
         hypothesis="hyp",
         signal_definition="sig",
         timeframe="1d",
-        entry_rules=[
-            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=100.0)),
-        ],
+        entry_rules=entry_rules,
         target_symbols=target_symbols or [],
     )
+
+
+def _spec(target_symbols: list[str] | None = None) -> StrategySpec:
+    return _spec_with_rules(
+        [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=100.0))],
+        target_symbols=target_symbols,
+    )
+
+
+def _close_after_bars(
+    fill: ReferenceEntryFill, bars: list[_Bar], hold_bars: int
+) -> tuple[int, float]:
+    """Test-only stand-in for exit-side replay (real exit rules arrive later).
+
+    Not production logic: ``replay_entry_rules`` models entries only, so
+    these tests close a reference position by a fixed hold-bar-count (or the
+    series' last bar, whichever comes first) purely to exercise a complete
+    open+close round trip on hand-constructed series. Returns
+    ``(exit_bar, exit_price)`` using the exit bar's close.
+    """
+    exit_bar = min(fill.entry_bar + hold_bars, len(bars) - 1)
+    return exit_bar, bars[exit_bar].close
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +124,35 @@ def test_predicate_true_across_consecutive_bars_suppresses_to_one_fill():
     out = replay_entry_rules(_spec(), bars)
     assert len(out) == 1
     assert out[0].entry_bar == 1
+
+
+def test_multiple_entry_rules_picks_the_earliest_firing_rule_by_index():
+    # Two entry rules on the spec: rule 0 (long, close > 200) never fires in
+    # this series; rule 1 (short, close < 50) fires at bar 1. Proves
+    # entry_rule_index/side are derived from whichever rule actually
+    # matched — not hardcoded to index 0 — and that once rule 1 fills the
+    # symbol, rule 0's later-satisfiable condition (bar 3's close=250) is
+    # never reached, since the module never re-opens a symbol once filled.
+    rules = [
+        EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=200.0)),
+        EntryRule(side="short", when=Predicate(lhs="bar.close", op="<", rhs=50.0)),
+    ]
+    bars = {
+        "AAA": [
+            _bar(70, 70, 70, 70, ts="2024-01-01T00:00:00"),
+            _bar(40, 40, 40, 40, ts="2024-01-02T00:00:00"),
+            _bar(44, 46, 43, 45, ts="2024-01-03T00:00:00"),
+            _bar(250, 250, 250, 250, ts="2024-01-04T00:00:00"),
+        ]
+    }
+    out = replay_entry_rules(_spec_with_rules(rules), bars)
+    assert len(out) == 1
+    fill = out[0]
+    assert fill.side == "short"
+    assert fill.entry_bar == 2
+    assert fill.entry_price == 44
+    assert fill.entry_rule_index == 1
+    assert fill.entry_date == "2024-01-03"
 
 
 def test_nonpositive_fill_bar_open_is_dropped_but_later_trigger_still_fires():
@@ -161,6 +212,54 @@ def test_suppression_is_per_symbol():
     }
     out = replay_entry_rules(_spec(), bars)
     assert sorted((f.symbol, f.entry_bar) for f in out) == [("AAA", 1), ("BBB", 1)]
+
+
+# ---------------------------------------------------------------------------
+# Round-trip: entry fill closed by the test-only ``_close_after_bars`` helper
+# (temporary scaffolding — real exit-side replay is not implemented yet)
+# ---------------------------------------------------------------------------
+
+
+def test_position_closed_by_fixed_hold_bar_count_before_series_end():
+    # Entry fires at bar 1, fills at bar 2 (open=102). Holding for 2 bars
+    # closes at bar 4 (2 + 2), which exists in this 5-bar series, so the
+    # fixed-count path — not the end-of-series fallback — determines the
+    # close. Expected close price is bar 4's close, derived by hand.
+    bars = [
+        _bar(90, 90, 90, 90),
+        _bar(101, 101, 101, 101),
+        _bar(102, 103, 101, 102),
+        _bar(103, 104, 102, 103),
+        _bar(104, 105, 103, 104.5),
+    ]
+    out = replay_entry_rules(_spec(), {"AAA": bars})
+    assert len(out) == 1
+    fill = out[0]
+    assert fill.entry_bar == 2
+
+    exit_bar, exit_price = _close_after_bars(fill, bars, hold_bars=2)
+    assert exit_bar == 4
+    assert exit_price == 104.5
+
+
+def test_position_closed_at_end_of_series_when_hold_bar_count_overruns():
+    # Entry fills at bar 2 in a 4-bar series (last index 3). A 5-bar hold
+    # would overrun the series (2 + 5 = 7 > 3), so the test-only helper
+    # falls back to closing at the series' last bar instead.
+    bars = [
+        _bar(90, 90, 90, 90),
+        _bar(101, 101, 101, 101),
+        _bar(102, 103, 101, 102),
+        _bar(103, 104, 102, 103.25),
+    ]
+    out = replay_entry_rules(_spec(), {"AAA": bars})
+    assert len(out) == 1
+    fill = out[0]
+    assert fill.entry_bar == 2
+
+    exit_bar, exit_price = _close_after_bars(fill, bars, hold_bars=5)
+    assert exit_bar == 3
+    assert exit_price == 103.25
 
 
 # ---------------------------------------------------------------------------
