@@ -68,7 +68,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
 
   ngOnDestroy(): void {
     this.jobsSub?.unsubscribe();
-    if (this.focusTimer) {
+    if (this.focusTimer !== null) {
       clearTimeout(this.focusTimer);
     }
   }

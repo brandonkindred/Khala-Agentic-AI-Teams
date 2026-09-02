@@ -152,6 +152,7 @@ describe('SoftwareEngineeringDashboardComponent (extra coverage)', () => {
       const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
       component.ngOnDestroy();
       expect(clearTimeoutSpy).toHaveBeenCalled();
+      clearTimeoutSpy.mockRestore();
       expect(() => vi.runAllTimers()).not.toThrow();
     });
   });
