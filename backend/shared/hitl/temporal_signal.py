@@ -35,8 +35,9 @@ module only registers and validates; a workflow durably pausing on
 ``self._submitted_answers`` is separate, follow-on work. A signal handler
 must never raise (Temporal replays workflow history, so an unhandled
 exception here would fail identically forever), so every validation failure
-here is a silent, side-effect-free rejection: the payload is dropped and the
-workflow's paused state is left exactly as it was.
+here is a non-raising, state-preserving rejection: the payload is dropped,
+the workflow's paused state is left exactly as it was, and only a
+replay-safe diagnostic is logged (see :func:`_log_signal_diagnostic`).
 
 Preconditions:
     - ``backend/agents`` and ``backend`` are on ``sys.path`` (the ``shared_*``
@@ -76,13 +77,13 @@ SUBMIT_ANSWERS_SIGNAL = "submit_answers"
 MAX_BUFFERED_SIGNALS = 8
 
 
-def _log_rejection(msg: str, *args: Any) -> None:
+def _log_signal_diagnostic(msg: str, *args: Any) -> None:
     """Log a ``submit_answers`` diagnostic via the replay-aware workflow logger.
 
-    Despite the name, this also carries the buffer-cap eviction notice (not
-    itself a rejection — the incoming signal is buffered right after) since
-    it needs the same outside-a-workflow-safe guard; there was no value in a
-    second, near-identical helper for one call site.
+    Covers both rejection notices and the buffer-cap eviction notice (not
+    itself a rejection — the incoming signal is buffered right after); both
+    need the same outside-a-workflow-safe guard, so there is no value in two
+    near-identical helpers.
 
     Preconditions:
         - None.
@@ -237,19 +238,19 @@ class HitlAnswerSignalMixin:
               token-matching first submission with a valid ``"answers"``
               batch sets ``self._submitted_answers``.
 
-        Every rejection branch below logs via :func:`_log_rejection` before
+        Every rejection branch below logs via :func:`_log_signal_diagnostic` before
         returning — never raises (Temporal's ``workflow.logger`` is
         replay-aware, so this adds an operator diagnostic trail without
         affecting determinism or violating the never-raise contract; see
-        :func:`_log_rejection` for why this is not simply
+        :func:`_log_signal_diagnostic` for why this is not simply
         ``workflow.logger.warning`` called directly).
         """
         if not isinstance(payload, dict):
-            _log_rejection("submit_answers rejected: payload is not a dict (%r)", type(payload))
+            _log_signal_diagnostic("submit_answers rejected: payload is not a dict (%r)", type(payload))
             return
         answers = _validate_answer_batch(payload.get("answers"))
         if answers is None:
-            _log_rejection("submit_answers rejected: malformed or empty answers batch")
+            _log_signal_diagnostic("submit_answers rejected: malformed or empty answers batch")
             return
         resume_token = payload.get("resume_token")
         if self._active_resume_token is None:
@@ -257,22 +258,24 @@ class HitlAnswerSignalMixin:
                 if resume_token not in self._buffered_signals and len(self._buffered_signals) >= MAX_BUFFERED_SIGNALS:
                     oldest_token = next(iter(self._buffered_signals))
                     del self._buffered_signals[oldest_token]
-                    _log_rejection(
+                    _log_signal_diagnostic(
                         "submit_answers: buffer cap reached, evicted oldest buffered resume_token=%r",
                         oldest_token,
                     )
                 self._buffered_signals.setdefault(resume_token, answers)
             else:
-                _log_rejection("submit_answers dropped: no pause active and no usable resume_token to buffer against")
+                _log_signal_diagnostic(
+                    "submit_answers dropped: no pause active and no usable resume_token to buffer against"
+                )
             return
         if resume_token != self._active_resume_token:
-            _log_rejection(
+            _log_signal_diagnostic(
                 "submit_answers rejected: resume_token mismatch (received=%r, active=%r)",
                 resume_token,
                 self._active_resume_token,
             )
             return
         if self._submitted_answers is not None:
-            _log_rejection("submit_answers rejected: duplicate submission for resume_token=%r", resume_token)
+            _log_signal_diagnostic("submit_answers rejected: duplicate submission for resume_token=%r", resume_token)
             return
         self._submitted_answers = answers
