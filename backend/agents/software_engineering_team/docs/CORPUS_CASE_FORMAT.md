@@ -77,6 +77,12 @@ expected_findings:
   (`files/`). Use this when a case is about a gate's judgment on code as it
   stands, not about what changed.
 
+Every gate listed in `gates` is scored for this case; `gates` need not
+equal the set of gates referenced by `expected_findings`. A gate listed
+with no corresponding labels means that gate is expected to report nothing
+on this fixture (a clean-fixture / false-positive-resistance case for that
+gate), not that the gate is unscored.
+
 ### Physical layout
 
 Not created by this document (building the corpus is #7587's job), but
@@ -86,12 +92,17 @@ specified here so that story has a fixed target:
 backend/agents/software_engineering_team/eval_corpus/
   cases/
     CASE-0001/
-      case.yaml       # the case body above (expected_findings inline or split into labels.yaml)
-      diff.patch       # mode: diff
+      case.yaml       # the case body above (expected_findings omitted here when split out)
+      labels.yaml       # optional: expected_findings as a top-level list of labels, same shape as §2
+      diff.patch         # mode: diff
       # or
-      files/            # mode: files
+      files/              # mode: files
         app/main.py
 ```
+
+`labels.yaml`, when present, holds exactly the `expected_findings` list —
+`case.yaml` then omits that key. This split is optional; a case is free to
+keep `expected_findings` inline in `case.yaml` instead.
 
 YAML is chosen because it is diff-friendly line by line in a pull-request
 review, matching the "human-reviewable in a PR" requirement.
@@ -130,7 +141,11 @@ Field notes:
 
 - **`gate`** is a closed 3-value enum: `code_review`, `qa`, `security`.
   `false_positive_filter` is not a value here — see §4.
-- **`defect_class`** must be one of the closed vocabulary values in §3.
+- **`defect_class`** must be one of the closed vocabulary values in §3. It
+  is required on **both** polarities, unlike `severity`. On a
+  `must_not_find` label, `defect_class` names the class a false positive
+  about this region would be filed under — i.e., the class the gate must
+  not assign here — not the class of the benign code actually present.
 - **`severity`** uses one vocabulary across all three gates —
   `critical | high | medium | low | info` — because that union is
   consistent with what all three gates actually document
