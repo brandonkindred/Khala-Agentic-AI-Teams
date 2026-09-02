@@ -66,6 +66,18 @@ def test_register_floors_interval_regardless_of_why_its_low(monkeypatch) -> None
     assert trace_pruner._heartbeat._interval_s == 60.0
 
 
+def test_register_passes_through_interval_above_floor(monkeypatch) -> None:
+    """A configured interval above the 60s floor reaches the heartbeat
+    unchanged — the other half of the registration clamp: a registration that
+    hardcoded or dropped the interval (e.g. always 60.0) would pass the floor
+    test above while production pruned far more often than configured."""
+    monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "3600")
+
+    trace_pruner.register_trace_pruner()
+
+    assert trace_pruner._heartbeat._interval_s == 3600.0
+
+
 def test_register_configures_beat_first_and_callable() -> None:
     """register_trace_pruner enables beat_first (so a restart landing more
     often than the interval still gets a sweep in) and hands _prune_tick to

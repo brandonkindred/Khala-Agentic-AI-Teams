@@ -101,6 +101,7 @@ def unregister() -> None:
 
 
 def _is_registered() -> bool:
+    """Whether a prune heartbeat is currently registered (test assertion helper)."""
     return _heartbeat is not None
 
 
