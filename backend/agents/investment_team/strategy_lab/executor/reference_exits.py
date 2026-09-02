@@ -204,9 +204,15 @@ def entry_price_basis(raw_open: float, side: str, entry_slippage_bps: float) -> 
     ``"short"``; ``entry_slippage_bps`` is finite and
     ``0 <= entry_slippage_bps < 10_000`` — at or above 10_000 the short-side
     multiplier reaches zero or goes negative, producing non-positive levels.
+    ``raw_open`` must additionally be large enough that the ROUNDED anchor
+    stays positive: ``raw_open > 0`` alone does not guarantee it, since a price
+    below the bucket's own resolution rounds to zero (``round(0.00004, 4)`` is
+    ``0.0``). That is a genuine input this function cannot model rather than a
+    value to coerce, so it is rejected below rather than returned.
     Postconditions: returns ``round(raw_open * (1 + bps/10_000), dp)`` for a
     long and ``round(raw_open * (1 - bps/10_000), dp)`` for a short, with ``dp``
-    taken from ``raw_open``'s own bucket. Strictly positive.
+    taken from ``raw_open``'s own bucket. Strictly positive — now enforced, not
+    merely asserted.
     """
     if not (raw_open > 0 and math.isfinite(raw_open)):
         raise ValueError(f"raw_open must be a positive finite number, got {raw_open!r}")
@@ -227,7 +233,21 @@ def entry_price_basis(raw_open: float, side: str, entry_slippage_bps: float) -> 
     # price it is about to slip) does. Deriving the bucket from the product
     # instead would round 9.99995 @ 2bps to 10.00 rather than 10.0019 — enough
     # to shift every level hanging off this anchor.
-    return round(raw_open * multiplier, _decimals_for(raw_open))
+    anchor = round(raw_open * multiplier, _decimals_for(raw_open))
+    # A sub-bucket price rounds to zero even though it passed every guard
+    # above. Returning it would be silent and expensive: every stop level hangs
+    # off this anchor, so a zero anchor drives each of them to zero, the
+    # nonpositive-fill guard then suppresses every candidate fill, and the
+    # position simply never closes — the reference ledger emits NO trade and
+    # the later matching module reads that missing trade as a spec/engine
+    # divergence. Fail here, where the cause is still visible.
+    if not anchor > 0:
+        raise ValueError(
+            f"post-slippage anchor rounded to a non-positive value ({anchor!r}); "
+            f"raw_open={raw_open!r} is below the resolution of its price bucket "
+            f"({_decimals_for(raw_open)} decimals)"
+        )
+    return anchor
 
 
 def working_exit_rules(spec: StrategySpec) -> List[ExitRule]:
@@ -336,7 +356,7 @@ class _RestingStopLoss:
         # enters the watermark.
         self._high_water = anchor
         self._low_water = anchor
-        self._armed: dict[int, bool] = {}
+        self._armed: set[int] = set()
 
     def _position(self) -> PositionState:
         """Snapshot the position as the shared evaluator expects to see it.
@@ -405,17 +425,18 @@ class _RestingStopLoss:
         Preconditions: ``rule`` is side-compatible with the position; ``idx`` is
         its index in the working rule list.
         Postconditions: returns the unrounded reference fill price, or ``None``
-        when the rule does not fire on this bar. May latch ``_armed[idx]`` as a
+        when the rule does not fire on this bar. May latch ``idx`` into
+        ``_armed`` as a
         side effect for a limit-style rule whose stop level is breached — that
         latch is deliberate engine state that must survive a non-filling bar.
         """
         position = self._position()
         if rule.style == "limit":
             _stop_price, limit_price = stop_limit_prices(rule, position)
-            if not self._armed.get(idx, False):
+            if idx not in self._armed:
                 if not stop_loss_triggers(rule, position, _snapshot(bar)):
                     return None
-                self._armed[idx] = True
+                self._armed.add(idx)
             # Armed (this bar or an earlier one): only the limit stage decides
             # from here, so the stop level is never re-tested.
             if not self._limit_reachable(limit_price, bar):

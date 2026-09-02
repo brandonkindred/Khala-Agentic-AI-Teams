@@ -48,8 +48,16 @@ class _Bar:
     symbol: str = "AAA"
 
 
-def _bar(o: float, h: float, low: float, c: float, ts: str = "2024-01-01T00:00:00") -> _Bar:
-    return _Bar(open=o, high=h, low=low, close=c, timestamp=ts)
+def _bar(
+    open_: float, high: float, low: float, close: float, ts: str = "2024-01-01T00:00:00"
+) -> _Bar:
+    """Positional OHLC factory, in OHLC order.
+
+    Names are spelled out and consistent so a positional call reads correctly
+    without opening this body; ``open_`` carries the underscore only to avoid
+    shadowing the builtin.
+    """
+    return _Bar(open=open_, high=high, low=low, close=close, timestamp=ts)
 
 
 def _flat(price: float, ts: str = "2024-01-01T00:00:00") -> _Bar:
@@ -130,6 +138,33 @@ def test_anchor_rejects_nonpositive_or_nonfinite_open(raw_open):
 def test_anchor_rejects_bad_side():
     with pytest.raises(ValueError, match="side"):
         entry_price_basis(100.0, "sideways", 0.0)
+
+
+@pytest.mark.parametrize(
+    ("raw_open", "side", "bps"),
+    [
+        (0.00004, "long", 0.0),  # sub-bucket price: round(0.00004, 4) == 0.0
+        (0.00004, "short", 0.0),
+        (0.5, "short", 9999.0),  # driven under the bucket by extreme slippage
+    ],
+)
+def test_anchor_rejects_a_price_that_rounds_away_to_zero(raw_open, side, bps):
+    """``raw_open > 0`` does not imply the ROUNDED anchor is positive.
+
+    Silently returning ``0.0`` here would be invisible downstream: every stop
+    level hangs off the anchor, so all of them collapse to zero, the
+    nonpositive-fill guard suppresses each candidate fill, and the position
+    never closes — the ledger emits no trade at all, which the matching module
+    would read as a spec/engine divergence rather than a degenerate price.
+    """
+    with pytest.raises(ValueError, match="non-positive"):
+        entry_price_basis(raw_open, side, bps)
+
+
+def test_anchor_accepts_the_smallest_price_its_bucket_can_represent():
+    """The guard rejects only what genuinely rounds away — one tick above the
+    bucket's resolution still resolves."""
+    assert entry_price_basis(0.0001, "long", 0.0) == 0.0001
 
 
 @pytest.mark.parametrize("bps", [-1.0, 10_000.0, 20_000.0, float("nan"), float("inf")])
