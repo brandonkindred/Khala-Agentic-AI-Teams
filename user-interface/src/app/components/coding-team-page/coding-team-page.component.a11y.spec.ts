@@ -195,4 +195,47 @@ describe('CodingTeamPageComponent a11y', () => {
     expect(el.querySelector('app-coding-team-monitor')).not.toBeNull();
     await expectNoAxeViolations(el);
   }, 15000);
+
+  // NOTE: MatTooltip's overlay open-on-focus behavior relies on FocusMonitor's
+  // keyboard-origin detection, which is not reliably exercisable under jsdom
+  // (no real focus/paint pipeline). These tests assert the static, DOM-level
+  // preconditions for that behavior — a focusable host element carrying
+  // matTooltip/aria-label — not that the tooltip overlay actually opens.
+  // Tooltip-opens-on-Tab is verified manually in Chrome (see PR description).
+
+  it('renders the Runs-panel legend as a focusable button with a non-empty accessible name', async () => {
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    const legend = el.querySelector('.jobs-panel__legend');
+    expect(legend).not.toBeNull();
+    expect(legend?.tagName).toBe('BUTTON');
+    const accessibleName = (legend?.getAttribute('aria-label') ?? '').trim();
+    expect(accessibleName.length).toBeGreaterThan(0);
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('exposes full, untruncated task titles on task chips for keyboard and AT users', async () => {
+    await setup();
+    const longTitle =
+      'Refactor the authentication middleware to support pluggable providers across every backend service';
+    openRun(ghRun({ status: 'running' }), {
+      job_id: 'j-run',
+      status: 'running',
+      phase: 'coding',
+      task_graph_snapshot: [
+        { id: 't1', title: longTitle, status: 'in_progress' },
+        { id: 't2', title: 'short title', status: 'pending' },
+      ],
+    });
+    const el: HTMLElement = fixture.nativeElement;
+    const chips = el.querySelectorAll<HTMLElement>('.github-task-chip');
+    expect(chips.length).toBe(2);
+    chips.forEach((chip) => {
+      expect(chip.tabIndex).toBe(0);
+      expect(chip.getAttribute('role')).toBe('img');
+    });
+    expect(chips[0].getAttribute('aria-label')).toBe(longTitle + ' — in_progress');
+    expect(chips[0].textContent).not.toContain(longTitle);
+    await expectNoAxeViolations(el);
+  }, 15000);
 });
