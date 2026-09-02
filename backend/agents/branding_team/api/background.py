@@ -30,6 +30,7 @@ from branding_team.shared.job_store import (
     JOB_STATUS_PENDING,
     begin_job,
     create_job,
+    is_job_cancelled,
     mark_completed,
     mark_failed,
 )
@@ -63,6 +64,34 @@ async def _run_in_pipeline_executor(func, *args):
     return await loop.run_in_executor(_main._run_executor, func, *args)
 
 
+def _job_not_cancelled(job_id: str) -> bool:
+    """Report whether *job_id* has **not** been cancelled, failing open on a probe error.
+
+    Adapts ``is_job_cancelled`` -- a job-service read that can raise on a
+    transport blip -- into the non-raising predicate ``orchestrator.run``'s
+    ``should_continue`` contract requires. Failing open matters: this check is
+    an optimisation (stop burning LLM calls on an already-terminal run), so a
+    momentarily unreachable job service must not abort an otherwise healthy
+    multi-minute pipeline. Cancellation is re-probed at the next phase
+    boundary anyway, and the run's terminal status is decided by the guarded
+    ``mark_completed``/``mark_failed`` writes, never by this predicate.
+
+    Preconditions:
+        - ``job_id`` refers to a job in the job store.
+    Postconditions:
+        - Returns ``False`` only for a confirmed CANCELLED row.
+        - Returns ``True`` otherwise, including when the probe itself fails
+          (logged at warning level) -- i.e. never raises.
+    """
+    try:
+        return not is_job_cancelled(job_id)
+    except Exception:
+        logger.warning(
+            "Branding job %s: cancel probe failed; continuing the run", job_id, exc_info=True
+        )
+        return True
+
+
 def _run_branding_core(
     job_id: str,
     mission: BrandingMission,
@@ -90,6 +119,16 @@ def _run_branding_core(
           ``TeamOutput``.
         - If the job was cancelled, leaves the row as-is and returns (a
           cancelled run is terminal, not a failure).
+        - Cancellation is cooperative *during* the run, not only before it:
+          ``should_continue`` is wired to ``_job_not_cancelled(job_id)``, over
+          the same ``is_job_cancelled`` predicate the Temporal path checks
+          between phases (see that helper for its fail-open semantics) -- so a
+          cancel requested mid-run stops the orchestrator from issuing any
+          further phase, instead of letting every remaining phase burn its
+          LLM fan-out against a row that is already terminal. The run still
+          returns (a truncated) ``TeamOutput``, and the guarded
+          ``mark_completed`` below no-ops against the CANCELLED row, so the
+          row stays CANCELLED exactly as it did before the check existed.
         - On a genuine failure, attempts to mark the row FAILED via
           ``mark_failed`` and then **re-raises the original exception**
           regardless of whether that write succeeds — even if ``mark_failed``
@@ -118,6 +157,7 @@ def _run_branding_core(
                 include_design_assets=include_design_assets,
                 target_phase=target_phase,
                 phase_cache=_main._get_brand_cache(brand_id) if brand_id else PhaseOutputCache(),
+                should_continue=lambda: _job_not_cancelled(job_id),
             )
         mark_completed(job_id, result.model_dump())
     except Exception as e:
