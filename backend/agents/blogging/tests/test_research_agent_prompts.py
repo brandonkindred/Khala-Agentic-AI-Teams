@@ -18,6 +18,11 @@ def test_merged_prompt_has_scoring_and_summarization_sections() -> None:
 
 
 def test_merged_prompt_names_all_six_response_keys() -> None:
+    # Assert against the "## Response shape" section specifically, not the whole
+    # prompt: every key below also appears inside the embedded source prompt
+    # bodies (describing their own outputs), so a whole-prompt match would still
+    # pass even if the response-shape section itself dropped a key.
+    response_shape = DOC_SCORE_AND_SUMMARIZE_PROMPT.split("## Response shape", 1)[1]
     for key in (
         "relevance_score",
         "authority_score",
@@ -26,7 +31,7 @@ def test_merged_prompt_names_all_six_response_keys() -> None:
         "summary",
         "key_points",
     ):
-        assert key in DOC_SCORE_AND_SUMMARIZE_PROMPT
+        assert key in response_shape
 
 
 def test_merged_prompt_requests_single_json_object_no_markdown() -> None:
