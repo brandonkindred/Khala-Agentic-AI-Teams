@@ -248,6 +248,11 @@ describe('CodingTeamPageComponent', () => {
       expect(component.jobStatus).toBeNull();
       expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
       expect(statusRegions().some((el) => el.textContent?.includes('Starting…'))).toBe(true);
+      // Let the poller's first (async) tick land, matching the teardown check the three sibling tests make.
+      await flushAsync();
+      fixture.detectChanges();
+      expect(component.jobStatus).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
     });
   });
 
