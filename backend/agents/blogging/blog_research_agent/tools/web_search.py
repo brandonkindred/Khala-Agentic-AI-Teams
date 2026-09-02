@@ -21,17 +21,22 @@ class WebSearchError(RuntimeError):
 
 def is_web_search_configured() -> bool:
     """
-    True when ``OLLAMA_API_KEY`` is set in the environment.
+    True when ``OLLAMA_API_KEY`` is set to a non-blank value in the environment.
 
     Used by the API layer to reject a pipeline run before any job is created
     or LLM/search work is spent, instead of letting it fail deep inside
     ``OllamaWebSearch.search()`` partway through the ``planning`` stage.
 
     Postconditions:
-        - Returns True iff ``os.environ.get("OLLAMA_API_KEY")`` is a non-empty
-          string. Does not validate the key against the Ollama API.
+        - Returns True iff ``os.environ.get("OLLAMA_API_KEY")`` is non-empty
+          after stripping whitespace -- a whitespace-only value (e.g. a stray
+          ``OLLAMA_API_KEY=" "`` in a ``.env`` file) counts as unconfigured, the
+          same as an empty string, so this fail-fast gate catches it instead of
+          the deployment sailing past the 422 and failing later inside
+          ``OllamaWebSearch.search()``. Does not validate the key against the
+          Ollama API.
     """
-    return bool(os.environ.get("OLLAMA_API_KEY"))
+    return bool(os.environ.get("OLLAMA_API_KEY", "").strip())
 
 
 # Ollama web search allows max 10 results per request

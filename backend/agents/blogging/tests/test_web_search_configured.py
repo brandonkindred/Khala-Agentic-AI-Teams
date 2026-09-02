@@ -18,3 +18,8 @@ def test_web_search_configured_false_when_key_unset(monkeypatch) -> None:
 def test_web_search_configured_false_when_key_blank(monkeypatch) -> None:
     monkeypatch.setenv("OLLAMA_API_KEY", "")
     assert is_web_search_configured() is False
+
+
+def test_web_search_configured_false_when_key_whitespace_only(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "   ")
+    assert is_web_search_configured() is False

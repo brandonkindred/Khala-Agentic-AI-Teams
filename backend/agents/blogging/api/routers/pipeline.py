@@ -120,17 +120,20 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
     """Start the full pipeline asynchronously and return job_id for polling.
 
     Raises:
+        HTTPException(501): when the job store module is unavailable -- checked
+            before the web-search precondition, so a broken deployment is
+            reported as unavailable rather than as a configuration error.
         HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset.
     """
     from agents.blogging.api import main as _main
-
-    require_web_search_configured()
 
     if _main.create_blog_job is None:
         raise HTTPException(
             status_code=501,
             detail="Async pipeline not available - job store module not found",
         )
+
+    require_web_search_configured()
 
     job_id = str(uuid.uuid4())[:8]
     audience_str = _format_audience(request.audience)
