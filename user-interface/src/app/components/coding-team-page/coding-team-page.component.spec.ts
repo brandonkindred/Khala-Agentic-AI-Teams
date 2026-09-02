@@ -195,6 +195,9 @@ describe('CodingTeamPageComponent', () => {
       expect(statusRegions().some((el) => el.textContent?.includes('Checking GitHub integration…'))).toBe(true);
       configSubject.next(CONFIGURED);
       configSubject.complete();
+      fixture.detectChanges();
+      expect(component.isLoadingConfig).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
     });
 
     it('shows "Loading repositories…" via app-loading-spinner while loadingRepos is true', async () => {
@@ -207,6 +210,9 @@ describe('CodingTeamPageComponent', () => {
       expect(statusRegions().some((el) => el.textContent?.includes('Loading repositories…'))).toBe(true);
       reposSubject.next([REPO]);
       reposSubject.complete();
+      fixture.detectChanges();
+      expect(component.loadingRepos).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
     });
 
     it('shows "Loading issues…" via app-loading-spinner while loadingIssues is true', async () => {
@@ -220,6 +226,9 @@ describe('CodingTeamPageComponent', () => {
       expect(statusRegions().some((el) => el.textContent?.includes('Loading issues…'))).toBe(true);
       issuesSubject.next(makeIssues(1));
       issuesSubject.complete();
+      fixture.detectChanges();
+      expect(component.loadingIssues).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
     });
 
     it('shows "Starting…" via app-loading-spinner for a selected run with no status yet', async () => {
@@ -228,6 +237,9 @@ describe('CodingTeamPageComponent', () => {
       component.runs = [run];
       component.runningRuns = [run];
       component.recentRuns = [];
+      // The template iterates the precomputed view-models, so they must be rebuilt from the run
+      // list via the same private builder the component uses (bracket access, the spec's idiom
+      // for internals — no structural cast to a private method's shape) before toggleRun renders it.
       component['buildRunVms']();
       // toggleRun selects the run and (re)starts polling on a timer, so `jobStatus` stays null
       // until the poller's first (async) tick — the window this "Starting…" branch covers.
