@@ -49,11 +49,14 @@ on the normalized triple.
 
 ### 2.1 Code review
 
-Already structured — no parsing. `file_path` is used as-is. When
+Already structured — no parsing. `file_path` is used as-is. `line: None`
+takes precedence and resolves to a file-wide finding: `file_path` known, no
+line — `start_line` is not consulted in that case, since a span end with no
+span start it anchors to is not meaningful (the inventory documents
+`start_line` as only ever set alongside a non-null `line`). Otherwise, when
 `start_line` is present the finding's range is `(start_line, line)` (`line`
 acts as the span's end, per `GATE_FINDING_INVENTORY.md` §1, "Location
-fields"); when absent, the range is the point `(line, line)`. `line: None`
-resolves to a file-wide finding: `file_path` known, no line.
+fields"); when absent, the range is the point `(line, line)`.
 
 ### 2.2 QA
 
@@ -361,7 +364,11 @@ Suppose the code-review gate emits:
 - Defect class (§3.1): `"naming"` maps directly onto the vocabulary token
   `naming`.
 - Match test (§4): gate matches; file matches; `1` falls within
-  `[1 - 3, 1 + 3] = [-2, 4]`; class matches. **L1 is satisfied.**
+  `[1 - 3, 1 + 3] = [-2, 4]` (the negative lower bound is never reachable in
+  practice — resolved finding lines are always positive — so it never
+  admits anything beyond what a lower bound of `1` already would; it is
+  left unclamped here only because §4 does not clamp it either); class
+  matches. **L1 is satisfied.**
 
 Now suppose the same gate instead emits `category: "general"` with the same
 location and description. Location and gate still match, but §3.1 resolves
