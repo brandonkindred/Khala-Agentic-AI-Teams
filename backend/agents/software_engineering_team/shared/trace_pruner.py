@@ -73,8 +73,11 @@ def register_trace_pruner() -> None:
             return
         try:
             heartbeat = BackgroundHeartbeat(
-                _prune_tick,
-                max(_prune_interval_s(), 60.0),  # floor: never busy-loop on a 0/garbage interval
+                beat=_prune_tick,
+                # floor: never tick faster than 60s, whatever the resolved
+                # interval (0/garbage/negative/valid-but-small) — see
+                # test_register_floors_interval_regardless_of_why_its_low.
+                interval_s=max(_prune_interval_s(), 60.0),
                 name="se-trace-pruner",
                 beat_first=True,
             )

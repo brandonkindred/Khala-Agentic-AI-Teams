@@ -18,6 +18,27 @@ import pytest
 from software_engineering_team.shared import trace_pruner, trace_store
 
 
+def _spy_on_heartbeat_init(monkeypatch) -> list:
+    """Patch BackgroundHeartbeat.__init__ to record its call kwargs while still
+    constructing a real, working instance (delegates to the real __init__).
+
+    Pins register_trace_pruner()'s wiring at the constructor boundary instead
+    of reading it back off BackgroundHeartbeat's private attributes through
+    trace_pruner's own private module state — two layers of another module's
+    internals a rename in either would otherwise break with no behavior
+    change. Returns the list of captured kwargs dicts, one per construction.
+    """
+    calls: list = []
+    real_init = trace_pruner.BackgroundHeartbeat.__init__
+
+    def spy_init(self, **kwargs):
+        calls.append(kwargs)
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr(trace_pruner.BackgroundHeartbeat, "__init__", spy_init)
+    return calls
+
+
 @pytest.fixture(autouse=True)
 def _reset_pruner(monkeypatch):
     """Start each test with no registered heartbeat; clean up afterward.
@@ -56,14 +77,16 @@ def test_register_floors_interval_regardless_of_why_its_low(monkeypatch) -> None
     band so an implementation that only special-cases <=0 (e.g. `interval if
     interval > 0 else 60.0` instead of `max(interval, 60.0)`) would fail here
     even though it'd pass a zero-only check."""
+    calls = _spy_on_heartbeat_init(monkeypatch)
+
     monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "0")
     trace_pruner.register_trace_pruner()
-    assert trace_pruner._heartbeat._interval_s == 60.0
+    assert calls[-1]["interval_s"] == 60.0
 
     trace_pruner._reset_for_test()
     monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "30")
     trace_pruner.register_trace_pruner()
-    assert trace_pruner._heartbeat._interval_s == 60.0
+    assert calls[-1]["interval_s"] == 60.0
 
 
 def test_register_passes_through_interval_above_floor(monkeypatch) -> None:
@@ -71,23 +94,26 @@ def test_register_passes_through_interval_above_floor(monkeypatch) -> None:
     unchanged — the other half of the registration clamp: a registration that
     hardcoded or dropped the interval (e.g. always 60.0) would pass the floor
     test above while production pruned far more often than configured."""
+    calls = _spy_on_heartbeat_init(monkeypatch)
     monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "3600")
 
     trace_pruner.register_trace_pruner()
 
-    assert trace_pruner._heartbeat._interval_s == 3600.0
+    assert calls[-1]["interval_s"] == 3600.0
 
 
-def test_register_configures_beat_first_and_callable() -> None:
+def test_register_configures_beat_first_and_callable(monkeypatch) -> None:
     """register_trace_pruner enables beat_first (so a restart landing more
     often than the interval still gets a sweep in) and hands _prune_tick to
     the heartbeat as its beat callable — the actual wiring this PR exists to
     establish. A mis-wired or no-op registration would otherwise pass every
     other test in this file while production pruning silently never ran."""
+    calls = _spy_on_heartbeat_init(monkeypatch)
+
     trace_pruner.register_trace_pruner()
 
-    assert trace_pruner._heartbeat._beat_first is True
-    assert trace_pruner._heartbeat._beat is trace_pruner._prune_tick
+    assert calls[-1]["beat_first"] is True
+    assert calls[-1]["beat"] is trace_pruner._prune_tick
 
 
 def test_prune_tick_calls_prune_traces_and_logs_when_removed(monkeypatch, caplog) -> None:
