@@ -81,6 +81,11 @@ def remote_url_matches(
           token-based clone produces) — the userinfo is stripped before the
           scp-colon normalization runs, so its embedded colon is never
           mistaken for the scp form's host separator.
+        - When ``expected_host`` carries a port, the host comparison stays
+          EXACT, and scp-style remotes (``git@host:owner/repo``) can therefore
+          never match it: scp syntax has no way to express a port, so such a
+          remote's host segment is always bare. A caller pinning a
+          ``host:port`` must expect URL-form remotes.
     """
     cleaned = remote_url.strip().rstrip("/")
     # Case-INSENSITIVE, like every other identity comparison in this function:
@@ -135,6 +140,14 @@ def remote_url_matches(
     # or a custom SSH/HTTPS port) and must be stripped before comparing, or a
     # perfectly valid `ssh://git@github.com:22/owner/repo.git` (or an HTTPS
     # equivalent) would spuriously fail to match a bare expected host.
+    # KNOWN LIMITATION of leaving the ported comparison exact: scp syntax
+    # (`git@host:owner/repo`) cannot express a port at all, so its host segment
+    # is always bare and can never equal a port-carrying `expected_host`. A
+    # GHES deployment whose API base URL carries a nonstandard port but whose
+    # SSH endpoint listens on 22 therefore sees its scp-style remotes rejected
+    # here. Documented rather than normalized away: matching a bare host
+    # against a ported `expected_host` would discard the exactness the ported
+    # spelling was chosen to request.
     if ":" not in expected_host and ":" in host:
         host = host.rsplit(":", 1)[0]
     if host.casefold() != expected_host.casefold():

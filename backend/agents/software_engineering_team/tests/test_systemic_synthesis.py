@@ -302,6 +302,9 @@ _GHU = f"ghu_{'B' * 22}"
 _GHS = f"ghs_{'C' * 22}"
 _GHR = f"ghr_{'D' * 22}"
 _GHP2 = f"ghp_{'E' * 22}"
+# Fine-grained PAT shape: its body contains underscores, which is exactly why
+# the ``gh[pousr]_[A-Za-z0-9]+`` alternative can never match it.
+_PAT = f"github_pat_{'F' * 12}_{'G' * 12}"
 
 
 @pytest.mark.parametrize(
@@ -313,6 +316,7 @@ _GHP2 = f"ghp_{'E' * 22}"
         "token gho_abcdef0123456789abcdef01 quoted inside a finding",
         f"{_GHU} and {_GHS} and {_GHR}",
         f"https://{_FAKE}@example.com/path plus {_GHP2}",
+        f"fine-grained {_PAT} quoted inside a finding",
         "short ghp_tooshort is left alone",
     ],
 )
@@ -331,3 +335,22 @@ def test_local_scrubber_stays_in_lockstep_with_github_source(text: str) -> None:
     from software_engineering_team.github_source.client import scrub_token_from_text
 
     assert _scrub_token_from_text(text) == scrub_token_from_text(text)
+
+
+@pytest.mark.parametrize("token", [_GHP, _PAT], ids=["classic", "fine-grained"])
+def test_local_scrubber_actually_redacts_a_full_length_token(token: str) -> None:
+    """Positive control for the parity test above.
+
+    Parity alone would still pass if the canonical scrubber and this local copy
+    regressed IDENTICALLY -- the regex narrowed on both sides, or both routed
+    through a helper that became a no-op -- and a credential quoted inside a
+    finding would then reach the synthesis prompt un-redacted with this file
+    still green. A full-length token is required here because the parametrized
+    case ``"short ghp_tooshort is left alone"`` is deliberately NOT redacted,
+    so no blanket "contains a token prefix implies redacted" check would hold.
+    """
+    text = f"token {token} quoted inside a finding"
+    scrubbed = _scrub_token_from_text(text)
+    assert scrubbed != text
+    assert token not in scrubbed
+    assert "***" in scrubbed

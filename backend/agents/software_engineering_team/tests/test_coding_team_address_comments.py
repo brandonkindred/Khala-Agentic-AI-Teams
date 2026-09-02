@@ -253,10 +253,17 @@ class TestReviewThreadNodesNonStrictDegrades:
             assert _resolved_ids(client) == {11}
         assert any("comments pageInfo" in r.getMessage() for r in caplog.records)
 
-    def test_truthy_non_bool_is_resolved_warns_before_coercing(self, caplog) -> None:
-        """``bool("false")`` is ``True``, so coercing a malformed ``isResolved``
-        can SKIP an actually-unresolved thread. That is data loss, and must be
-        logged rather than treated as a benign documented coercion."""
+    def test_truthy_non_bool_is_resolved_warns_and_treats_thread_as_unresolved(
+        self, caplog
+    ) -> None:
+        """A malformed ``isResolved`` must FAIL SAFE to unresolved, not coerce.
+
+        ``bool("false")`` is ``True``, so a coercing implementation would put
+        this thread's comment ids into the RESOLVED set -- and address-comments
+        would then never address a genuinely unresolved thread, silently. Fail
+        safe means the ids stay OUT of the set (the thread is re-addressed at
+        worst, which is harmless), and the degrade is still announced.
+        """
         payload = _threads_response(
             nodes=[
                 {
@@ -271,8 +278,30 @@ class TestReviewThreadNodesNonStrictDegrades:
         )
         client = _client_with(lambda _r: httpx.Response(200, json=payload))
         with caplog.at_level(logging.WARNING):
-            assert _resolved_ids(client) == {11}
+            assert _resolved_ids(client) == set()
         assert any("isResolved" in r.getMessage() for r in caplog.records)
+
+    def test_bool_database_id_is_rejected_not_taken_as_the_int_one(self, caplog) -> None:
+        """``bool`` subclasses ``int``, so a JSON ``true`` in ``databaseId`` would
+        otherwise pass an ``isinstance(..., int)`` check and enter the resolved-id
+        set as ``1`` (``True == 1`` and hashes equal), marking an unrelated comment
+        #1 resolved. It must be rejected like any other malformed id."""
+        payload = _threads_response(
+            nodes=[
+                {
+                    "id": "T1",
+                    "isResolved": True,
+                    "comments": {
+                        "nodes": [{"databaseId": True}, {"databaseId": 11}],
+                        "pageInfo": {"hasNextPage": False},
+                    },
+                }
+            ]
+        )
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == {11}
+        assert any("databaseId" in r.getMessage() for r in caplog.records)
 
     def test_missing_has_next_page_warns_and_stops(self, caplog) -> None:
         payload = {
@@ -481,6 +510,19 @@ class TestWebHostForApiBaseUrl:
         """A GHES instance on a non-default port must keep it: the port is part
         of its clone URL."""
         assert web_host_for_api_base_url("https://ghe.acme.com:8443/api/v3") == "ghe.acme.com:8443"
+
+    def test_ghes_host_drops_embedded_userinfo(self) -> None:
+        """``netloc`` keeps userinfo, and this value feeds clone/browse URLs and
+        operator-facing display -- so a credential-bearing ``GITHUB_API_URL``
+        would otherwise be echoed straight back out. Built by interpolation so
+        no contiguous ``user:token@host`` literal appears in this source."""
+        user = "x-access-" + "token"
+        secret = "gh" + "p_" + "N" * 22
+        assert (
+            web_host_for_api_base_url(f"https://{user}:{secret}@ghe.acme.com:8443/api/v3")
+            == "ghe.acme.com:8443"
+        )
+        assert web_host_for_api_base_url(f"https://{user}@ghe.acme.com/api/v3") == "ghe.acme.com"
 
 
 # ---------------------------------------------------------------------------

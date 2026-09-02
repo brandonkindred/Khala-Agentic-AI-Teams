@@ -86,6 +86,10 @@ class TestGithubPrPublishActivityValidation:
     def test_invalid_pr_number_raises(
         self, monkeypatch: pytest.MonkeyPatch, api: Any, bad_pr_number: Any
     ) -> None:
+        """A PRESENT but non-positive-int pr_number is diverted to the
+        positive-integer check, not the missing-fields sweep. ``True`` is in the
+        cases because ``bool`` subclasses ``int``, so a bare ``isinstance(..., int)``
+        would accept it as the PR number 1."""
         _stub_token(monkeypatch, api)
         with pytest.raises(ValueError, match="positive integer pr_number"):
             _pr_publish()(_base_request(pr_number=bad_pr_number))
@@ -105,6 +109,9 @@ class TestGithubPrPublishActivityGitFailures:
     def test_fast_forward_failure_raises_and_skips_update(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
+        """A failed fast-forward raises RuntimeError naming the git error, and
+        neither ``_push_branch`` nor ``update_job`` is reached -- the job must not
+        be marked published when nothing was pushed."""
         _stub_token(monkeypatch, api)
         monkeypatch.setattr(api, "_fast_forward", lambda *a, **kw: (False, "not a fast-forward"))
         push_calls: list[tuple[Any, ...]] = []
@@ -137,6 +144,9 @@ class TestGithubPrPublishActivityGitFailures:
     def test_push_failure_raises_and_skips_update(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
+        """A failed push raises RuntimeError naming the git error and ``update_job``
+        is never reached, so a push that never landed cannot leave the job row
+        claiming the fix was published."""
         _stub_token(monkeypatch, api)
         monkeypatch.setattr(api, "_fast_forward", lambda *a, **kw: (True, None))
         monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: (False, "remote rejected"))
@@ -226,6 +236,9 @@ class TestGithubPrPublishActivityStatusMapping:
     def test_pr_url_present_is_forwarded_to_update_job(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
+        """A ``pr_url`` in the request is persisted onto the job row as
+        ``github_pr_url``, which is what links the finished child job back to the
+        PR it published to."""
         _stub_token(monkeypatch, api)
         self._stub_git_ok(monkeypatch, api)
         monkeypatch.setattr(
@@ -241,6 +254,8 @@ class TestGithubPrPublishActivityStatusMapping:
     def test_pr_url_absent_is_not_forwarded_to_update_job(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
+        """An absent ``pr_url`` is OMITTED from the update rather than written as
+        ``None``: a null would overwrite a URL an earlier step already stored."""
         _stub_token(monkeypatch, api)
         self._stub_git_ok(monkeypatch, api)
         monkeypatch.setattr(
@@ -284,6 +299,9 @@ class TestGithubBranchPrepActivityExpectedHeadSha:
     def test_expected_head_sha_forwarded_when_present(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
+        """``expected_head_sha`` is passed through to ``_prepare_issue_branch`` as a
+        keyword argument when present in the request -- that passthrough is the
+        whole stale-plan guard, so a dropped kwarg would silently disable it."""
         _stub_token(monkeypatch, api)
         captured: dict[str, Any] = {}
 
@@ -310,6 +328,9 @@ class TestGithubBranchPrepActivityExpectedHeadSha:
     def test_expected_head_sha_defaults_to_none_when_absent(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
     ) -> None:
+        """An absent ``expected_head_sha`` still reaches ``_prepare_issue_branch``
+        explicitly as ``None`` (the issue-driven flow's shape), so the callee always
+        sees the keyword and never has to distinguish absent from unset."""
         _stub_token(monkeypatch, api)
         captured: dict[str, Any] = {}
 

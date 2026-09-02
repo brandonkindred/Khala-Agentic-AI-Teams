@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+from pydantic.fields import FieldInfo
 
 # The HITL "pending question / answer" schemas live in the shared.hitl package so every
 # team shares one reconciled definition; re-exported here so existing importers (routes,
@@ -37,13 +38,14 @@ _GITHUB_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 _GITHUB_NAME_MAX_LENGTH = 100
 
 
-def _github_name_field(description: str) -> Any:
+def _github_name_field(description: str) -> FieldInfo:
     """Build the shared owner/repo ``Field`` so all five request models agree.
 
     Preconditions:
         - ``description`` is the field's human-readable description.
     Postconditions:
-        - Returns a required :func:`pydantic.Field` constrained to
+        - Returns the required :class:`~pydantic.fields.FieldInfo` that
+          :func:`pydantic.Field` builds, constrained to
           :data:`_GITHUB_NAME_PATTERN` and at most
           :data:`_GITHUB_NAME_MAX_LENGTH` characters (the pattern already
           forbids the empty string, so ``min_length`` is redundant). Pure.

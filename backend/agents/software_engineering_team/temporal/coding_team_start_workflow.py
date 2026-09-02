@@ -38,9 +38,12 @@ _COMMENT_WORKFLOW_TIMEOUT_S = 4 * 60 * 60
 # so ``API-KEY``, ``x_api_key`` and ``github_token`` all hit. ``apikey`` is
 # listed separately from ``api_key``/``api-key`` because substring matching is
 # literal: an unseparated ``apikey``/``APIKey`` spelling contains none of the
-# separated forms. ``private_key`` (a GitHub App signing key or an SSH PEM) and
-# ``passphrase`` (which does NOT contain ``password``) are likewise credentials
-# no other marker on this list would catch. None of the keys the real payloads
+# separated forms. ``private_key`` (a GitHub App signing key or an SSH PEM) is
+# listed in all three separator spellings for that SAME literal-matching
+# reason -- ``private-key`` and ``privateKey`` (lowered to ``privatekey``)
+# contain none of the others -- and ``passphrase`` (which does NOT contain
+# ``password``) is likewise a credential no other marker on this list would
+# catch. None of the keys the real payloads
 # carry (``github``: owner/repo/issue_number/issue_title/remote/base/
 # integration_branch/expected_base_sha/expected_head_sha/pr_number/pr_url/
 # publish_mode/cleanup_checkout_on_success; ``plan_input``: the fixed
@@ -55,6 +58,8 @@ _TOKEN_KEY_MARKERS = (
     "api-key",
     "apikey",
     "private_key",
+    "private-key",
+    "privatekey",
     "authorization",
     "credential",
 )
@@ -271,7 +276,7 @@ def start_coding_team_workflow(
           called ``create_job`` before dispatching).
         - ``repo_path`` is a non-empty str; ``plan_input`` is a JSON-serializable
           plan dict (a run with no plan has nothing to execute) that must not
-          contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key, authorization, credential) at any nesting
+          contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key/private-key/privatekey, authorization, credential) at any nesting
           depth (see :func:`_contains_token_key`) — it is serialized into the
           same durable Temporal payload as ``github``.
         - ``github``, when provided, is a dict of GitHub-issue run metadata for
@@ -324,7 +329,7 @@ def execute_coding_team_workflow(
           existing child job.
         - ``repo_path`` is a non-empty str.
         - ``github`` is a REQUIRED ``dict`` of GitHub PR/comment metadata and
-          must not contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key, authorization, credential);
+          must not contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key/private-key/privatekey, authorization, credential);
           activities resolve credentials from the child job's encrypted token
           or ``GITHUB_TOKEN`` instead.
         - ``plan_input``, when not ``None``, is a JSON-serializable plan dict

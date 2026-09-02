@@ -1511,26 +1511,44 @@ def _redact_job_secrets(payload: Any) -> Any:
           and no caller can mistake a placeholder for a usable token).
         - Recurses through dicts, lists and tuples; every other value (str, int,
           None, …) is returned as-is.
-        - The two envelope-shape warnings below are retained purely as
-          TRIPWIRES for job-service contract drift. They no longer gate the
-          redaction — an unrecognized body is redacted just the same — so a
-          warning here means "the envelope changed, go look", not "credentials
-          were forwarded".
+        - The envelope-shape warnings below are retained purely as TRIPWIRES
+          for job-service contract drift, and cover it symmetrically: a
+          non-dict top level (no envelope at all), a dict carrying neither
+          ``jobs`` nor ``job``, a non-list ``jobs``, and a non-dict ``job``.
+          They do not gate the redaction — an unrecognized body is redacted
+          just the same — so a warning here means "the envelope changed, go
+          look", not "credentials were forwarded".
         - Never mutates ``payload`` in place; containers are rebuilt. Never
           raises on an unexpected shape.
     """
-    if isinstance(payload, dict) and "jobs" not in payload and "job" not in payload:
+    if not isinstance(payload, dict):
+        # A non-dict top level (a bare list of jobs, say) is envelope drift
+        # too: the routes below document a dict body. Warned symmetrically
+        # with the dict-shaped drift cases so the tripwire has no blind side.
         logger.warning(
-            "_redact_job_secrets: job-service body has neither 'jobs' nor 'job'; "
-            "redacting it as an unrecognized shape. Keys seen: %s",
-            sorted(payload),
-        )
-    if isinstance(payload, dict) and "jobs" in payload and not isinstance(payload["jobs"], list):
-        logger.warning(
-            "_redact_job_secrets: job-service body's 'jobs' is %s, not a list; "
+            "_redact_job_secrets: job-service body is %s, not a dict envelope; "
             "redacting it as an unrecognized shape",
-            type(payload["jobs"]).__name__,
+            type(payload).__name__,
         )
+    else:
+        if "jobs" not in payload and "job" not in payload:
+            logger.warning(
+                "_redact_job_secrets: job-service body has neither 'jobs' nor 'job'; "
+                "redacting it as an unrecognized shape. Keys seen: %s",
+                sorted(payload),
+            )
+        if "jobs" in payload and not isinstance(payload["jobs"], list):
+            logger.warning(
+                "_redact_job_secrets: job-service body's 'jobs' is %s, not a list; "
+                "redacting it as an unrecognized shape",
+                type(payload["jobs"]).__name__,
+            )
+        if "job" in payload and not isinstance(payload["job"], dict):
+            logger.warning(
+                "_redact_job_secrets: job-service body's 'job' is %s, not a dict; "
+                "redacting it as an unrecognized shape",
+                type(payload["job"]).__name__,
+            )
 
     def _clean(value: Any) -> Any:
         if isinstance(value, dict):

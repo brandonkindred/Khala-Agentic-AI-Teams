@@ -1050,6 +1050,17 @@ class TestScrubTokenFromText:
         assert user not in out
         assert "https://***@example.com/repo.git" in out
 
+    def test_redacts_a_fine_grained_pat(self) -> None:
+        """Fine-grained PATs (``github_pat_``) carry underscores in their body,
+        so the classic ``gh[pousr]_[A-Za-z0-9]+`` shape can never match them --
+        they need their own alternative or a finding quoting one would be posted
+        verbatim to a public PR comment. Built by interpolation, never as one
+        contiguous literal."""
+        token = f"github_pat_{'F' * 12}_{'G' * 12}"
+        out = scrub_token_from_text(f"leaked: {token} in config.py")
+        assert token not in out
+        assert "***" in out
+
     def test_idempotent_on_clean_text(self) -> None:
         assert scrub_token_from_text("nothing sensitive here") == "nothing sensitive here"
 

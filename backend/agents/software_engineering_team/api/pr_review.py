@@ -153,15 +153,10 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     active_jobs = list(_main.list_jobs(active_only=True))
     for j in active_jobs:
         if (j or {}).get("parent_job_id"):
-            # A child implementation job (address_comments._dispatch_implementation)
-            # carries the SAME PR-identifying github_context as its parent for
-            # traceability, but it is never independently heartbeated — only the
-            # parent runs a continuous BackgroundHeartbeat — so a child legitimately
-            # blocked for a while (a long activity, a HITL pause) would otherwise
-            # look heartbeat-stale here and get destructively marked failed by the
-            # zombie-cleanup branch below, corrupting a durable workflow that is
-            # still actually running. The parent alone represents this PR's
-            # review/address-comments run for admission purposes.
+            # Child implementation job: never independently heartbeated, so it
+            # must not be scanned or zombie-marked here. Full rationale in the
+            # docstring paragraph above -- kept in ONE place so the two cannot
+            # drift apart.
             continue
         ctx = (j or {}).get("github_context") or {}
         try:

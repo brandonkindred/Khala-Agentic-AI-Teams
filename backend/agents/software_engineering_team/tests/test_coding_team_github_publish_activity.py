@@ -8,6 +8,17 @@ Everything `_finish_already_complete`/`_publish_merged_work` touch is reached
 through the shared `coding_team_main` module-object alias, so this file
 monkeypatches that surface directly rather than driving real git repos or a
 real job service.
+
+Two `github_pr_publish_activity` tests live here as well, despite the sibling
+`test_coding_team_github_pr_publish_activity.py` being named for that activity:
+they assert on the JOB-STORE side of the publish (cleared PR markers, the
+terminal status derived from `task_graph_snapshot`), which is exactly what this
+file's `_install` store double and `_publish_request` payload already model,
+while the sibling file builds an entirely different fixture stack
+(`_ensure_real_modules`/`_stub_orchestrator_only`) around request validation and
+git-failure paths. Moving them would mean porting that store scaffolding into
+the sibling and maintaining two copies of it -- more duplication, not less. The
+split is by fixture stack, not by accident.
 """
 
 from __future__ import annotations

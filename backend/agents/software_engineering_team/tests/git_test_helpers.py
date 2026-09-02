@@ -30,10 +30,12 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
         - On SUCCESS, returns the new commit's SHA with the checkout back on
           ``main``.
         - On FAILURE (a failing ``add``/``commit`` raises ``AssertionError``),
-          the checkout is STILL returned to ``main`` before the error
-          propagates — the "back on main" guarantee is unconditional, so one
+          the checkout is STILL returned to ``main`` AND reset hard onto it
+          before the error propagates — the "back on main" guarantee is
+          unconditional and covers the index/worktree, not just HEAD, so one
           genuine failure cannot leave every later assertion in the calling
-          test running against the wrong HEAD.
+          test running against the wrong HEAD *or* against changes the failed
+          commit left staged.
 
     Preconditions:
         - ``repo`` is an existing on-disk git checkout with ``main`` **checked
@@ -101,4 +103,14 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
         sha = _run("rev-parse", "HEAD")
     finally:
         _run("checkout", "-q", "main")
+        # A successful `add` followed by a failing `commit` leaves `filename`
+        # staged, and `branch` was just reset to `main`'s tip so there is no
+        # commit difference for `checkout main` to refuse -- git carries the
+        # staged change straight onto `main`. A later commit_on_branch call in
+        # the same test would then `checkout -B` with that stale change still
+        # staged and sweep it into its own commit, returning a SHA whose tree
+        # holds content no caller asked for. The precondition pins `repo` to a
+        # freshly built checkout with `main` checked out, so discarding here
+        # can only discard the failed commit's own remnants.
+        _run("reset", "-q", "--hard", "main")
     return sha

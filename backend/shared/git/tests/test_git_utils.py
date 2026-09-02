@@ -696,8 +696,9 @@ def test_remote_url_matches_rejects_at_sign_inside_repo_name() -> None:
 
 def test_remote_url_matches_accepts_ssh_url_with_incidental_port_on_bare_host() -> None:
     """P2 regression: a valid URL-form SSH remote with an explicit port that is
-    NOT part of `expected_host` (e.g. the standard `ssh://.../owner/repo.git:22`
-    form) must still match a bare expected host -- the port here is incidental
+    NOT part of `expected_host` (e.g. the standard
+    `ssh://git@host:port/owner/repo.git` form, where the port follows the HOST)
+    must still match a bare expected host -- the port here is incidental
     (SSH's default port spelled out explicitly, or a custom one), not part of
     the host identity being checked."""
     assert (

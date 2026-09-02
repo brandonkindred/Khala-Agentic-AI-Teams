@@ -132,11 +132,12 @@ def _group_similar_findings(
 # — same rationale as the clustering copy above). ------------------------
 
 _TOKEN_URL_RE = re.compile(r"https?://[^/\s@]+@", re.IGNORECASE)
-# Bare GitHub credential prefixes. Kept in lockstep with
-# ``github_source.client._BARE_TOKEN_RE``: a finding routinely quotes the code
-# it flags, so a "hardcoded credential" finding carries the credential itself
-# into this prompt.
-_BARE_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}")
+# Bare GitHub credential prefixes, classic (``gh[pousr]_``) and fine-grained
+# (``github_pat_``, whose body contains underscores and so needs its own
+# alternative). Kept in lockstep with ``github_source.client._BARE_TOKEN_RE``:
+# a finding routinely quotes the code it flags, so a "hardcoded credential"
+# finding carries the credential itself into this prompt.
+_BARE_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
 
 
 def _scrub_token_from_text(msg: str) -> str:
@@ -144,7 +145,8 @@ def _scrub_token_from_text(msg: str) -> str:
 
     Postconditions: returns ``msg`` unchanged when it carries no credential,
     otherwise with every ``https://user:token@host/...`` URL replaced by
-    ``https://***@`` and every bare ``gh[pousr]_`` token replaced by ``***``.
+    ``https://***@`` and every bare ``gh[pousr]_``/``github_pat_`` token
+    replaced by ``***``.
     Never raises.
     """
     if not msg:

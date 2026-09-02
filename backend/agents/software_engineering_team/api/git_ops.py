@@ -247,7 +247,10 @@ def _is_deletable_ephemeral_checkout(target: Path) -> bool:
     namespacing — see ``unified_api``'s ``_resolve_repo_path``) final component,
     and carrying a ``.git`` entry. It does NOT resolve or re-check the
     symlink-root condition (1) — callers pass an already-resolved, non-symlink
-    ``Path``.
+    ``Path``. The final-component test is a name-shape test, with the same
+    documented ``issue-{N}``/``pr-{N}``-named-repository collision
+    ``_ephemeral_checkout_target``'s condition 3 records; the two conditions
+    are one implementation, so they cannot disagree.
 
     Preconditions:
         - ``target`` is an already-resolved path (symlink-collapsed).
@@ -360,8 +363,17 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     3. its final component is the auto-derived ``issue-{N}`` per-issue OR
        ``pr-{N}`` per-PR shape (``is_per_issue_dir``/``is_per_pr_dir``) — so a
        repo-level checkout that merely sits under an ephemeral root (e.g. the
-       PR-review path ``.../github_workspaces/owner/repo``) is never deleted,
-       matching the contract that only per-issue/per-PR clones are reclaimed;
+       PR-review path ``.../github_workspaces/owner/repo``) is normally never
+       deleted, matching the contract that only per-issue/per-PR clones are
+       reclaimed. This is a NAME-SHAPE test with one documented collision: a
+       GitHub repository literally named ``issue-{N}`` or ``pr-{N}`` produces a
+       repo-level checkout whose own final component has the ephemeral shape,
+       and that checkout IS eligible. Tightening it would need a
+       root-layout-dependent depth rule (``<cache>/github_workspaces/{owner}/
+       {repo}/pr-N`` and ``<root>/{owner}_{repo}/pr-N`` put the checkout at
+       different depths), so the collision is documented rather than closed;
+       its blast radius is bounded — a deleted clone is recoverable by
+       re-cloning — and condition 2 still keeps every non-platform path out;
     4. it is actually a git checkout (carries a ``.git`` entry).
 
     Preconditions:
@@ -393,12 +405,16 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     try:
         deletable = _is_deletable_ephemeral_checkout(resolved)
     except OSError as e:
-        # Logged, not silently swallowed: without this an operator cannot tell a
-        # routine refusal ("not a platform-owned per-issue/per-PR checkout") from
-        # an environmental one (a permission error stopped the safety check).
-        # ``_locked_rmtree`` logs the identical failure mode at its own
-        # validation site, so the two behave the same way for the same failure.
-        logger.debug("Could not validate ephemeral checkout target %s: %s", resolved, e)
+        # Logged at WARNING, not silently swallowed and not at debug: without
+        # this an operator cannot tell a routine refusal ("not a platform-owned
+        # per-issue/per-PR checkout") from an environmental one (a permission
+        # error stopped the safety check), and the only other operator-visible
+        # trace is ``_cleanup_issue_checkout``'s "Refusing to remove unsafe or
+        # non-checkout path" line, which MISREPORTS an environmental failure as
+        # an unsafe path. ``_locked_rmtree`` logs the identical failure mode at
+        # its own validation site at warning too, so the two are observable at
+        # the same default log level for the same failure.
+        logger.warning("Could not validate ephemeral checkout target %s: %s", resolved, e)
         return None
     if not deletable:
         return None
@@ -1230,10 +1246,6 @@ def _prepare_issue_branch(
             repo_path, "rev-parse", "--verify", "--quiet", remote_issue_ref
         )
         live_head_sha = live_head.strip() if rc_live_head == 0 else None
-        # casefold, not a plain ==: git SHAs are hex and case-insensitive, and
-        # nothing here guarantees the caller's expected_head_sha and git's own
-        # rev-parse output agree on letter case -- a same-commit comparison
-        # must not fail merely because of that.
         if live_head_sha is None:
             return (
                 False,
@@ -1243,6 +1255,10 @@ def _prepare_issue_branch(
                 "rather than applying the plan to an unknown head",
                 notes,
             )
+        # casefold, not a plain ==: git SHAs are hex and case-insensitive, and
+        # nothing here guarantees the caller's expected_head_sha and git's own
+        # rev-parse output agree on letter case -- a same-commit comparison
+        # must not fail merely because of that.
         if live_head_sha.casefold() != expected_head_sha.casefold():
             return (
                 False,

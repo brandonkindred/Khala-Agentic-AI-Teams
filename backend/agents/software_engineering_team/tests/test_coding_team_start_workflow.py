@@ -256,10 +256,16 @@ def test_dispatchers_reject_token_in_plan_input(monkeypatch, dispatch):
         # "passphrase" does NOT contain "password" -- a separate marker.
         "passphrase",
         "ssh_passphrase",
-        # GitHub App signing keys / SSH PEMs.
+        # GitHub App signing keys / SSH PEMs. All three separator spellings
+        # are listed for the same literal-substring reason as "apikey":
+        # "private-key" and "privateKey" contain neither of the others.
         "private_key",
         "PRIVATE_KEY",
         "app_private_key",
+        "private-key",
+        "PRIVATE-KEY",
+        "privateKey",
+        "x_privatekey",
         "credentials",
     ],
 )
@@ -406,6 +412,12 @@ def test_dispatchers_reject_falsy_non_dict_plan_input(monkeypatch, dispatch, fal
     across the durable Temporal workflow boundary -- the one input path this
     validator exists to close, and the contract the docstring states.
     """
-    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
+    # Record instead of no-op: `pytest.raises` alone would also pass for an
+    # implementation that dispatched FIRST and validated afterwards, since a
+    # silent stub swallows the premature dispatch. The empty-calls assertion
+    # is what actually pins "validated before the durable boundary".
+    calls: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: calls.append((a, k)))
     with pytest.raises(ValueError, match="requires plan_input to be a dict when provided"):
         dispatch(falsy)
+    assert calls == [], "dispatcher forwarded plan_input across the Temporal boundary before validating it"

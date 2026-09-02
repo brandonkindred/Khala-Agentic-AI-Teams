@@ -320,27 +320,30 @@ def _is_safe_ref(ref: str) -> bool:
 
 _TOKEN_URL_RE = re.compile(r"https?://[^/\s@]+@", re.IGNORECASE)
 # Bare GitHub credential prefixes (ghp_/gho_/ghu_/ghs_/ghr_ personal, OAuth,
-# user-to-server, server-to-server and refresh tokens). A URL-embedded
-# credential is only ONE of the shapes a token reaches us in: git can also echo
-# a bare token, and a code-review finding routinely quotes the credential line
-# it is flagging. Length-bounded (>=20) so ordinary prose like "ghp_x" in a
-# sentence is not mangled, while every real GitHub token (36+ chars) matches.
-_BARE_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}")
+# user-to-server, server-to-server and refresh tokens, plus ``github_pat_``
+# fine-grained PATs). A URL-embedded credential is only ONE of the shapes a
+# token reaches us in: git can also echo a bare token, and a code-review
+# finding routinely quotes the credential line it is flagging. The
+# fine-grained family needs its own alternative because its body contains
+# underscores, so the ``gh[pousr]_[A-Za-z0-9]+`` shape can never match it.
+# Length-bounded (>=20) so ordinary prose like "ghp_x" in a sentence is not
+# mangled, while every real GitHub token (36+ chars) matches.
+_BARE_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
 
 
 def scrub_token_from_text(msg: str) -> str:
     """Best-effort redact GitHub credentials from arbitrary text.
 
     Covers both shapes a token reaches us in: ``https://user:token@host/...``
-    style remote URLs that git echoes to stderr, and a bare ``ghp_``-family
-    token appearing anywhere in the text. Applied before a message is put into
-    a public issue comment, a job error field, a log line, a Temporal activity
-    exception, or an LLM prompt.
+    style remote URLs that git echoes to stderr, and a bare ``ghp_``-family or
+    ``github_pat_`` fine-grained token appearing anywhere in the text. Applied
+    before a message is put into a public issue comment, a job error field, a
+    log line, a Temporal activity exception, or an LLM prompt.
 
     Postconditions:
         - Returns ``msg`` with every URL-embedded credential rewritten to
-          ``https://***@`` and every bare ``gh[pousr]_`` token replaced with
-          ``***``. Best-effort pattern matching, not a proof of absence: a
+          ``https://***@`` and every bare ``gh[pousr]_``/``github_pat_`` token
+          replaced with ``***``. Best-effort pattern matching, not a proof of absence: a
           caller that knows the exact secret should ALSO redact it by value.
           Pure; never raises. Empty/falsy input is returned unchanged.
     """
@@ -571,6 +574,11 @@ def web_host_for_api_base_url(base_url: str) -> str:
           parses to an empty ``netloc`` too) is still recognized as the cloud
           API host and maps to ``"github.com"``, since that is what such a
           string names.
+        - The returned GHES host never carries a userinfo component: a
+          ``https://user:token@ghes.example.com/api/v3`` base URL yields
+          ``"ghes.example.com"``, so a credential embedded in
+          ``GITHUB_API_URL`` cannot reach a clone/browse URL or a log line
+          through this function.
     """
     try:
         parsed = urlsplit(base_url)
@@ -584,6 +592,12 @@ def web_host_for_api_base_url(base_url: str) -> str:
         return base_url
     if (hostname or host).lower() == "api.github.com":
         return "github.com"
+    if host and "@" in host:
+        # Drop the userinfo component (``user:token@``): ``netloc`` keeps it,
+        # and this value feeds clone/browse URLs and operator-facing display,
+        # which must never echo a credential embedded in ``GITHUB_API_URL``.
+        # ``rsplit`` so a password containing "@" still leaves only the host.
+        host = host.rsplit("@", 1)[1]
     # A GHES host is returned in its ORIGINAL casing (only the comparison
     # casefolds): the value feeds clone/browse URLs, where echoing the
     # operator's own spelling back is friendlier than a silently lowercased one.
@@ -1176,7 +1190,10 @@ class GitHubClient(_GitHubHttpMixin):
         instead: a malformed or missing field is treated as absent (skipped,
         or a threads page as exhausted) rather than raised, since a
         resolution-lookup only loses de-duplication, never correctness, when
-        data is missing.
+        data is missing. "Absent" is load-bearing for ``isResolved`` in
+        particular: it degrades to ``False`` (unresolved), never to a
+        ``bool()`` coercion, because an inverted-to-``True`` value would
+        suppress an unresolved thread instead of merely losing de-duplication.
 
         Preconditions:
             - ``number`` names an existing pull request.
@@ -1187,7 +1204,13 @@ class GitHubClient(_GitHubHttpMixin):
               thread, in GitHub's response order, until every page is
               consumed or (``strict=False`` only) an anomaly ends the walk
               early. ``thread_id`` is ``None`` unless ``query`` requested it
-              and it parsed as a non-empty string.
+              and it parsed as a non-empty string. The missing-id check is
+              unconditional (it does not know what ``query`` asked for), so
+              under ``strict=True`` a ``query`` that omits the ``id`` field
+              makes EVERY thread invalid and aborts the walk on the first one:
+              an id-less ``query`` is only meaningful with ``strict=False``,
+              where it yields ``thread_id=None`` per thread as documented
+              above.
             - ``strict=True`` raises :class:`ReviewThreadsUnavailableError`
               itself only for GraphQL-level errors and payload-shape
               anomalies: an unexpected payload shape, exceeding
@@ -1198,13 +1221,9 @@ class GitHubClient(_GitHubHttpMixin):
               GraphQL transport/HTTP error (a non-2xx status from the initial
               ``self._check(self._request(...))`` call) is NOT caught here in
               either mode — it propagates as ``GitHubAPIError``/an ordinary
-              exception, per this client's established non-2xx contract.
-              :meth:`list_review_threads`, the ``strict=True`` caller, wraps
-              its own call to this generator in a broad ``except`` that
-              re-raises any such exception as ``ReviewThreadsUnavailableError``,
-              so from that caller's perspective the fail-closed contract
-              still holds end-to-end — it is just enforced one level up, not
-              inside this generator.
+              exception, per this client's established non-2xx contract. What
+              each caller does with that propagated error is documented on
+              that caller.
             - ``strict=False`` never raises for shape anomalies (an unexpected
               payload shape, a malformed node, etc.) — those degrade to
               whatever was accumulated so far. A genuine transport/HTTP error
@@ -1216,9 +1235,13 @@ class GitHubClient(_GitHubHttpMixin):
               (see the ``_unavailable`` helper below) — so this generator has
               no path that silently returns less data than it found. That
               includes the two cases where non-strict still yields the thread:
-              a non-bool ``isResolved`` (coerced via ``bool()``, which would
-              otherwise turn a truthy non-bool like the string ``"false"``
-              into ``True`` and SKIP an unresolved thread), and a thread whose
+              a non-bool ``isResolved`` (yielded as ``False`` — UNRESOLVED —
+              rather than coerced via ``bool()``, which would turn a truthy
+              non-bool like the string ``"false"`` into ``True`` and make a
+              resolution-lookup consumer SKIP an unresolved thread; treating
+              unknown state as unresolved is safe in both directions, since
+              re-addressing an already-resolved thread is harmless while
+              suppressing an unresolved one is not), and a thread whose
               comments do not fit one
               :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` page (only the first
               page's ids are yielded).
@@ -1344,17 +1367,22 @@ class GitHubClient(_GitHubHttpMixin):
                     thread_id = None
                 is_resolved_raw = node.get("isResolved")
                 if not isinstance(is_resolved_raw, bool):
-                    # Non-strict coerces, but never silently: a truthy non-bool
-                    # (the string "false", say) coerces to True, which SKIPS an
-                    # actually-unresolved thread — data loss, not a benign
-                    # widening, so it gets the same warning every other degrade
-                    # point here gets.
+                    # Fail SAFE, not merely loud: bool() would turn a truthy
+                    # non-bool (the string "false", say) into True, and a True
+                    # here makes ``get_resolved_review_thread_comment_ids``
+                    # classify a genuinely UNRESOLVED thread as resolved, so
+                    # address-comments never addresses it — silent data loss.
+                    # Unknown resolution state therefore reads as UNRESOLVED:
+                    # the worst case is addressing an already-resolved thread
+                    # redundantly, which is harmless in both directions.
                     _unavailable(
                         "review-thread node has a missing or invalid isResolved (expected "
-                        f"bool, got {is_resolved_raw!r}); a non-strict caller would coerce "
-                        "with bool()"
+                        f"bool, got {is_resolved_raw!r}); a non-strict caller would treat "
+                        "the thread as unresolved"
                     )
-                is_resolved = bool(is_resolved_raw)
+                    is_resolved = False
+                else:
+                    is_resolved = is_resolved_raw
                 comments = node.get("comments")
                 if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list):
                     # SKIP the thread rather than yielding it with an empty
@@ -1408,15 +1436,23 @@ class GitHubClient(_GitHubHttpMixin):
                         )
                 comment_ids_list: list[int] = []
                 for comment in comments["nodes"]:
-                    if not isinstance(comment, dict) or not isinstance(
-                        comment.get("databaseId"), int
+                    # ``bool`` subclasses ``int``, so a JSON ``true`` would
+                    # otherwise pass as an id and enter the resolved-id set as
+                    # the integer 1 (``True == 1`` and hashes equal). Excluded
+                    # explicitly, matching the same rule applied to
+                    # ``hasNextPage`` above.
+                    database_id = comment.get("databaseId") if isinstance(comment, dict) else None
+                    if (
+                        not isinstance(comment, dict)
+                        or isinstance(database_id, bool)
+                        or not isinstance(database_id, int)
                     ):
                         _unavailable(
                             "review comment missing databaseId (thread "
                             f"{thread_id!r}): {comment!r}"
                         )
                         continue
-                    comment_ids_list.append(comment["databaseId"])
+                    comment_ids_list.append(database_id)
                 yield thread_id, is_resolved, tuple(comment_ids_list)
             page_info = review_threads.get("pageInfo")
             if not isinstance(page_info, dict):
@@ -1530,6 +1566,14 @@ class GitHubClient(_GitHubHttpMixin):
               which degrades to an empty set because a review only loses
               de-duplication, not correctness, when resolution state is
               missing.)
+            - The fail-closed contract holds END-TO-END, not just for the
+              anomalies :meth:`_iter_review_thread_nodes` raises itself: that
+              generator deliberately lets a genuine transport/HTTP/JSON error
+              propagate as an ordinary exception in both modes, and the broad
+              ``except`` below re-raises any such exception as
+              :class:`ReviewThreadsUnavailableError`. The wrapper lives here,
+              next to the ``except`` that implements it, rather than in the
+              generator's own contract.
         """
         threads: list[ReviewThread] = []
         try:

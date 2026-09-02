@@ -67,10 +67,15 @@ def create_job(
           create-then-update pair leaves open.
     Postconditions:
         - Creates the row with status ``pending`` and the standard coding-team
-          field set, plus every key of ``extra_fields`` (which wins on a key
-          collision, so a caller can seed a standard field's initial value).
-          Raises whatever the job service raises; on a raise NO row exists to
-          orphan.
+          field set, plus every key of ``extra_fields`` (which wins on a
+          collision with one of the STANDARD field-dict keys, so a caller can
+          seed such a field's initial value). ``status`` and ``job_id`` are
+          RESERVED and are not part of that dict: they are passed to the job
+          service as an explicit keyword and a positional argument
+          respectively, so supplying either in ``extra_fields`` raises
+          ``TypeError`` ("got multiple values for ...") at the service call
+          rather than overriding it. Otherwise raises whatever the job service
+          raises; on a raise NO row exists to orphan.
     """
     data: Dict[str, Any] = {
         "repo_path": repo_path,
