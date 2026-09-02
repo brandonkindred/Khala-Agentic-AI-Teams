@@ -255,10 +255,11 @@ def test_suppression_is_per_symbol():
 
 
 def test_position_closed_by_fixed_hold_bar_count_before_series_end():
-    # Entry fires at bar 1, fills at bar 2 (open=102). Holding for 2 bars
-    # closes at bar 4 (2 + 2), which exists in this 5-bar series, so the
-    # fixed-count path — not the end-of-series fallback — determines the
-    # close. Expected close price is bar 4's close, derived by hand.
+    # Entry fires at bar 1, fills at bar 2 (open=102). Holding for 1 bar
+    # closes at bar 3 (2 + 1), strictly before the series' last bar (index
+    # 4) — so only the fixed-count path can produce this result; a helper
+    # that ignored hold_bars and always fell back to the last bar would
+    # close at bar 4 instead and fail this assertion.
     bars = [
         _bar(90, 90, 90, 90),
         _bar(101, 101, 101, 101),
@@ -271,9 +272,9 @@ def test_position_closed_by_fixed_hold_bar_count_before_series_end():
     fill = out[0]
     assert fill.entry_bar == 2
 
-    exit_bar, exit_price = _close_after_bars(fill, bars, hold_bars=2)
-    assert exit_bar == 4
-    assert exit_price == 104.5
+    exit_bar, exit_price = _close_after_bars(fill, bars, hold_bars=1)
+    assert exit_bar == 3
+    assert exit_price == 103
 
 
 def test_position_closed_at_end_of_series_when_hold_bar_count_overruns():
