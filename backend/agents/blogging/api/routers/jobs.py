@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agents.blogging.api.dependencies import get_job
+from agents.blogging.api.dependencies import get_job, require_web_search_configured
 from agents.blogging.api.models import (
     BlogJobListItem,
     BlogJobStatusResponse,
@@ -283,6 +283,8 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     """Resume a blog job from its last checkpoint."""
     from agents.blogging.api import main as _main
 
+    require_web_search_configured()
+
     if _main.get_blog_job is None or _main.update_blog_job is None:
         raise HTTPException(status_code=501, detail="Job store not available")
     try:
@@ -332,6 +334,8 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
 def restart_blog_job(job_id: str) -> StartPipelineResponse:
     """Restart a blog job from the beginning."""
     from agents.blogging.api import main as _main
+
+    require_web_search_configured()
 
     if _main.get_blog_job is None or _main.update_blog_job is None:
         raise HTTPException(status_code=501, detail="Job store not available")

@@ -153,6 +153,47 @@ def test_restart_job_happy(client: TestClient, monkeypatch) -> None:
     assert job["status"] == "pending"
 
 
+def test_resume_job_422_when_web_search_not_configured(client: TestClient, monkeypatch) -> None:
+    """POST /job/{id}/resume rejects before touching the job when OLLAMA_API_KEY is unset."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    job_id = _create_job()
+    bjs.update_blog_job(job_id, status="interrupted", request_payload={"brief": "x"})
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    r = client.post(f"/job/{job_id}/resume")
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+    # Left untouched: still "interrupted", not bumped to "running".
+    assert bjs.get_blog_job(job_id)["status"] == "interrupted"
+
+
+def test_restart_job_422_when_web_search_not_configured_leaves_state_untouched(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    """POST /job/{id}/restart rejects before staging/discarding research state or
+    resetting the job record when OLLAMA_API_KEY is unset."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    work_dir = tmp_path / "job-work-dir"
+    cache_dir = work_dir / ".research_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "stale-checkpoint.json").write_text("{}", encoding="utf-8")
+
+    job_id = _create_job()
+    bjs.update_blog_job(
+        job_id, status="completed", request_payload={"brief": "x"}, work_dir=str(work_dir)
+    )
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    r = client.post(f"/job/{job_id}/restart")
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+    # Research cache and job status both untouched -- no staging/reset happened.
+    assert cache_dir.exists()
+    assert bjs.get_blog_job(job_id)["status"] == "completed"
+
+
 def test_restart_job_clears_research_cache(client: TestClient, monkeypatch, tmp_path: Path) -> None:
     """Restart must wipe the job's research checkpoint cache and packet, not just
     job-store fields — otherwise a "from scratch" restart with an unchanged brief

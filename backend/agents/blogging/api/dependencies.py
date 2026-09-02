@@ -2,7 +2,10 @@
 
 Consolidates the guard sequence repeated across those routers' route handlers:
 job-store-available check (501) -> job-found check (404) -> optional
-job-in-expected-state check (400).
+job-in-expected-state check (400). Also home to
+``require_web_search_configured``, the standalone precondition every pipeline
+entry point (fresh start, resume, restart) calls before creating or mutating
+a job.
 
 Every dependency here re-imports ``agents.blogging.api.main`` at call time
 rather than capturing a reference at declaration time. Route handlers rely on
@@ -40,6 +43,34 @@ def require_job_store(
                 raise HTTPException(status_code=501, detail=detail)
 
     return _dependency
+
+
+def require_web_search_configured() -> None:
+    """Raise 422 if research's web-search dependency is unconfigured.
+
+    Shared by every pipeline entry point (fresh start, resume, restart) so the
+    ``OLLAMA_API_KEY`` precondition is enforced once, at the same point in each
+    handler, rather than per-endpoint — a restart in particular must not stage
+    or discard research state before this check runs.
+
+    Preconditions: none.
+    Postconditions: returns None if ``is_web_search_configured()`` is True;
+        otherwise raises HTTPException(422) before any job/work is created or
+        mutated.
+    """
+    from agents.blogging.blog_research_agent.tools.web_search import is_web_search_configured
+
+    if not is_web_search_configured():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "web_search_not_configured",
+                "message": (
+                    "OLLAMA_API_KEY is not set. The research stage requires an Ollama "
+                    "API key for web search (e.g. from https://ollama.com/settings/keys)."
+                ),
+            },
+        )
 
 
 def get_job_or_404(job_id: str) -> Dict[str, Any]:

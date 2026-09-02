@@ -13,11 +13,30 @@ from agents.blogging.api.dependencies import (
     get_job_or_404,
     require_job_store,
     require_job_waiting_for,
+    require_web_search_configured,
 )
 from fastapi import HTTPException
 
 from ._api_test_utils import api_main as _api_main
 from ._api_test_utils import create_job as _create_job
+
+# ---------------------------------------------------------------------------
+# require_web_search_configured
+# ---------------------------------------------------------------------------
+
+
+def test_require_web_search_configured_passes_when_key_set(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "some-key")
+    require_web_search_configured()
+
+
+def test_require_web_search_configured_422_when_key_unset(monkeypatch) -> None:
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    with pytest.raises(HTTPException) as exc_info:
+        require_web_search_configured()
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["error"] == "web_search_not_configured"
+
 
 # ---------------------------------------------------------------------------
 # require_job_store
