@@ -354,7 +354,10 @@ def test_prune_traces_deletes_only_stale_rows(_schema, monkeypatch) -> None:
     assert removed == 3
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT job_id FROM se_agent_traces WHERE job_id IN ('jOld', 'jNew')")
+        cur.execute(
+            "SELECT DISTINCT job_id FROM se_agent_traces WHERE job_id IN (%s, %s)",
+            ("jOld", "jNew"),
+        )
         remaining_jobs = {r[0] for r in cur.fetchall()}
     assert remaining_jobs == {"jNew"}
 
@@ -373,7 +376,8 @@ def test_prune_traces_zero_retention_is_noop(_schema, monkeypatch) -> None:
 
     monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
     assert trace_store.prune_traces(retention_days=0) == 0
+    assert trace_store.prune_traces(retention_days=-1) == 0
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM se_agent_traces WHERE job_id = 'jAncient'")
+        cur.execute("SELECT COUNT(*) FROM se_agent_traces WHERE job_id = %s", ("jAncient",))
         assert cur.fetchone()[0] == 1
