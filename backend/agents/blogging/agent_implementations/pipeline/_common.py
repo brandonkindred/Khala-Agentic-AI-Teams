@@ -968,9 +968,11 @@ def _fill_story_placeholders(
         job_id: Identifier of the active blog job.
         job_updater: Callable that publishes phase, progress, and status text.
         elicited_stories_text: Existing collected stories, if any.
-        draft_agent: Agent used to re-draft after stories are collected.
-        draft_input_kwargs: Base kwargs for ``WriterInput``; must not include
-            ``elicited_stories``.
+        draft_agent: Agent used to revise the draft after stories are collected.
+        draft_input_kwargs: Base kwargs (``audience``, ``tone_or_purpose``,
+            ``selected_title``, ``allowed_claims``, ``target_word_count``,
+            ``length_guidance``) forwarded to ``revise_from_user_feedback``;
+            must not include ``elicited_stories``.
         work_dir: Optional directory for draft artifacts. If ``None``, no draft
             artifact is persisted.
         iteration: Current draft iteration number.
@@ -979,14 +981,16 @@ def _fill_story_placeholders(
         - ``draft_text`` is a ``str``.
         - ``plan`` is a ``ContentPlan`` instance.
         - ``llm_client`` is not ``None``.
-        - ``draft_agent`` provides a callable ``run`` method.
+        - ``draft_agent`` provides a callable ``revise_from_user_feedback`` method.
         - ``draft_input_kwargs`` does not already contain ``elicited_stories``
-          (this function injects that key when building ``WriterInput``).
+          (this function passes the collected stories to
+          ``revise_from_user_feedback`` separately, via its own
+          ``elicited_stories`` parameter).
     Postconditions:
         - Returns ``(updated_draft_result, updated_elicited_stories_text)``.
         - When no placeholders exist, returns a ``WriterOutput`` wrapping the
           original ``draft_text`` and the unchanged ``elicited_stories_text``.
-        - If the post-story re-draft call raises a non-cancellation
+        - If the post-story revision call raises a non-cancellation
           exception, the original ``draft_text`` — including any unfilled
           ``[Author: ...]`` placeholders — is returned unchanged alongside
           the updated ``elicited_stories_text``; the failure is logged but
@@ -998,13 +1002,13 @@ def _fill_story_placeholders(
         ValueError: ``draft_input_kwargs`` already contains ``elicited_stories``.
         CancelledError: a Temporal-native (or otherwise external) cancellation
             propagates unchanged from both the non-fatal story-bank-save
-            guard below and the non-fatal re-draft guard — neither ever
+            guard below and the non-fatal revision guard — neither ever
             swallows it.
     """
     # Local imports so GhostWriterElicitationAgent is resolved from
     # agents.blogging.ghost_writer_agent at call time — tests monkeypatch that
     # module attribute. Hoisting would freeze the class binding and break those patches.
-    from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
     from agents.blogging.ghost_writer_agent import GhostWriterElicitationAgent
     from agents.blogging.ghost_writer_agent.agent import MAX_ROUNDS_POST_DRAFT
     from agents.blogging.ghost_writer_agent.models import StoryGap
@@ -1022,8 +1026,8 @@ def _fill_story_placeholders(
         raise TypeError("plan must be a ContentPlan")
     if llm_client is None:
         raise TypeError("llm_client must not be None")
-    if not callable(getattr(draft_agent, "run", None)):
-        raise TypeError("draft_agent must provide a callable run method")
+    if not callable(getattr(draft_agent, "revise_from_user_feedback", None)):
+        raise TypeError("draft_agent must provide a callable revise_from_user_feedback method")
 
     placeholders = _extract_story_placeholders(draft_text)
     if not placeholders:
@@ -1132,11 +1136,11 @@ def _fill_story_placeholders(
         else:
             elicited_stories_text = new_text
 
-    # Re-draft with the updated stories and skip instructions
+    # Revise with the updated stories and skip instructions
     job_updater(
         phase="draft_initial",
         progress=40,
-        status_text="Re-drafting with your stories and removing unsupported story sections...",
+        status_text="Revising with your stories and removing unsupported story sections...",
     )
 
     skip_instruction = ""
@@ -1149,20 +1153,37 @@ def _fill_story_placeholders(
         )
 
     try:
-        draft_input = WriterInput(
-            **draft_input_kwargs,
-            elicited_stories=(elicited_stories_text or "") + skip_instruction or None,
-        )
+        feedback_parts: list[str] = []
+        if new_narratives:
+            feedback_parts.append(
+                "The author provided the following stories. Replace the matching "
+                "[Author: ...] placeholders with these narratives:\n\n"
+                + "\n\n".join(new_narratives)
+            )
+        if skip_instruction:
+            feedback_parts.append(skip_instruction.strip())
+        user_feedback = "\n\n".join(feedback_parts)
+
+        content_plan_text = content_plan_to_outline_markdown(plan)
         draft_output_path = (
             (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
         )
-        redraft_result = draft_agent.run(
-            draft_input,
+        redraft_result = draft_agent.revise_from_user_feedback(
+            draft=draft_text,
+            user_feedback=user_feedback,
+            content_plan_text=content_plan_text,
+            audience=draft_input_kwargs["audience"],
+            tone_or_purpose=draft_input_kwargs["tone_or_purpose"],
+            selected_title=draft_input_kwargs["selected_title"],
+            elicited_stories=elicited_stories_text or None,
+            allowed_claims=draft_input_kwargs["allowed_claims"],
+            target_word_count=draft_input_kwargs["target_word_count"],
+            length_guidance=draft_input_kwargs["length_guidance"],
             on_llm_request=lambda msg: job_updater(phase="draft_initial", status_text=msg),
             draft_output_path=draft_output_path,
         )
         logger.info(
-            "Post-draft re-draft complete: %d new stories, %d skipped topics, length=%s",
+            "Post-draft revision complete: %d new stories, %d skipped topics, length=%s",
             len(new_narratives),
             len(skipped_topics),
             len(redraft_result.draft),
@@ -1173,7 +1194,7 @@ def _fill_story_placeholders(
     except Exception as e:
         if _is_external_cancellation(e):
             raise
-        logger.warning("Post-draft re-draft failed (keeping original): %s", e)
+        logger.warning("Post-draft revision failed (keeping original): %s", e)
         return WriterOutput(draft=draft_text), elicited_stories_text
 
 

@@ -52,13 +52,30 @@ def _make_stub_ghost(
 
 
 def _make_stub_draft_agent(draft_text: str):
-    """Build a draft_agent stand-in whose .run(...) always returns ``draft_text``."""
+    """Build a draft_agent stand-in whose .revise_from_user_feedback(...) always
+    returns ``draft_text``."""
 
     class _StubAgent:
-        def run(self, *a, **kw):
+        def revise_from_user_feedback(self, *a, **kw):
             return WriterOutput(draft=draft_text)
 
     return _StubAgent
+
+
+def _full_draft_input_kwargs(**overrides):
+    """The full ``draft_input_kwargs`` shape the real call site builds
+    (``draft_stage.py``), so the revision call's direct-subscript reads succeed."""
+    base = dict(
+        content_plan=_plan(),
+        audience="developers",
+        tone_or_purpose="informative",
+        target_word_count=1000,
+        length_guidance="Aim for 1000 words.",
+        selected_title=None,
+        allowed_claims=None,
+    )
+    base.update(overrides)
+    return base
 
 
 def _valid_fill_kwargs(**overrides):
@@ -121,13 +138,14 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(skipped=True))
 
-    # Stub draft_agent.run to return the redraft, capturing the WriterInput it
-    # was called with so we can confirm the skip instruction was built.
+    # Stub draft_agent.revise_from_user_feedback to return the revision,
+    # capturing the kwargs it was called with so we can confirm the skip
+    # instruction was built into user_feedback.
     captured: dict = {}
 
     class _StubAgent:
-        def run(self, draft_input, **kw):
-            captured["draft_input"] = draft_input
+        def revise_from_user_feedback(self, **kw):
+            captured["kwargs"] = kw
             return WriterOutput(draft="# Redraft without stories\nBody.")
 
     out_draft, out_stories = v2._fill_story_placeholders(
@@ -138,11 +156,11 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
         draft_agent=_StubAgent(),
-        draft_input_kwargs={"content_plan": _plan()},
+        draft_input_kwargs=_full_draft_input_kwargs(),
         work_dir=tmp_path,
         iteration=1,
     )
-    # The redraft (success) branch must have run — not the exception-fallback
+    # The revision (success) branch must have run — not the exception-fallback
     # branch that keeps the original draft — so the stubbed output is returned
     # verbatim.
     assert out_draft.draft == "# Redraft without stories\nBody."
@@ -151,12 +169,11 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
     # The draft agent must have actually been invoked with the skip
     # instruction naming the skipped topic, proving the skip path was
     # exercised rather than silently no-op'd.
-    elicited = captured["draft_input"].elicited_stories
-    assert elicited is not None
-    assert "NO PERSONAL EXPERIENCE" in elicited
+    user_feedback = captured["kwargs"]["user_feedback"]
+    assert "NO PERSONAL EXPERIENCE" in user_feedback
     # _PLACEHOLDER_RE strips a leading "add " from the placeholder body, so
     # the topic recorded in the skip instruction is "a real story".
-    assert "a real story" in elicited
+    assert "a real story" in user_feedback
 
 
 def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) -> None:
@@ -183,7 +200,7 @@ def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) 
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
         draft_agent=_make_stub_draft_agent("# Redraft with stories\nNarrative incorporated.")(),
-        draft_input_kwargs={"content_plan": _plan()},
+        draft_input_kwargs=_full_draft_input_kwargs(),
         work_dir=tmp_path,
         iteration=1,
     )
@@ -204,7 +221,7 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(monkeypatch, tmp_p
     monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A story."))
 
     class _Boom:
-        def run(self, *a, **kw):
+        def revise_from_user_feedback(self, *a, **kw):
             raise RuntimeError("redraft failed")
 
     out_draft, out_stories = v2._fill_story_placeholders(
@@ -215,7 +232,7 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(monkeypatch, tmp_p
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
         draft_agent=_Boom(),
-        draft_input_kwargs={"content_plan": _plan()},
+        draft_input_kwargs=_full_draft_input_kwargs(),
         work_dir=tmp_path,
         iteration=1,
     )
@@ -255,14 +272,14 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
             job_updater=lambda **kw: None,
             elicited_stories_text=None,
             draft_agent=_make_stub_draft_agent("# Should not get here")(),
-            draft_input_kwargs={"content_plan": _plan()},
+            draft_input_kwargs=_full_draft_input_kwargs(),
             work_dir=tmp_path,
             iteration=1,
         )
 
 
 def test_fill_story_placeholders_redraft_cancellation_propagates(monkeypatch, tmp_path) -> None:
-    """A Temporal cancellation raised from the post-story re-draft call must
+    """A Temporal cancellation raised from the post-story revision call must
     propagate, not be swallowed into the "keep original draft" fallback."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
@@ -276,7 +293,7 @@ def test_fill_story_placeholders_redraft_cancellation_propagates(monkeypatch, tm
     monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A story."))
 
     class _CancellingAgent:
-        def run(self, *a, **kw):
+        def revise_from_user_feedback(self, *a, **kw):
             raise CancelledError("cancelled")
 
     with pytest.raises(CancelledError):
@@ -288,7 +305,7 @@ def test_fill_story_placeholders_redraft_cancellation_propagates(monkeypatch, tm
             job_updater=lambda **kw: None,
             elicited_stories_text=None,
             draft_agent=_CancellingAgent(),
-            draft_input_kwargs={"content_plan": _plan()},
+            draft_input_kwargs=_full_draft_input_kwargs(),
             work_dir=tmp_path,
             iteration=1,
         )
@@ -319,7 +336,7 @@ def test_fill_story_placeholders_cancelled_break(monkeypatch, tmp_path) -> None:
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
         draft_agent=_make_stub_draft_agent("# Should not get here")(),
-        draft_input_kwargs={"content_plan": _plan()},
+        draft_input_kwargs=_full_draft_input_kwargs(),
         work_dir=tmp_path,
         iteration=1,
     )
@@ -356,7 +373,7 @@ def test_fill_story_placeholders_progress_stays_below_next_phase(monkeypatch, tm
         job_updater=_capture_updater,
         elicited_stories_text=None,
         draft_agent=_make_stub_draft_agent("# Redraft\nBody.")(),
-        draft_input_kwargs={"content_plan": _plan()},
+        draft_input_kwargs=_full_draft_input_kwargs(),
         work_dir=tmp_path,
         iteration=1,
     )
@@ -407,11 +424,11 @@ def test_fill_story_placeholders_rejects_none_llm_client() -> None:
         _fill_story_placeholders(**_valid_fill_kwargs(llm_client=None))
 
 
-def test_fill_story_placeholders_rejects_draft_agent_without_run() -> None:
-    """draft_agent must provide a callable run method."""
+def test_fill_story_placeholders_rejects_draft_agent_without_revise_from_user_feedback() -> None:
+    """draft_agent must provide a callable revise_from_user_feedback method."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         _fill_story_placeholders,
     )
 
-    with pytest.raises(TypeError, match="callable run"):
+    with pytest.raises(TypeError, match="callable revise_from_user_feedback"):
         _fill_story_placeholders(**_valid_fill_kwargs(draft_agent=object()))  # type: ignore[arg-type]
