@@ -95,6 +95,12 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
             {"resume_token": resume_token, "answers": answers_dicts},
         )
         store_append_submitted_answers(job_id, answers_dicts)
+        # Record WHICH pause these answers resolved. The envelope itself stays for
+        # the activity to consume atomically on re-entry; this marker only lets the
+        # status projection stop advertising a pause the client has already answered
+        # (see build_job_status_response), instead of handing back the same questions
+        # and the same token it just submitted against.
+        update_job(job_id, answers_submitted_for_token=resume_token)
         return build_job_status_response(job_id, get_job(job_id))
 
     store_submit_answers(job_id, answers_dicts)

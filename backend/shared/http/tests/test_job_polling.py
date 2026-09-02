@@ -275,6 +275,53 @@ def test_poll_short_circuits_on_on_poll_exception(monkeypatch):
     assert result == {"status": "failed", "error": "Progress callback failed"}
 
 
+class _PauseSignal(Exception):
+    """Stand-in for a caller's control-flow signal (e.g. a durable HITL pause)."""
+
+
+def test_poll_propagates_a_declared_passthrough_exception(monkeypatch):
+    """A caller can nominate exceptions ``on_poll`` raises as control flow, not
+    failure. Folding those into a failed status silently disables whatever they
+    drive, since the caller never sees the signal it is waiting for."""
+    monkeypatch.setattr(
+        "shared.http.job_polling.time.sleep",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+
+    def _on_poll(_status):
+        raise _PauseSignal("waiting on a human")
+
+    with pytest.raises(_PauseSignal, match="waiting on a human"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            on_poll=_on_poll,
+            passthrough_exceptions=(_PauseSignal,),
+            poll_interval=0.01,
+            total_timeout=10,
+        )
+
+
+def test_poll_still_swallows_an_undeclared_exception_when_passthrough_is_set(monkeypatch):
+    """The passthrough is a whitelist, not a switch: anything outside it keeps
+    failing closed."""
+    monkeypatch.setattr(
+        "shared.http.job_polling.time.sleep",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+
+    def _on_poll(_status):
+        raise RuntimeError("progress sink failed")
+
+    result = poll_until_terminal(
+        lambda: {"status": "running"},
+        on_poll=_on_poll,
+        passthrough_exceptions=(_PauseSignal,),
+        poll_interval=0.01,
+        total_timeout=10,
+    )
+    assert result == {"status": "failed", "error": "Progress callback failed"}
+
+
 def test_poll_respects_custom_status_key_and_terminal_statuses():
     result = poll_until_terminal(
         lambda: {"state": "cancelled"},

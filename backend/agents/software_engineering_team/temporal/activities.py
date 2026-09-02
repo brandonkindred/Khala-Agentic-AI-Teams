@@ -496,7 +496,7 @@ def plan_project_activity(
     trace_id: str = "",
     resume_token: Optional[str] = None,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
-    asked_question_ids: Optional[List[str]] = None,
+    allow_repause: bool = True,
 ) -> Dict[str, Any]:
     """Phase 2: Run Planning workflow.
 
@@ -507,9 +507,10 @@ def plan_project_activity(
     than inherited via contextvars. ``resume_token``/``submitted_answers`` are supplied by
     the calling workflow when re-invoking this activity after a prior pause was resolved by
     a ``submit_planning_answers`` signal; omitted on a fresh (unpaused) invocation.
-    ``asked_question_ids`` is every question id already presented across this run's pause
-    rounds, which is what decides whether a replayed batch pauses again (see
-    ``build_temporal_planning_answer_callback``).
+    ``allow_repause=False`` forbids a further pause outright, so this activity always
+    returns a ``PlanResult``: the calling workflow passes it on the last round of its
+    bounded pause loop, because Planning's question ids are LLM-minted and can drift
+    across a replay, which would otherwise re-pause forever.
     """
     with bind_trace_id(trace_id or new_trace_id()):
         return _plan_project_activity_body(
@@ -518,7 +519,7 @@ def plan_project_activity(
             spec_parse_result,
             resume_token,
             submitted_answers,
-            asked_question_ids,
+            allow_repause,
         )
 
 
@@ -528,7 +529,7 @@ def _plan_project_activity_body(
     spec_parse_result: Dict[str, Any],
     resume_token: Optional[str] = None,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
-    asked_question_ids: Optional[List[str]] = None,
+    allow_repause: bool = True,
 ) -> Dict[str, Any]:
     """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block.
 
@@ -553,6 +554,12 @@ def _plan_project_activity_body(
         activity blocking. Matches thread-mode's invariant that Planning is never silently
         auto-answered (``auto_answer_questions=False`` in both modes) via a durable signal
         instead of a blocking poll loop.
+
+        ``allow_repause=False`` suppresses a *further* pause on a resume: the callback then
+        resolves every batch with whatever answers match and logs a warning, so this returns
+        a ``PlanResult`` rather than another ``{"outcome": "paused"}``. The calling workflow
+        uses it to bound its pause loop -- see ``build_temporal_planning_answer_callback``
+        for why an unbounded one cannot be relied on to terminate.
     """
     from planning_team.temporal.answer_signal import (
         PlanningAnswerPauseSignal,
@@ -597,11 +604,11 @@ def _plan_project_activity_body(
     answer_callback = build_temporal_planning_answer_callback(
         resume_token,
         submitted_answers=submitted_answers,
-        # A resumed run can still reach a question nobody has been shown; that
-        # pauses again, and a pause round needs its own token
-        # (mint_resume_token: never reused across rounds).
+        # A resumed run can still reach a question with no answer -- skipped by
+        # the submitter, or opened fresh by the replay; that pauses again, and a
+        # pause round needs its own token (mint_resume_token: never reused).
         next_resume_token=lambda: mint_resume_token(job_id),
-        asked_question_ids=asked_question_ids,
+        allow_repause=allow_repause,
     )
 
     try:

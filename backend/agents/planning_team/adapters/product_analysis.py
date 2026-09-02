@@ -13,6 +13,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from planning_team.adapters._base import BaseAdapter
+from planning_team.exceptions import PlanningAnswerPauseSignal
 from shared.http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,10 @@ def wait_for_product_analysis_completion(
         if status.get("waiting_for_answers") and answer_callback:
             pending = status.get("pending_questions", [])
             answers = answer_callback(pending)
+            # An answer_callback returns either a complete set for ``pending`` or
+            # nothing at all -- the answers route rejects a batch missing any
+            # required question, and every PRA question is required. So an empty
+            # result means there was nothing to answer, not "answer with nothing".
             if answers:
                 submit_product_analysis_answers(job_id, answers)
 
@@ -102,5 +107,10 @@ def wait_for_product_analysis_completion(
         poll_interval=poll_interval,
         total_timeout=max_wait,
         on_poll=_on_poll,
+        # A durable-HITL answer_callback signals "no answer yet" by raising, for a
+        # Temporal activity boundary to translate into a paused result. Without
+        # this it would be swallowed into a failed status here and the pause would
+        # never happen -- the whole feature inert, silently.
+        passthrough_exceptions=(PlanningAnswerPauseSignal,),
         log_context="product analysis",
     )

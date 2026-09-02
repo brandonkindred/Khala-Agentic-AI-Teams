@@ -281,9 +281,7 @@ def test_callback_returns_resolved_answers_filtered_by_question_id() -> None:
         {"question_id": "q1", "selected_option_id": "opt-a"},
         {"question_id": "q2", "selected_option_id": "opt-b"},
     ]
-    cb = build_temporal_planning_answer_callback(
-        "tok-1", submitted_answers=submitted, asked_question_ids=["q1", "q2", "q3"]
-    )
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=submitted)
 
     result = cb([{"id": "q1"}])
 
@@ -315,7 +313,6 @@ def test_callback_pauses_again_on_a_batch_from_a_later_round() -> None:
         "tok-1",
         submitted_answers=submitted,
         next_resume_token=lambda: "tok-2",
-        asked_question_ids=["q1"],
     )
 
     # The batch these answers belong to still resolves normally.
@@ -330,43 +327,40 @@ def test_callback_pauses_again_on_a_batch_from_a_later_round() -> None:
     assert excinfo.value.pending_questions == [{"id": "q2"}, {"id": "q3"}]
 
 
-def test_empty_submitted_answers_resolves_instead_of_pausing_forever() -> None:
-    """An explicitly empty submission means "proceed without answers".
+def test_empty_submitted_answers_pauses_rather_than_submitting_nothing() -> None:
+    """An empty answer set cannot resume the sub-job it is meant to resume.
 
-    Re-pausing on it would re-ask the same batch on every resume with nothing
-    new for the submitter to supply — an unterminating loop, which is strictly
-    worse than proceeding on their explicit choice. The batch was asked, so it
-    resolves; that it resolves to nothing is the submitter's call.
+    The product-analysis answers route rejects any batch missing a required
+    question, and ``convert_to_pending_questions`` marks every question required.
+    So "return []" is not "proceed without answers" -- it is a submission the
+    route drops on the floor, leaving the sub-job waiting until it times out.
+    Pausing at least puts the question back to a human; the caller's round budget
+    is what stops it repeating.
     """
     cb = build_temporal_planning_answer_callback(
         "tok-1",
         submitted_answers=[],
         next_resume_token=lambda: "tok-2",
-        asked_question_ids=["q1"],
     )
 
-    assert cb([{"id": "q1"}]) == []
+    with pytest.raises(PlanningAnswerPauseSignal) as exc:
+        cb([{"id": "q1"}])
+    assert exc.value.resume_token == "tok-2"
 
 
-def test_a_declined_batch_still_resolves_on_a_later_round() -> None:
-    """The escape hatch must survive round 1, or accumulation reinstates the loop.
-
-    Answers accumulate across rounds, so by round 2 `submitted_answers` is
-    non-empty even when the submitter answered nothing this time. Deciding on
-    matches would re-pause the declined batch on every replay; deciding on what
-    was asked resolves it.
-    """
+def test_a_fully_answered_batch_resolves_while_a_new_one_pauses() -> None:
+    """Answers accumulate across rounds, so a later round's callback holds
+    earlier rounds' answers. A batch they fully cover resolves; a batch carrying
+    anything they do not still pauses."""
     cb = build_temporal_planning_answer_callback(
         "tok-2",
         submitted_answers=[{"question_id": "q1", "selected_option_id": "a"}],
         next_resume_token=lambda: "tok-3",
-        asked_question_ids=["q1", "q3"],
     )
 
-    # Round 1's batch still resolves.
     assert cb([{"id": "q1"}]) == [{"question_id": "q1", "selected_option_id": "a"}]
-    # Round 2's batch was presented and declined — it proceeds, not re-asks.
-    assert cb([{"id": "q3"}]) == []
+    with pytest.raises(PlanningAnswerPauseSignal):
+        cb([{"id": "q3"}])
 
 
 def test_a_new_question_alongside_an_answered_one_still_pauses() -> None:
@@ -375,7 +369,6 @@ def test_a_new_question_alongside_an_answered_one_still_pauses() -> None:
         "tok-2",
         submitted_answers=[{"question_id": "q1", "selected_option_id": "a"}],
         next_resume_token=lambda: "tok-3",
-        asked_question_ids=["q1"],
     )
 
     with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
@@ -397,21 +390,18 @@ def test_callback_reuses_its_token_when_no_minter_is_given() -> None:
     assert excinfo.value.resume_token == "tok-1"
 
 
-def test_callback_returns_partial_matches_without_pausing() -> None:
-    """A partially answered batch is that same batch, not a later round.
-
-    Re-pausing here would re-ask what the user already answered, with nothing
-    new for them to add on the second pass.
-    """
-    submitted = [{"question_id": "q1", "selected_option_id": "opt-a"}]
+def test_callback_pauses_on_a_partially_answered_batch() -> None:
+    """A partial set is indistinguishable from silence at the route: it is
+    rejected for the missing required question and the sub-job keeps waiting.
+    Returning it would look like progress and produce a hang."""
     cb = build_temporal_planning_answer_callback(
         "tok-1",
-        submitted_answers=submitted,
+        submitted_answers=[{"question_id": "q1", "selected_option_id": "opt-a"}],
         next_resume_token=lambda: "tok-2",
-        asked_question_ids=["q1", "q2"],
     )
 
-    assert cb([{"id": "q1"}, {"id": "q2"}]) == submitted
+    with pytest.raises(PlanningAnswerPauseSignal):
+        cb([{"id": "q1"}, {"id": "q2"}])
 
 
 def test_callback_answers_an_empty_batch_with_nothing() -> None:
@@ -425,9 +415,7 @@ def test_callback_ignores_malformed_question_entries() -> None:
     """A non-dict question entry is not matched against any submitted answer --
     fails closed rather than crashing."""
     submitted = [{"question_id": "q1", "selected_option_id": "opt-a"}]
-    cb = build_temporal_planning_answer_callback(
-        "tok-1", submitted_answers=submitted, asked_question_ids=["q1"]
-    )
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=submitted)
 
     result = cb(["not-a-dict", {"id": "q1"}])
 
@@ -445,7 +433,6 @@ def test_callback_skips_answer_with_unhashable_question_id() -> None:
             {"question_id": [], "selected_option_id": "opt-a"},
             {"question_id": "q1", "selected_option_id": "opt-b"},
         ],
-        asked_question_ids=["q1"],
     )
 
     result = cb([{"id": "q1"}])
@@ -459,7 +446,6 @@ def test_callback_skips_question_with_non_str_id() -> None:
     cb = build_temporal_planning_answer_callback(
         "tok-1",
         submitted_answers=[{"question_id": "q1", "selected_option_id": "opt-a"}],
-        asked_question_ids=["q1"],
     )
 
     result = cb([{"id": []}, {"id": "q1"}])
@@ -476,9 +462,112 @@ def test_callback_skips_malformed_submitted_answer_entries() -> None:
     cb = build_temporal_planning_answer_callback(
         "tok-1",
         submitted_answers=["bad", {"question_id": "q1", "selected_option_id": "opt-a"}],
-        asked_question_ids=["q1"],
     )
 
     result = cb([{"id": "q1"}])
 
     assert result == [{"question_id": "q1", "selected_option_id": "opt-a"}]
+
+
+def test_callback_defaults_unanswered_questions_when_repause_is_forbidden() -> None:
+    """``allow_repause=False`` is the caller's escape from a pause loop that is
+    not guaranteed to converge -- Planning question ids are LLM-minted, so a
+    replay can mint fresh ones for questions already answered. The final round
+    must hand back a set the answers route will accept, which means defaulting
+    what nobody answered rather than submitting a short set that gets rejected.
+    """
+    cb = build_temporal_planning_answer_callback(
+        "tok-1",
+        submitted_answers=[{"question_id": "q1", "selected_option_id": "opt-a"}],
+        next_resume_token=lambda: "tok-2",
+        allow_repause=False,
+    )
+
+    result = cb(
+        [
+            {"id": "q1"},
+            {
+                "id": "q-drifted",
+                "options": [
+                    {"id": "opt-x", "is_default": False},
+                    {"id": "opt-y", "is_default": True},
+                ],
+            },
+        ]
+    )
+
+    assert result == [
+        {"question_id": "q1", "selected_option_id": "opt-a"},
+        {"question_id": "q-drifted", "selected_option_id": "opt-y", "other_text": None},
+    ]
+
+
+def test_default_answer_falls_back_to_the_first_option_then_to_none() -> None:
+    """Not every pending question carries an ``is_default`` option, and one with
+    no options at all carries only a free-text placeholder -- neither may crash
+    the final round or emit an option id the route never saw."""
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[], allow_repause=False)
+
+    result = cb(
+        [
+            {"id": "q-no-default", "options": [{"id": "opt-first"}, {"id": "opt-second"}]},
+            {"id": "q-no-options", "options": []},
+            {"id": "q-malformed-options", "options": ["not-a-dict", {"id": 7}]},
+        ]
+    )
+
+    assert [a["selected_option_id"] for a in result] == ["opt-first", None, None]
+
+
+def test_callback_warns_when_defaulting_an_unanswered_question() -> None:
+    """Choosing an answer nobody gave is the silent auto-answer this callback
+    otherwise exists to prevent -- when the budget forces it, it must not be
+    silent."""
+    import logging
+
+    cb = build_temporal_planning_answer_callback(
+        "tok-1",
+        submitted_answers=[],
+        allow_repause=False,
+    )
+
+    logger = logging.getLogger("planning_team.temporal.answer_signal")
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[method-assign]
+    logger.addHandler(handler)
+    try:
+        assert cb([{"id": "q-never-shown"}]) == [
+            {"question_id": "q-never-shown", "selected_option_id": None, "other_text": None}
+        ]
+    finally:
+        logger.removeHandler(handler)
+
+    assert any(
+        rec.levelno == logging.WARNING and "q-never-shown" in rec.getMessage() for rec in records
+    )
+
+
+def test_callback_still_pauses_on_an_unanswered_batch_when_repause_allowed() -> None:
+    """The escape hatch is opt-in: the default keeps the pause behaviour intact."""
+    cb = build_temporal_planning_answer_callback(
+        "tok-1",
+        submitted_answers=[],
+        next_resume_token=lambda: "tok-2",
+        allow_repause=True,
+    )
+
+    with pytest.raises(PlanningAnswerPauseSignal):
+        cb([{"id": "q-never-shown"}])
+
+
+def test_callback_rejects_non_bool_allow_repause() -> None:
+    """``allow_repause`` decides whether Phase 2 can terminate; a truthy
+    non-bool (or a None threaded through by mistake) must fail loudly at the
+    boundary rather than silently picking a branch."""
+    with pytest.raises(AssertionError):
+        build_temporal_planning_answer_callback(
+            "tok-1",
+            submitted_answers=[],
+            allow_repause=None,  # type: ignore[arg-type]
+        )

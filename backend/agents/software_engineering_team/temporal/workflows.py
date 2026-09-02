@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from planning_team.temporal.answer_signal import PlanningAnswerSignalMixin
@@ -25,6 +26,17 @@ with workflow.unsafe.imports_passed_through():
 
 RETRY_FAILED_TIMEOUT = timedelta(seconds=24 * 3600)
 STANDALONE_TIMEOUT = timedelta(seconds=12 * 3600)
+
+# Hard ceiling on Phase 2 Planning clarification rounds. Planning's question ids are
+# LLM-minted (``product_requirements_analysis_agent.question_processing.parse_open_question``
+# takes ``id`` straight from model output), and a resume replays Planning from scratch, so a
+# re-run can mint a different id for a question the user already answered. The pause test
+# would then never be satisfied and the loop would re-ask forever. The last round runs with
+# ``allow_repause=False``, which forces the activity to return a plan, so this bound is what
+# makes Phase 2 terminate rather than a hope that ids stay put. Sized for a human answering
+# in a UI: more rounds than any real clarification exchange needs, few enough that a drifting
+# run gives up in minutes rather than never.
+MAX_PLANNING_PAUSE_ROUNDS = 8
 
 
 # Retry policy: limited retries for transient failures
@@ -63,6 +75,13 @@ class RunTeamWorkflowV2(PlanningAnswerSignalMixin):
     durably resolve a Planning clarification-question pause (see the Phase 2 loop in
     ``run``) without this workflow blocking — matching thread-mode's invariant that
     Planning is never silently auto-answered.
+
+    Invariants:
+        - The Phase 2 pause loop runs at most ``MAX_PLANNING_PAUSE_ROUNDS`` times. It
+          terminates by construction, not by trusting Planning's LLM-minted question ids
+          to stay put across a replay: the final round is dispatched with
+          ``allow_repause=False``, and an activity that pauses anyway fails the run
+          rather than being re-dispatched.
     """
 
     @workflow.run
@@ -108,30 +127,35 @@ class RunTeamWorkflowV2(PlanningAnswerSignalMixin):
             heartbeat_timeout=timedelta(minutes=5),
             retry_policy=DEFAULT_RETRY_POLICY,
         )
-        # Both lists ACCUMULATE across pause rounds, because the activity
-        # replays Planning from scratch on every resume and therefore
-        # re-encounters every earlier round's questions.
+        # ``collected_answers`` ACCUMULATES across pause rounds, because the
+        # activity replays Planning from scratch on every resume and therefore
+        # re-encounters every earlier round's questions. Carrying only the
+        # newest batch would leave round 1's questions unmatched on round 2's
+        # replay, pause on them again, and ping-pong between the rounds
+        # forever.
         #
-        # ``collected_answers`` is what resolves them: carrying only the newest
-        # batch would leave round 1's questions unmatched on round 2's replay,
-        # pause on them again, and ping-pong between the rounds forever.
-        #
-        # ``asked_question_ids`` is what decides whether to pause. Matching on
-        # answers alone cannot tell "the submitter saw this question and
-        # declined to answer" from "this question has never been put to
-        # anyone" -- so an empty or partial submission either re-asks forever
-        # or slips through unanswered, depending on which way that guard is
-        # written. Every question already presented is recorded here, so a
-        # batch pauses iff it contains one nobody has been shown yet.
+        # Accumulating still does not guarantee convergence: Planning's
+        # question ids are LLM-minted, so a replay can mint fresh ones for
+        # questions already answered and every round then pauses on the next
+        # batch. ``MAX_PLANNING_PAUSE_ROUNDS`` is what makes this terminate --
+        # the final round runs with ``allow_repause=False``, which forbids the
+        # activity from pausing again and forces it to return a plan.
         collected_answers: list[dict[str, Any]] = []
-        asked_question_ids: list[str] = []
+        pause_round = 0
         while plan_result.get("outcome") == "paused":
+            if pause_round >= MAX_PLANNING_PAUSE_ROUNDS:
+                # Unreachable while the activity honours ``allow_repause``: the
+                # previous round passed False, which forbids it from pausing
+                # again. Reaching here means that contract was broken, and the
+                # one thing this loop must never do is spin -- fail the run
+                # instead, non-retryable because a retry would spin too.
+                raise ApplicationError(
+                    f"Planning paused for a {pause_round + 1}th round after being told not to "
+                    f"(MAX_PLANNING_PAUSE_ROUNDS={MAX_PLANNING_PAUSE_ROUNDS})",
+                    non_retryable=True,
+                )
+            pause_round += 1
             resume_token = plan_result["resume_token"]
-            asked_question_ids.extend(
-                question["id"]
-                for question in plan_result.get("pending_questions") or []
-                if isinstance(question, dict) and isinstance(question.get("id"), str)
-            )
             collected_answers.extend(await self.wait_for_planning_answers(resume_token))
             plan_result = await workflow.execute_activity(
                 _activities.plan_project_activity,
@@ -141,11 +165,13 @@ class RunTeamWorkflowV2(PlanningAnswerSignalMixin):
                     spec_result,
                     trace_id,
                     resume_token,
-                    # Snapshots, not the live lists: both keep accumulating
-                    # for the next round, and an argument that mutates after
-                    # the call is a trap for anything holding it.
+                    # A snapshot, not the live list: it keeps accumulating for
+                    # the next round, and an argument that mutates after the
+                    # call is a trap for anything holding it.
                     list(collected_answers),
-                    list(asked_question_ids),
+                    # Last allowed round: the activity must come back with a
+                    # plan, not another pause.
+                    pause_round < MAX_PLANNING_PAUSE_ROUNDS,
                 ],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=timedelta(hours=4),

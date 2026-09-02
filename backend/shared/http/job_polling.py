@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Awaitable, Callable, Dict, FrozenSet, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, FrozenSet, Optional, Tuple, Type
 
 import httpx
 
@@ -366,6 +366,7 @@ def poll_until_terminal(
     poll_interval: float = 5.0,
     total_timeout: float = 3600.0,
     on_poll: Optional[Callable[[Dict[str, Any]], None]] = None,
+    passthrough_exceptions: Tuple[Type[BaseException], ...] = (),
     log_context: str = "job",
 ) -> Dict[str, Any]:
     """Poll ``status_fn()`` until it reports a terminal status or time runs out.
@@ -378,15 +379,23 @@ def poll_until_terminal(
           seconds.
         - ``on_poll``, if given, is called with each *non-terminal* status
           dict, once per poll, strictly before that iteration's sleep.
+        - ``passthrough_exceptions``, if given, is a tuple of exception types
+          ``on_poll`` raises as CONTROL FLOW rather than as failure -- they
+          propagate to the caller untouched instead of being folded into a
+          failed status. Only for signals the caller itself handles; anything
+          left out is still swallowed into a failed status as below.
     Postconditions:
         - Returns the first status dict for which
           ``status.get(status_key)`` is in ``terminal_statuses``, unmodified.
         - If ``status_fn()`` returns None or raises, immediately returns
           ``{status_key: "failed", "error": "Failed to get status"}`` — no
           further polling, no sleep.
-        - If ``on_poll`` raises, immediately returns ``{status_key: "failed",
-          "error": "Progress callback failed"}``. The distinct message keeps a
-          broken progress sink from being misread as an unreadable job status.
+        - If ``on_poll`` raises anything in ``passthrough_exceptions``, that
+          exception propagates unchanged -- polling stops and no status dict is
+          returned. Otherwise, if ``on_poll`` raises, immediately returns
+          ``{status_key: "failed", "error": "Progress callback failed"}``. The
+          distinct message keeps a broken progress sink from being misread as an
+          unreadable job status.
         - If no terminal status is observed within ``total_timeout`` seconds,
           returns ``{status_key: "failed", "error": f"Timed out waiting for
           {log_context}"}``.
@@ -409,6 +418,11 @@ def poll_until_terminal(
         if on_poll is not None:
             try:
                 on_poll(status)
+            except passthrough_exceptions:
+                # A control-flow signal the caller handles itself (e.g. a
+                # durable HITL pause). Converting it into a failed status here
+                # would silently disable whatever it drives.
+                raise
             except Exception as e:
                 logger.warning("%s on_poll raised: %s", log_context, e)
                 return {status_key: "failed", "error": _ON_POLL_FAILURE}
