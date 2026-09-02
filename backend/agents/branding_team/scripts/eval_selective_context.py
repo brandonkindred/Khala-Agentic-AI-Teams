@@ -412,12 +412,12 @@ def _run_variant(
     outputs: dict[BrandPhase, object] = {}
     task_strings: dict[BrandPhase, str] = {}
     prior_outputs: dict[str, dict] = {}
+    variant_label = "full-context variant" if full_context else "selective variant"
 
     for phase in PHASE_ORDER:
         context_phases = (
             _full_context_phases(phase) if full_context else _PHASE_SPEC[phase].context_phases
         )
-        variant_label = "full-context variant" if full_context else "selective variant"
         output, task_strings[phase] = _execute_phase_variant(
             orchestrator, mission, phase, context_phases, prior_outputs, variant_label=variant_label
         )
