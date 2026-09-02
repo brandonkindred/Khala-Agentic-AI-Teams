@@ -1085,6 +1085,27 @@ def test_rule5_fixed_notional_slippage_clause_suppressed_for_sub_rounding_bps() 
     assert not any("0.0bps" in c for c in matches), matches
 
 
+def test_rule5_slippage_bps_display_avoids_float_round_trip_error() -> None:
+    """``slippage_bps_display`` must read directly from ``config.slippage_bps``,
+    not reverse-derive it from ``slippage_multiplier`` — that
+    divide-then-multiply round trip accumulates float error that can shift
+    the displayed value across a rounding boundary. slippage_bps=0.15 must
+    display as "0.1bps" (round(0.15, 1) == 0.1); the buggy round-trip form
+    (round((1 + 0.15/10_000 - 1) * 10_000, 1)) evaluates to 0.2 instead."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=25_000.0),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01", slippage_bps=0.15)
+    results = SpecReadinessGate().validate(spec, backtest_config=config)
+    matches = [c for c in _critical(results) if "fixed_notional" in c]
+    assert matches, _critical(results)
+    assert any("0.1bps" in c for c in matches), matches
+    assert not any("0.2bps" in c for c in matches), matches
+
+
 @pytest.mark.parametrize(
     "sizing_factory,max_open_positions,expect_critical",
     [

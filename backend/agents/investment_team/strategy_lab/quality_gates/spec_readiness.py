@@ -928,6 +928,36 @@ class SpecReadinessGate(GateResultsMixin):
     # Rule 5: Sizing realisable.
     # ------------------------------------------------------------------
     def _check_sizing_realisable(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        """Verify the spec's sizing rule can actually be filled at runtime.
+
+        Covers all three sizing kinds (``fixed_fraction``, ``fixed_notional``,
+        ``volatility_target``): per-symbol price validity and whole-lot
+        fillability, plus a worst-case-concurrency check — the largest
+        ``risk_limits.max_open_positions`` positions (capped by the target
+        universe size) filling simultaneously, slippage-inflated — against
+        ``initial_capital``. ``volatility_target``'s worst-case notional is
+        bounded by the ``risk_limits.max_position_pct`` clamp alone (not an
+        assumed ATR floor — see the ``elif`` branch below for why no such
+        floor is provably safe), so it is only a partial realisability
+        check: it says nothing about whether the declared
+        ``target_annual_vol`` itself is plausible.
+
+        Preconditions: ``ctx.spec`` is a :class:`StrategySpec`.
+        Postconditions: returns an iterable (concretely a tuple) of
+        :class:`QualityGateResult`. A single critical when the sizing rule
+        cannot be filled at all (broken/non-positive price data, an
+        unsupported or unresolvable asset class/universe, a sub-lot target on
+        a whole-lot class) or when the worst-case concurrent notional would
+        exceed ``initial_capital``; otherwise empty for ``fixed_fraction`` /
+        ``fixed_notional``, or a single informational warning for
+        ``volatility_target`` (its actual deployed size depends on realised
+        volatility, unknowable here) — plus, for any kind, a warning instead
+        of a critical when every target symbol's price sample is
+        persistently unavailable on a fractional (crypto/forex) asset class.
+        Returns empty when ``ctx.config`` (the backtest config carrying
+        ``initial_capital``) is ``None``, since no notional can be sized
+        against it.
+        """
         assert isinstance(ctx.spec, StrategySpec)
         config = ctx.config
         if config is None:
@@ -1019,19 +1049,25 @@ class SpecReadinessGate(GateResultsMixin):
         # inflate the worst-case notional by the configured slippage before
         # comparing.
         slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
-        # bps-display form of the same inflation, and the note phrase built
-        # from it, shared by every sizing kind's critical message below so a
-        # future wording change is a one-line edit instead of a
-        # multi-template drift risk.
-        slippage_bps_display = (slippage_multiplier - 1) * 10_000
-        # Guard against the *rounded* display value, not the raw one: a
-        # configured slippage_bps in (0, 0.05) is still positive but rounds
-        # to "0.0" at the message's one-decimal precision, which would
-        # reproduce the misleading "inflated 0.0bps" phrasing this note
-        # exists to avoid.
+        # Display form of the configured slippage, read directly from
+        # ``config.slippage_bps`` rather than reverse-derived from
+        # ``slippage_multiplier`` (a ``/ 10_000`` then ``* 10_000`` round
+        # trip accumulates float error that can shift the ``.1f``-rounded
+        # value by 0.1bps from what was actually configured, e.g.
+        # slippage_bps=0.15 round-tripping to display as "0.2"). Shared by
+        # every sizing kind's critical message below so a future wording
+        # change is a one-line edit instead of a multi-template drift risk.
+        slippage_bps_display = float(config.slippage_bps)
+        # Whether the display value is worth mentioning at all: guards
+        # against the *rounded* value, not the raw one, since a small enough
+        # positive slippage_bps still rounds to "0.0" at the messages'
+        # one-decimal precision — computed once and shared by every sizing
+        # kind's slippage clause below, so a future precision change can't
+        # fix this in one message template and miss another.
+        slippage_bps_is_displayable = round(slippage_bps_display, 1) > 0
         slippage_note = (
             f", inflated {slippage_bps_display:.1f}bps for configured slippage"
-            if worst_case_concurrent > 1 and round(slippage_bps_display, 1) > 0
+            if worst_case_concurrent > 1 and slippage_bps_is_displayable
             else ""
         )
 
@@ -1193,6 +1229,13 @@ class SpecReadinessGate(GateResultsMixin):
                             f"Sizing realisability: fixed_fraction {fraction:.4f} {worst_case_tail}"
                         ),
                     )
+                # ``worst_case_tail`` opens with a bare "×", so it needs a
+                # numeric left operand immediately before it (mirroring
+                # ``fixed_fraction``'s "{fraction:.4f} ×") rather than
+                # trailing the explanatory clause directly — otherwise the
+                # multiplication reads as dangling, with the reader unable
+                # to tell what quantity the concurrency count multiplies.
+                max_position_fraction = float(ctx.spec.risk_limits.max_position_pct) / 100.0
                 return (
                     self._critical(
                         "Sizing realisability: volatility_target worst-case notional, "
@@ -1200,18 +1243,15 @@ class SpecReadinessGate(GateResultsMixin):
                         f"max_position_pct {ctx.spec.risk_limits.max_position_pct:.2f}% "
                         "clamp (the only provably safe bound — target_annual_vol has no "
                         "enforced ATR floor, so a low realised ATR can deploy up to this "
-                        f"clamp regardless of target_annual_vol), {worst_case_tail}"
+                        f"clamp regardless of target_annual_vol) {max_position_fraction:.4f} "
+                        f"{worst_case_tail}"
                     ),
                 )
             # fixed_notional
             if worst_case_concurrent > 1:
-                # Same rounding guard as ``slippage_note`` above: a
-                # configured slippage_bps that rounds to "0.0" at this
-                # message's precision must not claim a slippage adjustment
-                # that reads as a no-op.
                 slippage_clause = (
                     f" and {slippage_bps_display:.1f}bps configured slippage"
-                    if round(slippage_bps_display, 1) > 0
+                    if slippage_bps_is_displayable
                     else ""
                 )
                 return (
