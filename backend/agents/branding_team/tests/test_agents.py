@@ -708,19 +708,33 @@ def test_build_spec_agent_rejects_fields_based_prompt() -> None:
         )
 
 
-def test_build_spec_agent_builds_agent_from_structured_output_spec() -> None:
+def test_build_spec_agent_builds_agent_from_structured_output_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``_build_spec_agent`` builds an Agent from a structured_output-based prompt spec.
 
     Preconditions:
         None (test only).
     Postconditions:
         The returned ``Agent`` carries the given ``name`` and renders
-        ``system_prompt`` from ``prompt`` via ``render_agent_prompt``.
+        ``system_prompt`` from ``prompt`` via ``render_agent_prompt``. The
+        underlying ``build_agent`` call receives ``prompt.structured_output``,
+        ``description``, and ``agent_key`` unchanged (``agent_key`` and the
+        bound structured-output model aren't exposed back on the ``Agent``
+        instance, so this spies on ``build_agent`` to pin the full contract).
     """
     spec_prompt = AgentPromptSpec(
         opening="You are a Test Agent.",
         structured_output=BrandDiscoveryAudit,
     )
+    captured: dict[str, object] = {}
+    real_build_agent = branding_agents.build_agent
+
+    def spy_build_agent(**kwargs: object) -> Agent:
+        captured.update(kwargs)
+        return real_build_agent(**kwargs)
+
+    monkeypatch.setattr(branding_agents, "build_agent", spy_build_agent)
     agent = branding_agents._build_spec_agent(
         name="test_agent",
         description="test description",
@@ -729,6 +743,9 @@ def test_build_spec_agent_builds_agent_from_structured_output_spec() -> None:
     )
     assert agent.name == "test_agent"
     assert agent.system_prompt == render_agent_prompt(spec_prompt)
+    assert captured["structured_output"] is BrandDiscoveryAudit
+    assert captured["description"] == "test description"
+    assert captured["agent_key"] == "branding"
 
 
 # ---------------------------------------------------------------------------
