@@ -159,6 +159,16 @@ def build_temporal_planning_answer_callback(
     assert isinstance(allow_repause, bool), (
         "build_temporal_planning_answer_callback requires a bool allow_repause"
     )
+    # Checked here, not at the re-pause site: a non-callable (a token string
+    # mistaken for ``resume_token``) would otherwise stay silent until a batch
+    # actually re-pauses, and surface as ``TypeError: 'str' object is not
+    # callable`` from inside a resumed activity -- the one place a clear message
+    # is hardest to come by.
+    assert next_resume_token is None or callable(next_resume_token), (
+        "build_temporal_planning_answer_callback requires next_resume_token to be a "
+        "zero-argument callable that mints a FRESH token (e.g. pause_cycle."
+        "mint_resume_token), or None"
+    )
 
     if submitted_answers is None:
 

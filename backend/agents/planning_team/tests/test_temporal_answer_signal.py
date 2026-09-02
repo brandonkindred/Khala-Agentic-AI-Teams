@@ -571,3 +571,16 @@ def test_callback_rejects_non_bool_allow_repause() -> None:
             submitted_answers=[],
             allow_repause=None,  # type: ignore[arg-type]
         )
+
+
+def test_callback_rejects_a_non_callable_next_resume_token() -> None:
+    """A token string passed where the minting callable belongs must fail at
+    construction. Left unchecked it stays silent until a batch actually
+    re-pauses, then surfaces as ``TypeError: 'str' object is not callable`` from
+    inside a resumed activity."""
+    with pytest.raises(AssertionError, match="next_resume_token"):
+        build_temporal_planning_answer_callback(
+            "tok-1",
+            submitted_answers=[],
+            next_resume_token="tok-2",  # type: ignore[arg-type]
+        )

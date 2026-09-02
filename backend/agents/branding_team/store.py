@@ -64,7 +64,17 @@ class BrandVersionAppendConflict(RuntimeError):
     """
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
+    """The timestamp format every branding write path stamps ``updated_at`` with.
+
+    Public (not underscore-prefixed) because ``coordination.py`` writes brand rows
+    through its own transaction and shares this formatter: a second hand-rolled
+    one would drift the moment this changes (a ``timespec``, a ``Z`` suffix),
+    leaving rows written through that path formatted differently from every other
+    row in the same column.
+
+    Postconditions: returns an ISO-8601 string in UTC with an explicit offset.
+    """
     return datetime.now(tz=timezone.utc).isoformat()
 
 
@@ -190,7 +200,7 @@ class BrandingStore(PostgresHelperMixin):
         if not name:
             raise ValueError("name must be a non-empty string")
         client_id = f"client_{uuid4().hex[:12]}"
-        now = _now_iso()
+        now = now_iso()
         client = Client(
             id=client_id,
             name=name,
@@ -348,7 +358,7 @@ class BrandingStore(PostgresHelperMixin):
             if cur.fetchone() is None:
                 return None
             brand_id = f"brand_{uuid4().hex[:12]}"
-            now = _now_iso()
+            now = now_iso()
             brand = Brand(
                 id=brand_id,
                 client_id=client_id,
@@ -430,7 +440,7 @@ class BrandingStore(PostgresHelperMixin):
             raise ValueError("mission must be a BrandingMission")
         if status is not None and not isinstance(status, BrandStatus):
             raise ValueError("status must be a BrandStatus")
-        patch: dict = {"updated_at": _now_iso()}
+        patch: dict = {"updated_at": now_iso()}
         if mission is not None:
             patch["mission"] = mission.model_dump(mode="json")
             # A mission edit invalidates any previously generated output: it was
@@ -556,7 +566,7 @@ class BrandingStore(PostgresHelperMixin):
             row = cur.fetchone()
             if row is None:
                 return None
-            now = _now_iso()
+            now = now_iso()
             new_version = int(row["version"] or 0) + 1
             history_entry = BrandVersionSummary(
                 version=new_version,

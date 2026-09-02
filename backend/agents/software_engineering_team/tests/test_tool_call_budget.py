@@ -870,3 +870,44 @@ def test_a_forwarded_block_start_keeps_its_stop_even_when_its_tool_use_is_droppe
     stops = [e for e in events if (e.get("contentBlockStop") or {}).get("contentBlockIndex") == 0]
     # The block Strands opened is the block Strands closes.
     assert len(starts) == len(stops) == 1
+
+
+def test_getattr_propagates_an_attribute_error_from_inners_own_getter() -> None:
+    """An AttributeError raised INSIDE an attribute ``inner`` does provide is the
+    wrapped model's error, not "inner lacks this".
+
+    Swallowing it hands back a Strands ``Model`` default computed against the
+    wrapper -- a plausible-looking value standing in for a real failure (a lazy
+    import, a missing config key), and the hardest kind to trace back.
+    """
+
+    class _ExplodingModel:
+        @property
+        def context_window_limit(self):
+            raise AttributeError("inner is missing its lazily-imported config")
+
+        async def stream(self, *_a, **_k):  # pragma: no cover - never called
+            yield {}
+
+    wrapped = ToolCallBudgetModel(_ExplodingModel(), 5)
+
+    with pytest.raises(AttributeError, match="lazily-imported config"):
+        wrapped.context_window_limit
+
+
+def test_getattr_still_falls_back_for_an_attribute_inner_genuinely_lacks() -> None:
+    """The guard above must not close the fallback a bare test double relies on:
+    an attribute neither object defines still resolves to Model's default."""
+
+    class _BareModel:
+        async def stream(self, *_a, **_k):  # pragma: no cover - never called
+            yield {}
+
+    wrapped = ToolCallBudgetModel(_BareModel(), 5)
+
+    # ``Model.stateful`` is read off every model by Strands; inner does not
+    # define it, so the Model default answers.
+    assert wrapped.stateful is False
+
+    with pytest.raises(AttributeError):
+        wrapped.no_such_attribute_anywhere

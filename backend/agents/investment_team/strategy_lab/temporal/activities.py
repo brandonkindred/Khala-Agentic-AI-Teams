@@ -777,13 +777,18 @@ def _cross_attempt_resume_from_params(
     """Reconstruct ``run_design_attempt_activity``'s cross-attempt resume state from ``params``.
 
     Temporal-mode parity with thread mode's gated cross-attempt resume
-    (``orchestrator.py::run_cycle``). Only ever called from
-    ``run_design_attempt_activity`` when the ADR-012 same-attempt checkpoint
-    lookup found nothing -- the two never actually collide, since an
-    ADR-012 checkpoint is keyed to the exact ``design_attempt_index``
-    crashing mid-execution, while ``params["resume_spec"]`` is supplied by
-    the calling workflow for a ``design_attempt_index`` that has never run
-    yet. The workflow is the sole source of truth for whether resuming is
+    (``orchestrator.py::run_cycle``). Called from
+    ``run_design_attempt_activity`` (via ``_resolve_resume_state``) in two
+    shapes: as a real cross-attempt resume when the ADR-012 same-attempt
+    checkpoint lookup found nothing and the workflow supplied
+    ``params["resume_spec"]``, and with ``probe_only=True`` when an ADR-012
+    checkpoint WAS found and the caller only re-derives whether the
+    cross-attempt seed was ever adopted. The two resume sources never both
+    drive Phase 1, since an ADR-012 checkpoint is keyed to the exact
+    ``design_attempt_index`` crashing mid-execution, while
+    ``params["resume_spec"]`` is supplied by the calling workflow for a
+    ``design_attempt_index`` that has never run yet. The workflow is the sole
+    source of truth for whether resuming is
     sound (gated on the prior attempt's
     ``SpecImplementabilityError.spec_implicated`` being ``False`` -- see
     ``checkpoints.py`` and ``orchestrator.py::run_cycle`` for the full

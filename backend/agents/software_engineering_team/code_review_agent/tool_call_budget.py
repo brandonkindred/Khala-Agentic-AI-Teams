@@ -313,6 +313,13 @@ class ToolCallBudgetModel:
         Postconditions:
             - Raises ``AttributeError`` only when neither ``inner`` nor
               ``Model`` provides ``name``.
+            - An ``AttributeError`` raised from INSIDE an attribute ``inner``
+              does provide (a property whose getter fails on a lazy import or a
+              missing config key) propagates unchanged. Substituting a ``Model``
+              default there would mask the wrapped model's real error behind a
+              plausible-looking value, and the postcondition above says the
+              fallback is for an attribute ``inner`` lacks -- not one it has and
+              cannot compute.
         """
         # ``_inner`` is set in ``__init__``; guard against lookups that run
         # before that (e.g. during unpickling) recursing forever.
@@ -321,6 +328,14 @@ class ToolCallBudgetModel:
         try:
             return getattr(self._inner, name)
         except AttributeError:
+            # ``getattr_static`` fires no descriptor and no ``__getattr__``, so
+            # it answers "does inner define this?" without re-running the getter
+            # that just failed. A dynamic proxy that serves the attribute only
+            # through its own ``__getattr__`` never reaches here (its ``getattr``
+            # succeeded above), so a bare test double still falls through to the
+            # Model default exactly as before.
+            if inspect.getattr_static(self._inner, name, _MISSING) is not _MISSING:
+                raise
             return self._strands_model_default(name)
 
     def _strands_model_default(self, name: str) -> Any:
