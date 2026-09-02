@@ -45,6 +45,17 @@ _REVIEW_THREAD_COMMENTS_PAGE_SIZE = 100
 # below and any future reader agree on where the number comes from.
 _REVIEW_THREADS_PAGE_SIZE = 100
 
+# Hard bound on how many `reviewThreads` PAGES one traversal may fetch.
+# `MAX_REVIEW_THREADS_TRAVERSED` bounds NODES, which a well-behaved endpoint
+# makes equivalent — but an endpoint returning empty `nodes` with
+# `hasNextPage: true` and a fresh `endCursor` every time (a malformed proxy, a
+# buggy mock, a compromised endpoint) advances neither counter and would loop
+# forever issuing GraphQL requests. Derived from the node cap so the two can
+# never disagree, plus slack for pages GitHub returns short.
+_MAX_REVIEW_THREAD_PAGES = (
+    MAX_REVIEW_THREADS_TRAVERSED // _REVIEW_THREADS_PAGE_SIZE
+) + 10
+
 # GraphQL query for the review-thread listing: resolution state (GitHub's REST
 # API has no "resolved" field on a review comment, so thread resolution -- the
 # "Resolve conversation" button on GitHub -- can only be read via GraphQL's
@@ -424,7 +435,11 @@ def pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
     Postconditions:
         - Returns a fully populated :class:`PullRequestDetail`; every field
           other than ``number`` falls back to its empty/false default when
-          absent or null. Pure — no network, no mutation of ``payload``.
+          absent or null, with ONE deviation: ``state`` falls back to the
+          sentinel ``"open"`` rather than ``""``, since a PR payload with no
+          usable ``state`` is far likelier to be an open PR whose field was
+          dropped than a PR in no state at all. Pure — no network, no mutation
+          of ``payload``.
     """
     head = payload.get("head") or {}
     base = payload.get("base") or {}
@@ -538,11 +553,13 @@ def web_host_for_api_base_url(base_url: str) -> str:
     Postconditions:
         - Returns ``"github.com"`` for the default ``api.github.com`` host
           (github.com Cloud's API and web hosts differ by an "api." prefix).
-          The host comparison is case-INSENSITIVE: RFC 3986 defines the host
-          component as case-insensitive, so an operator's
-          ``https://Api.GitHub.com`` must resolve to the same web host as the
-          lowercase spelling rather than being mistaken for a GHES instance
-          and returned as its own web host.
+          The comparison is made on the parsed HOSTNAME, so it is both
+          case-INSENSITIVE and port-insensitive: RFC 3986 defines the host
+          component as case-insensitive and ``https://api.github.com:443`` names
+          the same host as ``https://api.github.com``, so neither spelling may
+          be mistaken for a GHES instance and returned as its own web host
+          (which would derive a clone URL pointing at the API host, which serves
+          no git traffic).
         - For any other host (a GitHub Enterprise Server instance, whose API
           and web UI share one host, typically at an ``/api/v3`` path),
           returns that host unchanged — GHES's clone URLs use the bare host,
@@ -552,10 +569,16 @@ def web_host_for_api_base_url(base_url: str) -> str:
           clone-URL convenience, never an auth-relevant decision.
     """
     try:
-        host = urlsplit(base_url).netloc or base_url
+        parsed = urlsplit(base_url)
+        # ``hostname`` lowercases and strips any explicit port, so
+        # ``https://Api.GitHub.com:443`` still compares equal to the cloud host;
+        # ``netloc`` (which keeps the port) is what gets RETURNED for a GHES
+        # instance, whose clone URLs need the port when one is configured.
+        hostname = parsed.hostname
+        host = parsed.netloc or base_url
     except ValueError:
         return base_url
-    if host.lower() == "api.github.com":
+    if (hostname or host).lower() == "api.github.com":
         return "github.com"
     # A GHES host is returned in its ORIGINAL casing (only the comparison
     # casefolds): the value feeds clone/browse URLs, where echoing the
@@ -1164,7 +1187,8 @@ class GitHubClient(_GitHubHttpMixin):
             - ``strict=True`` raises :class:`ReviewThreadsUnavailableError`
               itself only for GraphQL-level errors and payload-shape
               anomalies: an unexpected payload shape, exceeding
-              :data:`MAX_REVIEW_THREADS_TRAVERSED`, a thread missing/invalid
+              :data:`MAX_REVIEW_THREADS_TRAVERSED` or
+              :data:`_MAX_REVIEW_THREAD_PAGES`, a thread missing/invalid
               ``id``, or a thread with more than
               :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` comments. A genuine
               GraphQL transport/HTTP error (a non-2xx status from the initial
@@ -1208,7 +1232,17 @@ class GitHubClient(_GitHubHttpMixin):
               implicit "no more pages": strict raises and non-strict warns
               before ending the walk, since ending pagination on unknown state
               is exactly the silent partial result strict mode exists to
-              prevent.
+              prevent. The SAME rule applies one level down, to each thread's
+              ``comments.pageInfo``: a missing or non-bool ``hasNextPage``
+              there is announced too, rather than read as "this thread's
+              comments all fit on one page".
+            - Traversal is bounded on BOTH axes: at most
+              :data:`MAX_REVIEW_THREADS_TRAVERSED` thread nodes and at most
+              :data:`_MAX_REVIEW_THREAD_PAGES` pages. The page bound is what
+              terminates a walk against an endpoint that returns empty
+              ``nodes`` with ``hasNextPage: true`` forever (which advances the
+              node count not at all); exceeding either is announced through
+              ``_unavailable`` like every other degrade point.
         """
         def _unavailable(message: str) -> None:
             """Fail closed (``strict``) or log-and-degrade (non-strict) for one anomaly.
@@ -1238,7 +1272,19 @@ class GitHubClient(_GitHubHttpMixin):
 
         after: Optional[str] = None
         seen = 0
+        pages = 0
         while True:
+            pages += 1
+            if pages > _MAX_REVIEW_THREAD_PAGES:
+                # Announced like every other degrade point rather than silently
+                # returning what we have: an endpoint that keeps claiming more
+                # pages without ever advancing the node count is broken, and a
+                # truncated listing must never look complete.
+                _unavailable(
+                    f"exceeded _MAX_REVIEW_THREAD_PAGES={_MAX_REVIEW_THREAD_PAGES} "
+                    f"reviewThreads pages after {seen} threads; stopping"
+                )
+                return
             variables: dict[str, Any] = {
                 "owner": owner,
                 "repo": repo,
@@ -1282,7 +1328,8 @@ class GitHubClient(_GitHubHttpMixin):
                 if not isinstance(thread_id, str) or not thread_id:
                     _unavailable(
                         "review-thread node has a missing or invalid id (expected non-empty "
-                        f"str, got {thread_id!r}); yielding it with a None id"
+                        f"str, got {thread_id!r}); a non-strict caller would yield it with a "
+                        "None id"
                     )
                     thread_id = None
                 is_resolved_raw = node.get("isResolved")
@@ -1322,14 +1369,32 @@ class GitHubClient(_GitHubHttpMixin):
                 if not isinstance(comments_page_info, dict):
                     _unavailable(
                         f"invalid review-thread comments pageInfo (thread {thread_id!r}): "
-                        f"{comments_page_info!r}; yielding only the first page of comment ids"
-                    )
-                elif comments_page_info.get("hasNextPage"):
-                    _unavailable(
-                        f"review thread {thread_id!r} has more than "
-                        f"{_REVIEW_THREAD_COMMENTS_PAGE_SIZE} comments; yielding only the "
+                        f"{comments_page_info!r}; a non-strict caller would yield only the "
                         "first page of comment ids"
                     )
+                else:
+                    # Same rule as the threads-level pageInfo below: hasNextPage
+                    # must be PRESENT and a bool. A dict carrying no (or a
+                    # non-bool) hasNextPage says NOTHING about whether this
+                    # thread has more comments, and a bare truthiness test reads
+                    # that unknown state as "no more comments" -- silently
+                    # yielding a first page as if it were the whole thread, in
+                    # BOTH modes. It would also read a truthy non-bool like the
+                    # string "false" as "more comments", warning spuriously.
+                    comments_has_next = comments_page_info.get("hasNextPage")
+                    if not isinstance(comments_has_next, bool):
+                        _unavailable(
+                            f"review-thread comments pageInfo (thread {thread_id!r}) has a "
+                            "missing or invalid hasNextPage (expected bool, got "
+                            f"{comments_has_next!r}); a non-strict caller would yield only "
+                            "the first page of comment ids"
+                        )
+                    elif comments_has_next:
+                        _unavailable(
+                            f"review thread {thread_id!r} has more than "
+                            f"{_REVIEW_THREAD_COMMENTS_PAGE_SIZE} comments; a non-strict "
+                            "caller would yield only the first page of comment ids"
+                        )
                 comment_ids_list: list[int] = []
                 for comment in comments["nodes"]:
                     if not isinstance(comment, dict) or not isinstance(

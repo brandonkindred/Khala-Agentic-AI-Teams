@@ -104,7 +104,14 @@ def _is_token_key(key: Any) -> bool:
     Postconditions:
         - Returns True iff ``str(key).lower()`` contains any substring in
           :data:`_TOKEN_KEY_MARKERS`. Never raises: a non-string key is
-          stringified first, so an int/tuple key is simply a non-match.
+          stringified via ``str()`` first and matched on that form. An int key
+          therefore can never match (every marker is alphabetic, and
+          ``str(123)`` has no letters), but a TUPLE key matches whenever its
+          repr-based string form contains a marker — ``("token", 0)``
+          stringifies to ``"('token', 0)"``, which contains ``token``, so it IS
+          a match. That errs toward detecting more, which is the safe direction
+          for a guard whose job is to keep credentials out of a permanent
+          Temporal event history.
     """
     lowered = str(key).lower()
     return any(marker in lowered for marker in _TOKEN_KEY_MARKERS)
@@ -246,7 +253,7 @@ def start_coding_team_workflow(
           same durable Temporal payload as ``github``.
         - ``github``, when provided, is a dict of GitHub-issue run metadata for
           the workflow (owner/repo/issue/base/integration_branch/expected_base_sha/...).
-          It must not contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key, authorization, credential)
+          It must not contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS`)
           either — activities resolve credentials activity-side.
     Postconditions:
         - A workflow with id ``coding_team-<job_id>`` is started on the coding
@@ -257,7 +264,7 @@ def start_coding_team_workflow(
     Raises:
         ValueError: ``job_id`` or ``repo_path`` is empty; ``github`` or
             ``plan_input`` is truthy but not a ``dict``; or ``github`` or
-            ``plan_input`` contains a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key, authorization, credential) at any
+            ``plan_input`` contains a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS`) at any
             nesting depth (see :func:`_contains_token_key`).
         RuntimeError: the worker's Temporal client never becomes available
             within the wait window.
@@ -298,7 +305,7 @@ def execute_coding_team_workflow(
           or ``GITHUB_TOKEN`` instead.
         - ``plan_input``, when not ``None``, is a JSON-serializable plan dict
           (it is sent verbatim as a Temporal workflow argument) that must not
-          contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key, authorization, credential) at any nesting
+          contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS`) at any nesting
           depth (see :func:`_contains_token_key`).
     Postconditions:
         - Blocks until ``CodingTeamWorkflow`` reaches a terminal result and returns
@@ -315,7 +322,7 @@ def execute_coding_team_workflow(
     Raises:
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
             non-empty dict, ``plan_input`` is truthy but not a dict, or
-            ``github`` or ``plan_input`` contains a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key, authorization, credential)
+            ``github`` or ``plan_input`` contains a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS`)
             at any nesting depth (see :func:`_contains_token_key`).
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result; the
             message names the observed type so the payload shape is diagnosable

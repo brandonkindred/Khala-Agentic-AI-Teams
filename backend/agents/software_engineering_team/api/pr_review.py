@@ -132,6 +132,13 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
         is never independently heartbeated, so treating it as a candidate here
         would eventually mark a still-running child ``failed`` as a false
         zombie. Only the parent job represents this PR's admission state.
+        Excluding a child from the SCAN does not abandon it: when this sweep
+        terminalizes a stale parent it also best-effort terminalizes every child
+        naming that parent (via :func:`_mark_orphaned_child_failed`), because the
+        parent's lifecycle was that child's only terminalizer and a child left
+        non-terminal lingers forever as a phantom active job. That cascade runs
+        inside the same swallow-and-log block, so a cleanup failure still never
+        blocks admission.
         Raises only if the job-service scan itself fails.
 
     Cross-worker by construction: the scan reads the shared central job service (the same
@@ -143,7 +150,8 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     ``_running_job_for_issue``); add an owner/repo/pr filter to ``list_jobs`` if that set
     ever grows materially.
     """
-    for j in _main.list_jobs(active_only=True):
+    active_jobs = list(_main.list_jobs(active_only=True))
+    for j in active_jobs:
         if (j or {}).get("parent_job_id"):
             # A child implementation job (address_comments._dispatch_implementation)
             # carries the SAME PR-identifying github_context as its parent for
@@ -193,6 +201,18 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
                     error="review worker heartbeat went stale (process died mid-review)",
                     completed=True,
                 )
+                # Cascade to this parent's child implementation jobs. They are
+                # skipped by the scan above (they never heartbeat on their own),
+                # and their only other terminalizer -- the parent's own
+                # lifecycle -- just died with it, so without this they stay
+                # non-terminal forever and surface as phantom active jobs to
+                # every other list_jobs(active_only=True) consumer.
+                for child in active_jobs:
+                    if (child or {}).get("parent_job_id") != job_id:
+                        continue
+                    child_id = child.get("job_id")
+                    if child_id:
+                        _mark_orphaned_child_failed(child_id, job_id, str(child.get("repo_path") or ""))
             except Exception as exc:  # noqa: BLE001 - unblocking admission must not depend on cleanup
                 logger.warning(
                     "could not mark stale review job %s failed: %s",

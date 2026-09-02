@@ -172,21 +172,24 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         raise_if_checkout_occupied(request.repo_path)
 
         job_id = str(uuid.uuid4())
-        _main.create_job(job_id=job_id, repo_path=request.repo_path, plan_input=plan.model_dump())
-        job_fields: Dict[str, Any] = {
-            "github_context": {
-                "owner": request.owner,
-                "repo": request.repo,
-                "issue_number": issue.number,
-                "issue_url": issue.html_url,
-                "base_branch": request.base_branch,
-                "remote": request.remote,
-                # Persisted so a resume reconstructs the SAME cleanup decision the
-                # fresh run made; without it a resumed job would default to False and
-                # leak its ephemeral per-issue checkout on clean completion.
-                "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
-            },
+        # ONE source for the GitHub context: the persisted job field and the
+        # workflow dispatch payload below are both built from this dict, so a
+        # field added for one consumer cannot go missing for the other. (The
+        # dispatch payload adds its own run-scoped keys on top; it never
+        # re-spells a shared one.)
+        github_context: Dict[str, Any] = {
+            "owner": request.owner,
+            "repo": request.repo,
+            "issue_number": issue.number,
+            "issue_url": issue.html_url,
+            "base_branch": request.base_branch,
+            "remote": request.remote,
+            # Persisted so a resume reconstructs the SAME cleanup decision the
+            # fresh run made; without it a resumed job would default to False and
+            # leak its ephemeral per-issue checkout on clean completion.
+            "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
         }
+        job_fields: Dict[str, Any] = {"github_context": github_context}
         # Persist the token (encrypted) so a resume after the orchestrator thread dies (server restart,
         # different worker process) can re-drive the GitHub publish flow. In the standard deployment the
         # token is a per-request PAT from the credential store and the coding-team container has no
@@ -194,32 +197,23 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         # — never a usable PAT — because the raw job record is echoed verbatim by the generic
         # GET /api/jobs/{team} route. When no encryption key is configured the token is not persisted
         # and resume falls back to GITHUB_TOKEN env (or refuses); we never store plaintext.
-        # Wrapped so a failure here cannot orphan the row created just above.
-        # ``encrypt_token`` is contractually non-raising (it returns None on any
-        # crypto/key problem), but ``update_job`` reaches the central job service
-        # and CAN raise (transport error, service unavailable, store rejection).
-        # An exception escaping here would leave the row 'pending' — which
-        # ``_running_job_for_issue`` treats as active — so every retry for this
-        # issue would 409 forever with nothing left to terminalize it, exactly
-        # the failure mode the three handlers below already guard against.
-        try:
-            encrypted = encrypt_token(token)
-            if encrypted:
-                job_fields["github_token_encrypted"] = encrypted
-            _main.update_job(job_id, **job_fields)
-        except Exception as e:
-            # Sanitized per ``_fail_new_job``'s safe-to-disclose contract: the
-            # stored ``error`` is echoed verbatim by GET /api/jobs/{team}, and a
-            # job-service exception's ``str()`` can carry internal host names or
-            # connection strings. The full diagnostic stays in the log and the
-            # chained cause.
-            logger.exception("Failed to persist GitHub context for job_id=%s: %s", job_id, e)
-            _fail_new_job(
-                job_id,
-                500,
-                "failed to persist GitHub job context",
-                cause=e,
-            )
+        encrypted = encrypt_token(token)
+        if encrypted:
+            job_fields["github_token_encrypted"] = encrypted
+        # ONE write, not create-then-update. A second call to persist the context
+        # would leave a window — an exception, but also a hard crash (SIGKILL,
+        # OOM, deploy restart) between two adjacent service calls — in which the
+        # row exists as 'pending' with no context. ``_running_job_for_issue``
+        # treats a pending row as active, so every retry for this issue would 409
+        # forever with nothing left to terminalize it. Creating the row already
+        # complete removes the window entirely rather than handling one of its
+        # two causes: if this call raises, no row exists to orphan.
+        _main.create_job(
+            job_id=job_id,
+            repo_path=request.repo_path,
+            plan_input=plan.model_dump(),
+            extra_fields=job_fields,
+        )
 
         base = request.base_branch or default_branch
         if not base:
@@ -266,15 +260,16 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                 request.repo_path,
                 plan.model_dump(),
                 github={
-                    "owner": request.owner,
-                    "repo": request.repo,
-                    "issue_number": issue.number,
+                    # Shared context first (see ``github_context`` above), then
+                    # the run-scoped keys only the workflow needs. ``base`` is
+                    # the RESOLVED base branch, deliberately distinct from the
+                    # persisted ``base_branch`` (the caller's raw, possibly None,
+                    # request), so both are carried rather than reconciled.
+                    **github_context,
                     "issue_title": issue.title,
-                    "remote": request.remote,
                     "base": base,
                     "integration_branch": integration_branch,
                     "expected_base_sha": base_sha_or_err,
-                    "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
                 },
             )
         except Exception as e:

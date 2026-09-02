@@ -52,8 +52,26 @@ def create_job(
     repo_path: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     plan_input: Optional[Dict[str, Any]] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Create a new coding_team job with pending status."""
+    """Create a new coding_team job with pending status.
+
+    Preconditions:
+        - ``job_id`` is unique; ``extra_fields``, when given, holds additional
+          job-record fields to persist WITH the row rather than in a follow-up
+          ``update_job``. It exists so a caller whose row is meaningless without
+          them (the GitHub-issue route's ``github_context``: a ``pending`` row
+          with no context is treated as an active job by
+          ``_running_job_for_issue`` yet carries nothing to identify or resume
+          it) can write them in ONE service call, closing the crash window a
+          create-then-update pair leaves open.
+    Postconditions:
+        - Creates the row with status ``pending`` and the standard coding-team
+          field set, plus every key of ``extra_fields`` (which wins on a key
+          collision, so a caller can seed a standard field's initial value).
+          Raises whatever the job service raises; on a raise NO row exists to
+          orphan.
+    """
     data: Dict[str, Any] = {
         "repo_path": repo_path,
         "phase": "task_graph",
@@ -78,6 +96,8 @@ def create_job(
         "pause_kind": None,
         "pause_context": None,
     }
+    if extra_fields:
+        data.update(extra_fields)
     _client(cache_dir).create_job(job_id, status="pending", **data)
     # Best-effort: link the project to the default profile. record_association_safe
     # never raises, so a link failure can't break job creation.

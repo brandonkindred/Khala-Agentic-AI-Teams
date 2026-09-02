@@ -8,6 +8,8 @@ workflow id, and the coding-team task queue.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from software_engineering_team.temporal import coding_team_start_workflow as sw
@@ -326,3 +328,59 @@ def test_contains_token_key_still_finds_a_token_inside_a_shared_substructure():
     shared = {"nested": {"github_token": "ghp_secret"}}
     diamond = {"l": shared, "r": shared}
     assert sw._contains_token_key(diamond) is True
+
+
+# ---------------------------------------------------------------------------
+# Docstring credential-marker enumeration
+# ---------------------------------------------------------------------------
+
+
+def _docstring_marker_enumerations(doc: str) -> list[set[str]]:
+    """Every inline ``_TOKEN_KEY_MARKERS`` enumeration found in ``doc``.
+
+    Preconditions:
+        - ``doc`` is a docstring that may contain zero or more spellings of
+          ``(any of :data:`_TOKEN_KEY_MARKERS` — a, b, c/d)``.
+    Postconditions:
+        - Returns one set of listed marker strings per enumeration, in order of
+          appearance: comma-separated entries split further on ``/`` (the
+          docstrings spell alternative separator forms as ``api_key/api-key``).
+          Whitespace, including a line wrap inside the parentheses, is
+          normalized away. Pure.
+    """
+    normalized = " ".join(doc.split())
+    return [
+        {part.strip() for chunk in body.split(",") for part in chunk.split("/") if part.strip()}
+        for body in re.findall(
+            r"\(any of :data:`_TOKEN_KEY_MARKERS` — ([^)]*)\)", normalized
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "func",
+    [sw.start_coding_team_workflow, sw.execute_coding_team_workflow],
+)
+def test_docstring_marker_enumeration_matches_the_data(func):
+    """The enumeration is spelled out ONCE per docstring, and pinned to the data.
+
+    Naming the markers inline is what makes the precondition satisfiable
+    without opening the source -- but a hand-copied list is exactly the thing
+    that drifts once ``_TOKEN_KEY_MARKERS`` changes. This test makes drift
+    impossible in both directions: adding a marker without documenting it, or
+    documenting one that is not enforced, fails here. Every OTHER mention in
+    these docstrings carries the bare ``:data:`` cross-reference, so there is
+    only ever one list to keep true.
+    """
+    enumerations = _docstring_marker_enumerations(func.__doc__ or "")
+    assert len(enumerations) == 1, f"{func.__name__} should enumerate the markers exactly once"
+    assert enumerations[0] == set(sw._TOKEN_KEY_MARKERS)
+
+
+def test_is_token_key_matches_a_tuple_key_containing_a_marker():
+    """Documented behavior, pinned: ``str(("token", 0))`` contains "token", so a
+    tuple key IS a match. The guard errs toward detecting more, which is the
+    safe direction for a permanent Temporal event history."""
+    assert sw._is_token_key(("token", 0)) is True
+    assert sw._is_token_key(123) is False
+    assert sw._is_token_key(("owner", "repo")) is False

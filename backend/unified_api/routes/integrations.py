@@ -2383,7 +2383,19 @@ def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
 
     Field extraction is delegated to the coding team's ``pr_detail_from_payload`` so
     GitHub's PR payload shape is parsed in exactly one place; this only adapts the
-    parsed detail to the panel's response model (truncating the body for preview).
+    parsed detail to the panel's response model.
+
+    Preconditions:
+        - ``raw`` is a decoded GitHub pull-request object carrying at least
+          ``number`` (``pr_detail_from_payload``'s own precondition).
+    Postconditions:
+        - Returns a :class:`GitHubPullRequestItem` whose fields are exactly the
+          parsed detail's. ``body_preview`` carries the PR body IN FULL, unlike
+          the issue list's 200-character preview: a PR body is rendered whole in
+          the review-detail panel, and truncating it here would silently drop
+          the tail of every PR description the panel shows. The field keeps its
+          ``_preview`` name for wire compatibility with the panel's model.
+        - Pure — no network, no mutation of ``raw``.
     """
     detail = pr_detail_from_payload(raw)
     return GitHubPullRequestItem(

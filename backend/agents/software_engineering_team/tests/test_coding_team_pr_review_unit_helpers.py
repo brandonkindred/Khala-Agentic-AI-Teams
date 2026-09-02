@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import ANY
 
 import pytest
+from pydantic import ValidationError
 
 import software_engineering_team.api.coding_team_main as main
 from software_engineering_team.api import pr_review
@@ -215,6 +216,52 @@ class TestRunningReviewForPrUnit:
         assert pr_review._running_review_for_pr("acme", "widgets", 7) == "job-1"
         assert job_updates == []  # the stale child was never touched
         assert review_updates == []  # the review record was never marked failed either
+
+    def test_stale_parent_cascades_terminalization_to_its_children(self, monkeypatch) -> None:
+        """Excluding children from the SCAN must not abandon them.
+
+        A child is never independently heartbeated, so its only terminalizer is
+        its parent's lifecycle. When this sweep declares the parent dead, the
+        child would otherwise stay non-terminal forever and surface as a phantom
+        active job to every other ``list_jobs(active_only=True)`` consumer.
+        """
+        stale_parent = _job(job_id="job-1", heartbeat_delta=_STALE_S + 60)
+        child = _job(job_id="job-1:comment:2", heartbeat_delta=_STALE_S + 60)
+        child["parent_job_id"] = "job-1"
+        child["repo_path"] = "/tmp/checkout"
+        other = _job(job_id="job-9", heartbeat_delta=_STALE_S + 60)
+        other["parent_job_id"] = "some-other-parent"
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child, other, stale_parent])
+        job_updates: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            main, "update_job", lambda job_id, **kw: job_updates.append({"job_id": job_id, **kw})
+        )
+        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
+
+        updated = {u["job_id"]: u for u in job_updates}
+        assert updated["job-1"]["status"] == "failed"
+        assert updated["job-1:comment:2"]["status"] == "failed"
+        # A child of a DIFFERENT parent is left alone.
+        assert "job-9" not in updated
+
+    def test_child_cascade_failure_never_breaks_admission(self, monkeypatch) -> None:
+        """The cascade lives in the same swallow-and-log block as the parent's
+        own cleanup: unblocking admission must not depend on it."""
+        stale_parent = _job(job_id="job-1", heartbeat_delta=_STALE_S + 60)
+        child = _job(job_id="job-1:comment:2", heartbeat_delta=_STALE_S + 60)
+        child["parent_job_id"] = "job-1"
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [stale_parent, child])
+
+        def _boom_on_child(job_id, **kw):
+            if job_id != "job-1":
+                raise RuntimeError("job service unreachable")
+
+        monkeypatch.setattr(main, "update_job", _boom_on_child)
+        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1031,3 +1078,50 @@ class TestBuildChangeSurfaceForReviewable:
             files, {"gone.py": content, "ok.py": content}
         )
         assert list(surface.blocks.keys()) == ["ok.py"]
+
+
+# ---------------------------------------------------------------------------
+# owner/repo request-model validation
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubNameValidation:
+    """owner/repo are identifiers, not free text.
+
+    A whitespace-only or path-like value used to satisfy ``min_length=1`` and
+    flow into GitHub API URLs and checkout-origin comparisons before failing
+    downstream -- for an address-comments run, as the route's "origin remote
+    names a different repository" 400, blaming the checkout for what is really
+    a malformed identifier.
+    """
+
+    @staticmethod
+    def _models():
+        from software_engineering_team.api import coding_team_models as m
+
+        return [
+            (m.RunFromGitHubRequest, {"repo_path": "/tmp/x"}),
+            (m.GroomGithubIssuesRequest, {"issue_number": 1}),
+            (m.ReviewPrRequest, {"pr_number": 1}),
+            (m.AddressCommentsRequest, {"repo_path": "/tmp/x"}),
+            (m.CreateEnhancedIssuesRequest, {"proposal_ids": ["a:b"]}),
+        ]
+
+    @pytest.mark.parametrize(
+        "bad", [" ", "", "acme/widgets", "../etc", "%2e%2e", "-leading-dash", "x" * 101]
+    )
+    def test_malformed_owner_is_rejected(self, bad: str) -> None:
+        for model, extras in self._models():
+            with pytest.raises(ValidationError):
+                model(owner=bad, repo="widgets", **extras)
+
+    @pytest.mark.parametrize("bad", [" ", "", "acme/widgets", "..", "x" * 101])
+    def test_malformed_repo_is_rejected(self, bad: str) -> None:
+        for model, extras in self._models():
+            with pytest.raises(ValidationError):
+                model(owner="acme", repo=bad, **extras)
+
+    @pytest.mark.parametrize("good", ["acme", "Acme-Corp", "a.b_c-d", "0day"])
+    def test_well_formed_names_are_accepted(self, good: str) -> None:
+        for model, extras in self._models():
+            assert model(owner=good, repo=good, **extras).owner == good

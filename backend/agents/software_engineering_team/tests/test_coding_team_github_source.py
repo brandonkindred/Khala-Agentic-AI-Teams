@@ -1683,11 +1683,16 @@ class TestEndpointHappyPath:
         assert resp.status_code == 200, resp.text
         assert started["repo_path"] == patched_app["repo_path"]
         assert started["plan_input"]["requirements_title"] == "Add feature"
+        # The dispatch payload is the persisted ``github_context`` plus the
+        # run-scoped keys only the workflow needs -- built from ONE dict, so a
+        # field can never be present for one consumer and missing for the other.
         assert started["github"] == {
             "owner": "o",
             "repo": "r",
             "issue_number": 1,
+            "issue_url": "https://example/issues/1",
             "issue_title": "Add feature",
+            "base_branch": None,
             "remote": "upstream",
             "base": "trunk",
             "integration_branch": "khala/issue-1",
@@ -1695,6 +1700,8 @@ class TestEndpointHappyPath:
             "cleanup_checkout_on_success": True,
         }
         assert "token" not in started["github"]
+        persisted = patched_app["jobs"].get_job(resp.json()["job_id"])["github_context"]
+        assert persisted.items() <= started["github"].items()
         assert gh.get_repo_calls == 1
 
     def test_run_from_github_skips_get_repo_when_base_branch_supplied(
@@ -1822,28 +1829,28 @@ class TestEndpointHappyPath:
         assert "ghp_SECRETSECRETSECRETSECRET" not in caplog.text
         assert "example/r" in caplog.text
 
-    def test_run_from_github_fails_job_when_persisting_github_context_raises(
+    def test_run_from_github_persists_github_context_in_the_create_call(
         self, patched_app, monkeypatch
     ) -> None:
-        """The github-context persistence that follows ``create_job`` reaches the
-        central job service and can raise. If that exception escaped, the row
-        would stay ``pending`` -- which ``_running_job_for_issue`` treats as
-        active -- so every retry for this issue would 409 forever with nothing
-        left to terminalize it. It must be caught and terminalized like the three
-        other post-create failure paths, and the disclosed error must be a
-        sanitized summary, never the raw exception text."""
+        """The context is written WITH the row, not by a follow-up update.
+
+        A create-then-update pair leaves a window -- an exception, but also a
+        hard crash between two adjacent service calls -- in which the row exists
+        as 'pending' with no github_context. ``_running_job_for_issue`` treats a
+        pending row as active, so every retry for that issue would 409 forever
+        with nothing left to terminalize it. One write removes the window: if it
+        raises, there is no row to orphan.
+        """
         import software_engineering_team.api.coding_team_main as api_main
 
+        updates: list[dict] = []
         real_update_job = api_main.update_job
 
-        def _fail_on_github_context(job_id: str, **fields):
-            """Raise only for the github_context persistence, so ``_fail_new_job``'s
-            own terminalizing update still lands."""
-            if "github_context" in fields:
-                raise RuntimeError("job service unreachable at postgres://user:pw@db:5432")
+        def _record_update(job_id: str, **fields):
+            updates.append(fields)
             return real_update_job(job_id, **fields)
 
-        monkeypatch.setattr(api_main, "update_job", _fail_on_github_context)
+        monkeypatch.setattr(api_main, "update_job", _record_update)
 
         gh = _FakeClient(
             issues=[_issue(1, title="Add feature")],
@@ -1856,16 +1863,13 @@ class TestEndpointHappyPath:
             "/run-from-github",
             json=_body(1, repo_path=patched_app["repo_path"]),
         )
+        assert resp.status_code == 200, resp.text
 
-        assert resp.status_code == 500
-        assert resp.json()["detail"] == "failed to persist GitHub job context"
-        assert "postgres://" not in resp.text
-
-        jobs = patched_app["jobs"].list_jobs()
-        assert len(jobs) == 1
-        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
-        assert job["status"] == "failed"
-        assert job["error"] == "failed to persist GitHub job context"
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["github_context"]["owner"] == "o"
+        assert job["github_context"]["issue_number"] == 1
+        # Nothing had to be patched in afterwards.
+        assert not [u for u in updates if "github_context" in u]
 
     def test_run_from_github_returns_500_and_fails_job_when_base_branch_unresolvable(
         self, patched_app
@@ -3517,6 +3521,32 @@ class TestEphemeralCheckoutCleanup:
         monkeypatch.setattr(api.fcntl, "flock", _flock_boom)
         api._cleanup_issue_checkout(str(target))  # must not raise
         assert target.exists()  # not deleted because the lock was never held
+
+    def test_cleanup_lock_failure_names_the_checkout_it_skipped(
+        self, patched_app, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """Every log line from this cleanup names ``target``.
+
+        An operator traces a cleanup by grepping the checkout path; a skip
+        message naming only the lock file (which lives in the parent directory
+        under a different name) is invisible to that search.
+        """
+        import logging
+
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        target = tmp_path / "issue-7"
+        target.mkdir()
+        (target / ".git").mkdir()
+
+        def _flock_boom(fd, op):
+            raise OSError("ENOLCK")
+
+        monkeypatch.setattr(api.fcntl, "flock", _flock_boom)
+        with caplog.at_level(logging.WARNING):
+            api._cleanup_issue_checkout(str(target))
+        skips = [r.getMessage() for r in caplog.records if "Skipping checkout cleanup" in r.getMessage()]
+        assert skips and all(str(target.resolve()) in m for m in skips)
 
     def test_cleanup_deletes_resolved_path_not_raw_symlinked_string(
         self, patched_app, tmp_path, monkeypatch

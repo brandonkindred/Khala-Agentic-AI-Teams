@@ -24,6 +24,37 @@ from shared.hitl.models import (  # noqa: F401
 )
 from software_engineering_team.models import AgentStatusEntry
 
+# GitHub owner (user/org) and repository names: ASCII alphanumerics, ``-``,
+# ``_`` and ``.``, starting with an alphanumeric. Anchored, so a whitespace-only
+# value, an embedded ``/`` (a two-segment "owner/repo" pasted into one field) or
+# a path traversal (``..``) is a 422 at the boundary instead of a confusing
+# downstream failure — an address-comments run, for instance, would otherwise
+# surface a malformed owner as the route's "origin remote names a different
+# repository" 400, blaming the checkout for a bad identifier.
+_GITHUB_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+# GitHub caps owner names at 39 characters and repository names at 100; the
+# looser 100 is used for both so oversized junk never reaches an API URL.
+_GITHUB_NAME_MAX_LENGTH = 100
+
+
+def _github_name_field(description: str) -> Any:
+    """Build the shared owner/repo ``Field`` so all five request models agree.
+
+    Preconditions:
+        - ``description`` is the field's human-readable description.
+    Postconditions:
+        - Returns a required :func:`pydantic.Field` constrained to
+          :data:`_GITHUB_NAME_PATTERN` and at most
+          :data:`_GITHUB_NAME_MAX_LENGTH` characters (the pattern already
+          forbids the empty string, so ``min_length`` is redundant). Pure.
+    """
+    return Field(
+        ...,
+        max_length=_GITHUB_NAME_MAX_LENGTH,
+        pattern=_GITHUB_NAME_PATTERN,
+        description=description,
+    )
+
 
 class RunRequest(BaseModel):
     """Request body for POST /run."""
@@ -157,8 +188,8 @@ class JobListItem(BaseModel):
 class RunFromGitHubRequest(BaseModel):
     """Request body for POST /run-from-github."""
 
-    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
-    repo: str = Field(..., min_length=1, description="GitHub repository name")
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
     repo_path: str = Field(..., description="Local checkout the implementation teams work in")
     label: Optional[str] = Field(default=None, description="Optional label filter")
     issue_number: Optional[int] = Field(
@@ -195,8 +226,8 @@ class RunFromGitHubResponse(BaseModel):
 class GroomGithubIssuesRequest(BaseModel):
     """Request body for POST /groom-github-issues."""
 
-    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
-    repo: str = Field(..., min_length=1, description="GitHub repository name")
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
     issue_number: int = Field(..., description="Issue to groom")
     github_token: Optional[str] = Field(
         default=None,
@@ -214,8 +245,8 @@ class GroomGithubIssuesResponse(BaseModel):
 class ReviewPrRequest(BaseModel):
     """Request body for POST /review-pr."""
 
-    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
-    repo: str = Field(..., min_length=1, description="GitHub repository name")
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
     repo_path: str = Field(
         default="",
         description="Local checkout path, accepted for parity with /run-from-github. "
@@ -257,8 +288,8 @@ class AddressCommentsRequest(BaseModel):
     then move the PR to "waiting for review".
     """
 
-    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
-    repo: str = Field(..., min_length=1, description="GitHub repository name")
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
     repo_path: str = Field(
         default="",
         description=(
@@ -279,8 +310,11 @@ class AddressCommentsRequest(BaseModel):
             "unconditionally coerces this field to match it via model_copy before "
             "use, so a caller sending only {owner, repo, repo_path} (relying on the "
             "path parameter alone) is not forced to redundantly repeat it here, and "
-            "a divergent body value is silently overridden rather than causing "
-            "ambiguity."
+            "a divergent POSITIVE body value is silently overridden rather than "
+            "causing ambiguity. The gt=0 bound still applies first: 0 or a negative "
+            "number is rejected with a 422 before the route runs, since a value that "
+            "could never name a pull request is a caller bug worth reporting rather "
+            "than one worth silently discarding."
         ),
     )
     github_token: Optional[str] = Field(
@@ -486,12 +520,8 @@ class CreateEnhancedIssuesRequest(BaseModel):
     proposal_ids: List[str] = Field(
         description="Composite ids of the form 'job_id:proposal_id' identifying which proposals to file."
     )
-    owner: str = Field(
-        ..., min_length=1, description="Repository owner (validated against stored review)."
-    )
-    repo: str = Field(
-        ..., min_length=1, description="Repository name (validated against stored review)."
-    )
+    owner: str = _github_name_field("Repository owner (validated against stored review).")
+    repo: str = _github_name_field("Repository name (validated against stored review).")
     github_token: Optional[str] = Field(
         default=None, description="Overrides GITHUB_TOKEN env var for this request."
     )

@@ -29,6 +29,7 @@ from software_engineering_team.github_source import (
     ReviewThreadsUnavailableError,
 )
 from software_engineering_team.github_source.client import (
+    _MAX_REVIEW_THREAD_PAGES,
     KHALA_COMMENT_MARKER,
     web_host_for_api_base_url,
 )
@@ -301,6 +302,108 @@ class TestReviewThreadNodesNonStrictDegrades:
         assert any("hasNextPage" in r.getMessage() for r in caplog.records)
 
 
+class TestReviewThreadCommentsPageInfo:
+    """The per-thread ``comments.pageInfo`` gets the SAME rule as the
+    threads-level one, one level down.
+
+    A bare truthiness test on ``hasNextPage`` reads a missing or non-bool value
+    as "this thread has no more comments" -- in BOTH modes -- so the
+    address-comments run would reply to and resolve a thread whose later
+    comments it never saw, with nothing logged and nothing raised.
+    """
+
+    @staticmethod
+    def _payload(comments_page_info: Any) -> dict[str, Any]:
+        return _threads_response(
+            nodes=[
+                {
+                    "id": "T1",
+                    "isResolved": True,
+                    "comments": {
+                        "nodes": [{"databaseId": 11}],
+                        "pageInfo": comments_page_info,
+                    },
+                }
+            ]
+        )
+
+    @pytest.mark.parametrize(
+        "page_info",
+        [
+            {},  # hasNextPage absent entirely
+            {"hasNextPage": None},
+            {"hasNextPage": 0},  # falsy non-bool
+            {"hasNextPage": "false"},  # truthy non-bool
+        ],
+    )
+    def test_fails_closed_on_unknown_comment_page_state(self, page_info: Any) -> None:
+        client = _client_with(lambda _r: httpx.Response(200, json=self._payload(page_info)))
+        with pytest.raises(ReviewThreadsUnavailableError):
+            client.list_review_threads("o", "r", 7)
+
+    @pytest.mark.parametrize(
+        "page_info",
+        [{}, {"hasNextPage": None}, {"hasNextPage": 0}, {"hasNextPage": "false"}],
+    )
+    def test_non_strict_warns_on_unknown_comment_page_state(self, page_info: Any, caplog) -> None:
+        client = _client_with(lambda _r: httpx.Response(200, json=self._payload(page_info)))
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == {11}
+        assert any(
+            "hasNextPage" in r.getMessage() and "comments pageInfo" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_well_formed_single_page_is_silent(self, caplog) -> None:
+        """The check must not cry wolf on the ordinary case."""
+        client = _client_with(
+            lambda _r: httpx.Response(200, json=self._payload({"hasNextPage": False}))
+        )
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == {11}
+        assert not [r for r in caplog.records if "_iter_review_thread_nodes" in r.getMessage()]
+
+
+class TestReviewThreadPageCap:
+    """An endpoint that always claims another page must not loop forever.
+
+    ``MAX_REVIEW_THREADS_TRAVERSED`` bounds NODES; a page carrying empty
+    ``nodes`` with ``hasNextPage: true`` and a fresh cursor advances that
+    counter not at all, so only a PAGE bound terminates the walk.
+    """
+
+    @staticmethod
+    def _always_another_page() -> Callable[[httpx.Request], httpx.Response]:
+        calls = {"n": 0}
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                200,
+                json=_threads_response(
+                    has_next_page=True, end_cursor=f"c{calls['n']}", nodes=[]
+                ),
+            )
+
+        handler.calls = calls  # type: ignore[attr-defined]
+        return handler
+
+    def test_strict_fails_closed_at_the_page_cap(self) -> None:
+        handler = self._always_another_page()
+        client = _client_with(handler)
+        with pytest.raises(ReviewThreadsUnavailableError):
+            client.list_review_threads("o", "r", 7)
+        assert handler.calls["n"] == _MAX_REVIEW_THREAD_PAGES  # type: ignore[attr-defined]
+
+    def test_non_strict_warns_and_stops_at_the_page_cap(self, caplog) -> None:
+        handler = self._always_another_page()
+        client = _client_with(handler)
+        with caplog.at_level(logging.WARNING):
+            assert _resolved_ids(client) == set()
+        assert handler.calls["n"] == _MAX_REVIEW_THREAD_PAGES  # type: ignore[attr-defined]
+        assert any("_MAX_REVIEW_THREAD_PAGES" in r.getMessage() for r in caplog.records)
+
+
 class TestReviewThreadNodesStrictPageInfo:
     def test_fails_closed_when_page_info_lacks_has_next_page(self) -> None:
         """A ``pageInfo`` dict with no ``hasNextPage`` says NOTHING about
@@ -363,6 +466,21 @@ class TestWebHostForApiBaseUrl:
 
     def test_ghes_host_keeps_its_original_casing(self) -> None:
         assert web_host_for_api_base_url("https://GitHub.Acme.com/api/v3") == "GitHub.Acme.com"
+
+    @pytest.mark.parametrize(
+        "base_url",
+        ["https://api.github.com:443", "https://Api.GitHub.com:443/"],
+    )
+    def test_explicit_default_port_is_still_the_cloud_host(self, base_url: str) -> None:
+        """``netloc`` keeps the port, so a port-qualified cloud API URL would
+        otherwise be mistaken for a GHES instance and derive a clone URL
+        pointing at ``api.github.com``, which serves no git traffic."""
+        assert web_host_for_api_base_url(base_url) == "github.com"
+
+    def test_ghes_host_keeps_an_explicit_port(self) -> None:
+        """A GHES instance on a non-default port must keep it: the port is part
+        of its clone URL."""
+        assert web_host_for_api_base_url("https://ghe.acme.com:8443/api/v3") == "ghe.acme.com:8443"
 
 
 # ---------------------------------------------------------------------------

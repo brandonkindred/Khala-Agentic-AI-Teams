@@ -20,7 +20,6 @@ git subprocess calls.
 from __future__ import annotations
 
 import base64
-import fcntl
 import logging
 import os
 import shutil
@@ -29,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from shared.concurrency import flock_lock
 from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     git_identity_env,
@@ -420,26 +420,36 @@ def _locked_rmtree(target: Path) -> None:
     """Delete a resolved per-issue or per-PR checkout while holding the shared clone flock.
 
     Holds the SAME sibling ``flock`` that unified_api's ``_ensure_repo_clone``
-    takes around clone/fetch, keyed on the RESOLVED checkout path (not the raw
-    request string) so a symlinked request can't lock a different name and leave
-    the real checkout unguarded. Re-validates under the lock on the fixed
-    resolved ``target`` — never by re-resolving ``repo_path`` — so a symlink
-    swapped between the first resolve and lock acquisition cannot redirect the
-    delete. The lock file is released and closed but never unlinked (unlinking a
-    flock'd file lets a waiter keep the orphaned inode while a later run locks a
-    fresh one, so two runs would each think they hold "the" lock).
+    takes around clone/fetch, through the SAME primitive
+    (:func:`shared.concurrency.flock_lock`) rather than a second hand-rolled
+    copy of the open -> ``flock(LOCK_EX)`` -> ``flock(LOCK_UN)`` -> close
+    bookkeeping: the clone path and this cleanup path serialize against each
+    other on one lock file, so one implementation of that protocol serves both
+    and cannot drift out of step with the other. Keyed on the RESOLVED checkout
+    path (not the raw request string) so a symlinked request can't lock a
+    different name and leave the real checkout unguarded. Re-validates under the
+    lock on the fixed resolved ``target`` — never by re-resolving ``repo_path``
+    — so a symlink swapped between the first resolve and lock acquisition
+    cannot redirect the delete. ``flock_lock`` releases and closes but never
+    unlinks the lock file (unlinking a flock'd file lets a waiter keep the
+    orphaned inode while a later run locks a fresh one, so two runs would each
+    think they hold "the" lock), which is exactly what this caller needs.
 
     Preconditions:
         - ``target`` is the resolved, non-symlink per-issue or per-PR checkout
           returned by ``_ephemeral_checkout_target``. Every log line here names
           ``target`` — the path actually operated on — so one cleanup never
-          reports two different path spellings depending on its outcome.
+          reports two different path spellings depending on its outcome. The
+          lock-failure lines name the lock file as WELL, never instead.
     Postconditions:
         - Best-effort: ``target`` is removed only if the lock is acquired and it
           still resolves as a deletable per-issue or per-PR checkout under the lock. Never
           raises — any lock/rmtree failure is caught and logged so a successful
-          job is not turned into a failure. The success line is logged only after
-          ``rmtree`` returns.
+          job is not turned into a failure. ``flock_lock`` deliberately
+          propagates ``OSError`` from ``open``/``flock`` to its caller (different
+          callers want different handling); this one swallows it, mirroring
+          ``_ensure_repo_clone``'s own ``except OSError`` around the same
+          primitive. The success line is logged only after ``rmtree`` returns.
     """
     # clone_lock_path would only raise ValueError on an empty-name path, which a
     # validated per-issue target never is — but guard it anyway so a future change
@@ -450,60 +460,46 @@ def _locked_rmtree(target: Path) -> None:
         logger.warning("Skipping checkout cleanup; invalid lock path for %s: %s", target, e)
         return
     try:
-        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
+        with flock_lock(lock_path):
+            # Re-validate under the lock on the fixed resolved ``target`` (see the
+            # docstring): rmtree does not follow symlinks *inside* the tree, and the
+            # resolved root is never a symlink, so a symlink planted in the checkout
+            # can't redirect the delete. Guarded the same way
+            # ``_ephemeral_checkout_target`` guards its own call: the gate's
+            # docstring warns it can raise OSError on a filesystem read failure,
+            # which must not escape this "never raises" cleanup path.
+            try:
+                deletable = _is_deletable_ephemeral_checkout(target)
+            except OSError as e:
+                logger.warning("Skipping checkout cleanup; could not validate %s: %s", target, e)
+                return
+            if not deletable:
+                logger.warning(
+                    "Checkout no longer a deletable per-issue or per-PR path under lock: %s", target
+                )
+                return
+            try:
+                shutil.rmtree(target)
+                logger.info("Removed ephemeral per-issue or per-PR checkout at %s", target)
+            except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
+                # exc_info so a partial-rmtree failure (the non-atomic case) is
+                # diagnosable from the traceback, not just the message.
+                logger.warning(
+                    "Failed to remove ephemeral checkout at %s: %s", target, e, exc_info=True
+                )
     except OSError as e:
-        # Can't take the lock (e.g. parent vanished) — skip rather than delete
-        # unsynchronised and risk racing a concurrent clone. Best-effort.
-        logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
-        return
-    try:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-        except OSError as e:
-            # flock can fail (e.g. ENOLCK on some network filesystems). Cleanup must
-            # never turn a successful job into a failure, so skip rather than let it
-            # propagate — honouring the "never raises" contract.
-            logger.warning(
-                "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
-            )
-            return
-        # Re-validate under the lock on the fixed resolved ``target`` (see the
-        # docstring): rmtree does not follow symlinks *inside* the tree, and the
-        # resolved root is never a symlink, so a symlink planted in the checkout
-        # can't redirect the delete. Guarded the same way
-        # ``_ephemeral_checkout_target`` guards its own call: the gate's
-        # docstring warns it can raise OSError on a filesystem read failure,
-        # which must not escape this "never raises" cleanup path.
-        try:
-            deletable = _is_deletable_ephemeral_checkout(target)
-        except OSError as e:
-            logger.warning("Skipping checkout cleanup; could not validate %s: %s", target, e)
-            return
-        if not deletable:
-            logger.warning(
-                "Checkout no longer a deletable per-issue or per-PR path under lock: %s", target
-            )
-            return
-        try:
-            shutil.rmtree(target)
-            logger.info("Removed ephemeral per-issue or per-PR checkout at %s", target)
-        except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
-            # exc_info so a partial-rmtree failure (the non-atomic case) is
-            # diagnosable from the traceback, not just the message.
-            logger.warning(
-                "Failed to remove ephemeral checkout at %s: %s", target, e, exc_info=True
-            )
-    finally:
-        # Release and close, but do NOT unlink the lock file (see the docstring).
-        # Both are wrapped so a degenerate flock/close can't break "never raises".
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            lock_file.close()
-        except OSError:
-            pass
+        # The lock could not be opened or taken (parent vanished, ENOLCK on some
+        # network filesystems, ...). Skip rather than delete unsynchronised and
+        # risk racing a concurrent clone, and never let it propagate — cleanup
+        # must not turn a successful job into a failure. Names ``target`` first
+        # so an operator grepping the checkout path finds this skip too, then
+        # the lock file that actually failed.
+        logger.warning(
+            "Skipping checkout cleanup for %s; could not acquire clone lock %s: %s",
+            target,
+            lock_path,
+            e,
+        )
 
 
 def _cleanup_issue_checkout(repo_path: str) -> None:
