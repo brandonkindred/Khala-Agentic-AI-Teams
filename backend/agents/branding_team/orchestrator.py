@@ -631,10 +631,14 @@ class BrandingTeamOrchestrator:
               be ``None``. When ``_use_monolithic`` is ``True``, ``phase_cache``
               is ignored.
             - ``should_continue``, when not ``None``, is a zero-argument
-              callable returning ``bool``. It may be invoked zero or more
-              times over the course of the run and must be cheap and
-              side-effect-free to call (no I/O, no mutation of caller state
-              beyond a simple flag read).
+              callable returning ``bool``. It is invoked at most once per
+              phase iteration -- so at most ``len(PHASE_ORDER)`` times over a
+              whole run, each against a phase that is itself a multi-agent
+              LLM fan-out -- and must be side-effect-free and non-raising: a
+              bounded read (a flag, or a single status lookup such as a
+              job-store cancellation check) is fine, but it must not mutate
+              caller or orchestrator state and must not raise, since an
+              exception from it propagates out of ``run``.
 
         Postconditions:
             - Returns a fully populated ``TeamOutput`` (unless ``should_continue``
@@ -692,23 +696,25 @@ class BrandingTeamOrchestrator:
               ``should_continue`` is accepted but never consulted, matching
               that branch's existing testing/comparison-only,
               no-production-caller status.
-            - No production caller passes ``should_continue`` yet: the thread
-              path (``api/background.py``), the chat path
-              (``api/conversation.py``), and the Temporal path (which calls
-              ``run_single_phase`` directly and never this method) are all
-              unchanged by this parameter's addition -- wiring a real
-              cancellation source into any of them is deliberately deferred
-              to a follow-up story. A ``should_continue``-triggered stop
-              does **not** short-circuit compliance checks, integrations,
-              ``_assemble_team_output``, or ``store.append_brand_version``
-              below -- it only changes which phases ran, exactly like a
-              smaller ``target_phase`` would, and the resulting
-              (possibly-truncated) output is persisted the same way any
-              other ``run()`` output is. A future caller that wires this to
-              a real cancellation signal (e.g. a job-store cancel flag) owns
-              deciding whether and how to gate persistence on that outcome;
-              this method does not infer cancellation intent from a
-              truncated result, nor treat it specially.
+            - The thread path (``api/background.py``) is the one production
+              caller that passes ``should_continue``, wiring it to the
+              job-store cancellation flag so a cancel requested mid-run stops
+              the phase loop. The chat path (``api/conversation.py``) and the
+              Temporal path (which calls ``run_single_phase`` directly and
+              never this method) do not pass it and are unaffected -- Temporal
+              runs its own equivalent between-phase cancel check. A
+              ``should_continue``-triggered stop does **not** short-circuit
+              compliance checks, integrations, ``_assemble_team_output``, or
+              ``store.append_brand_version`` below -- it only changes which
+              phases ran, exactly like a smaller ``target_phase`` would, and
+              the resulting (possibly-truncated) output is persisted the same
+              way any other ``run()`` output is. Whether a truncated result
+              should be persisted at all is the wiring caller's decision, not
+              this method's: ``run`` does not infer cancellation intent from a
+              truncated result, nor treat it specially. The thread-path caller
+              does not currently gate persistence -- a cancel-truncated output
+              is still appended, a deliberate residual tracked separately from
+              the cancellation gate itself.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
@@ -807,9 +813,10 @@ class BrandingTeamOrchestrator:
               by ``run`` from ``target_phase``).
             - ``cache`` is a ``PhaseOutputCache`` instance (possibly empty).
             - ``should_continue``, when not ``None``, is a zero-argument
-              callable returning ``bool``. It may be invoked zero or more
-              times over the course of the call and must be cheap and
-              side-effect-free to call.
+              callable returning ``bool``. It is invoked at most once per
+              phase iteration and must be side-effect-free and non-raising; a
+              bounded read (a flag, or a single status lookup such as a
+              job-store cancellation check) is within contract.
         Postconditions:
             - Returns exactly ``len(PHASE_ORDER)`` ``(output, degraded)``
               pairs in ``PHASE_ORDER`` order, matching the shape and contract
