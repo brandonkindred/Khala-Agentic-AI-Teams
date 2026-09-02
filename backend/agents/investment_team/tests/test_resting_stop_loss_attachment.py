@@ -22,6 +22,9 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+from typing import Sequence
+
 import pytest
 
 from investment_team.execution.bar_safety import BarSafetyAssertion
@@ -33,6 +36,7 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
 from investment_team.strategy_lab.executor.rule_compiler import PositionState, _stop_loss_level
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
+    ExitRule,
     FixedFractionSizing,
     Predicate,
     StopLossRule,
@@ -178,11 +182,25 @@ def test_resolved_attachment_has_no_limit_or_trail_offset() -> None:
     assert attachment.trail_offset is None
 
 
+def test_resolved_attachment_carries_entry_price_pct_for_reanchoring() -> None:
+    """``entry_price_pct`` is set to the rule's ``pct`` so materialization can
+    re-derive ``stop_price`` from the entry's actual fill price rather than
+    trusting this ``ref_price``-anchored preview verbatim (see
+    ``StopAttachment.entry_price_pct`` and the gap-reanchoring end-to-end test)."""
+    attachment = resolve_resting_stop_loss_attachment(
+        StopLossRule(pct=0.03, basis="entry_price"), OrderSide.LONG, 100.0
+    )
+    assert attachment.entry_price_pct == pytest.approx(0.03)
+
+
 # ---------------------------------------------------------------------------
 # _EngineEntryDispatcher: wiring
 # ---------------------------------------------------------------------------
 
 
+# Dispatcher-wiring bars: only ``close`` (and an implied symbol) vary across
+# call sites here — distinct from ``_bar`` below, which the end-to-end section
+# uses for explicit per-bar OHLC control (gaps, wicks) across a bar sequence.
 def _make_bar(symbol="AAA", close=100.0, timestamp="2024-01-10") -> Bar:
     return Bar(
         symbol=symbol,
@@ -201,11 +219,16 @@ def _make_portfolio(capital=10_000_000.0) -> Portfolio:
 
 
 def _build_view(closes: list[float]) -> StreamingHistoryView:
+    # Real date arithmetic (not a zero-padded day-of-month string) so this
+    # stays valid for a ``closes`` list longer than 31 entries, unlike a
+    # naive ``f"2024-01-{i + 1:02d}"`` which would emit an impossible date
+    # such as "2024-01-32".
+    start = date(2024, 1, 1)
     view = StreamingHistoryView()
     for i, c in enumerate(closes):
         view.append(
             BarRecord(
-                timestamp=f"2024-01-{i + 1:02d}",
+                timestamp=(start + timedelta(days=i)).isoformat(),
                 open=c,
                 high=c + 1,
                 low=c - 1,
@@ -216,7 +239,7 @@ def _build_view(closes: list[float]) -> StreamingHistoryView:
     return view
 
 
-def _emit(exit_rules: list, side: str = "long", close: float = 100.0) -> OrderRequest:
+def _emit(exit_rules: Sequence[ExitRule], side: str = "long", close: float = 100.0) -> OrderRequest:
     rhs = 90.0 if side == "long" else 110.0
     op = ">" if side == "long" else "<"
     rules = [EntryRule(side=side, when=Predicate(lhs="bar.close", op=op, rhs=rhs))]
@@ -321,7 +344,15 @@ def test_dispatcher_does_not_attach_short_safety_auto_stop_shape() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _bar(ts, *, open_price=100.0, high=None, low=None, close=None, volume=1_000_000.0) -> Bar:
+def _bar(
+    ts: str,
+    *,
+    open_price: float = 100.0,
+    high: float | None = None,
+    low: float | None = None,
+    close: float | None = None,
+    volume: float = 1_000_000.0,
+) -> Bar:
     return Bar(
         symbol="AAA",
         timestamp=ts,
@@ -334,7 +365,7 @@ def _bar(ts, *, open_price=100.0, high=None, low=None, close=None, volume=1_000_
     )
 
 
-def _make_simulator():
+def _make_simulator() -> tuple[FillSimulator, OrderBook, Portfolio]:
     portfolio = Portfolio(initial_capital=10_000_000.0)
     order_book = OrderBook()
     sim = FillSimulator(
@@ -363,6 +394,7 @@ def test_end_to_end_resting_stop_only_materializes_after_entry_fill() -> None:
 
     # Bar 2: entry fills at the open; the resting STOP child materializes at 95.
     sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    assert "AAA" in portfolio.positions  # entry filled — the child now rests against it
     children = order_book.children_of(parent.order_id)
     assert len(children) == 1
     assert children[0].request.order_type == OrderType.STOP
@@ -373,3 +405,29 @@ def test_end_to_end_resting_stop_only_materializes_after_entry_fill() -> None:
     assert len(outcome.closed_trades) == 1
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
+
+
+def test_end_to_end_resting_stop_reanchors_to_actual_fill_price_on_gap() -> None:
+    """The resting child's ``stop_price`` is derived from the entry's ACTUAL fill
+    price, not the stale signal-bar-close preview the dispatcher resolved it
+    from — otherwise, on a gap (``fill_price != signal_close``), this resting
+    order and the still-independently-active bar-close evaluator (which anchors
+    to the real fill price via ``PositionState.entry_price``) would disagree
+    about where the stop sits. Signal close is 100 (preview stop 97 at pct=0.03),
+    but the entry actually gaps down and fills at 90 on bar 2 — the materialized
+    child must sit at 90 * (1 - 0.03) = 87.3, not the stale 97 (which would sit
+    ABOVE the fill price and could liquidate the position almost immediately)."""
+    sim, order_book, portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.03, basis="entry_price")], side="long", close=100.0)
+    [preview] = req.attached_exits
+    assert preview.stop_price == pytest.approx(97.0)  # the stale, signal-close-anchored preview
+    parent = order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+
+    # Bar 2: entry gaps down and fills at the (lower) open, not the signal close.
+    sim.process_bar(_bar("2024-01-02", open_price=90.0))
+    assert "AAA" in portfolio.positions
+    assert portfolio.positions["AAA"].entry_price == pytest.approx(90.0)
+    [child] = order_book.children_of(parent.order_id)
+    assert child.request.stop_price == pytest.approx(87.3)

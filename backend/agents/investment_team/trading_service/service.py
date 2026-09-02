@@ -1897,11 +1897,18 @@ def resolve_resting_stop_loss_attachment(
     a finite number ``> 0``; ``side`` is the entry's ``OrderSide``.
     Postconditions: returns a :class:`StopAttachment` whose ``stop_price``
     is finite, strictly positive, and strictly on the protective side of
-    ``ref_price``.
+    ``ref_price`` (a preview only — see ``entry_price_pct`` below), and
+    whose ``entry_price_pct == rule.pct`` so materialization re-anchors
+    ``stop_price`` to the entry's actual fill price rather than trusting
+    this ``ref_price``-anchored preview verbatim (``ref_price`` is the
+    signal bar's close, which can gap away from where the entry actually
+    fills — see :class:`StopAttachment`'s ``entry_price_pct`` field for why
+    that matters here specifically).
     """
     attachments = resolve_exit_leg_attachments(_stop_loss_rule_to_leg_specs(rule), side, ref_price)
     (attachment,) = attachments
     assert isinstance(attachment, StopAttachment)
+    attachment.entry_price_pct = rule.pct
     return attachment
 
 
@@ -1994,6 +2001,19 @@ class _EngineEntryDispatcher:
         # limit-style stop uses) is reserved for a later step of this same
         # migration, once the fill-semantics verification step has settled
         # exactly when the resting child is and isn't in flight.
+        #
+        # This redundancy is safe only because the two paths are also kept
+        # in PRICE agreement: the resting child's ``stop_price`` is resolved
+        # here at entry-EMISSION time off the signal bar's close (a preview
+        # that can gap away from where the entry actually fills), but
+        # ``FillSimulator._materialize_stop_child`` re-anchors it to the
+        # entry's real fill price before submitting the child (see
+        # ``StopAttachment.entry_price_pct``) — the same
+        # ``entry_price * (1 ∓ pct)`` formula ``rule_compiler._stop_loss_level``
+        # uses for the bar-close evaluator. Without that re-anchor, a gap
+        # entry would leave the two paths disagreeing about the stop level
+        # (not just redundantly re-evaluating it), which is a materially
+        # worse bug than the redundancy this comment otherwise accepts.
         self._resting_stop_loss: Optional[StopLossRule] = next(
             (r for r in self.exit_rules if _is_resting_stop_loss(r)), None
         )

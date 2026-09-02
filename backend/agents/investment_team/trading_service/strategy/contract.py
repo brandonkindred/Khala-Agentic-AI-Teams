@@ -146,6 +146,23 @@ class StopAttachment(BaseModel):
     limit_offset: Optional[float] = None
     limit_offset_kind: Literal["abs", "bps"] = "abs"
     client_order_id: Optional[str] = None
+    # When set, materialization re-derives ``stop_price`` from the parent
+    # entry's ACTUAL fill price (``entry_fill_price * (1 ∓ entry_price_pct)``,
+    # sign per the parent's side) instead of trusting this attachment's
+    # ``stop_price`` preview verbatim. The preview is resolved at
+    # entry-EMISSION time off the signal bar's close (see
+    # ``resolve_exit_leg_attachments``'s ``ref_price``), which is only a
+    # forecast of where the entry will actually fill — on a gap
+    # (``fill_price != signal_close``) the preview and the true
+    # entry-anchored level diverge. This matters specifically for a leg
+    # whose trigger geometry is *also* independently recomputed elsewhere
+    # from the real fill price (e.g. the bar-close stop-loss evaluator's
+    # ``rule_compiler._stop_loss_level``, which the entry_price/market
+    # resting-stop-loss migration leaves active alongside this resting
+    # order) — without re-anchoring here, the two would disagree about
+    # where the stop sits. Unused (``None``) by every other leg kind/source,
+    # including bracket legs, which have no such competing live evaluator.
+    entry_price_pct: Optional[float] = None
 
 
 class LimitAttachment(BaseModel):
@@ -311,7 +328,12 @@ class OrderRequest(BaseModel):
     # (``basis="entry_price"``, ``style="market"``, ``0 < pct < 1.0`` — the
     # exact predicate is the module-level ``_is_resting_stop_loss``, not a
     # method of the dispatcher); other rule kinds/bases are not yet migrated
-    # onto this path and remain bar-close-only.
+    # onto this path and remain bar-close-only. The migrated rule kind is
+    # NOT resting-only, though: the bar-close evaluator still independently
+    # evaluates it too until a tracked follow-up adds the skip
+    # ``OcoBracketRule`` already gets at that chokepoint — see
+    # ``StopLossRule.style``'s docstring for the current, redundant-but-
+    # consistent (see ``StopAttachment.entry_price_pct``) dual-action state.
     attached_exits: List[Union[StopAttachment, LimitAttachment]] = Field(default_factory=list)
     parent_order_id: Optional[str] = None
     oco_group_id: Optional[str] = None

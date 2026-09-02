@@ -1656,12 +1656,29 @@ class FillSimulator:
 
         Preconditions: ``po.request is req``; ``entry_fill_price`` is the
         parent's actual fill price (or ``None`` when unknown, e.g. the
-        abandon path with no open position), used only to pre-seed a
-        trailing leg's ratchet.
+        abandon path with no open position), used to pre-seed a trailing
+        leg's ratchet and, when ``sl.entry_price_pct`` is set, to re-anchor
+        the resting child's ``stop_price`` (see :class:`StopAttachment`).
         Postconditions: exactly one resting STOP/STOP_LIMIT/TRAILING_STOP
         child is submitted to the order book, tagged with ``oco_group_id``
         and ``parent_order_id=po.order_id``.
         """
+        # ``sl.entry_price_pct`` set means the preview ``stop_price`` (resolved
+        # at entry-emission time off the signal bar's close) may have gapped
+        # away from where the entry actually filled — re-derive it from the
+        # real fill price using the same entry-anchored formula
+        # ``rule_compiler._stop_loss_level`` uses, so this resting child and
+        # the (still independently active) bar-close evaluator can never
+        # disagree about where the stop sits. Falls back to the preview when
+        # ``entry_fill_price`` is unknown (the abandon path) rather than
+        # raising, since a preview-anchored stop still protects the position.
+        resolved_stop_price = sl.stop_price
+        if sl.entry_price_pct is not None and entry_fill_price is not None:
+            resolved_stop_price = (
+                entry_fill_price * (1.0 - sl.entry_price_pct)
+                if req.side == OrderSide.LONG
+                else entry_fill_price * (1.0 + sl.entry_price_pct)
+            )
         is_trailing = sl.trail_offset is not None
         # ``trail_offset`` and ``limit_offset`` are mutually exclusive
         # (enforced by the parent's ``validate_prices``), so at most one of
@@ -1672,14 +1689,14 @@ class FillSimulator:
             if sl.limit_offset_kind == "abs":
                 limit_off = sl.limit_offset
             else:  # "bps"
-                limit_off = apply_bps_offset(sl.stop_price, sl.limit_offset)
+                limit_off = apply_bps_offset(resolved_stop_price, sl.limit_offset)
             # Limit sits on the protective side of the stop: below it for a
             # SHORT child (sell-stop-limit closing a long parent), above it
             # for a LONG child (buy-stop-limit closing a short parent).
             # Shared with the DSL structured-exit path via the single
             # sign-convention helper.
             sl_limit_price = protective_limit_price(
-                sl.stop_price, limit_off, closing_long=(req.side == OrderSide.LONG)
+                resolved_stop_price, limit_off, closing_long=(req.side == OrderSide.LONG)
             )
         if is_limit:
             sl_order_type = OrderType.STOP_LIMIT
@@ -1695,7 +1712,7 @@ class FillSimulator:
             side=child_side,
             qty=filled_qty,
             order_type=sl_order_type,
-            stop_price=sl.stop_price,
+            stop_price=resolved_stop_price,
             limit_price=sl_limit_price,
             trail_offset=sl.trail_offset,
             trail_offset_kind=sl.trail_offset_kind,
