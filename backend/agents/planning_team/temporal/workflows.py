@@ -23,8 +23,6 @@ from typing import Any, Dict, Optional
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from shared.hitl.temporal_signal import HitlAnswerSignalMixin
-
 with workflow.unsafe.imports_passed_through():
     from planning_team.temporal import activities as _activities
     from planning_team.temporal.constants import (
@@ -32,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         SINGLE_ATTEMPT,
         TASK_QUEUE,
     )
+    from shared.hitl.temporal_signal import HitlAnswerSignalMixin
 
 # --- Per-phase timeouts -----------------------------------------------------
 #: Deterministic/cheap phases (intake, synthesis, finalize).

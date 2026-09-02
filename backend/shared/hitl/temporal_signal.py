@@ -6,8 +6,18 @@ reject/accept state machine backing it, as a composable mixin any
 ``@workflow.defn`` class can inherit. This is the signal name and payload
 envelope the coding team's ``CodingTeamWorkflow`` already uses in production
 (``software_engineering_team/temporal/coding_team_workflow.py``), extracted
-here so a second team (Planning) can register the identical contract without
-copying the state machine into a second bespoke implementation.
+here so ``PlanningWorkflow`` can register the identical contract without a
+third bespoke copy of its own.
+
+Not yet a full convergence: ``CodingTeamWorkflow`` still carries its own
+inline copy of this same state machine, and
+``planning_team.temporal.answer_signal.PlanningAnswerSignalMixin`` (signal
+name ``submit_planning_answers``, predating this contract, still wired into
+``RunTeamWorkflowV2``) remains live and untouched. Migrating
+``CodingTeamWorkflow`` onto this mixin (with a ``workflow.patched`` gate
+protecting its pre-existing history) and reconciling
+``PlanningAnswerSignalMixin`` are deliberately deferred, not implicitly
+completed by this module's existence — both are tracked as follow-up work.
 
 Deliberately excludes any ``wait_condition``-based wait/resume logic — this
 module only registers and validates; a workflow durably pausing on
@@ -61,21 +71,26 @@ def _validate_answer_batch(raw: Any) -> Optional[List[Dict[str, Any]]]:
     Preconditions:
         - None — ``raw`` is untrusted, signal-delivered data of arbitrary shape.
     Postconditions:
-        - Returns ``None`` (never raises) if ``raw`` is not a list, or any
-          element is not a dict, or any element fails ``AnswerSubmission``
-          validation — the whole batch is rejected on a single bad entry
-          rather than silently dropping just that entry, so a resume can
-          never proceed with a partially-validated answer set.
-        - Otherwise returns a new list of plain dicts, one per input element,
-          each normalized through ``AnswerSubmission`` (so every dict carries
-          the schema's full field set, e.g. an omitted ``other_text``
-          becomes an explicit ``None``).
+        - Returns ``None`` (never raises, for any input) if ``raw`` is not a
+          non-empty list, or any element is not a dict with all-``str`` keys,
+          or any element fails ``AnswerSubmission`` validation — the whole
+          batch is rejected on a single bad entry rather than silently
+          dropping just that entry, so a resume can never proceed with a
+          partially-validated answer set. An empty list is rejected too:
+          there is no content to apply, and accepting it would let a caller
+          mistake "submitted, vacuously" for "not yet submitted" if it ever
+          tests ``_submitted_answers`` for truthiness instead of ``is not
+          None``.
+        - Otherwise returns a new, non-empty list of plain dicts, one per
+          input element, each normalized through ``AnswerSubmission`` (so
+          every dict carries the schema's full field set, e.g. an omitted
+          ``other_text`` becomes an explicit ``None``).
     """
-    if not isinstance(raw, list):
+    if not isinstance(raw, list) or not raw:
         return None
     validated: List[Dict[str, Any]] = []
     for item in raw:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not all(isinstance(key, str) for key in item):
             return None
         try:
             answer = AnswerSubmission(**item)
@@ -105,6 +120,24 @@ class HitlAnswerSignalMixin:
           ``MAX_BUFFERED_SIGNALS`` distinct tokens at once — the oldest entry
           (by arrival order) is evicted before a new one is buffered past the
           cap, so durable workflow state cannot grow without bound.
+
+    Requirements on adopters:
+        - A workflow class using this mixin must ensure
+          ``HitlAnswerSignalMixin.__init__`` runs — define no ``__init__`` of
+          its own, or chain ``super().__init__()`` if it does — so the buffer
+          state attributes exist before any signal is delivered. Skipping
+          this makes the first delivered signal raise ``AttributeError``
+          inside the handler, the permanent-strand failure mode this module
+          exists to prevent.
+        - A step-2 consumer waiting on this state (e.g. a
+          ``workflow.wait_condition`` predicate) MUST test
+          ``self._submitted_answers is not None``, never truthiness: that is
+          the only reliable "has a signal landed" test. It happens to be
+          moot today only because ``submit_answers`` never stores an empty
+          list (an empty ``"answers"`` batch is rejected as malformed, see
+          :func:`_validate_answer_batch`) — but ``is not None`` remains the
+          contractually correct test, not an accident of today's validation
+          choice.
     """
 
     def __init__(self) -> None:

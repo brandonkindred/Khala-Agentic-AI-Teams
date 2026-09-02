@@ -75,6 +75,12 @@ class AnswerSubmission(BaseModel):
         None, description="ID of the selected option, or 'other' if custom text is provided."
     )
     other_text: Optional[str] = Field(None, description="Custom text when 'other' is selected.")
+    selected_option_ids: List[str] = Field(
+        default_factory=list,
+        description="Selected option IDs for a question with allow_multiple=True. Populated "
+        "instead of (not in addition to) selected_option_id for that question; empty for a "
+        "single-select answer.",
+    )
 
 
 class SubmitAnswersRequest(BaseModel):

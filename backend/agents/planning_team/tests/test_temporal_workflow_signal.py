@@ -42,16 +42,23 @@ def test_planning_workflow_submit_answers_accepts_matching_signal() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [{"question_id": "q1"}]})
 
     assert wf._submitted_answers == [
-        {"question_id": "q1", "selected_option_id": None, "other_text": None}
+        {
+            "question_id": "q1",
+            "selected_option_id": None,
+            "other_text": None,
+            "selected_option_ids": [],
+        }
     ]
 
 
 def test_planning_workflow_submit_answers_rejects_out_of_order_signal() -> None:
     """A signal for a pause that is not the one currently pending must not be
-    applied to it."""
+    applied to it, nor buffered for later -- a mismatched token while a pause
+    is active has nothing to buffer against."""
     wf = PlanningWorkflow()
     wf._active_resume_token = "current-token"
 
     wf.submit_answers({"resume_token": "stale-token", "answers": [{"question_id": "q1"}]})
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}

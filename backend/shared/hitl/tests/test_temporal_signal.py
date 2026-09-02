@@ -22,7 +22,12 @@ class _Workflow(HitlAnswerSignalMixin):
 
 
 def _answer(question_id: str = "q1", **overrides) -> dict:
-    payload = {"question_id": question_id, "selected_option_id": None, "other_text": None}
+    payload = {
+        "question_id": question_id,
+        "selected_option_id": None,
+        "other_text": None,
+        "selected_option_ids": [],
+    }
     payload.update(overrides)
     return payload
 
@@ -47,7 +52,7 @@ def test_submit_answers_ignores_non_dict_payload() -> None:
     wf = _Workflow()
     wf._active_resume_token = "tok-1"
 
-    wf.submit_answers("not-a-dict")  # type: ignore[arg-type]
+    wf.submit_answers("not-a-dict")
 
     assert wf._submitted_answers is None
 
@@ -92,6 +97,30 @@ def test_submit_answers_rejects_non_dict_answer_entry() -> None:
     wf._active_resume_token = "tok-1"
 
     wf.submit_answers({"resume_token": "tok-1", "answers": ["not-a-dict"]})
+
+    assert wf._submitted_answers is None
+
+
+def test_submit_answers_rejects_answer_entry_with_non_string_keys() -> None:
+    """A dict answer entry with a non-str key would raise TypeError from
+    AnswerSubmission(**item) if unpacked directly -- must be rejected before
+    that, not let the exception escape the handler."""
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [{1: "x", "question_id": "q1"}]})
+
+    assert wf._submitted_answers is None
+
+
+def test_submit_answers_rejects_empty_answers_list() -> None:
+    """An empty batch has no content to apply -- accepting it would let a
+    caller mistake 'submitted, vacuously' for 'not yet submitted' if it ever
+    tests _submitted_answers for truthiness."""
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": []})
 
     assert wf._submitted_answers is None
 

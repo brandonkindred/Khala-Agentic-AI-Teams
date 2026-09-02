@@ -4,6 +4,17 @@ These pure-function branches (devops error parsers, model coercions, the
 unbudgeted repo scanner, env/truncation helpers) were previously measured under
 the SE team gate; after the extraction they are gated by the shared-infra CI
 job, which these tests keep above the 90% floor.
+
+``shared.hitl.temporal_signal`` (below) is a different flavor of gap: it was
+extracted straight into ``shared/hitl/`` rather than migrated out of SE, and
+its only consumer today is ``planning_team.temporal.workflows.PlanningWorkflow``
+-- Planning has no dedicated CI test job of its own (its ``tests/`` directory
+isn't in this workflow's per-team matrix), so nothing else in CI exercises it.
+These tests keep it above the 90% floor until either Planning gains its own
+CI job or ``CodingTeamWorkflow`` migrates onto this shared primitive (see
+``shared/hitl/temporal_signal.py``'s module docstring). The behavioral test
+suite of record lives in ``shared/hitl/tests/test_temporal_signal.py``; this
+section only needs to hit the branches that suite leaves uncovered here.
 """
 
 from __future__ import annotations
@@ -21,6 +32,7 @@ from shared.command_runner.error_parsing import (
     parse_devops_failure,
 )
 from shared.dev_models import ToolRecommendation, model_to_dict
+from shared.hitl.temporal_signal import HitlAnswerSignalMixin
 from shared.repo_context.repo_utils import (
     int_env,
     read_repo_code,
@@ -221,3 +233,101 @@ def test_int_env_parses_and_clamps(monkeypatch) -> None:
     assert int_env("SHARED_INFRA_TEST_INT", 7, min_val=1) == 1
     monkeypatch.setenv("SHARED_INFRA_TEST_INT", "garbage")
     assert int_env("SHARED_INFRA_TEST_INT", 7) == 7
+
+
+# ---------------------------------------------------------------------------
+# shared.hitl.temporal_signal
+# ---------------------------------------------------------------------------
+
+
+class _Workflow(HitlAnswerSignalMixin):
+    """Minimal stand-in for a real ``@workflow.defn`` class mixing this in."""
+
+
+def _answer(question_id: str = "q1") -> dict:
+    return {
+        "question_id": question_id,
+        "selected_option_id": None,
+        "other_text": None,
+        "selected_option_ids": [],
+    }
+
+
+def test_hitl_signal_mixin_init_state() -> None:
+    wf = _Workflow()
+    assert wf._active_resume_token is None
+    assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
+
+
+def test_hitl_signal_mixin_rejects_malformed_answer_batch() -> None:
+    """One malformed answer entry rejects the whole batch (fails closed) rather
+    than resuming with partial content."""
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": ["not-a-dict"]})
+    assert wf._submitted_answers is None
+
+    wf.submit_answers(
+        {
+            "resume_token": "tok-1",
+            "answers": [_answer("q1"), {"selected_option_id": "no-question-id"}],
+        }
+    )
+    assert wf._submitted_answers is None
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": []})
+    assert wf._submitted_answers is None
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [{1: "x", "question_id": "q1"}]})
+    assert wf._submitted_answers is None
+
+
+def test_hitl_signal_mixin_accepts_matching_signal() -> None:
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+
+    assert wf._submitted_answers == [_answer("q1")]
+
+
+def test_hitl_signal_mixin_ignores_non_dict_payload() -> None:
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers("not-a-dict")
+
+    assert wf._submitted_answers is None
+
+
+def test_hitl_signal_mixin_ignores_second_submission_for_same_token() -> None:
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+    first = [_answer("q1")]
+    wf.submit_answers({"resume_token": "tok-1", "answers": first})
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q2")]})
+
+    assert wf._submitted_answers == first
+
+
+def test_hitl_signal_mixin_rejects_out_of_order_signal() -> None:
+    wf = _Workflow()
+    wf._active_resume_token = "current-token"
+
+    wf.submit_answers({"resume_token": "stale-token", "answers": [_answer("q1")]})
+
+    assert wf._submitted_answers is None
+
+
+def test_hitl_signal_mixin_buffers_and_evicts_past_cap() -> None:
+    from shared.hitl.temporal_signal import MAX_BUFFERED_SIGNALS
+
+    wf = _Workflow()
+    for i in range(MAX_BUFFERED_SIGNALS + 1):
+        wf.submit_answers({"resume_token": f"tok-{i}", "answers": [_answer("q1")]})
+
+    assert len(wf._buffered_signals) == MAX_BUFFERED_SIGNALS
+    assert "tok-0" not in wf._buffered_signals
