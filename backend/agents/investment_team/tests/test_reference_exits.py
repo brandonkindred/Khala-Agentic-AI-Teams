@@ -779,24 +779,39 @@ def test_entry_bar_range_is_the_one_intended_difference_from_the_gate_replay():
 
 
 def test_module_imports_no_forbidden_engine_module():
-    """The design doc's module boundary, asserted rather than asserted-in-prose:
-    importing this module must not drag in the live engine."""
+    """The design doc's module boundary, asserted rather than left to prose:
+    importing this module must not drag in the live engine.
+
+    Run in a subprocess because the boundary is about what the IMPORT does — in
+    this process the forbidden modules are already loaded by other tests, so
+    checking ``sys.modules`` here would prove nothing.
+
+    The module name and ``sys.path`` are taken from the running interpreter
+    rather than hardcoded: the package root differs between a run rooted at
+    ``backend/`` (``agents.investment_team...``) and one rooted at
+    ``backend/agents/`` (``investment_team...``), and CI uses the latter.
+    Forbidden modules are matched by suffix for the same reason.
+    """
     import subprocess
     import sys
 
-    forbidden = [
-        "agents.investment_team.trading_service.service",
-        "agents.investment_team.trading_service.engine.fill_simulator",
-        "agents.investment_team.trading_service.engine.order_book",
-        "agents.investment_team.trading_service.engine.execution_model",
-        "agents.investment_team.trading_service.engine.portfolio",
-    ]
+    from investment_team.strategy_lab.executor import reference_exits
+
     code = (
-        "import sys;"
-        "import agents.investment_team.strategy_lab.executor.reference_exits;"
-        f"print([m for m in {forbidden!r} if m in sys.modules])"
+        "import sys\n"
+        f"sys.path[:] = {list(sys.path)!r}\n"
+        f"import {reference_exits.__name__}\n"
+        "hits = [\n"
+        "    m\n"
+        "    for m in sys.modules\n"
+        "    if m.endswith('trading_service.service')\n"
+        "    or m.endswith('trading_service.engine')\n"
+        "    or '.trading_service.engine.' in m\n"
+        "]\n"
+        "print(sorted(hits))\n"
     )
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "[]", proc.stdout
 
 
