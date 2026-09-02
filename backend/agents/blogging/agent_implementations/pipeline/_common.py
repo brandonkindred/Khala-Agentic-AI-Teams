@@ -1232,7 +1232,7 @@ def _fill_story_placeholders(
     except Exception as e:
         if _is_external_cancellation(e):
             raise
-        logger.warning("Post-draft revision failed (keeping original): %s", e)
+        logger.warning("Post-draft revision failed (keeping original): %s", e, exc_info=True)
         return WriterOutput(draft=draft_text), elicited_stories_text
 
 
