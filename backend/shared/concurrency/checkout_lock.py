@@ -58,6 +58,13 @@ async def held_checkout_lock(
     Preconditions:
         - ``loop`` is the running event loop.
         - ``lock_path``'s parent may or may not exist yet.
+        - ``owner``/``repo`` name the GitHub repository this checkout belongs
+          to. They are diagnostic only -- they never take part in the lock
+          key (``lock_path`` alone identifies the lock) -- and are included in
+          the acquisition-failure warning below so an operator triaging a
+          degraded pinned checkout can tell WHICH repository's run went
+          unserialized from the log line alone, without correlating the
+          opaque lock path back to a repo.
 
     Postconditions:
         - When acquisition (mkdir or flock) fails with an ``OSError`` and
@@ -68,8 +75,9 @@ async def held_checkout_lock(
         - When acquisition fails with an ``OSError`` and ``platform_owned``
           is False (an operator-pinned checkout), the failure degrades to no
           additional locking: a warning is logged (tagged with
-          ``log_prefix``) and the block's body runs WITHOUT the lock held,
-          matching the pre-existing best-effort-for-pinned-paths contract.
+          ``log_prefix``, and naming ``owner``/``repo``) and the block's body
+          runs WITHOUT the lock held, matching the pre-existing
+          best-effort-for-pinned-paths contract.
         - Once acquired, the lock is guaranteed released by the time this
           context manager exits -- including when the awaiting coroutine is
           cancelled while the ``run_in_executor`` acquisition is still in
@@ -117,9 +125,11 @@ async def held_checkout_lock(
             if platform_owned:
                 raise
             logger.warning(
-                "%s: could not acquire serialization lock for pinned checkout %s: %s",
+                "%s: could not acquire serialization lock for pinned checkout %s (%s/%s); proceeding without it: %s",
                 log_prefix,
                 lock_path,
+                owner,
+                repo,
                 e,
             )
         yield

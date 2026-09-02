@@ -206,6 +206,19 @@ def execute_workflow_sync(
           cancel and the reattach waiter starting is possible during
           teardown, but the abandoned wait is reliably torn down rather than
           left running indefinitely.
+        - Edge case of that cancellation: if the initial wait window elapses
+          while ``client.execute_workflow`` is still in its START phase (the
+          StartWorkflowExecution call has not yet been accepted by the
+          server), ``future.cancel()`` can abort the start itself, so no
+          workflow with ``workflow_id`` may ever exist. The reattach below
+          then attaches to a workflow that was never started and
+          ``handle.result()`` raises ``temporalio.service.RPCError`` /
+          ``temporalio.client.WorkflowNotFoundError``, which propagates to
+          the caller (see Raises). This is deliberately NOT swallowed:
+          "not found" is also how a genuinely missing or already-purged
+          workflow surfaces, and treating it as benign here would mask that.
+          Callers for whom this matters should size ``execute_timeout_s``
+          comfortably larger than a workflow start round trip.
 
     Invariants:
         - Runs the coroutine on the worker's shared event loop via
@@ -219,6 +232,11 @@ def execute_workflow_sync(
         - ``temporalio.client.WorkflowFailureError`` if the workflow itself fails;
           callers that need to translate the failure inspect its ``ApplicationError``
           cause.
+        - ``temporalio.client.WorkflowNotFoundError`` (surfaced as a
+          ``temporalio.service.RPCError`` with ``NOT_FOUND``) when
+          ``reattach_on_timeout`` is True and the timeout cancelled the
+          workflow START before the server accepted it, so the reattach finds
+          no such workflow — see the Postconditions edge case above.
     """
     assert workflow_id, "workflow_id must be non-empty"
     assert task_queue, "task_queue must be non-empty"

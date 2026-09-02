@@ -206,3 +206,87 @@ def test_start_coding_team_workflow_rejects_token_in_plan_input(monkeypatch):
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
     with pytest.raises(ValueError, match="plan_input to not include a token"):
         sw.start_coding_team_workflow("job-7", "/repo", {"auth": {"token": "ghp_secret"}})
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "token",
+        "GITHUB_TOKEN",
+        "authorization",
+        "Authorization",
+        "api_key",
+        "API-KEY",
+        "client_secret",
+        "password",
+        "credentials",
+    ],
+)
+def test_contains_token_key_flags_every_credential_marker(key):
+    """Defense in depth: a credential smuggled under any of the common key
+    spellings -- not just "token" -- must be caught before it reaches Temporal's
+    permanent event history."""
+    assert sw._contains_token_key({key: "value"}) is True
+    assert sw._contains_token_key({"outer": [{key: "value"}]}) is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "owner",
+        "repo",
+        "issue_number",
+        "issue_title",
+        "remote",
+        "base",
+        "integration_branch",
+        "expected_base_sha",
+        "expected_head_sha",
+        "pr_number",
+        "pr_url",
+        "publish_mode",
+        "cleanup_checkout_on_success",
+        "requirements_title",
+        "requirements_description",
+        "project_overview",
+        "completed_work_summary",
+        "repo_path",
+    ],
+)
+def test_contains_token_key_does_not_flag_real_payload_keys(key):
+    """Every key the real `github`/`plan_input` payloads actually carry must stay
+    dispatchable -- the broadened marker list must not false-positive on them."""
+    assert sw._contains_token_key({key: "value"}) is False
+
+
+def test_contains_token_key_terminates_on_a_reference_cycle():
+    """A self-referential payload must not recurse forever: the visited set is
+    identity-keyed, so the cycle is closed on the second encounter."""
+    cyclic: dict = {"a": 1}
+    cyclic["self"] = cyclic
+    assert sw._contains_token_key(cyclic) is False
+
+    cyclic_with_token: dict = {"token": "ghp_secret"}
+    cyclic_with_token["self"] = cyclic_with_token
+    assert sw._contains_token_key(cyclic_with_token) is True
+
+
+def test_contains_token_key_visits_a_shared_substructure_once():
+    """The visited set accumulates across the WHOLE traversal, not per path: a
+    diamond-shaped payload (one shared child referenced from many parents) is
+    walked once per container, not once per reference -- otherwise k levels of
+    sharing cost O(2**k)."""
+    shared: dict = {"leaf": "v"}
+    for _ in range(30):
+        shared = {"l": shared, "r": shared}
+    # With a per-path (copied) visited set this is 2**30 traversals and would
+    # never return; with one accumulated set it is linear in container count.
+    assert sw._contains_token_key(shared) is False
+
+
+def test_contains_token_key_still_finds_a_token_inside_a_shared_substructure():
+    """Deduplicating shared containers must not lose a real finding: the FIRST
+    visit still walks the shared child in full."""
+    shared = {"nested": {"github_token": "ghp_secret"}}
+    diamond = {"l": shared, "r": shared}
+    assert sw._contains_token_key(diamond) is True

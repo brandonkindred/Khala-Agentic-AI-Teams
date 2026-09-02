@@ -3696,6 +3696,22 @@ class TestAddressCommentsAdmissionRoute:
         )
         assert len(route_env["jobs"].list_jobs()) == before
 
+    @pytest.mark.parametrize(
+        "owner,repo,pr_number",
+        [("", "r", 7), ("o", "", 7), ("o", "r", 0), ("o", "r", -1)],
+        ids=["empty-owner", "empty-repo", "zero-pr", "negative-pr"],
+    )
+    def test_service_seam_rejects_degenerate_coordinates(self, owner, repo, pr_number) -> None:
+        """A degenerate coordinate can never match a stored ``github_context``, so
+        without enforcement it would silently return ``None`` -- which every caller
+        reads as the load-bearing "no job is running for this PR" and acts on by
+        touching that PR's shared checkout. Fail loudly instead, mirroring
+        ``get_running_job_on_checkout``'s own precondition enforcement."""
+        from software_engineering_team.api import coding_team_main as _main
+
+        with pytest.raises(ValueError):
+            _main.get_running_review_for_pr(owner, repo, pr_number)
+
     def test_repo_path_catches_sibling_job_on_different_pr(self, route_env) -> None:
         """An operator-pinned repo_path is shared, unnamespaced, across every PR
         of that repo, so a job active for a DIFFERENT PR on the SAME checkout

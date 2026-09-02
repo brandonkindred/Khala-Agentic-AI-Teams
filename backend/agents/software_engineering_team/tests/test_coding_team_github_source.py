@@ -1507,6 +1507,29 @@ def _body(issue_number: int = 1, **overrides: Any) -> dict[str, Any]:
     }
 
 
+def _current_branch(repo: str) -> str:
+    """Return ``repo``'s currently checked-out branch name.
+
+    One shared spelling of the ``git rev-parse --abbrev-ref HEAD`` subprocess
+    call the branch-prep tests assert on repeatedly, so the invocation (and its
+    ``check=True``/text handling) exists once instead of once per assertion.
+
+    Preconditions:
+        - ``repo`` is a git checkout with a resolvable HEAD.
+    Postconditions:
+        - Returns the abbreviated branch name, whitespace-stripped. Raises
+          ``subprocess.CalledProcessError`` if ``rev-parse`` fails.
+    """
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _post_run_from_github_then_run_legacy_hooks(patched_app, json: dict[str, Any]):
     """Post to the route, then explicitly drive the *legacy* hook path.
 
@@ -1571,6 +1594,43 @@ class TestCheckoutRunningRoute:
         )
         assert resp.status_code == 200
         assert resp.json() == {"running_job_id": "sibling-job"}
+
+    def test_does_not_report_a_terminal_job_on_the_same_checkout(self, patched_app) -> None:
+        """A completed/failed job on the SAME repo_path is not "running" — the
+        route's scan is over active jobs only, so a finished job must never keep
+        a checkout looking occupied forever."""
+        for job_id, status in (("done-job", "completed"), ("dead-job", "failed")):
+            patched_app["jobs"].create_job(
+                job_id,
+                status=status,
+                repo_path=patched_app["repo_path"],
+                github_context={"owner": "o", "repo": "r", "issue_number": 5},
+            )
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}
+
+    def test_does_not_report_a_running_job_on_a_different_checkout(
+        self, patched_app, tmp_path
+    ) -> None:
+        """The scan is scoped to the QUERIED checkout: a job running on a
+        different repo_path must not be reported, or every unrelated concurrent
+        job would falsely block this checkout."""
+        other_checkout = tmp_path / "other-checkout"
+        other_checkout.mkdir()
+        patched_app["jobs"].create_job(
+            "elsewhere-job",
+            status="running",
+            repo_path=str(other_checkout),
+            github_context={"owner": "o", "repo": "r", "issue_number": 6},
+        )
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}
 
     def test_is_read_only_and_creates_no_job(self, patched_app) -> None:
         before = len(patched_app["jobs"].list_jobs())
@@ -1702,14 +1762,22 @@ class TestEndpointHappyPath:
         assert "Temporal dispatch failed" in job["error"]
 
     def test_run_from_github_returns_502_when_base_sha_unresolvable(
-        self, patched_app, monkeypatch
+        self, patched_app, monkeypatch, caplog
     ) -> None:
         """When the base branch's HEAD SHA can't be resolved, fail before dispatch
-        rather than starting a workflow with no freshness anchor."""
+        rather than starting a workflow with no freshness anchor.
+
+        The raw git output is deliberately NOT echoed into the response or the
+        stored job ``error``: ``_fail_new_job``'s safe-to-disclose contract
+        applies (``GET /api/jobs/{team}`` returns a job's ``error`` verbatim),
+        and remote-supplied git stderr is not a sanitized summary. It must still
+        reach the log, where the operator diagnostic belongs.
+        """
         import software_engineering_team.api.coding_team_main as api_main
 
+        raw_git_error = "fatal: could not read from https://x-access-token:ghp_SECRET@example/r"
         monkeypatch.setattr(
-            api_main, "resolve_remote_branch_sha", lambda *a, **kw: (False, "fetch failed")
+            api_main, "resolve_remote_branch_sha", lambda *a, **kw: (False, raw_git_error)
         )
 
         gh = _FakeClient(
@@ -1725,7 +1793,8 @@ class TestEndpointHappyPath:
         )
 
         assert resp.status_code == 502
-        assert "fetch failed" in resp.json()["detail"]
+        assert resp.json()["detail"] == "unable to resolve base branch head sha"
+        assert "ghp_SECRET" not in resp.text
 
         # The job row was already created before the SHA check ran; it must be
         # marked failed here or every retry for this issue would 409 forever
@@ -1734,7 +1803,55 @@ class TestEndpointHappyPath:
         assert len(jobs) == 1
         job = patched_app["jobs"].get_job(jobs[0]["job_id"])
         assert job["status"] == "failed"
-        assert "fetch failed" in job["error"]
+        assert job["error"] == "unable to resolve base branch head sha"
+        # Sanitized in the disclosed surfaces, but the full diagnostic still
+        # reaches the operator through the log.
+        assert raw_git_error in caplog.text
+
+    def test_run_from_github_fails_job_when_persisting_github_context_raises(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """The github-context persistence that follows ``create_job`` reaches the
+        central job service and can raise. If that exception escaped, the row
+        would stay ``pending`` -- which ``_running_job_for_issue`` treats as
+        active -- so every retry for this issue would 409 forever with nothing
+        left to terminalize it. It must be caught and terminalized like the three
+        other post-create failure paths, and the disclosed error must be a
+        sanitized summary, never the raw exception text."""
+        import software_engineering_team.api.coding_team_main as api_main
+
+        real_update_job = api_main.update_job
+
+        def _fail_on_github_context(job_id: str, **fields):
+            """Raise only for the github_context persistence, so ``_fail_new_job``'s
+            own terminalizing update still lands."""
+            if "github_context" in fields:
+                raise RuntimeError("job service unreachable at postgres://user:pw@db:5432")
+            return real_update_job(job_id, **fields)
+
+        monkeypatch.setattr(api_main, "update_job", _fail_on_github_context)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "failed to persist GitHub job context"
+        assert "postgres://" not in resp.text
+
+        jobs = patched_app["jobs"].list_jobs()
+        assert len(jobs) == 1
+        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
+        assert job["status"] == "failed"
+        assert job["error"] == "failed to persist GitHub job context"
 
     def test_run_from_github_returns_500_and_fails_job_when_base_branch_unresolvable(
         self, patched_app
@@ -2473,14 +2590,8 @@ class TestPrepareIssueBranch:
         self._git(repo, "fetch", "origin", "main")
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
-        import subprocess
 
-        head = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        head = _current_branch(repo)
         assert head == "khala/issue-9"
 
     def test_unsafe_default_branch_rejected(self, api, tmp_path) -> None:
@@ -2506,14 +2617,8 @@ class TestPrepareIssueBranch:
             repo, "origin", "main", "khala/issue-9", expected_head_sha=live_sha
         )
         assert ok is True, msg
-        import subprocess
 
-        head = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        head = _current_branch(repo)
         assert head == "khala/issue-9"
 
     def test_matching_expected_base_sha_succeeds(self, api, tmp_path) -> None:
@@ -2535,7 +2640,6 @@ class TestPrepareIssueBranch:
 
     def test_stale_expected_base_sha_rejected_before_any_checkout(self, api, tmp_path) -> None:
         """The base moved since triage: fail closed, before touching the checkout."""
-        import subprocess
 
         repo = self._init_repo(tmp_path)
         # Advance origin/main past the SHA the (fake) triage step observed.
@@ -2544,12 +2648,7 @@ class TestPrepareIssueBranch:
         self._git(repo, "add", "README.md")
         self._git(repo, "commit", "-q", "--no-gpg-sign", "-m", "advance")
 
-        original_head_on_disk = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        original_head_on_disk = _current_branch(repo)
 
         ok, msg, _notes = api._prepare_issue_branch(
             repo, "origin", "main", "khala/issue-9", expected_base_sha="0" * 40
@@ -2559,12 +2658,7 @@ class TestPrepareIssueBranch:
         assert "0" * 40 in (msg or "")
 
         # No checkout switch happened -- HEAD is exactly where the test left it.
-        head_after = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        head_after = _current_branch(repo)
         assert head_after == original_head_on_disk
 
     def test_expected_head_sha_mismatch_blocks_prep_without_mutating_checkout(
@@ -2611,12 +2705,7 @@ class TestPrepareIssueBranch:
         # The checkout must be left exactly where _init_repo put it -- no
         # branch switch, no local integration/rescue branch created, no
         # uncommitted changes left behind.
-        head = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        head = _current_branch(repo)
         assert head == "main"
         assert _local_branches() == branches_before
         assert _status() == ""
@@ -3267,11 +3356,11 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_refuses_repo_level_path_under_root(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
-        """A repo-level checkout (no issue-N/pr-N component) under a root is never removed."""
-        # A repo-level checkout (no ``issue-N``/``pr-N`` final component) that merely
-        # sits under an ephemeral root must NOT be removed even with .git and the flag
-        # — per-issue AND per-PR clones are reclaimable, but a bare repo-level
-        # checkout (the PR-review path lives here) is not.
+        """A repo-level checkout (no ``issue-N``/``pr-N`` final component) that
+        merely sits under an ephemeral root is never removed, even with ``.git``
+        present and the cleanup flag set: per-issue AND per-PR clones are
+        reclaimable, but a bare repo-level checkout — where the PR-review flow's
+        own checkout lives — is not."""
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)

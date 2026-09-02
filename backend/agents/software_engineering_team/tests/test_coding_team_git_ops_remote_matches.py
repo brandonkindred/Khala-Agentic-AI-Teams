@@ -13,13 +13,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-# `coding_team_main` must be imported before `git_ops` in test modules that
-# import `git_ops` directly: `git_ops` imports `coding_team_main` (as `_main`)
-# at module scope, and `coding_team_main` imports several names FROM
-# `git_ops` at module scope too — importing `git_ops` first hits Python
-# mid-initializing it when `coding_team_main`'s import runs, since the two
-# already have a circular top-level dependency (unrelated to this fix).
-from software_engineering_team.api import coding_team_main as _main  # noqa: F401
+# The `git_ops` <-> `coding_team_main` module-scope import cycle is unwound once
+# for the whole package in `tests/conftest.py`; no per-module dummy import needed.
 from software_engineering_team.api import git_ops
 
 

@@ -50,6 +50,19 @@ from llm_service.interface import (  # noqa: E402
     reset_complete_json_observer_state as _reset_json_obs,
 )
 
+# ``software_engineering_team.api.git_ops`` and
+# ``software_engineering_team.api.coding_team_main`` have a circular module-scope
+# dependency (``git_ops`` imports ``coding_team_main`` as ``_main``;
+# ``coding_team_main`` imports several names FROM ``git_ops``). A test module
+# that imports ``git_ops`` FIRST therefore hits Python mid-initializing it when
+# ``coding_team_main``'s own import runs, and the ``from git_ops import ...``
+# names are not bound yet. Importing ``coding_team_main`` here — conftest is
+# always imported before the test modules it applies to — establishes the
+# working order ONCE for the whole package, so no individual test module has to
+# remember a dummy side-effect import of its own. (Breaking the cycle itself is
+# a production-code refactor, deliberately out of scope for a test fixture.)
+from software_engineering_team.api import coding_team_main  # noqa: F401, E402
+
 # The coordinator's caches exist once per module identity: production code
 # imports the dotted ``software_engineering_team.code_review_agent`` package,
 # while some tests still drive the bare ``code_review_agent`` name (resolved

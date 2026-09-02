@@ -12,6 +12,7 @@ import itertools
 import logging
 import os
 import threading
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
@@ -108,7 +109,8 @@ def _review_job_heartbeat_live(job: Dict[str, Any]) -> bool:
 
 
 def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[str]:
-    """Return the job_id of a live non-terminal code-review job already reviewing this PR.
+    """Return the job_id of a live non-terminal review or address-comments job already
+    working this PR.
 
     Preconditions: ``owner``/``repo`` are non-empty repository coordinates; ``pr_number``
         is a positive PR number.
@@ -663,7 +665,7 @@ _CHECKOUT_ADMISSION_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
-def _checkout_admission(repo_path: str):
+def _checkout_admission(repo_path: str) -> Iterator[None]:
     """Mutual exclusion for checkout-wide admission (sibling scan + job creation).
 
     Preconditions:

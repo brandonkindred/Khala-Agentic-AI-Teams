@@ -11,6 +11,7 @@ release it.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import threading
 from pathlib import Path
 
@@ -68,6 +69,31 @@ def _install_slow_lock(monkeypatch: pytest.MonkeyPatch, proceed: threading.Event
     return lock
 
 
+def _assert_flock_is_held(lock_path: Path) -> None:
+    """Assert some OTHER open file description already holds ``lock_path``'s flock.
+
+    ``fcntl.flock`` locks are per OPEN FILE DESCRIPTION, not per process or per
+    thread, so a fresh ``open()`` of the same path from this very test yields a
+    new description whose non-blocking ``LOCK_EX`` genuinely conflicts with a
+    lock held elsewhere in this process. That makes "is the lock held right
+    now?" directly observable in-process, rather than only inferable after the
+    fact from a later acquisition succeeding.
+
+    Preconditions:
+        - ``lock_path`` exists (``flock_lock`` creates it on acquisition).
+    Postconditions:
+        - Returns None when the non-blocking acquisition is refused with
+          ``BlockingIOError`` (i.e. the lock IS held). Fails the test otherwise.
+          The probe descriptor is always closed, and no lock is left behind.
+    """
+    probe = open(lock_path, "w", encoding="utf-8")
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        probe.close()
+
+
 def test_lock_is_held_around_the_body_and_released_after(tmp_path: Path) -> None:
     lock_path = tmp_path / ".test.lock"
 
@@ -76,7 +102,11 @@ def test_lock_is_held_around_the_body_and_released_after(tmp_path: Path) -> None
         async with held_checkout_lock(
             loop, lock_path, platform_owned=True, owner="acme", repo="widget", log_prefix="test"
         ):
-            pass
+            # The "held around the body" half of this test's name: a no-op
+            # implementation that never actually acquires would sail past the
+            # post-run assertion below, so prove the flock is genuinely held
+            # WHILE the body runs, from an independent open file description.
+            _assert_flock_is_held(lock_path)
 
     asyncio.run(_run())
 

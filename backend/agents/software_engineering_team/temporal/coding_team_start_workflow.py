@@ -21,8 +21,31 @@ logger = logging.getLogger(__name__)
 _COMMENT_WORKFLOW_TIMEOUT_S = 4 * 60 * 60
 
 
+# Substrings that mark a dict key as naming a credential. Broader than a bare
+# "token" check as defense in depth: the durable Temporal event history is
+# permanent, so a payload key spelling a credential any other common way
+# (``authorization``, ``api_key``, ``secret``, ``password``, ``credential``)
+# must be refused at dispatch too rather than relying on every caller
+# remembering to spell it "token". Matched case-insensitively as a substring,
+# so ``API-KEY``, ``x_api_key`` and ``github_token`` all hit. None of the keys
+# the real payloads carry (``github``: owner/repo/issue_number/issue_title/
+# remote/base/integration_branch/expected_base_sha/expected_head_sha/
+# pr_number/pr_url/publish_mode/cleanup_checkout_on_success; ``plan_input``:
+# the fixed ``CodingTeamPlanInput`` fields) contains any of these markers, so
+# broadening cannot false-positive on a legitimate dispatch.
+_TOKEN_KEY_MARKERS = (
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "api-key",
+    "authorization",
+    "credential",
+)
+
+
 def _contains_token_key(value: Any, _seen: Optional[set[int]] = None) -> bool:
-    """True iff ``value`` (recursively) contains a dict with a ``"token"`` key.
+    """True iff ``value`` (recursively) contains a dict with a credential-named key.
 
     A plain top-level ``"token" in github`` check only catches a token stored
     directly on the ``github`` dict — one nested under a sub-dict (e.g.
@@ -32,33 +55,51 @@ def _contains_token_key(value: Any, _seen: Optional[set[int]] = None) -> bool:
 
     Preconditions:
         - ``_seen``, when passed, is a set of ``id()`` values of dicts/lists/
-          tuples already visited on the CURRENT recursion path; it is an
-          internal recursion parameter, not for callers to populate.
+          tuples ALREADY VISITED ANYWHERE IN THE TRAVERSAL (not merely on the
+          current recursion path); it is an internal recursion parameter, not
+          for callers to populate.
     Postconditions:
         - Returns True iff any dict reachable from ``value`` (through nested
-          dicts, lists, or tuples) has a key that is, or case-insensitively
-          contains, the substring ``"token"`` (e.g. ``"token"``,
-          ``"github_token"``, ``"auth_token"``, ``"TOKEN"``).
+          dicts, lists, or tuples) has a key that case-insensitively contains
+          any marker in :data:`_TOKEN_KEY_MARKERS` (e.g. ``"token"``,
+          ``"github_token"``, ``"TOKEN"``, ``"authorization"``, ``"api_key"``,
+          ``"client_secret"``, ``"password"``, ``"credentials"``).
         - Guards against unbounded recursion on a genuine reference cycle: a
-          container already on the current recursion path (identity-compared
-          via ``id()``) is treated as containing no token key and not
-          traversed again. This does NOT bound recursion depth in general --
-          a pathologically deep but acyclic structure (no container repeated
-          on its own path) can still recurse as deep as the structure goes
-          and, in principle, raise ``RecursionError``.
+          container already visited (identity-compared via ``id()``) is
+          treated as containing no credential key and not traversed again.
+          The visited set is accumulated IN PLACE across the whole traversal
+          rather than copied per level, so a shared/diamond substructure is
+          walked once instead of once per reference (O(total containers), not
+          O(2**depth-of-sharing)). This is sound because the predicate is
+          monotone: a container that contributed no credential key on its
+          first visit cannot contribute one on a later visit, so skipping the
+          repeat can never change the result. This does NOT bound recursion
+          depth in general -- a pathologically deep but acyclic structure can
+          still recurse as deep as the structure goes and, in principle,
+          raise ``RecursionError``.
     """
     if isinstance(value, (dict, list, tuple)):
         seen = _seen if _seen is not None else set()
         marker = id(value)
         if marker in seen:
             return False
-        seen = seen | {marker}
+        seen.add(marker)
         if isinstance(value, dict):
-            return any(
-                "token" in str(k).lower() or _contains_token_key(v, seen) for k, v in value.items()
-            )
+            return any(_is_token_key(k) or _contains_token_key(v, seen) for k, v in value.items())
         return any(_contains_token_key(v, seen) for v in value)
     return False
+
+
+def _is_token_key(key: Any) -> bool:
+    """True iff ``key``'s string form case-insensitively contains a credential marker.
+
+    Postconditions:
+        - Returns True iff ``str(key).lower()`` contains any substring in
+          :data:`_TOKEN_KEY_MARKERS`. Never raises: a non-string key is
+          stringified first, so an int/tuple key is simply a non-match.
+    """
+    lowered = str(key).lower()
+    return any(marker in lowered for marker in _TOKEN_KEY_MARKERS)
 
 
 def _validate_common_args(job_id: str, repo_path: str, caller: str) -> None:
@@ -92,14 +133,16 @@ def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: st
           raised message.
     Postconditions:
         - Returns None when ``plan_input`` is ``None``, or is a dict containing
-          no ``"token"``-like key at any nesting depth.
+          no credential-named key (any :data:`_TOKEN_KEY_MARKERS` substring —
+          ``token``, ``secret``, ``password``, ``api_key``/``api-key``,
+          ``authorization``, ``credential``) at any nesting depth.
     Raises:
         ValueError: ``plan_input`` is truthy but not a ``dict`` (a bare truthy
             non-dict, e.g. a token string, would otherwise bypass
             :func:`_contains_token_key`'s dict/list/tuple-only traversal and be
             serialized into the durable workflow payload verbatim — the same
             hole :func:`_validate_github_arg` already closes for ``github``);
-            or ``plan_input`` contains a ``"token"``-like key at any nesting
+            or ``plan_input`` contains a credential-named key at any nesting
             depth (see :func:`_contains_token_key`).
     """
     if plan_input and not isinstance(plan_input, dict):
@@ -121,15 +164,17 @@ def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, requi
     Postconditions:
         - Returns None when ``github`` passes validation: present as a
           non-empty dict when ``required``; absent, or a dict (possibly
-          empty) containing no ``"token"``-like key at any nesting depth,
-          otherwise.
+          empty) containing no credential-named key (any
+          :data:`_TOKEN_KEY_MARKERS` substring — ``token``, ``secret``,
+          ``password``, ``api_key``/``api-key``, ``authorization``,
+          ``credential``) at any nesting depth, otherwise.
     Raises:
         ValueError: ``required`` is True and ``github`` is not a non-empty
             dict; or ``github`` is truthy but not a ``dict`` (a bare truthy
             non-dict, e.g. a token string, would otherwise bypass
             :func:`_contains_token_key`'s dict/list/tuple-only traversal and
             be serialized into the workflow payload verbatim); or ``github``
-            contains a ``"token"``-like key at any nesting depth.
+            contains a credential-named key at any nesting depth.
     """
     if required:
         if not isinstance(github, dict) or not github:

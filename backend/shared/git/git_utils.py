@@ -89,8 +89,14 @@ def remote_url_matches(
     # Record whether one was present BEFORE stripping it, so the colon
     # normalization below can tell a "host:port" URL apart from a genuine
     # scp-style "host:path" — both look identical once the scheme is gone.
-    had_scheme = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned) is not None
-    cleaned = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", cleaned)
+    # Matched ONCE and sliced with the match object rather than a re.match plus
+    # a separate re.sub: the scp-colon normalization below is only correct while
+    # `had_scheme` and the strip agree exactly, and two copies of the same
+    # pattern can silently drift apart.
+    scheme_match = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned)
+    had_scheme = scheme_match is not None
+    if scheme_match is not None:
+        cleaned = cleaned[scheme_match.end() :]
     # Strip userinfo (``user:token@`` or scp's bare ``git@``) BEFORE the
     # scp-colon normalization below — otherwise the colon inside
     # "x-access-token:ghp_xxx@host/..." gets converted to "/" first,

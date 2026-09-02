@@ -192,10 +192,32 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         # — never a usable PAT — because the raw job record is echoed verbatim by the generic
         # GET /api/jobs/{team} route. When no encryption key is configured the token is not persisted
         # and resume falls back to GITHUB_TOKEN env (or refuses); we never store plaintext.
-        encrypted = encrypt_token(token)
-        if encrypted:
-            job_fields["github_token_encrypted"] = encrypted
-        _main.update_job(job_id, **job_fields)
+        # Wrapped so a failure here cannot orphan the row created just above.
+        # ``encrypt_token`` is contractually non-raising (it returns None on any
+        # crypto/key problem), but ``update_job`` reaches the central job service
+        # and CAN raise (transport error, service unavailable, store rejection).
+        # An exception escaping here would leave the row 'pending' — which
+        # ``_running_job_for_issue`` treats as active — so every retry for this
+        # issue would 409 forever with nothing left to terminalize it, exactly
+        # the failure mode the three handlers below already guard against.
+        try:
+            encrypted = encrypt_token(token)
+            if encrypted:
+                job_fields["github_token_encrypted"] = encrypted
+            _main.update_job(job_id, **job_fields)
+        except Exception as e:
+            # Sanitized per ``_fail_new_job``'s safe-to-disclose contract: the
+            # stored ``error`` is echoed verbatim by GET /api/jobs/{team}, and a
+            # job-service exception's ``str()`` can carry internal host names or
+            # connection strings. The full diagnostic stays in the log and the
+            # chained cause.
+            logger.exception("Failed to persist GitHub context for job_id=%s: %s", job_id, e)
+            _fail_new_job(
+                job_id,
+                500,
+                "failed to persist GitHub job context",
+                cause=e,
+            )
 
         base = request.base_branch or default_branch
         if not base:
@@ -219,8 +241,14 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # treats a pending job as active, so leaving it pending here would make
             # every retry for this issue 409 forever with nothing left to
             # terminalize it. Mark it failed, same as a Temporal dispatch failure.
+            # The raw git output stays in the log only. ``resolve_remote_branch_sha``
+            # already scrubs URL-embedded credentials and the transient auth header,
+            # but that scrubbing is best-effort pattern matching over arbitrary git
+            # stderr; the stored ``error`` is echoed verbatim by
+            # GET /api/jobs/{team}, so it carries a fixed summary instead of
+            # remote-supplied text, per ``_fail_new_job``'s safe-to-disclose contract.
             logger.error("Unable to resolve base branch head sha: %s", base_sha_or_err)
-            _fail_new_job(job_id, 502, f"unable to resolve base branch head sha: {base_sha_or_err}")
+            _fail_new_job(job_id, 502, "unable to resolve base branch head sha")
         integration_branch = f"khala/issue-{issue.number}"
         try:
             start_coding_team_workflow(

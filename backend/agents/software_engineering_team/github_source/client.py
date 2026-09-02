@@ -34,14 +34,15 @@ from .client_http import (
 
 logger = logging.getLogger(__name__)
 
-# Per-thread comment page size used by BOTH review-thread GraphQL queries below.
+# Per-thread comment page size used by the single review-thread GraphQL query
+# below (`_REVIEW_THREADS_FULL_QUERY`, shared by both of its callers).
 # A thread whose comments exceed this in one page trips the `hasNextPage` check
 # near the "review thread has more than N comments" error — named so that check
 # (and its error message) can never drift from the query's actual `first:` value.
 _REVIEW_THREAD_COMMENTS_PAGE_SIZE = 100
 
-# GitHub's GraphQL page-size maximum; both review-thread queries below page at
-# this rate so a future change to it can't miss one of the two bare literals.
+# GitHub's GraphQL page-size maximum; named rather than inlined so the query
+# below and any future reader agree on where the number comes from.
 _REVIEW_THREADS_PAGE_SIZE = 100
 
 # GraphQL query for the review-thread listing: resolution state (GitHub's REST
@@ -1208,13 +1209,21 @@ class GitHubClient(_GitHubHttpMixin):
                 if not isinstance(thread_id, str) or not thread_id:
                     if strict:
                         raise ReviewThreadsUnavailableError(
-                            owner, repo, number, "review-thread node missing id"
+                            owner,
+                            repo,
+                            number,
+                            "review-thread node has a missing or invalid id "
+                            f"(expected non-empty str, got {thread_id!r})",
                         )
                     thread_id = None
                 is_resolved_raw = node.get("isResolved")
                 if strict and not isinstance(is_resolved_raw, bool):
                     raise ReviewThreadsUnavailableError(
-                        owner, repo, number, "review-thread node missing isResolved"
+                        owner,
+                        repo,
+                        number,
+                        "review-thread node has a missing or invalid isResolved "
+                        f"(expected bool, got {is_resolved_raw!r})",
                     )
                 is_resolved = bool(is_resolved_raw)
                 comments = node.get("comments")

@@ -441,10 +441,12 @@ class CodingTeamWorkflow:
               either ``issue_number``/``issue_title`` for issue-driven publishing
               or ``publish_mode="existing_pr"``/``pr_number`` for review-comment
               remediation. ``remote`` defaults to ``"origin"`` when absent.
-              An optional ``expected_head_sha`` is forwarded to
-              ``github_branch_prep_activity`` (see its contract) so branch
-              prep fails closed if the branch moved since the caller's plan
-              was grounded, rather than silently checking out newer code. An
+              Optional ``expected_head_sha`` and ``expected_base_sha`` values
+              are both forwarded to ``github_branch_prep_activity`` (see its
+              contract) so branch prep fails closed if the integration branch
+              (``expected_head_sha``) or the base branch (``expected_base_sha``)
+              moved since the caller's plan was grounded, rather than silently
+              seeding work from newer code. An
               optional ``pr_url`` is forwarded to ``github_pr_publish_activity``
               in ``existing_pr`` mode, and an optional
               ``cleanup_checkout_on_success`` flag is forwarded to whichever

@@ -262,12 +262,24 @@ def get_running_review_for_pr(owner: str, repo: str, pr_number: int) -> str | No
     module's underscore-prefixed helper — the same heartbeat-checked
     definition the POST admission path uses.
 
+    Preconditions:
+        - ``owner`` and ``repo`` are non-empty repository coordinates and
+          ``pr_number`` is a positive PR number. Enforced here rather than left
+          implicit — mirroring :func:`get_running_job_on_checkout` — because a
+          degenerate value can never match any stored ``github_context`` and so
+          would silently return ``None``, which every caller reads as the
+          load-bearing "no job is running for this PR" and acts on by touching
+          the PR's shared checkout.
     Postconditions:
         - Returns the job_id of a live, non-terminal review/address-comments
           job for ``owner/repo#pr_number``, or ``None`` when none is running.
           See :func:`_running_review_for_pr` for the full heartbeat/zombie-
-          cleanup contract.
+          cleanup contract. Raises ``ValueError`` on a degenerate argument.
     """
+    if not owner or not repo:
+        raise ValueError("get_running_review_for_pr requires non-empty owner and repo")
+    if pr_number <= 0:
+        raise ValueError("get_running_review_for_pr requires a positive pr_number")
     return _running_review_for_pr(owner, repo, pr_number)
 
 

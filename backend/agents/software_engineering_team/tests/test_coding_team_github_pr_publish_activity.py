@@ -90,8 +90,24 @@ class TestGithubPrPublishActivityGitFailures:
     ) -> None:
         _stub_token(monkeypatch, api)
         monkeypatch.setattr(api, "_fast_forward", lambda *a, **kw: (False, "not a fast-forward"))
-        push_calls = []
-        monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: push_calls.append(a) or (True, None))
+        push_calls: list[tuple[Any, ...]] = []
+
+        def _fake_push(*a: Any, **_kw: Any) -> tuple[bool, None]:
+            """Record the positional args and report a successful push.
+
+            Spelled as a named function rather than an
+            ``append(a) or (True, None)`` lambda: that idiom only works because
+            ``list.append`` happens to return ``None``, which reads as a bug at
+            a glance. This test asserts the push is never REACHED, so the
+            recording is what matters.
+
+            Postconditions:
+                - Appends ``a`` to ``push_calls`` and returns ``(True, None)``.
+            """
+            push_calls.append(a)
+            return True, None
+
+        monkeypatch.setattr(api, "_push_branch", _fake_push)
         update_calls = []
         monkeypatch.setattr(api, "update_job", lambda job_id, **kw: update_calls.append((job_id, kw)))
 
