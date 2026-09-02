@@ -25,10 +25,11 @@ ambiguous many-to-many candidates are resolved deterministically (§6); what
 the rule deliberately cannot distinguish (§7); and a worked walkthrough
 against the two examples already in `CORPUS_CASE_FORMAT.md` (§8).
 
-**Out of scope for this document:** false-positive-resistance expression and
-worked examples beyond restating that the match test is polarity-symmetric
-(a later specification); implementing this rule in the runner; any change to
-gate prompts, models, or logic. No production code accompanies this document.
+**Out of scope for this document:** the false-positive-resistance expression
+and its worked examples (a later specification) — this document only
+restates that the match test is polarity-symmetric, in §4; implementing this
+rule in the runner; any change to gate prompts, models, or logic. No
+production code accompanies this document.
 
 ## 1. Scope filter
 
@@ -218,11 +219,13 @@ starting point rather than a final calibration:
   those lines should still count as locating the same defect.
 - A model that reports a line number relative to a diff hunk rather than
   absolute to the file — a plausible failure mode, since gates review
-  chunked diffs — drifts by roughly the hunk's own size for small,
-  tightly-scoped hunks like the ones in both worked examples (`CASE-0001`'s
-  4-line addition, `CASE-0002`'s 3-line hunk). 3 lines absorbs that class of
-  drift for hunks of that size without absorbing drift from a hunk an order
-  of magnitude larger.
+  chunked diffs — drifts by roughly the hunk's own size. 3 lines fully
+  absorbs that class of drift for a hunk up to 3 lines, like `CASE-0002`'s;
+  for a hunk one line larger, like `CASE-0001`'s 4-line addition, worst-case
+  hunk-relative drift is ~4 lines, one past this tolerance — an accepted
+  residual at this calibration rather than a claim that 3 lines absorbs
+  every hunk this size, and revisited per the final bullet below. Either way
+  it does not absorb drift from a hunk an order of magnitude larger.
 - 3 lines stays tighter than the typical vertical gap between distinct,
   blank-line-separated logical blocks in reasonably formatted code, so it
   does not casually credit a match against an unrelated adjacent statement.
@@ -247,15 +250,22 @@ order.**
 
 1. For each candidate pair, compute a distance: for a line-specific label,
    the gap between the finding's resolved range `[F.line, F.line_end]` and
-   the label's range `[L.line, L.line_end]` — `0` when the two ranges overlap
-   (the same overlap test §4 uses to admit the pair as a candidate in the
-   first place), otherwise `max(L.line - F.line_end, F.line - L.line_end)`
-   (the gap from the nearer span end to the nearer range end; for a
-   single-line finding, `F.line == F.line_end`, so this reduces to the
-   distance from that one line to the nearer end of `[L.line, L.line_end]`);
-   for a file-wide label, distance is defined as `0` (there is only ever one
-   file-wide "slot" per file per label to fill, so line distance does not
-   disambiguate it).
+   the label's **unexpanded** range `[L.line, L.line_end]` — `0` when the two
+   ranges overlap directly, otherwise `max(L.line - F.line_end, F.line -
+   L.line_end)` (the gap from the nearer span end to the nearer range end;
+   for a single-line finding, `F.line == F.line_end`, so this reduces to the
+   distance from that one line to the nearer end of `[L.line, L.line_end]`).
+   This is a **stricter** overlap test than §4's candidate-admission test,
+   which uses the ±3-expanded range — every pair reaching this step already
+   passed §4, but only pairs overlapping the unexpanded label range get
+   distance `0`; a pair admitted purely through §4's tolerance (e.g. a
+   single-line finding at line 10 against a label at `[12, 12]`: admitted
+   since `10 >= 12 - 3`, but the raw ranges don't overlap) carries distance
+   `1`–`3`, not `0`. This is what makes the sort in step 2 prefer an exact
+   overlap over a tolerance-only hit instead of treating every admitted
+   candidate as equally close. For a file-wide label, distance is defined as
+   `0` (there is only ever one file-wide "slot" per file per label to fill,
+   so line distance does not disambiguate it).
 2. Sort all candidate pairs by, in order: (a) ascending distance; (b) the
    label's `label_id`, lexicographically; (c) the finding's position (index)
    in its gate's own output list, ascending.
