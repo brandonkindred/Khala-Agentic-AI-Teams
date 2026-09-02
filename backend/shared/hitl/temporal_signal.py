@@ -19,6 +19,17 @@ protecting its pre-existing history) and reconciling
 ``PlanningAnswerSignalMixin`` are deliberately deferred, not implicitly
 completed by this module's existence — both are tracked as follow-up work.
 
+**Do not compose this mixin together with ``PlanningAnswerSignalMixin`` on
+the same workflow class.** Both use the identical private attribute names
+(``_active_resume_token``/``_submitted_answers``/``_buffered_signals``) and
+both chain ``super().__init__()``, so a class inheriting both would have the
+two signal handlers silently alias one shared set of state — e.g.
+``PlanningAnswerSignalMixin.wait_for_planning_answers`` arming
+``_active_resume_token`` would make this module's ``submit_answers`` treat
+that token as its own active pause, under a different signal name and a
+different validation/buffering contract. A workflow needing both gate kinds
+must not use both mixins until they converge onto one implementation.
+
 Deliberately excludes any ``wait_condition``-based wait/resume logic — this
 module only registers and validates; a workflow durably pausing on
 ``self._submitted_answers`` is separate, follow-on work. A signal handler
@@ -66,7 +77,12 @@ MAX_BUFFERED_SIGNALS = 8
 
 
 def _log_rejection(msg: str, *args: Any) -> None:
-    """Log a ``submit_answers`` rejection via the replay-aware workflow logger.
+    """Log a ``submit_answers`` diagnostic via the replay-aware workflow logger.
+
+    Despite the name, this also carries the buffer-cap eviction notice (not
+    itself a rejection — the incoming signal is buffered right after) since
+    it needs the same outside-a-workflow-safe guard; there was no value in a
+    second, near-identical helper for one call site.
 
     Preconditions:
         - None.

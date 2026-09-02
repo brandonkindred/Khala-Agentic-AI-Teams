@@ -12,9 +12,18 @@ its only consumer today is ``planning_team.temporal.workflows.PlanningWorkflow``
 isn't in this workflow's per-team matrix), so nothing else in CI exercises it.
 These tests keep it above the 90% floor until either Planning gains its own
 CI job or ``CodingTeamWorkflow`` migrates onto this shared primitive (see
-``shared/hitl/temporal_signal.py``'s module docstring). The behavioral test
-suite of record lives in ``shared/hitl/tests/test_temporal_signal.py``; this
-section only needs to hit the branches that suite leaves uncovered here.
+``shared/hitl/temporal_signal.py``'s module docstring).
+
+More thorough, standalone-mixin behavioral coverage lives in
+``shared/hitl/tests/test_temporal_signal.py`` and
+``planning_team/tests/test_temporal_workflow_signal.py`` -- useful for local
+development and as documentation, but neither runs in CI today for the same
+reason (no CI job passes ``shared/hitl/tests/`` or ``planning_team/tests/``
+to pytest). This file is therefore the only CI-enforced regression coverage
+for this behavior, so it also carries a minimal check that the real
+``PlanningWorkflow`` class (not just the standalone mixin) actually wires up
+correctly -- the composition-level assertions those uncollected suites would
+otherwise be the sole guard for.
 """
 
 from __future__ import annotations
@@ -333,3 +342,38 @@ def test_hitl_signal_mixin_drops_early_signal_with_no_usable_resume_token() -> N
     wf.submit_answers({"answers": [_answer("q1")]})
 
     assert wf._buffered_signals == {}
+
+
+# ---------------------------------------------------------------------------
+# planning_team.temporal.workflows.PlanningWorkflow composition
+# ---------------------------------------------------------------------------
+# CI-enforced (unlike planning_team/tests/test_temporal_workflow_signal.py,
+# see module docstring): proves the real PlanningWorkflow class -- not just
+# the standalone mixin above -- actually composes HitlAnswerSignalMixin.
+
+
+def test_planning_workflow_registers_submit_answers_signal() -> None:
+    from temporalio import workflow as _workflow
+
+    from planning_team.temporal.workflows import PlanningWorkflow
+    from shared.hitl.temporal_signal import SUBMIT_ANSWERS_SIGNAL
+
+    # temporalio private API (_Definition); re-verify on temporalio upgrades.
+    defn = _workflow._Definition.from_class(PlanningWorkflow)
+    assert defn is not None, "PlanningWorkflow is missing the @workflow.defn decorator"
+    assert SUBMIT_ANSWERS_SIGNAL in defn.signals
+
+
+def test_planning_workflow_submit_answers_accepts_and_rejects() -> None:
+    from planning_team.temporal.workflows import PlanningWorkflow
+
+    wf = PlanningWorkflow()
+    assert wf._active_resume_token is None
+
+    wf._active_resume_token = "tok-1"
+    wf.submit_answers({"resume_token": "stale-token", "answers": [_answer("q1")]})
+    assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+    assert wf._submitted_answers == [_answer("q1")]

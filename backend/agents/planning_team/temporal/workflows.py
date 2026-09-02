@@ -90,6 +90,17 @@ class PlanningWorkflow(HitlAnswerSignalMixin):
           unconsumed: no phase below arms a pause or reads
           ``self._submitted_answers`` yet — durably waiting on a pause and
           resuming with the delivered answers is separate, follow-on work.
+        - Adding this signal registration needed no ``workflow.patched`` gate,
+          despite this class already carrying ``_PER_PHASE_PATCH`` for
+          pre-migration histories: the handler only mutates in-memory mixin
+          state (``_active_resume_token``/``_submitted_answers``/
+          ``_buffered_signals``) that ``run()`` never reads, so replaying any
+          open history — with or without a ``submit_answers`` event in it —
+          produces identical activity-scheduling decisions either way.
+          Revisit this once follow-on work makes that state observable to
+          ``run()`` (e.g. a ``wait_condition`` reading it): at that point a
+          patch gate may become necessary for histories recorded before this
+          registration existed.
     """
 
     @workflow.run
