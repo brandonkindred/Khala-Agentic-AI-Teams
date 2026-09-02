@@ -101,15 +101,18 @@ exclude version-like tokens is exactly the kind of accumulating heuristic
 this rule exists to refuse, so an occasional false positive here is an
 accepted cost of keeping the boundary at one fixed pattern. The same
 one-fixed-pattern boundary has a matching false-negative cost: the pattern
-requires at least one character before the extension dot, so a bare
-dotfile with no directory prefix — `.env`, `.npmrc`, `.gitignore` — has no
-character preceding its only dot and never matches, resolving to
-`unresolved` per §2.4 even though a directory-qualified form of the same
-path (`config/.env`) would. A realistic case this affects is a security
-finding whose free-text location names a bare `.env` file — an accepted
-cost on the false-negative side of the same boundary as the version-token
-false positive above, not a reason to special-case dotfiles into the
-pattern.
+requires at least one character before the extension dot it ultimately
+matches, so a bare dotfile whose leading dot is its *only* dot — `.env`,
+`.npmrc`, `.gitignore` — has no character preceding that dot and never
+matches, resolving to `unresolved` per §2.4 even though a
+directory-qualified form of the same path (`config/.env`) would. (A bare
+dotfile containing a second dot, such as `.eslintrc.json`, is not affected
+— the leading `[\w./\\-]+` class itself includes `.`, so it matches from
+index 0 and takes the extension after the last dot.) A realistic case this
+affects is a security finding whose free-text location names a bare,
+single-dot file like `.env` — an accepted cost on the false-negative side
+of the same boundary as the version-token false positive above, not a
+reason to special-case dotfiles into the pattern.
 
 This is deliberately the *only* parsing attempt specified. `location:
 "run:3"` — the real security example in `GATE_FINDING_INVENTORY.md` §3, a
