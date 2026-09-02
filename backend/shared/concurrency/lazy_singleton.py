@@ -58,6 +58,10 @@ class LazySingleton(Generic[_T]):
           because that call returned — once some call's ``factory`` has
           already constructed the value, later calls return that value
           without invoking their own ``factory`` at all.
+        - ``factory`` does not call :meth:`get_or_create` on this same
+          instance, directly or transitively — the internal lock is not
+          reentrant and is held for the duration of ``factory``, so a
+          re-entrant call would deadlock the calling thread.
 
     Postconditions:
         - The first ``factory`` invocation to complete without raising
@@ -91,13 +95,18 @@ class LazySingleton(Generic[_T]):
         """Return the constructed value, building it via ``factory`` on first success.
 
         Preconditions:
-            ``factory`` takes no arguments and returns a non-``None`` ``_T``,
-            or raises.
+            ``factory`` takes no arguments, does not call :meth:`get_or_create`
+            on this same instance, and returns a non-``None`` ``_T`` or
+            raises.
 
         Postconditions:
             See the class Postconditions: exactly-once construction across
             concurrent first calls, and raise-and-retry semantics when
-            ``factory`` fails.
+            ``factory`` fails. Raises ``ValueError`` — without caching
+            anything, so a later call still retries — if ``factory`` returns
+            ``None``, since a silently cached ``None`` would violate the
+            "returns that exact same object" postcondition on every later
+            call with no way to diagnose why.
         """
         value = self._value
         if value is None:
@@ -105,5 +114,10 @@ class LazySingleton(Generic[_T]):
                 value = self._value
                 if value is None:
                     value = factory()
+                    if value is None:
+                        raise ValueError(
+                            "factory returned None; None is reserved as the 'not yet constructed' "
+                            "sentinel for LazySingleton"
+                        )
                     self._value = value
         return value

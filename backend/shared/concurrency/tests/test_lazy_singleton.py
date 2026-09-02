@@ -50,3 +50,13 @@ def test_raising_factory_propagates_and_leaves_instance_retryable() -> None:
     # The failed attempt must not have cached anything — a subsequent call
     # retries by invoking its own factory again.
     assert singleton.get_or_create(lambda: "recovered") == "recovered"
+
+
+def test_none_returning_factory_raises_and_leaves_instance_retryable() -> None:
+    singleton: LazySingleton[object] = LazySingleton()
+
+    with pytest.raises(ValueError, match="factory returned None"):
+        singleton.get_or_create(lambda: None)
+
+    # Nothing was cached — a subsequent call with a valid factory still builds.
+    assert singleton.get_or_create(lambda: "recovered") == "recovered"

@@ -252,4 +252,9 @@ def get_default_store() -> BrandingStore:
   `factory` does beyond returning the value.
 - `None` is reserved as the "not yet constructed" sentinel, so `factory` must
   never return `None` — the same assumption the hand-rolled call sites above
-  already made.
+  already made. Enforced: a `None`-returning `factory` raises `ValueError`
+  immediately rather than silently caching `None` and re-running `factory`
+  on every later call.
+- `factory` must not call `get_or_create` on the same instance, directly or
+  transitively — the internal lock isn't reentrant and is held for the
+  duration of `factory`, so re-entry deadlocks the calling thread.
