@@ -282,31 +282,65 @@ class _FakeCursor:
         self._raise = raise_on_execute
 
     @staticmethod
-    def _check_arity(sql, params) -> None:
-        expected = sql.count("%s")
+    def _check_arity(sql: str, params, expected: int) -> None:
+        """Reject a ``params``/row whose length does not match ``sql``'s own ``%s`` count.
+
+        Preconditions:
+            ``expected`` is ``sql.count("%s")``, computed once by the caller — passed
+            in rather than recomputed here so a caller iterating many rows against
+            the same ``sql`` (``executemany``) does the ``str.count`` scan once.
+        Postconditions:
+            Returns ``None`` when ``len(params or ())`` equals ``expected``.
+        Raises:
+            ``_FakeCursorContractViolation`` — deliberately a ``BaseException``, not an
+            ``Exception`` — when the lengths differ, naming both counts.
+        """
         actual = len(params or ())
         if expected != actual:
             raise _FakeCursorContractViolation(f"SQL expects {expected} params, row has {actual}")
 
-    def execute(self, sql, params=None):
+    def execute(self, sql: str, params=None) -> None:
+        """Record one ``(sql, params)`` call, or raise if ``raise_on_execute`` is set.
+
+        Preconditions:
+            ``params`` is ``None`` or a sequence whose length matches ``sql``'s ``%s``
+            placeholder count.
+        Postconditions:
+            When not configured to raise, appends ``(sql, params)`` to ``self.executed``
+            and returns ``None``.
+        Raises:
+            ``RuntimeError`` when ``raise_on_execute`` was set at construction, before
+            any arity check or recording. ``_FakeCursorContractViolation`` when
+            ``params``'s length does not match ``sql``'s placeholder count.
+        """
         if self._raise:
             raise RuntimeError("boom")
-        self._check_arity(sql, params)
+        self._check_arity(sql, params, sql.count("%s"))
         self.executed.append((sql, params))
 
-    def executemany(self, sql, seq):
+    def executemany(self, sql: str, seq) -> None:
+        """Record one ``(sql, rows)`` call for a batch, or raise if ``raise_on_execute`` is set.
+
+        Preconditions:
+            Every row in ``seq`` is a sequence whose length matches ``sql``'s ``%s``
+            placeholder count.
+        Postconditions:
+            When not configured to raise, appends ``(sql, list(seq))`` to
+            ``self.executed`` and returns ``None``. ``sql.count("%s")`` is computed
+            once and reused across every row in ``seq``, since it is invariant for a
+            single call.
+        Raises:
+            ``RuntimeError`` when ``raise_on_execute`` was set at construction, before
+            any row is checked or recorded. ``_FakeCursorContractViolation`` on the
+            first row whose length does not match ``sql``'s placeholder count.
+        """
         if self._raise:
             raise RuntimeError("boom")
+        expected = sql.count("%s")
         rows = list(seq)
         for row in rows:
-            self._check_arity(sql, row)
+            self._check_arity(sql, row, expected)
         self.executed.append((sql, rows))
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
 
 
 def _rec(**overrides):
