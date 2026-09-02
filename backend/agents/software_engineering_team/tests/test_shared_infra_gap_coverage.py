@@ -357,6 +357,27 @@ def test_hitl_signal_mixin_logs_diagnostic_inside_a_workflow(monkeypatch) -> Non
     assert fake_logger.warnings == [("submit_answers rejected: %r", ("reason",))]
 
 
+def test_hitl_signal_mixin_diagnostic_is_a_silent_no_op_outside_a_workflow(monkeypatch) -> None:
+    """Complementary to the in-workflow test above: when workflow.in_workflow()
+    is False -- the case every other test in this module exercises implicitly
+    -- the documented contract is a no-op, not a fallback logger."""
+
+    class _FakeLogger:
+        def __init__(self) -> None:
+            self.warnings: list[tuple] = []
+
+        def warning(self, msg, *args) -> None:
+            self.warnings.append((msg, args))
+
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(_temporal_signal_module.workflow, "in_workflow", lambda: False)
+    monkeypatch.setattr(_temporal_signal_module.workflow, "logger", fake_logger)
+
+    _temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
+
+    assert fake_logger.warnings == []
+
+
 def test_hitl_signal_mixin_ignores_second_submission_for_same_token() -> None:
     wf = _Workflow()
     wf._active_resume_token = "tok-1"

@@ -352,3 +352,19 @@ def test_log_signal_diagnostic_logs_via_workflow_logger_inside_a_workflow(monkey
     temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
 
     assert fake_logger.warnings == [("submit_answers rejected: %r", ("reason",))]
+
+
+def test_log_signal_diagnostic_is_a_silent_no_op_outside_a_workflow(monkeypatch) -> None:
+    """The documented contract is a no-op (not a stdlib-logging fallback) when
+    workflow.in_workflow() is False -- e.g. every other test in this suite,
+    which drives HitlAnswerSignalMixin as a bare object with no Temporal
+    context. Assert the workflow logger is never touched in that case,
+    pinning "no-op" rather than "logs somewhere else" as the real
+    behavior."""
+    fake_logger = _FakeWorkflowLogger()
+    monkeypatch.setattr(temporal_signal_module.workflow, "in_workflow", lambda: False)
+    monkeypatch.setattr(temporal_signal_module.workflow, "logger", fake_logger)
+
+    temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
+
+    assert fake_logger.warnings == []
