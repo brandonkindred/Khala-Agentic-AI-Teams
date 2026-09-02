@@ -41,6 +41,7 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     StopLossRule,
     TakeProfitRule,
+    entry_anchored_stop_price,
 )
 from investment_team.trading_service.engine.execution_model import RealisticExecutionModel
 from investment_team.trading_service.engine.fill_simulator import FillSimulator, FillSimulatorConfig
@@ -191,6 +192,104 @@ def test_resolved_attachment_carries_entry_price_pct_for_reanchoring() -> None:
         StopLossRule(pct=0.03, basis="entry_price"), OrderSide.LONG, 100.0
     )
     assert attachment.entry_price_pct == pytest.approx(0.03)
+
+
+# ---------------------------------------------------------------------------
+# entry_price_pct bounds validation (OrderRequest.validate_prices)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_pct", [0.0, 1.0, -0.1, 1.5])
+def test_validate_prices_rejects_out_of_range_entry_price_pct(bad_pct: float) -> None:
+    """``StopAttachment.entry_price_pct`` shares ``ExitLegSpec.pct``'s strict
+    ``(0, 1)`` bound (see ``_is_resting_stop_loss``); a leg carrying a value
+    outside that bound must fail loudly at ``validate_prices`` rather than
+    silently mis-anchoring at materialization time."""
+    attachment = resolve_resting_stop_loss_attachment(
+        StopLossRule(pct=0.03, basis="entry_price"), OrderSide.LONG, 100.0
+    )
+    attachment.entry_price_pct = bad_pct
+    req = OrderRequest(
+        client_order_id="co-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10,
+        order_type=OrderType.MARKET,
+        attached_exits=[attachment],
+    )
+    with pytest.raises(ValueError, match="entry_price_pct"):
+        req.validate_prices()
+
+
+def test_validate_prices_accepts_in_range_entry_price_pct() -> None:
+    attachment = resolve_resting_stop_loss_attachment(
+        StopLossRule(pct=0.03, basis="entry_price"), OrderSide.LONG, 100.0
+    )
+    req = OrderRequest(
+        client_order_id="co-2",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10,
+        order_type=OrderType.MARKET,
+        attached_exits=[attachment],
+    )
+    req.validate_prices()  # does not raise
+
+
+# ---------------------------------------------------------------------------
+# entry_anchored_stop_price: shared geometry helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("is_long", "expected"),
+    [(True, 97.0), (False, 103.0)],
+)
+def test_entry_anchored_stop_price_matches_direction(is_long: bool, expected: float) -> None:
+    assert entry_anchored_stop_price(100.0, 0.03, is_long=is_long) == pytest.approx(expected)
+
+
+def test_stop_loss_level_delegates_to_entry_anchored_stop_price() -> None:
+    """``rule_compiler._stop_loss_level`` and the shared helper must never
+    drift apart — they are the same formula, not two copies of it."""
+    rule = StopLossRule(pct=0.05, basis="entry_price")
+    long_pos = PositionState(
+        symbol="AAA",
+        side="long",
+        qty=10.0,
+        entry_price=200.0,
+        high_since_entry=200.0,
+        low_since_entry=200.0,
+    )
+    short_pos = PositionState(
+        symbol="AAA",
+        side="short",
+        qty=10.0,
+        entry_price=200.0,
+        high_since_entry=200.0,
+        low_since_entry=200.0,
+    )
+    assert _stop_loss_level(rule, long_pos) == entry_anchored_stop_price(200.0, 0.05, is_long=True)
+    assert _stop_loss_level(rule, short_pos) == entry_anchored_stop_price(
+        200.0, 0.05, is_long=False
+    )
+
+
+def test_resolve_resting_stop_loss_attachment_delegates_to_entry_anchored_stop_price() -> None:
+    """``resolve_resting_stop_loss_attachment``'s preview price is the same
+    shared-helper formula as the bar-close evaluator's, for both sides."""
+    long_attachment = resolve_resting_stop_loss_attachment(
+        StopLossRule(pct=0.04, basis="entry_price"), OrderSide.LONG, 150.0
+    )
+    short_attachment = resolve_resting_stop_loss_attachment(
+        StopLossRule(pct=0.04, basis="entry_price"), OrderSide.SHORT, 150.0
+    )
+    assert long_attachment.stop_price == pytest.approx(
+        entry_anchored_stop_price(150.0, 0.04, is_long=True)
+    )
+    assert short_attachment.stop_price == pytest.approx(
+        entry_anchored_stop_price(150.0, 0.04, is_long=False)
+    )
 
 
 # ---------------------------------------------------------------------------

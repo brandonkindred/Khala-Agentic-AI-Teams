@@ -703,6 +703,38 @@ def protective_limit_price(stop_price: float, offset: float, *, closing_long: bo
     return stop_price - offset if closing_long else stop_price + offset
 
 
+def entry_anchored_stop_price(ref_price: float, pct: float, *, is_long: bool) -> float:
+    """Floor/cap price for a stop anchored at ``pct`` off ``ref_price``.
+
+    A long's protective level sits *below* the reference (``ref * (1 - pct)``);
+    a short's sits *above* it (``ref * (1 + pct)``). This is the single source
+    of that geometry, shared by every consumer that must derive the same level
+    from the same reference and never drift apart: the bar-close evaluator
+    (``rule_compiler._stop_loss_level``, for both the static ``entry_price``
+    basis and the trailing bases — trailing only changes which price is passed
+    as ``ref_price``, not the formula), the generalized exit-leg resolver
+    (``trading_service.service.resolve_exit_leg_attachments``, whose preview
+    anchors ``ref_price`` at the signal bar's close), and the resting-child
+    materializer (``trading_service.engine.fill_simulator._materialize_stop_child``,
+    which re-anchors ``ref_price`` at the entry's actual fill price for a leg
+    carrying ``StopAttachment.entry_price_pct``). Before this helper existed,
+    each of those three re-implemented the same two-line formula independently
+    — durable only as long as no one edited one copy without the others, which
+    is exactly the class of bug the resting-child re-anchor was added to fix
+    (see that materializer's own comment).
+
+    Preconditions: ``ref_price`` and ``pct`` are plain floats (no
+    finiteness/sign/bound constraint here — callers validate the result
+    against their own contract; ``ExitLegSpec``/``_is_resting_stop_loss``
+    bound ``pct`` to ``(0, 1)`` before it reaches here, and the STOP-family
+    branch of ``resolve_exit_leg_attachments`` validates the resolved price
+    afterward).
+    Postconditions: returns ``ref_price * (1 - pct)`` when ``is_long``, else
+    ``ref_price * (1 + pct)``.
+    """
+    return ref_price * (1.0 - pct) if is_long else ref_price * (1.0 + pct)
+
+
 def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[float]:
     """Worst-case stop fraction for ``side``: the FIRST side-compatible
     ``StopLossRule.pct`` in spec order, or ``None`` when no stop can fire for it.

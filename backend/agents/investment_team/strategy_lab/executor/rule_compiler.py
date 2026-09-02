@@ -44,6 +44,7 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    entry_anchored_stop_price,
     protective_limit_price,
 )
 from .predicate_evaluator import HistoryView, evaluate_signal_exit_rules
@@ -525,10 +526,14 @@ def _next_scaled_rung(
 
 def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     """Resolve the price level at which ``rule`` floors (long) / caps (short)
-    the position. Single source of the stop-level geometry: :func:`stop_loss_triggers`
-    compares the bar against this level, and the limit-style evaluator rests a
-    STOP_LIMIT here, so the trigger decision and the resting limit can never
-    disagree.
+    the position. Single source of the stop-level *reference selection*
+    (entry price vs. the running trailing extreme); the actual floor/cap
+    geometry off that reference is :func:`spec_dsl.entry_anchored_stop_price`,
+    shared with every other consumer that must derive the same level from the
+    same reference (see that function's docstring for the full list) so none
+    of them can silently drift apart. :func:`stop_loss_triggers` compares the
+    bar against this level, and the limit-style evaluator rests a STOP_LIMIT
+    here, so the trigger decision and the resting limit can never disagree.
 
     Preconditions: ``rule`` is side-compatible with ``position`` — the basis can
     fire for this side. ``stop_loss_triggers`` enforces this by returning early
@@ -540,12 +545,12 @@ def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     trailing basis it floors off the running high (long) / caps off the running
     low (short).
     """
-    pct = rule.pct
-    if position.side == "long":
+    is_long = position.side == "long"
+    if is_long:
         ref = position.high_since_entry if rule.basis == "trailing_high" else position.entry_price
-        return ref * (1.0 - pct)
-    ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
-    return ref * (1.0 + pct)
+    else:
+        ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
+    return entry_anchored_stop_price(ref, rule.pct, is_long=is_long)
 
 
 def _kind_of(rule: ExitRule) -> ExitRuleKind:

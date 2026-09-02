@@ -162,6 +162,8 @@ class StopAttachment(BaseModel):
     # order) — without re-anchoring here, the two would disagree about
     # where the stop sits. Unused (``None``) by every other leg kind/source,
     # including bracket legs, which have no such competing live evaluator.
+    # Precondition: 0 < entry_price_pct < 1.0 (same bound as ExitLegSpec.pct /
+    # _is_resting_stop_loss); enforced in OrderRequest.validate_prices.
     entry_price_pct: Optional[float] = None
 
 
@@ -405,6 +407,11 @@ class OrderRequest(BaseModel):
                         f"{label} cannot set both trail_offset and limit_offset "
                         "(a trailing stop-limit child is not supported)"
                     )
+            if sl.entry_price_pct is not None and not (0.0 < sl.entry_price_pct < 1.0):
+                raise ValueError(
+                    f"{label}.entry_price_pct must satisfy 0 < entry_price_pct < 1.0, "
+                    f"got {sl.entry_price_pct!r}"
+                )
         # ``parent_order_id`` / ``oco_group_id`` are engine-internal: the
         # bracket materializer in ``FillSimulator`` calls
         # ``OrderBook.submit_attached`` which clones the request with these
