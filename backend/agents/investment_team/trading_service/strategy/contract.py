@@ -306,12 +306,12 @@ class OrderRequest(BaseModel):
     # separate field rather than folding the bracket pair into it so existing
     # bracket call sites/tests constructing requests via
     # ``attached_stop_loss=``/``attached_take_profit=`` are unaffected.
-    # Populated in production by ``_EngineEntryDispatcher`` for a
-    # resting-eligible ``StopLossRule`` (``basis="entry_price"``,
-    # ``style="market"``, ``0 < pct < 1.0`` — see that class's
-    # ``_resting_stop_loss_attachments`` in ``trading_service/service.py``);
-    # other rule kinds/bases are not yet migrated onto this path and remain
-    # bar-close-only.
+    # Populated in production by ``_EngineEntryDispatcher`` (in
+    # ``trading_service/service.py``) for a resting-eligible ``StopLossRule``
+    # (``basis="entry_price"``, ``style="market"``, ``0 < pct < 1.0`` — the
+    # exact predicate is the module-level ``_is_resting_stop_loss``, not a
+    # method of the dispatcher); other rule kinds/bases are not yet migrated
+    # onto this path and remain bar-close-only.
     attached_exits: List[Union[StopAttachment, LimitAttachment]] = Field(default_factory=list)
     parent_order_id: Optional[str] = None
     oco_group_id: Optional[str] = None

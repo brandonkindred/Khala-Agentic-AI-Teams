@@ -95,6 +95,24 @@ def test_non_stop_loss_rule_is_not_eligible() -> None:
     assert _is_resting_stop_loss(TakeProfitRule(pct=0.06)) is False
 
 
+@pytest.mark.parametrize("pct", [0.0, -0.05])
+def test_non_positive_pct_is_not_eligible(pct: float) -> None:
+    """The predicate's own ``0 < pct`` check is defense-in-depth: ``StopLossRule.pct``
+    already rejects non-positive values at construction (``Field(gt=0)``), so a
+    non-positive-pct rule can only reach the predicate via ``model_construct``
+    (bypassing validation) — exactly the case the isinstance/bound checks inside
+    ``_is_resting_stop_loss`` exist to catch defensively."""
+    rule = StopLossRule.model_construct(
+        kind="stop_loss",
+        pct=pct,
+        basis="entry_price",
+        style="market",
+        limit_offset_pct=None,
+        note="",
+    )
+    assert _is_resting_stop_loss(rule) is False
+
+
 # ---------------------------------------------------------------------------
 # _stop_loss_rule_to_leg_specs / resolve_resting_stop_loss_attachment
 # ---------------------------------------------------------------------------
@@ -136,6 +154,18 @@ def test_resolved_price_matches_bar_close_evaluator(
         low_since_entry=entry_price,
     )
     assert attachment.stop_price == pytest.approx(_stop_loss_level(rule, position))
+
+
+def test_resolve_resting_stop_loss_attachment_rejects_ineligible_rule() -> None:
+    """``resolve_resting_stop_loss_attachment`` enforces the same precondition as
+    ``_stop_loss_rule_to_leg_specs``, which it delegates to, rather than silently
+    resolving a rule this migration doesn't cover — unlike the leg-spec
+    translation, this adapter's own ineligible-input behavior wasn't previously
+    pinned by a dedicated test."""
+    with pytest.raises(AssertionError):
+        resolve_resting_stop_loss_attachment(
+            StopLossRule(pct=0.03, basis="trailing_high"), OrderSide.LONG, 100.0
+        )
 
 
 def test_resolved_attachment_has_no_limit_or_trail_offset() -> None:

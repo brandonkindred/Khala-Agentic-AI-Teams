@@ -2130,8 +2130,16 @@ class _EngineEntryDispatcher:
         field so this mechanism can never collide with a bracket's stop leg —
         a spec carrying both an ``OcoBracketRule`` and a resting-eligible
         standalone ``StopLossRule`` (unusual, but not DSL-forbidden) attaches
-        both without either overwriting the other. Returns ``[]`` when the
-        spec has no resting-eligible stop-loss rule.
+        both without either overwriting the other.
+
+        Preconditions: ``self._resting_stop_loss`` (set once in
+        ``__post_init__``) is either ``None`` or a rule already verified
+        resting-eligible by ``_is_resting_stop_loss`` — this method never
+        re-checks eligibility itself. ``ref_price`` is a finite number ``> 0``;
+        ``side`` is the entry's ``OrderSide``.
+        Postconditions: returns ``[]`` when the spec has no resting-eligible
+        stop-loss rule; otherwise a single-element list containing the
+        resolved :class:`StopAttachment`.
         """
         if self._resting_stop_loss is None:
             return []
