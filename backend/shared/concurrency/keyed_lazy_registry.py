@@ -49,13 +49,20 @@ class KeyedLazyRegistry(Generic[K, _T]):
             return _phase_caches.get_or_create(conversation_id, PhaseOutputCache)
 
         # A factory needing constructor arguments is just a closure — the
-        # primitive doesn't care how the value is built:
-        _team_semaphores: KeyedLazyRegistry[str, threading.BoundedSemaphore] = KeyedLazyRegistry()
+        # primitive doesn't care how the value is built. Held as an instance
+        # attribute here rather than at module scope, since the value depends on
+        # per-instance configuration:
+        class TeamRateLimiter:
+            def __init__(self, per_team_limit: int) -> None:
+                self._team_semaphores: KeyedLazyRegistry[str, threading.BoundedSemaphore] = (
+                    KeyedLazyRegistry()
+                )
+                self.per_team_limit = per_team_limit
 
-        def _get_team_semaphore(self, team: str) -> threading.BoundedSemaphore:
-            return self._team_semaphores.get_or_create(
-                team, lambda: threading.BoundedSemaphore(self.per_team_limit)
-            )
+            def _get_team_semaphore(self, team: str) -> threading.BoundedSemaphore:
+                return self._team_semaphores.get_or_create(
+                    team, lambda: threading.BoundedSemaphore(self.per_team_limit)
+                )
 
     Preconditions:
         - Every ``key`` passed to :meth:`get_or_create` is hashable (the bound on
@@ -79,15 +86,24 @@ class KeyedLazyRegistry(Generic[K, _T]):
           for the key it is building, directly or transitively: the per-key lock
           is not reentrant and is held for the duration of ``factory``.
         - ``factory`` does not call :meth:`get_or_create` on this same instance
-          for any key this registry saw *earlier* than the key being built. The
-          underlying manager assigns each key a global order at first sight and
-          refuses to nest a lower-order acquisition under a higher-order one,
-          which is what rules out an A-builds-B/B-builds-A deadlock cycle. Note
-          the consequence: whether a given cross-key nesting is permitted
-          depends on the order this registry first saw the two keys, so an
-          acyclic nesting that works in one process can be rejected in another
-          that touched the keys in the opposite order. Build keyed values from
-          independent factories rather than from each other.
+          for a key that was seen earlier *and left unbuilt* — that is, a key
+          whose own ``factory`` previously raised. The underlying manager
+          assigns each key a global order at first sight and refuses to nest a
+          lower-order acquisition under a higher-order one, which is what rules
+          out an A-builds-B/B-builds-A deadlock cycle.
+
+          Two nestings are always fine, and are the common cases: building a key
+          this registry has never seen (it is assigned a higher order, so the
+          rule permits it), and reading a key that is already built (it returns
+          on the unlocked fast path below and never acquires its lock at all, so
+          the ordering rule is never consulted).
+
+          What is left is the narrow case above, and there the permitted set
+          still depends on the order this registry first saw the two keys — an
+          acyclic nesting can be accepted in one process and refused in another
+          that touched the keys in the opposite order. Building keyed values
+          from independent factories rather than from each other avoids the
+          question entirely.
         - Both nesting violations raise ``RuntimeError`` rather than deadlocking
           silently — inherited from
           :class:`~shared.concurrency.keyed_lock_manager.KeyedLockManager`, and

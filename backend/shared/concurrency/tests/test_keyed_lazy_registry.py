@@ -1,10 +1,15 @@
 """Single-threaded correctness tests for :class:`KeyedLazyRegistry`.
 
-Concurrent-first-call proof is tracked separately (the dedicated thread-safety
-test suite covering both ``LazySingleton`` and ``KeyedLazyRegistry``); this
-module covers the single-threaded contract: build-once-per-key,
-return-same-object, independence between keys, and raise-and-retry on a failing
-factory.
+This module covers the single-threaded contract: build-once-per-key,
+return-same-object, independence between keys, raise-and-retry on a failing
+factory, and the cross-key nesting rules the class documents as preconditions.
+
+The concurrent-first-call proof — that a key's value is built exactly once under
+genuinely concurrent first access, the postcondition the class leads with — is
+**not yet written**, here or anywhere else in this repository. It is planned as
+one dedicated thread-safety suite covering this class and ``LazySingleton``
+together, so the property is proven once rather than twice. Until that lands,
+treat the guarantee as reasoned-but-unproven: no test in this tree exercises it.
 """
 
 from __future__ import annotations
@@ -119,6 +124,59 @@ def test_factory_reentering_its_own_key_raises_instead_of_deadlocking() -> None:
 
     # The rejected attempt cached nothing, so the key is still buildable.
     assert registry.get_or_create("k", lambda: "recovered") == "recovered"
+
+
+def test_factory_may_build_a_key_this_registry_has_not_seen() -> None:
+    registry: KeyedLazyRegistry[str, str] = KeyedLazyRegistry()
+
+    def build_a_then_b() -> str:
+        registry.get_or_create("b", lambda: "b-value")
+        return "a-value"
+
+    # "a" is resolved first and so holds the lower global order; "b" is brand new
+    # and is assigned a higher one, which is exactly what the underlying manager's
+    # ordering rule permits.
+    assert registry.get_or_create("a", build_a_then_b) == "a-value"
+    assert registry.get_or_create("b", lambda: "unused") == "b-value"
+
+
+def test_factory_may_read_an_already_built_key_whatever_its_order() -> None:
+    registry: KeyedLazyRegistry[str, str] = KeyedLazyRegistry()
+    registry.get_or_create("b", lambda: "b-value")
+
+    def build_a_reading_b() -> str:
+        # "b" holds a *lower* order than "a" here, so this would be refused if it
+        # reached the lock at all. It does not: a built key returns on the
+        # unlocked fast path in get_or_create and never acquires its lock, so the
+        # ordering rule is never consulted. This is why the class's precondition
+        # is narrower than "never nest into an earlier-seen key".
+        assert registry.get_or_create("b", lambda: "unused") == "b-value"
+        return "a-value"
+
+    assert registry.get_or_create("a", build_a_reading_b) == "a-value"
+
+
+def test_factory_nesting_into_a_seen_but_unbuilt_key_raises_instead_of_deadlocking() -> None:
+    registry: KeyedLazyRegistry[str, str] = KeyedLazyRegistry()
+
+    def boom() -> str:
+        raise RuntimeError("boom")
+
+    # A *failed* build is what leaves "b" seen-but-unbuilt: it holds the lower
+    # global order yet has no value, so a later nested call for it really does
+    # reach the lock and is refused. This is the only shape that exercises the
+    # guard — nesting into a successfully built key takes the fast path instead
+    # (see the test above), so a test written that way would pass without ever
+    # reaching the ordering check.
+    with pytest.raises(RuntimeError, match="boom"):
+        registry.get_or_create("b", boom)
+
+    def build_a_then_b() -> str:
+        registry.get_or_create("b", lambda: "b-value")
+        return "a-value"
+
+    with pytest.raises(RuntimeError, match="lower-order key nested under"):
+        registry.get_or_create("a", build_a_then_b)
 
 
 def test_supports_any_hashable_key_type() -> None:

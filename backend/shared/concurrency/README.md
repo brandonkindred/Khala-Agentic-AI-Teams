@@ -301,11 +301,15 @@ def _get_team_semaphore(self, team: str) -> threading.BoundedSemaphore:
   error message names the offending key.
 - Re-entrancy is rejected loudly rather than hanging: a `factory` that calls
   `get_or_create` for the key it is building raises `RuntimeError`, and so does
-  one that reaches for a key this registry saw *earlier* (the inherited
-  `KeyedLockManager` lock ordering, which is what forecloses an
-  A-builds-B/B-builds-A cycle). Because "earlier" is decided by first-sight
-  order, a cross-key nesting that is accepted in one process can be rejected in
-  another — build keyed values from independent factories, not from each other.
+  one that reaches for a key this registry saw *earlier and left unbuilt* — a
+  key whose own factory previously raised (the inherited `KeyedLockManager` lock
+  ordering, which is what forecloses an A-builds-B/B-builds-A cycle). Nesting
+  into a key that is brand new, or one that is already built, is always fine:
+  the first is assigned a higher order, and the second returns on the unlocked
+  fast path without touching its lock. For that remaining narrow case, whether a
+  nesting is permitted depends on first-sight order, so it can be accepted in
+  one process and refused in another — build keyed values from independent
+  factories, not from each other.
 - Neither values nor per-key locks are ever evicted, so memory grows with the
   number of distinct keys ever seen — the same accepted tradeoff as
   `KeyedLockManager`, and the same one the never-evicted caches this is meant to
