@@ -510,7 +510,7 @@
                       class="github-task-chip github-task-chip--{{ task.status }}"
                       tabindex="0"
                       role="img"
-                      [attr.aria-label]="task.title"
+                      [attr.aria-label]="task.title + ' — ' + task.status"
                       [matTooltip]="task.title"
                     >
                       {{ task.title | slice:0:40 }}

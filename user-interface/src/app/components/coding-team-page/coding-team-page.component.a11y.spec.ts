@@ -234,7 +234,7 @@ describe('CodingTeamPageComponent a11y', () => {
       expect(chip.tabIndex).toBe(0);
       expect(chip.getAttribute('role')).toBe('img');
     });
-    expect(chips[0].getAttribute('aria-label')).toBe(longTitle);
+    expect(chips[0].getAttribute('aria-label')).toBe(longTitle + ' — in_progress');
     expect(chips[0].textContent).not.toContain(longTitle);
     await expectNoAxeViolations(el);
   }, 15000);
