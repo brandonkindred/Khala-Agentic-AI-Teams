@@ -88,6 +88,41 @@ def test_phase_spec_context_override_restores_on_error() -> None:
     assert _PHASE_SPEC[BrandPhase.GOVERNANCE].context_phases == original
 
 
+def test_execute_phase_variant_raises_on_degraded_output() -> None:
+    """_execute_phase_variant must raise RuntimeError when run_single_phase reports
+    degraded=True -- no existing test forces this branch.
+    """
+    orchestrator = BrandingTeamOrchestrator()
+    mission = make_mission()
+    phase = BrandPhase.STRATEGIC_CORE
+
+    with patch.object(orchestrator, "run_single_phase", return_value=(object(), True)):
+        with pytest.raises(RuntimeError, match="degraded") as exc_info:
+            eval_ctx._execute_phase_variant(
+                orchestrator, mission, phase, (), {}, variant_label="selective variant"
+            )
+
+    assert phase.value in str(exc_info.value)
+    assert mission.company_name in str(exc_info.value)
+    assert "selective variant" in str(exc_info.value)
+
+
+def test_execute_phase_variant_restores_phase_spec_on_degraded() -> None:
+    """_PHASE_SPEC must be restored even when the degraded-output RuntimeError fires."""
+    orchestrator = BrandingTeamOrchestrator()
+    mission = make_mission()
+    phase = BrandPhase.GOVERNANCE
+    original = _PHASE_SPEC[phase].context_phases
+
+    with patch.object(orchestrator, "run_single_phase", return_value=(object(), True)):
+        with pytest.raises(RuntimeError):
+            eval_ctx._execute_phase_variant(
+                orchestrator, mission, phase, (), {}, variant_label="shared prefix"
+            )
+
+    assert _PHASE_SPEC[phase].context_phases == original
+
+
 def test_run_variant_selective_includes_all_upstream_context() -> None:
     """Integration check that _run_variant(full_context=False) genuinely goes
     through the real, non-monkeypatched _PHASE_SPEC -- GOVERNANCE's selective
