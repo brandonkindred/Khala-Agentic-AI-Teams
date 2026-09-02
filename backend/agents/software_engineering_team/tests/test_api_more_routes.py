@@ -323,7 +323,7 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
     import software_engineering_team.api.routes.hitl as hitl_mod
 
     job_id = "job-signal-1"
-    _seed_temporal_native_pause(
+    token = _seed_temporal_native_pause(
         fake_job_client,
         job_id,
         {
@@ -354,7 +354,7 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
         f"/run-team/{job_id}/answers",
         json={
             "answers": [{"question_id": "q1", "selected_option_id": "okta"}],
-            "resume_token": f"{job_id}:tok-1",
+            "resume_token": token,
         },
     )
 
@@ -363,7 +363,7 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
     assert appended["answers"][0]["question_id"] == "q1"
     assert signaled["workflow_id"] == f"se-run-team-{job_id}"
     assert signaled["signal"] == "submit_planning_answers"
-    assert signaled["payload"]["resume_token"] == f"{job_id}:tok-1"
+    assert signaled["payload"]["resume_token"] == token
     assert signaled["payload"]["answers"] == appended["answers"]
     # The answered pause is no longer advertised back at the client (see below).
     assert resp.json()["resume_token"] is None
@@ -386,7 +386,7 @@ def test_submit_pending_answers_temporal_native_stops_advertising_the_answered_p
     import software_engineering_team.api.routes.hitl as hitl_mod
 
     job_id = "job-signal-projected"
-    _seed_temporal_native_pause(
+    token = _seed_temporal_native_pause(
         fake_job_client,
         job_id,
         {
@@ -403,7 +403,7 @@ def test_submit_pending_answers_temporal_native_stops_advertising_the_answered_p
         f"/run-team/{job_id}/answers",
         json={
             "answers": [{"question_id": "q1", "selected_option_id": "okta"}],
-            "resume_token": f"{job_id}:tok-1",
+            "resume_token": token,
         },
     )
 
@@ -421,7 +421,7 @@ def test_submit_pending_answers_temporal_native_stops_advertising_the_answered_p
     # ...and the envelope the activity classifies its re-entry from is untouched.
     record = fake_job_client.get_job(job_id)
     assert record["waiting_for_answers"] is True
-    assert record["resume_token"] == f"{job_id}:tok-1"
+    assert record["resume_token"] == token
     assert record["pending_questions"]
 
 
@@ -433,7 +433,7 @@ def test_submit_pending_answers_temporal_native_still_advertises_a_later_pause(
     import software_engineering_team.api.routes.hitl as hitl_mod
 
     job_id = "job-signal-round2"
-    _seed_temporal_native_pause(
+    token = _seed_temporal_native_pause(
         fake_job_client,
         job_id,
         {
@@ -450,7 +450,7 @@ def test_submit_pending_answers_temporal_native_still_advertises_a_later_pause(
         f"/run-team/{job_id}/answers",
         json={
             "answers": [{"question_id": "q1", "selected_option_id": "a"}],
-            "resume_token": f"{job_id}:tok-1",
+            "resume_token": token,
         },
     )
     # Assert the submission landed, and that the marker it set is visible.

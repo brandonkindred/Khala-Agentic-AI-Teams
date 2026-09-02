@@ -565,8 +565,13 @@ def _plan_project_activity_body(
         logging a warning naming them. Defaulting is the load-bearing half: the answers
         route rejects a batch missing any required question and every PRA question is
         required, so resolving with only the matches would leave the sub-job waiting out its
-        poll timeout instead of resuming. So this returns a ``PlanResult`` rather than
-        another ``{"outcome": "paused"}``. The calling workflow uses it to bound its pause
+        poll timeout instead of resuming. In the designed flow this returns a
+        ``PlanResult`` rather than another ``{"outcome": "paused"}`` -- but the
+        suppression is not enforced here: if a ``PlanningAnswerPauseSignal`` is raised
+        anyway, the handler below still persists the pause and returns
+        ``{"outcome": "paused"}`` (logging a warning), and the calling workflow fails the
+        run non-retryably. Stated to match ``plan_project_activity``'s docstring rather
+        than promising more than this function delivers. The calling workflow uses it to bound its pause
         loop -- see ``build_temporal_planning_answer_callback`` for why an unbounded one
         cannot be relied on to terminate.
     """

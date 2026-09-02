@@ -706,3 +706,28 @@ def test_default_answer_ignores_an_infinite_confidence() -> None:
     )
 
     assert result[0]["selected_option_id"] == "opt-real"
+
+
+def test_default_answer_ignores_an_out_of_range_int_confidence() -> None:
+    """``float()`` raises ``OverflowError`` on an int beyond ~1e308, and
+    ``json.loads`` parses integer tokens into unbounded ints — so the same
+    LLM-parsed source the other exclusions guard against can supply one.
+
+    Letting it raise would crash the resumed activity on the final round, which
+    is precisely the path that must default rather than fail.
+    """
+    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[], allow_repause=False)
+
+    result = cb(
+        [
+            {
+                "id": "q1",
+                "options": [
+                    {"id": "opt-huge", "confidence": 10**400},
+                    {"id": "opt-real", "confidence": 0.4},
+                ],
+            }
+        ]
+    )
+
+    assert result[0]["selected_option_id"] == "opt-real"

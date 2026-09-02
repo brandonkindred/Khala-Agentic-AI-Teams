@@ -239,6 +239,9 @@ class ToolCallBudgetModel:
         - ``max_tool_calls`` is an ``int`` >= 1. A non-int (``bool`` included)
           raises rather than being coerced -- a truncated cap would not be the
           one the caller asked for.
+        - ``label`` names the calling pass (e.g. ``"scope_verify"``) in the log
+          lines this wrapper emits. It is diagnostic only and does not affect
+          enforcement.
 
     Postconditions:
         - Below the cap: every event of ``inner.stream`` is yielded

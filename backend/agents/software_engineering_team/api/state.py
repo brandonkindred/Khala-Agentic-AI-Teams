@@ -279,12 +279,15 @@ def build_job_status_response(job_id: str, data: Dict[str, Any]) -> JobStatusRes
     Postconditions: returns a fully populated ``JobStatusResponse``; every field
         degrades to a safe default (``None``/``[]``/``False``) rather than raising when
         the underlying stored value is missing or malformed. ``server_time`` is always
-        the current UTC instant, not a stored value. When the record carries
-        ``answers_submitted_for_token`` equal to its ``resume_token`` — answers for the
+        the current UTC instant, not a stored value. When the record carries a NON-EMPTY
+        ``resume_token`` equal to its ``answers_submitted_for_token`` — answers for the
         current pause were accepted and durably signaled, but the pause envelope is not
         the answers route's to clear — the pause is reported as resolved
         (``waiting_for_answers`` False, no ``pending_questions``, no ``resume_token``)
-        even though the stored envelope still stands.
+        even though the stored envelope still stands. A record with no ``resume_token``
+        is projected verbatim: resolution is never synthesized for one that advertises
+        waiting without a token to have answered, which two unset fields would otherwise
+        satisfy by equality alone.
     """
     raw_failed = data.get("failed_tasks") or []
     failed_tasks = [

@@ -15,7 +15,7 @@ drives the identical fixture-defined scenario through both
 ``StrategyLabOrchestrator.run_cycle`` (thread mode) and
 ``StrategyLabCycleWorkflow.run`` (Temporal mode) and asserts both resolve
 the re-entry to the *same* ``PipelineStage`` -- the cross-mode parity work's central
-cross-mode parity claim, proven end-to-end rather than asserted only in a
+claim, proven end-to-end rather than asserted only in a
 PR description.
 
 Both modes' resume-stage determinations are already produced by one shared

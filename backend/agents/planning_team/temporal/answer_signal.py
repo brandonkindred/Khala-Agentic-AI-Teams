@@ -52,9 +52,10 @@ SUBMIT_PLANNING_ANSWERS_SIGNAL = "submit_planning_answers"
 def _option_confidence(option: Dict[str, Any]) -> float:
     """``option``'s confidence as a float, 0.0 when absent or unusable.
 
-    Postconditions: never raises; a missing, non-numeric, bool or non-finite
-        ``confidence`` scores 0.0, so a malformed option can never outrank a
-        well-formed one. Two exclusions are not obvious:
+    Postconditions: never raises; a ``confidence`` that is missing, non-numeric,
+        bool, non-finite, or too large to convert to a float scores 0.0, so a
+        malformed option can never outrank a well-formed one. Three exclusions
+        are not obvious:
 
         - ``bool`` is an ``int`` subclass, so ``True`` would otherwise score
           1.0 -- ahead of every real option.
@@ -64,11 +65,23 @@ def _option_confidence(option: Dict[str, Any]) -> float:
           is exactly what this postcondition rules out. ``json.loads`` accepts
           a bare ``NaN`` token, and these dicts originate from LLM-parsed
           output, so it is reachable rather than theoretical.
+        - An ``int`` beyond float range raises ``OverflowError`` from
+          ``float()`` rather than producing a value; ``json.loads`` parses
+          integer tokens into unbounded ints, so the same source can supply
+          one. It is caught, not allowed to escape.
     """
     value = option.get("confidence")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
-    confidence = float(value)
+    try:
+        confidence = float(value)
+    except OverflowError:
+        # An int beyond ~1e308. ``json.loads`` parses integer tokens into
+        # unbounded Python ints, so this is reachable from the same LLM-parsed
+        # output the exclusions below guard against -- and letting it raise
+        # would crash the resumed activity on the final round instead of
+        # defaulting, which is the one thing this path must not do.
+        return 0.0
     return confidence if math.isfinite(confidence) else 0.0
 
 

@@ -129,12 +129,19 @@ def _spend_budget(model: ToolCallBudgetModel, n: int) -> None:
 
     The private write is deliberate and centralized: these tests need the at-cap
     regime as a *precondition*, not as the thing under test, and draining a setup
-    turn first would make each one exercise two code paths. Keeping the coupling
-    in one place means a rename of the counter breaks here, with this name in the
-    traceback, rather than silently becoming a dead write in four tests that then
-    fail with "toolUse leaked through".
+    turn first would make each one exercise two code paths.
+
+    The readback is what makes centralizing it worth anything. A bare assignment
+    to a renamed attribute does not fail — Python just creates a new instance
+    attribute while the real counter stays at 0 — so the write would silently
+    become dead and four tests would fail downstream with "toolUse leaked
+    through", naming nothing. Asserting through the public accessor turns that
+    into a failure inside this helper, with this name in the traceback.
     """
     model._tool_calls_used = n
+    assert model.tool_calls_used == n, (
+        "_tool_calls_used no longer backs tool_calls_used; update this helper"
+    )
 
 
 def _drain(model: Any, **kwargs: Any) -> List[Dict]:
@@ -905,7 +912,7 @@ def test_a_forwarded_block_start_keeps_its_stop_even_when_its_tool_use_is_droppe
 
 
 def test_getattr_propagates_an_attribute_error_from_inners_own_getter() -> None:
-    """An AttributeError raised INSIDE an attribute ``inner`` does provide is the
+    """An AttributeError raised inside an attribute that ``inner`` does provide is the
     wrapped model's error, not "inner lacks this".
 
     Swallowing it hands back a Strands ``Model`` default computed against the
