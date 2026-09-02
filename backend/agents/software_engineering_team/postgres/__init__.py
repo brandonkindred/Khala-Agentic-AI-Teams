@@ -7,8 +7,9 @@ side effects. The SE FastAPI app's lifespan registers it via
 Four tables:
 
 - ``se_agent_traces`` — one row per LLM call (token counts, ``cost_usd``, latency,
-  outcome). The optional Postgres trace sink behind ``SE_TRACE_TO_POSTGRES``; the
-  DORA/cost endpoint reads cost from here so metrics work without an OTLP collector.
+  outcome). The Postgres trace sink (``SE_TRACE_TO_POSTGRES``, on by default; opt
+  out with a falsy value); the DORA/cost endpoint reads cost from here so metrics
+  work without an OTLP collector.
 - ``se_events`` — pipeline lifecycle events (task created/merged, gate
   rejections/re-entries, crash detected/resolved). The DORA-metrics substrate.
 - ``se_learnings`` — distilled lessons (``pattern`` / ``trigger`` /

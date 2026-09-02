@@ -64,6 +64,11 @@ with implementation detail for individual Strategy Lab capabilities:
   (`entry_bid_price` / `entry_fill_price` / `exit_bid_price` /
   `exit_fill_price` / `entry_order_type` / `exit_order_type`) used for
   post-hoc analysis of realized vs modeled slippage.
+- **[`reference_ledger_trade_model.md`](./reference_ledger_trade_model.md)**
+  — the `ReferenceTrade` schema and module boundary for a pure, independent
+  re-simulation of a spec's entry/exit rules, designed to be diffed against
+  production `TradeRecord` output; covers per-exit-rule-kind fill semantics
+  (stop-loss, take-profit, scaled take-profit, signal exit, OCO bracket).
 
 ## Where things live
 

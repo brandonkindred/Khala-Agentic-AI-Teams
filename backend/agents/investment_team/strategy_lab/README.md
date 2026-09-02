@@ -272,7 +272,9 @@ through to the revise path for criticals the machine cannot fix. Scope is intent
 (2) clamp `risk_limits.max_position_pct` to the shared `MAX_POSITION_PCT_CEILING` (Rule 8) — plus a
 trial `compile_strategy()` that flips `requires_custom_code=True` on `CompilerError`, so even a
 readiness-clean spec outside the deterministic-compiler envelope (e.g. a `volatility_target` spec
-without an ATR predicate — readiness only *warns* on that sizing mode) selects the custom-code path
+without an ATR predicate — readiness's sizing-realisability rule validates volatility_target's
+worst-case-concurrency invariant but can't confirm the deployed vol itself, so a spec missing the
+ATR predicate can still be readiness-clean) selects the custom-code path
 during design rather than discovering it later in synthesis. Each edit is recorded on the `on_phase`
 callback as a `"design_repair"` event and counted in `loop_telemetry.mechanical_repairs`; substantive
 defects (empty entry/exit rules, thesis coherence) are left to the LLM. Disable to restore the pure

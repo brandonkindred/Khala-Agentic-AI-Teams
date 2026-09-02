@@ -7,7 +7,7 @@ dedicated test that exercises its failure path.
 
 from __future__ import annotations
 
-from typing import List
+from typing import Callable, List, Union
 
 import pytest
 from pydantic import ValidationError
@@ -827,7 +827,7 @@ def test_rule5_volatility_target_emits_warning() -> None:
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
     assert any("volatility_target" in w and "0.15" in w for w in warnings), warnings
-    # No critical from Rule 5 (the rule abstained, not failed).
+    # No critical from Rule 5 — the worst-case bound fits within capital.
     sizing_criticals = [c for c in _critical(results) if "Sizing" in c or "qty=" in c]
     assert not sizing_criticals, sizing_criticals
 
@@ -863,7 +863,10 @@ def test_check_sizing_realisable_directly_catches_unknown_asset_class_value_erro
 
 
 def test_check_sizing_realisable_directly_emits_volatility_target_warning() -> None:
-    """Direct probe of the rule's volatility-target abstention path."""
+    """Direct probe of the rule's volatility-target plausibility-warning path
+    — Rule 5 no longer abstains on this kind (it runs the full worst-case
+    bound computation), but this particular spec's bound fits within
+    capital, so the only result is the informational warning."""
     from investment_team.strategy_lab.quality_gates.spec_readiness import (
         SpecReadinessCtx,
         SpecReadinessGate,
@@ -882,6 +885,301 @@ def test_check_sizing_realisable_directly_emits_volatility_target_warning() -> N
     assert results[0].severity == "warning"
     assert "volatility_target" in results[0].details
     assert "0.001" in results[0].details
+
+
+def test_rule5_volatility_target_bound_is_independent_of_target_annual_vol_and_price() -> None:
+    """The worst-case bound is exactly ``risk_limits.max_position_pct`` — NOT
+    a function of ``target_annual_vol`` or the sampled price. The engine's
+    sizing formula (``raw_qty = equity * target_annual_vol / (close *
+    atr_val)`` in ``_compute_qty``) accepts any positive ``atr_val`` with no
+    enforced floor, so no ATR-derived estimate is a provably safe worst case
+    — a low enough realised ATR always deploys up to the unconditional
+    ``max_position_pct`` clamp regardless of ``target_annual_vol``. Two
+    3-symbol specs with wildly different ``target_annual_vol`` (0.05 vs 2.0)
+    and different sample prices must produce the IDENTICAL verdict, since
+    both quantities are irrelevant to the bound."""
+    low_tav_spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.05),
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        asset_class="stocks",
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
+    )
+    low_tav_results = SpecReadinessGate(market_sample_provider=lambda sym, ac: 100.0).validate(
+        low_tav_spec, backtest_config=_config()
+    )
+    low_tav_matches = [
+        c for c in _critical(low_tav_results) if "volatility_target" in c and "worst-case" in c
+    ]
+    assert low_tav_matches, _critical(low_tav_results)
+
+    high_tav_spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=2.0),
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        asset_class="stocks",
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
+    )
+    high_tav_results = SpecReadinessGate(market_sample_provider=lambda sym, ac: 1.0).validate(
+        high_tav_spec, backtest_config=_config()
+    )
+    high_tav_matches = [
+        c for c in _critical(high_tav_results) if "volatility_target" in c and "worst-case" in c
+    ]
+    assert high_tav_matches, _critical(high_tav_results)
+    # Pin the "IDENTICAL verdict" claim directly: since the bound depends on
+    # neither target_annual_vol nor price, the critical messages themselves
+    # (which embed no target_annual_vol/price figures) must match exactly —
+    # not just "a critical fired in both cases", which wouldn't catch the
+    # bound becoming partially price/target_annual_vol-dependent while still
+    # emitting some worst-case critical.
+    assert low_tav_matches == high_tav_matches, (low_tav_matches, high_tav_matches)
+
+
+def test_rule5_volatility_target_over_committed_across_symbols_is_critical() -> None:
+    """A volatility_target spec whose worst-case (max_position_pct-bound)
+    notional is safe for a single order can still overcommit capital once
+    worst-case concurrency is considered — mirrors the
+    fixed_fraction/fixed_notional over-commit tests. 0.5 (50% max_position_pct)
+    × 3 symbols = 1.5x equity."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        asset_class="stocks",
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [
+        c for c in _critical(results) if "volatility_target" in c and "worst-case concurrency" in c
+    ]
+    assert matches, _critical(results)
+    assert any("max_position_pct" in c for c in matches), matches
+
+
+def test_rule5_volatility_target_single_symbol_is_unaffected() -> None:
+    """The same max_position_pct is implementable on a single-symbol
+    universe — worst-case concurrency is structurally 1. The informational
+    plausibility warning must still be preserved for a passing (no critical)
+    volatility_target spec, since the check still can't confirm the actual
+    deployed vol is sensible."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["AAPL"],
+        asset_class="stocks",
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "volatility_target" in c]
+    assert not matches, matches
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("volatility_target" in w and "cannot be evaluated exactly" in w for w in warnings), (
+        warnings
+    )
+
+
+def test_rule5_volatility_target_concurrency_capped_by_max_open_positions() -> None:
+    """Worst-case concurrency must be capped by risk_limits.max_open_positions
+    even when more target symbols are declared. 5 symbols at 50%
+    max_position_pct would be 2.5x equity uncapped — but max_open_positions=1
+    caps the worst case at 1 × 0.5 = 0.5x, which fits."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["AAPL", "MSFT", "GOOG", "AMZN", "META"],
+        asset_class="stocks",
+        risk_limits={
+            "max_position_pct": 50,
+            "max_drawdown_pct": 10,
+            "max_open_positions": 1,
+        },
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "volatility_target" in c]
+    assert not matches, matches
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("volatility_target" in w and "cannot be evaluated exactly" in w for w in warnings), (
+        warnings
+    )
+
+
+def test_rule5_volatility_target_ignores_declarative_max_concurrent_positions() -> None:
+    """Rule 5 sizes against the structural worst-case concurrency, not the
+    declarative max_concurrent_positions field — declaring 1 must not
+    suppress the over-commit critical on a genuinely multi-symbol spec."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["AAPL", "MSFT", "GOOG"],
+        asset_class="stocks",
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 10},
+        max_concurrent_positions=1,
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [
+        c for c in _critical(results) if "volatility_target" in c and "worst-case concurrency" in c
+    ]
+    assert matches, _critical(results)
+
+
+def test_rule5_volatility_target_worst_case_accounts_for_slippage() -> None:
+    """Same slippage-inflation concern as fixed_notional: 4 fractional
+    (crypto) positions whose worst-case notional sums to exactly the default
+    $100k capital must still be flagged critical once the default 2bps
+    slippage is applied. 0.25 (25% max_position_pct) × 4 = 1.0x equity
+    exactly."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 25, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "volatility_target" in c and "slippage" in c]
+    assert matches, _critical(results)
+
+
+def test_rule5_volatility_target_worst_case_fits_with_slippage_headroom() -> None:
+    """The same 4-position scenario with enough headroom below capital must
+    NOT be flagged — the adjustment should not be so conservative it blocks a
+    genuinely fundable spec."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 20, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    matches = [c for c in _critical(results) if "volatility_target" in c]
+    assert not matches, matches
+
+
+def test_rule5_slippage_note_suppressed_for_sub_rounding_slippage_bps() -> None:
+    """A configured slippage_bps that's positive but rounds to "0.0" at the
+    note's one-decimal precision (e.g. 0.01) must not reproduce the
+    misleading "inflated 0.0bps" phrasing — the guard must check the
+    *rounded* display value, not just whether the raw value is positive."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 25, "max_drawdown_pct": 10},
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01", slippage_bps=0.01)
+    results = SpecReadinessGate().validate(spec, backtest_config=config)
+    matches = [c for c in _critical(results) if "volatility_target" in c]
+    assert matches, _critical(results)
+    assert not any("0.0bps" in c for c in matches), matches
+
+
+def test_rule5_fixed_notional_slippage_clause_suppressed_for_sub_rounding_bps() -> None:
+    """Same sub-rounding-slippage guard as the shared ``slippage_note``, but
+    for fixed_notional's own separately-built slippage clause: a configured
+    slippage_bps that rounds to "0.0" must not be named in the message at
+    all, rather than reproducing "...and 0.0bps configured slippage..."."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=25_000.0),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01", slippage_bps=0.01)
+    results = SpecReadinessGate().validate(spec, backtest_config=config)
+    matches = [c for c in _critical(results) if "fixed_notional" in c]
+    assert matches, _critical(results)
+    assert not any("0.0bps" in c for c in matches), matches
+
+
+def test_rule5_slippage_bps_display_avoids_float_round_trip_error() -> None:
+    """``slippage_bps_display`` must read directly from ``config.slippage_bps``,
+    not reverse-derive it from ``slippage_multiplier`` — that
+    divide-then-multiply round trip accumulates float error that can shift
+    the displayed value across a rounding boundary. slippage_bps=0.15 must
+    display as "0.1bps" (round(0.15, 1) == 0.1); the buggy round-trip form
+    (round((1 + 0.15/10_000 - 1) * 10_000, 1)) evaluates to 0.2 instead."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=25_000.0),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01", slippage_bps=0.15)
+    results = SpecReadinessGate().validate(spec, backtest_config=config)
+    matches = [c for c in _critical(results) if "fixed_notional" in c]
+    assert matches, _critical(results)
+    assert any("0.1bps" in c for c in matches), matches
+    assert not any("0.2bps" in c for c in matches), matches
+
+
+@pytest.mark.parametrize(
+    "sizing_factory,max_open_positions,expect_critical",
+    [
+        # fixed_fraction: 0.4 × N symbols vs. 100% cash-bound ceiling.
+        (lambda: FixedFractionSizing(fraction=0.4), 1, False),  # 0.4x, fits
+        (lambda: FixedFractionSizing(fraction=0.4), 2, False),  # 0.8x, fits
+        (lambda: FixedFractionSizing(fraction=0.4), 3, True),  # 1.2x, overcommits
+        (lambda: FixedFractionSizing(fraction=0.4), 5, True),  # capped at 5 syms, 2.0x
+        # fixed_notional: $40k × N positions vs. $100k capital.
+        (lambda: FixedNotionalSizing(notional_usd=40_000.0), 1, False),  # $40k
+        (lambda: FixedNotionalSizing(notional_usd=40_000.0), 2, False),  # $80k
+        (lambda: FixedNotionalSizing(notional_usd=40_000.0), 3, True),  # $120k
+        (lambda: FixedNotionalSizing(notional_usd=40_000.0), 5, True),  # $200k
+        # volatility_target's bound is exactly max_position_pct
+        # (target_annual_vol is irrelevant to it — see
+        # test_rule5_volatility_target_bound_is_independent_of_target_annual_vol_and_price),
+        # set via a per-kind max_position_pct below rather than
+        # fixed_fraction's 0.4/fixed_notional's $40k shape.
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 1, False),
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 2, False),
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 3, True),
+        (lambda: VolatilityTargetSizing(target_annual_vol=0.15), 5, True),
+    ],
+    ids=[
+        "fixed_fraction-mop1",
+        "fixed_fraction-mop2",
+        "fixed_fraction-mop3",
+        "fixed_fraction-mop5",
+        "fixed_notional-mop1",
+        "fixed_notional-mop2",
+        "fixed_notional-mop3",
+        "fixed_notional-mop5",
+        "volatility_target-mop1",
+        "volatility_target-mop2",
+        "volatility_target-mop3",
+        "volatility_target-mop5",
+    ],
+)
+def test_rule5_all_sizing_kinds_against_max_open_positions(
+    sizing_factory: Callable[
+        [], Union[FixedFractionSizing, FixedNotionalSizing, VolatilityTargetSizing]
+    ],
+    max_open_positions: int,
+    expect_critical: bool,
+) -> None:
+    """Full-suite coverage: all three sizing kinds validated against a range
+    of risk_limits.max_open_positions values, on a fixed 5-symbol universe so
+    max_open_positions is always the tighter concurrency bound below 5 and a
+    no-op at/above it."""
+    sizing = sizing_factory()
+    is_vol_target = isinstance(sizing, VolatilityTargetSizing)
+    # 45% (not 50%) so 2 positions (0.9x) clears the >1-position slippage
+    # inflation with headroom, while 3 positions (1.35x) still overcommits —
+    # 50% put the 2-position case exactly on the 1.0x boundary, which
+    # slippage inflation then tips over into a false critical.
+    max_position_pct = 45 if is_vol_target else 50
+    spec = _spec(
+        sizing=sizing,
+        target_symbols=["AAPL", "MSFT", "GOOG", "AMZN", "META"],
+        asset_class="stocks",
+        risk_limits={
+            "max_position_pct": max_position_pct,
+            "max_drawdown_pct": 10,
+            "max_open_positions": max_open_positions,
+        },
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    sizing_criticals = [
+        c for c in _critical(results) if "Sizing realisability" in c and "worst-case" in c
+    ]
+    if expect_critical:
+        assert sizing_criticals, _critical(results)
+    else:
+        assert not sizing_criticals, sizing_criticals
 
 
 def test_check_sizing_realisable_directly_catches_concurrent_fixed_notional_overcommit() -> None:
@@ -997,6 +1295,28 @@ def test_rule5_warns_on_persistent_nan_for_fractional_crypto() -> None:
         if r.severity == "warning" and not r.passed and "no usable price sample" in r.details
     ]
     assert warnings, "expected a non-blocking warning for persistent NaN on crypto"
+
+
+def test_rule5_persistent_nan_does_not_mask_volatility_target_warning() -> None:
+    """A persistently broken price provider must not silently drop the
+    volatility_target plausibility warning: a spec can be affected by BOTH
+    at once (the provider is down AND target_annual_vol was never confirmed
+    sensible), so the NaN-price warning must not crowd out the other."""
+    spec = _spec(
+        asset_class="crypto",
+        target_symbols=["BTC-USD"],
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        hypothesis="BTC-USD momentum via RSI(14).",
+    )
+    gate = SpecReadinessGate(market_sample_provider=lambda sym, ac: float("nan"))
+    results = gate.validate(spec, backtest_config=_config())
+    sizing_failures = [c for c in _critical(results) if "Sizing realisability" in c]
+    assert not sizing_failures, sizing_failures
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("no usable price sample" in w for w in warnings), warnings
+    assert any("volatility_target" in w and "cannot be evaluated exactly" in w for w in warnings), (
+        warnings
+    )
 
 
 def test_rule5_persistent_zero_price_is_critical_for_forex() -> None:
