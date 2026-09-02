@@ -76,12 +76,13 @@ class ReferenceEntryFill:
     def __post_init__(self) -> None:
         """Enforce this record's structural contract at construction.
 
-        Preconditions (on the constructor arguments): none beyond typing —
-        every caller-supplied value is checked here rather than trusted.
+        Preconditions: none beyond typing.
         Postconditions: raises ``ValueError`` if ``entry_bar < 0``,
         ``entry_rule_index < 0``, ``entry_price`` is not a positive finite
         number, or ``side`` is not ``"long"``/``"short"``; otherwise the
-        instance is structurally valid.
+        instance is structurally valid. ``symbol`` and ``entry_date`` are
+        recorded as given, not validated — this module has no basis on which
+        to reject a symbol string or a date string beyond typing.
         """
         if self.entry_bar < 0:
             raise ValueError(f"entry_bar must be >= 0, got {self.entry_bar!r}")
