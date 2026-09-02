@@ -374,6 +374,18 @@ def _execute_phase_variant(
     return output, task_string
 
 
+def _variant_label(*, full_context: bool) -> str:
+    """Return the parenthetical run identifier embedded in degraded-output errors.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``"full-context variant"`` when ``full_context`` is ``True``,
+        ``"selective variant"`` otherwise.
+    """
+    return "full-context variant" if full_context else "selective variant"
+
+
 def _run_variant(
     orchestrator: BrandingTeamOrchestrator, mission: BrandingMission, *, full_context: bool
 ) -> tuple[dict[BrandPhase, object], dict[BrandPhase, str]]:
@@ -412,7 +424,7 @@ def _run_variant(
     outputs: dict[BrandPhase, object] = {}
     task_strings: dict[BrandPhase, str] = {}
     prior_outputs: dict[str, dict] = {}
-    variant_label = "full-context variant" if full_context else "selective variant"
+    variant_label = _variant_label(full_context=full_context)
 
     for phase in PHASE_ORDER:
         context_phases = (
@@ -530,7 +542,7 @@ def _run_variant_pair(
             context_phases = (
                 _full_context_phases(phase) if full_context else _PHASE_SPEC[phase].context_phases
             )
-            variant_label = "full-context variant" if full_context else "selective variant"
+            variant_label = _variant_label(full_context=full_context)
             output, tasks[phase] = _execute_phase_variant(
                 orchestrator, mission, phase, context_phases, prior, variant_label=variant_label
             )
