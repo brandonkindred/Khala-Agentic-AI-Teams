@@ -785,26 +785,133 @@ jobs:
           PYTHONPATH: ..
           REDIS_URL: redis://localhost:6379/0
 
-  # shared-infra: the neutral packages extracted from software_engineering_team
-  # (command runner + error parsing, repo context, LLM recovery, dev models,
-  # shared.git, shared.hitl, shared.run_thread_registry). Their unit tests live
-  # in the SE suite (which now also includes coding_team's tests, an in-package
-  # sub-team moved into software_engineering_team/tests/), which ALSO records
-  # shared coverage into a data-file artifact (see the `emit_shared_cov` entry
-  # in test-backend). This job re-runs NOTHING — it downloads that artifact,
-  # `coverage combine`s it, and gates the moved code at the repo's 90% floor.
-  # shared.git/git_utils.py is omitted with the same integration-heavy
-  # rationale the SE gate used before the shared-infra extraction (see
-  # shared/infra.coveragerc).
+  # shared packages that own their tests: every suite under
+  # backend/shared/<pkg>/tests/ plus the loose modules covered by
+  # backend/shared/tests/. shared.postgres, shared.neo4j and shared.cache are
+  # NOT here — they need live service containers and keep their own gated jobs
+  # above.
+  #
+  # This job measures but does not gate: it defers the 90% floor to
+  # combine-shared-infra by emitting a coverage data-file artifact, exactly like
+  # the `emit_shared_cov` matrix entry in test-backend. One threshold, one
+  # allowlist, so a package can never be listed there without real data behind
+  # it.
+  #
+  # shared.git / shared.hitl / shared.run_thread_registry appear both here and
+  # in the SE run: the SE suite is what actually covers them, but their own
+  # suites otherwise execute nowhere, so running them here keeps them honest.
+  # The two data files simply union at combine time.
+  test-shared-packages:
+    name: Test – shared packages (coverage data)
+    runs-on: ubuntu-latest
+    needs: changes
+    # The software_engineering clause is load-bearing: combine-shared-infra runs
+    # under that condition too, and a skipped job here would leave it filtering
+    # an absent data file — the allowlist would silently gate nothing.
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      (needs.changes.outputs.shared_backend == 'true' ||
+       needs.changes.outputs.software_engineering == 'true')
+    defaults:
+      run:
+        working-directory: backend/agents
+    env:
+      LLM_PROVIDER: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/agents/requirements.txt
+      - run: pip install -r requirements.txt
+      # PYTHONPATH=.. adds backend/ to sys.path so `shared.*` resolves;
+      # ../shared/<pkg>/tests/ are filesystem paths from backend/agents/, while
+      # --cov=shared.<pkg> are dotted module names. --cov-fail-under=0 defers
+      # the gate to combine-shared-infra and guarantees .coverage is written.
+      - name: Run shared package suites and record coverage
+        env:
+          PYTHONPATH: ..
+        run: |
+          set -euo pipefail
+          pytest \
+            ../shared/agent_invoke/tests \
+            ../shared/app/tests \
+            ../shared/concurrency/tests \
+            ../shared/env/tests \
+            ../shared/env_config/tests \
+            ../shared/git/tests \
+            ../shared/graph/tests \
+            ../shared/hitl/tests \
+            ../shared/http/tests \
+            ../shared/job_contracts/tests \
+            ../shared/job_event_bus/tests \
+            ../shared/manifests/tests \
+            ../shared/observability/tests \
+            ../shared/run_thread_registry/tests \
+            ../shared/sse/tests \
+            ../shared/temporal/tests \
+            ../shared/tests \
+            -v --tb=short -n 4 -m "not integration" \
+            --cov=shared.agent_invoke \
+            --cov=shared.app \
+            --cov=shared.concurrency \
+            --cov=shared.env \
+            --cov=shared.env_config \
+            --cov=shared.fencing \
+            --cov=shared.git \
+            --cov=shared.graph \
+            --cov=shared.hitl \
+            --cov=shared.http \
+            --cov=shared.job_contracts \
+            --cov=shared.job_event_bus \
+            --cov=shared.manifests \
+            --cov=shared.observability \
+            --cov=shared.run_thread_registry \
+            --cov=shared.sse \
+            --cov=shared.subprocess_timeouts \
+            --cov=shared.temporal \
+            --cov-report=term-missing \
+            --cov-fail-under=0
+          mv .coverage .coverage.shared_packages
+      - name: Upload shared coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data-shared_packages
+          # path is relative to GITHUB_WORKSPACE, not defaults.working-directory.
+          path: backend/agents/.coverage.shared_packages
+          # .coverage.* are dotfiles; upload-artifact@v4 skips hidden files
+          # unless this is set — without it the artifact is empty and the
+          # shared gate would pass on hollow data.
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # shared-infra: the single 90% gate for backend/shared/. It re-runs NOTHING —
+  # it downloads the coverage data artifacts its two upstream producers emit,
+  # `coverage combine`s them, and reports against shared/infra.coveragerc:
+  #
+  #   * test-backend's software_engineering entry (the `emit_shared_cov` matrix
+  #     flag) covers the neutral packages extracted from
+  #     software_engineering_team — command runner + error parsing, repo
+  #     context, LLM recovery, dev models, shared.git, shared.hitl,
+  #     shared.run_thread_registry — which the SE suite exercises (that suite
+  #     now also includes coding_team's tests, an in-package sub-team moved
+  #     into software_engineering_team/tests/) rather than tests of their own.
+  #   * test-shared-packages covers every shared package that owns its tests.
+  #
+  # shared.git/git_utils.py and shared.temporal/testing.py are omitted; see
+  # shared/infra.coveragerc for the per-entry rationale.
   combine-shared-infra:
     name: Test – shared infra packages (coverage combine)
     runs-on: ubuntu-latest
     # always(): still run the shared gate when an UNRELATED matrix entry (e.g.
-    # blogging) fails. A genuine SE failure leaves its artifact absent, so the
-    # download below fails and this job goes red — the correct signal.
+    # blogging) fails. A genuine failure in either producer leaves its artifact
+    # absent, so the download below fails and this job goes red — the correct
+    # signal.
     needs:
       - changes
       - test-backend
+      - test-shared-packages
     if: >-
       always() &&
       needs.changes.outputs.is_pull_request == 'true' &&
@@ -824,9 +931,11 @@ jobs:
       - run: pip install "coverage>=7.1,<8.0"
       - uses: actions/download-artifact@v4
         with:
-          # SE emits coverage-data-software_engineering; merge-multiple lands
-          # its .coverage.<source> file directly in backend/agents/ so
-          # `coverage combine` (which discovers .coverage.* in CWD) picks it up.
+          # SE emits coverage-data-software_engineering and
+          # test-shared-packages emits coverage-data-shared_packages;
+          # merge-multiple lands both .coverage.* files directly in
+          # backend/agents/ so `coverage combine` (which discovers .coverage.*
+          # in CWD) picks them up.
           pattern: coverage-data-*
           merge-multiple: true
           path: backend/agents/
@@ -837,9 +946,16 @@ jobs:
       # still wins over --include, so shared.git/git_utils.py stays excluded.
       # rcfile is a filesystem path; backend/shared/ is one level up from
       # backend/agents/ (this job's cwd), hence ../shared/infra.coveragerc.
+      #
+      # This list is the allowlist of gated shared packages. A package belongs
+      # here only once some upstream job MEASURES it (--cov=shared.<pkg>):
+      # --include filters the combined data, it does not create rows, so
+      # listing an unmeasured package gates nothing at all and does so
+      # silently. shared.postgres / shared.neo4j / shared.cache are absent by
+      # design — they are gated in their own jobs.
       - run: >-
           coverage report --rcfile=../shared/infra.coveragerc
-          --include='*/shared/command_runner/*,*/shared/repo_context/*,*/shared/llm_recovery/*,*/shared/dev_models/*,*/shared/git/*,*/shared/hitl/*,*/shared/run_thread_registry/*'
+          --include='*/shared/agent_invoke/*,*/shared/app/*,*/shared/command_runner/*,*/shared/concurrency/*,*/shared/dev_models/*,*/shared/env/*,*/shared/env_config/*,*/shared/git/*,*/shared/graph/*,*/shared/hitl/*,*/shared/http/*,*/shared/job_contracts/*,*/shared/job_event_bus/*,*/shared/llm_recovery/*,*/shared/manifests/*,*/shared/observability/*,*/shared/repo_context/*,*/shared/run_thread_registry/*,*/shared/sse/*,*/shared/temporal/*,*/shared/fencing.py,*/shared/subprocess_timeouts.py'
           --show-missing
           --fail-under=90
 
