@@ -14,8 +14,13 @@ here is genuinely shared plumbing:
   ``ExitRule`` discriminated unions (issue #527). The trading service's
   bar loop calls :func:`evaluate_exit_rules` after delivering each bar to
   the strategy and emits any returned ``ExitIntent`` as a close order.
+* :mod:`reference_entries` — entry-side replay for the reference-ledger
+  simulator (``system_design/reference_ledger_trade_model.md``): reuses
+  ``evaluate_entry_rules`` to open a reference position at the next bar's
+  open.
 """
 
+from .reference_entries import ReferenceEntryFill, replay_entry_rules
 from .rule_compiler import (
     BarSnapshot,
     ExitIntent,
@@ -28,6 +33,8 @@ __all__ = [
     "BarSnapshot",
     "ExitIntent",
     "PositionState",
+    "ReferenceEntryFill",
     "build_trade_records",
     "evaluate_exit_rules",
+    "replay_entry_rules",
 ]
