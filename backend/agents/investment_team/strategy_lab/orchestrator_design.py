@@ -1191,7 +1191,7 @@ class DesignMixin:
         ``CompilerError`` so a readiness-clean spec that is still outside the
         deterministic-compiler envelope (e.g. a ``volatility_target`` spec
         without an ATR predicate — readiness's sizing-realisability rule
-        validates volatility_target's worst-case-concurrency invariant but
+        validates ``volatility_target``'s worst-case-concurrency invariant but
         can't confirm the deployed vol itself, so a spec missing the ATR
         predicate can still be readiness-clean) selects the custom-code path
         here rather than later in synthesis. The
