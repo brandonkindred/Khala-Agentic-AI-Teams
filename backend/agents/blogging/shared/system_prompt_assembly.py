@@ -25,7 +25,7 @@ __all__ = ["build_blogging_system_prompt_content", "build_system_prompt_with_con
 
 def build_blogging_system_prompt_content(
     brand_spec_text: str, writing_guideline_text: str
-) -> Optional[list]:
+) -> Optional[List[CacheBreakpoint]]:
     """
     Wrap non-blank brand-spec / writing-guideline text in a single
     ``CacheBreakpoint``-marked system-content segment.
