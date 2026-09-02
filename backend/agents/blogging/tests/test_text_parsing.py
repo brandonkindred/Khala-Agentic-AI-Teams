@@ -84,7 +84,9 @@ def test_extract_draft_after_marker_returns_empty_on_unparseable_text() -> None:
 
 
 @pytest.mark.parametrize("raw", [None, "", 123, ["not", "a", "string"]])
-def test_extract_draft_after_marker_returns_empty_for_none_or_non_string_input(raw: Any) -> None:
+def test_extract_draft_after_marker_returns_empty_for_none_empty_or_non_string_input(
+    raw: Any,
+) -> None:
     assert tp.extract_draft_after_marker(raw) == ""
 
 
