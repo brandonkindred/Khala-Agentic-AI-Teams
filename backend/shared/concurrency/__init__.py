@@ -8,6 +8,9 @@ Exports:
 - :func:`flock_lock` — an exclusive, cross-process ``fcntl.flock`` on a
   well-known file: the primitive for "serialize access to a shared resource
   across worker *processes*", not just threads in one process.
+- :class:`KeyedLazyRegistry` — a value per key, each built at most once even
+  under concurrent first access to that key, with distinct keys never blocking
+  each other's construction: the dict-keyed sibling of :class:`LazySingleton`.
 - :class:`KeyedLockManager` — a per-key mutual-exclusion registry: concurrent
   writers touching the same key are serialized, while writers touching
   disjoint keys proceed fully concurrently.
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 from shared.concurrency.flock_lock import flock_lock
 from shared.concurrency.heartbeat import BackgroundHeartbeat
+from shared.concurrency.keyed_lazy_registry import KeyedLazyRegistry
 from shared.concurrency.keyed_lock_manager import KeyedLockManager
 from shared.concurrency.latest_value_flusher import LatestValueFlusher
 from shared.concurrency.lazy_singleton import LazySingleton
@@ -32,6 +36,7 @@ from shared.concurrency.parallel_map import parallel_map
 
 __all__ = [
     "BackgroundHeartbeat",
+    "KeyedLazyRegistry",
     "KeyedLockManager",
     "LatestValueFlusher",
     "LazySingleton",

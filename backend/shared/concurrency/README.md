@@ -258,3 +258,59 @@ def get_default_store() -> BrandingStore:
 - `factory` must not call `get_or_create` on the same instance, directly or
   transitively — the internal lock isn't reentrant and is held for the
   duration of `factory`, so re-entry deadlocks the calling thread.
+
+## `KeyedLazyRegistry`
+
+The dict-keyed sibling of `LazySingleton`: one lazily-built value *per key*,
+consolidating the hand-rolled dict-plus-lock double-checked-locking idiom
+duplicated across `branding_team/api/conversation.py::_get_or_create_phase_cache`,
+`branding_team/api/main.py::_get_brand_cache`, and
+`llm_service/rate_limiter.py::_get_team_semaphore`.
+
+```python
+from shared.concurrency import KeyedLazyRegistry
+
+_phase_caches: KeyedLazyRegistry[str, PhaseOutputCache] = KeyedLazyRegistry()
+
+def _get_or_create_phase_cache(conversation_id: str) -> PhaseOutputCache:
+    return _phase_caches.get_or_create(conversation_id, PhaseOutputCache)
+
+# A value needing constructor arguments is just a closure:
+def _get_team_semaphore(self, team: str) -> threading.BoundedSemaphore:
+    return self._team_semaphores.get_or_create(
+        team, lambda: threading.BoundedSemaphore(self.per_team_limit)
+    )
+```
+
+- `get_or_create(key, factory)` — returns that key's value, calling `factory()`
+  to build it on the first call for the key to succeed; every other call for
+  that key, concurrent or not, returns that exact same object without invoking
+  its own `factory`.
+- **Distinct keys never block each other's construction.** This is the one
+  behavioural difference from the call sites above, which funnel every key
+  through a single shared lock: there, a slow `factory` for one key stalls first
+  construction for every other key. Here each key has its own lock, delegated to
+  `KeyedLockManager`, and no lock is held across another key's `factory`.
+- Raise-and-retry is per key: a raising `factory` propagates to that caller and
+  leaves *that key* unbuilt, so the next call for it retries — while every other
+  key's value, and its retryability, is untouched. "Build exactly once" is a
+  claim about *successful* construction; concurrent callers for a key whose
+  `factory` always raises each get their own turn, serialized.
+- `None` is the per-key "not built yet" sentinel, so `factory` must never return
+  `None` — the same rule, and the same `ValueError`, as `LazySingleton`. The
+  error message names the offending key.
+- Re-entrancy is rejected loudly rather than hanging: a `factory` that calls
+  `get_or_create` for the key it is building raises `RuntimeError`, and so does
+  one that reaches for a key this registry saw *earlier* (the inherited
+  `KeyedLockManager` lock ordering, which is what forecloses an
+  A-builds-B/B-builds-A cycle). Because "earlier" is decided by first-sight
+  order, a cross-key nesting that is accepted in one process can be rejected in
+  another — build keyed values from independent factories, not from each other.
+- Neither values nor per-key locks are ever evicted, so memory grows with the
+  number of distinct keys ever seen — the same accepted tradeoff as
+  `KeyedLockManager`, and the same one the never-evicted caches this is meant to
+  hold already make. A registry that needs eviction wants a bounded/LRU
+  structure, not this.
+- Reach for `KeyedLockManager` instead when you want to hold a key's lock across
+  *your own* critical section, or lock several keys at once; reach for this when
+  you want keyed state built once and handed back.
