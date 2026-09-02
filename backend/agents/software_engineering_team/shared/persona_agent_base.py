@@ -1,7 +1,7 @@
 """
 Shared structured-output call for the top-level persona agents.
 
-``security_agent``, ``qa_agent``, and ``accessibility_agent`` each build a
+``qa_agent`` and ``accessibility_agent`` each build a
 fresh Strands ``Agent`` per ``run()`` call
 (required — reusing one instance across calls breaks
 ``structured_output_model``'s forced tool choice, since Strands accumulates
@@ -16,7 +16,8 @@ Decision record: ``devops_team``'s single-shot JSON agents standardize on
 ``complete_json_with_continuation`` (``software_engineering_team.shared.llm``)
 instead, since all of them already called it before any standardization
 effort began — no helper migration is needed there. ``run_structured_persona``
-stays the pattern only for the four callers named above. Moving
+stays the pattern only for the callers named above (``security_agent`` is
+not one of them -- it uses ``run_single_shot_review``). Moving
 ``devops_team`` onto ``run_structured_persona`` instead was considered and
 deferred: it would require defining a ``fallback_factory`` per devops agent,
 plus verifying Strands' ``structured_output_model`` mechanism against the

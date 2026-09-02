@@ -6,8 +6,8 @@ Canonical helper decision
 ``devops_team``'s single-shot JSON agents.
 
 ``run_structured_persona`` (``shared/persona_agent_base.py``) remains the
-pattern for the agents already using it (``security_agent``,
-``qa_agent``, ``accessibility_agent``). Switching
+pattern for the agents already using it (``qa_agent`` and
+``accessibility_agent``). Switching
 devops onto ``run_structured_persona`` was considered and deferred for
 these reasons:
 

@@ -108,12 +108,19 @@ class RunTeamWorkflowV2(PlanningAnswerSignalMixin):
             heartbeat_timeout=timedelta(minutes=5),
             retry_policy=DEFAULT_RETRY_POLICY,
         )
+        # Answers ACCUMULATE across pause rounds. The activity replays Planning
+        # from scratch on every resume, so round 2's re-invocation re-encounters
+        # round 1's questions first; carrying only the newest batch would leave
+        # those unmatched, pause on them again, and ping-pong between the two
+        # rounds forever. The activity matches each batch against the whole
+        # accumulated set, so every answered round resolves on every replay.
+        collected_answers: list[dict[str, Any]] = []
         while plan_result.get("outcome") == "paused":
             resume_token = plan_result["resume_token"]
-            answers = await self.wait_for_planning_answers(resume_token)
+            collected_answers.extend(await self.wait_for_planning_answers(resume_token))
             plan_result = await workflow.execute_activity(
                 _activities.plan_project_activity,
-                args=[job_id, repo_path, spec_result, trace_id, resume_token, answers],
+                args=[job_id, repo_path, spec_result, trace_id, resume_token, collected_answers],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=timedelta(hours=4),
                 heartbeat_timeout=timedelta(minutes=5),

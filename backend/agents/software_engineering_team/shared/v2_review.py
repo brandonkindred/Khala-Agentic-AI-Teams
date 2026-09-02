@@ -893,7 +893,12 @@ def _command_agent_chain_timeout_s() -> int:
     return env_int(_COMMAND_CHAIN_TIMEOUT_ENV, _DEFAULT_COMMAND_CHAIN_TIMEOUT_S, 1)
 
 
-def _dispatch_review_thunks(thunks: List[Callable[[], Any]], *, llm: LLMClient) -> List[Any]:
+def _dispatch_review_thunks(
+    thunks: List[Callable[[], Any]],
+    *,
+    llm: LLMClient,
+    timeout: Optional[float] = None,
+) -> List[Any]:
     """Run zero-arg thunks sequentially, unless ``llm`` allows concurrent fan-out.
 
     The single source of the "how" for every review fan-out in this module
@@ -916,6 +921,13 @@ def _dispatch_review_thunks(thunks: List[Callable[[], Any]], *, llm: LLMClient) 
         - Otherwise concurrent via ``shared.concurrency.parallel_map``,
           bounded to ``len(thunks)`` workers, order preserved, ``None``
           results kept (``skip_none=False``).
+        - ``timeout``, when given, is the per-thunk ceiling ``parallel_map``
+          degrades against: a thunk still running past it yields ``None``
+          (reported like any other failed review) instead of blocking the
+          fold forever. Only the tool-agent fan-out passes one -- its thunks
+          run external commands that can wedge; the LLM-only review steps are
+          bounded by the provider's own timeouts. It has no effect on the
+          sequential branch, where there is no pool to degrade against.
     """
     if _review_steps_run_sequentially(llm) or len(thunks) <= 1:
         return [t() for t in thunks]
@@ -924,7 +936,13 @@ def _dispatch_review_thunks(thunks: List[Callable[[], Any]], *, llm: LLMClient) 
     # concurrent branch (e.g. every DummyLLMClient-backed test).
     from shared.concurrency import parallel_map  # noqa: PLC0415
 
-    return parallel_map(thunks, lambda fn: fn(), max_workers=len(thunks), skip_none=False)
+    return parallel_map(
+        thunks,
+        lambda fn: fn(),
+        max_workers=len(thunks),
+        skip_none=False,
+        timeout=timeout,
+    )
 
 
 def _run_review_steps(
@@ -1196,17 +1214,23 @@ def _run_tool_agents_review(
             # never touch the working tree at once, and a predecessor that has
             # not reported is exactly one that may still be mid-build. Skipping
             # is reported like any other failed review (None), never as a pass.
-            if not command_done_events[my_turn - 1].wait(_command_agent_chain_timeout_s()):
+            chain_timeout = _command_agent_chain_timeout_s()
+            if not command_done_events[my_turn - 1].wait(chain_timeout):
                 logger.warning(
                     "[%s] Tool agent %s skipped: the command agent before it did not "
                     "finish within %ss (%s), and running concurrently with it could "
                     "observe a partial working tree",
                     task_id,
                     kind.value,
-                    _command_agent_chain_timeout_s(),
+                    chain_timeout,
                     _COMMAND_CHAIN_TIMEOUT_ENV,
                 )
-                command_done_events[my_turn].set()
+                # Deliberately NOT setting this agent's own event: doing so
+                # would release the NEXT command agent immediately, and it
+                # would start its own build against the working tree the
+                # predecessor may still be wedged inside -- the exact overlap
+                # this chain exists to prevent. Every successor waits with the
+                # same bound, so each skips on its own rather than deadlocking.
                 return None
         try:
             return _review_one(kind, agent)
@@ -1234,7 +1258,15 @@ def _run_tool_agents_review(
     # old sequential loop.
     if not thunks:
         return
-    for result in _dispatch_review_thunks(thunks, llm=llm):
+    # A command agent runs an external build/lint that can wedge on a stuck
+    # subprocess. Bounding the CHAIN wait alone only frees the queued agent's
+    # thread -- ``parallel_map`` still joins every future, so the wedged one
+    # would hold this fold (and the whole review phase) for the life of the
+    # process. The per-thunk ceiling is what actually degrades it to ``None``,
+    # reported like any other failed review rather than as a pass.
+    for result in _dispatch_review_thunks(
+        thunks, llm=llm, timeout=float(_command_agent_chain_timeout_s())
+    ):
         if result is not None:
             issues.extend(result)
 

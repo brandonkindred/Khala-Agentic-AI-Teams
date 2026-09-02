@@ -51,12 +51,11 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     token = resolve_github_token(request)
     if not Path(request.repo_path).is_dir():
         raise HTTPException(status_code=400, detail=f"repo_path not found: {request.repo_path}")
-    # `remote` is caller-supplied and reaches `git fetch` with the GitHub PAT in
-    # `http.extraHeader` (see `resolve_remote_branch_sha` below). `--` stops git
-    # parsing it as an option but not as a URL or transport, so an unvalidated
-    # value could send the token to an arbitrary host, or run a command via an
-    # `ext::` transport. It is a remote NAME here (default "origin"), never a
-    # URL, so the same ref-shape check every other git_ops caller applies fits.
+    # `git_ops.resolve_remote_branch_sha` validates these too -- it is the choke
+    # point every authenticated fetch passes through, so the guard belongs there
+    # rather than per-caller. Checking here as well turns a hostile value into a
+    # 400 before a job row is created, instead of a job that fails on its first
+    # fetch. Both are remote/ref NAMES (default "origin"), never URLs.
     if not _is_safe_ref(request.remote):
         raise HTTPException(status_code=400, detail=f"unsafe remote name: {request.remote!r}")
     if request.base_branch and not _is_safe_ref(request.base_branch):

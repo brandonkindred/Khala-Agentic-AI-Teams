@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from strands.models.model import Model as _StrandsModel
@@ -91,7 +92,12 @@ def _is_tool_use_start(event: Any) -> bool:
     if not isinstance(start, dict):
         return False
     inner = start.get("start")
-    return isinstance(inner, dict) and "toolUse" in inner
+    # Truthiness, not mere presence: Strands' own ``handle_content_block_start``
+    # reads ``if "toolUse" in start and start["toolUse"]``, so a falsy
+    # ``toolUse`` (``None``/``{}``) is an ordinary content block there. Counting
+    # it would charge the budget for a call that never happens, and at the cap
+    # would drop a block carrying real assistant text.
+    return isinstance(inner, dict) and bool(inner.get("toolUse"))
 
 
 def _block_delta(event: Any) -> dict[str, Any]:
@@ -200,6 +206,37 @@ def _kwargs_with_directive(kwargs: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(content, list) or not content:
         return dict(kwargs)
     return {**kwargs, "system_prompt_content": [*content, {"text": _BUDGET_DIRECTIVE}]}
+
+
+@dataclass
+class _BlockState:
+    """What this wrapper has done with one content block of one turn.
+
+    Kept per block (keyed by ``contentBlockIndex``, or one shared entry for a
+    stream that omits it) because a turn's blocks can interleave: scalar
+    stream-wide flags let one block's events describe another's.
+
+    Invariants:
+        - ``counted`` is True once a tool use in this block has been charged
+          to the run's budget, so a second announcement of the SAME tool use
+          (a ``contentBlockStart`` followed by its input delta) is not charged
+          twice.
+        - ``dropping`` is True once a tool use in this block was refused for
+          being over budget; its input deltas are then skipped too.
+        - ``forwarded`` is True once anything from this block has reached
+          Strands, which is what makes the block's ``contentBlockStop``
+          load-bearing: Strands commits the block's accumulated content there.
+    """
+
+    counted: bool = False
+    dropping: bool = False
+    forwarded: bool = False
+
+    def reset(self) -> None:
+        """Clear the record so this key can describe a new block."""
+        self.counted = False
+        self.dropping = False
+        self.forwarded = False
 
 
 class ToolCallBudgetModel:
@@ -420,60 +457,60 @@ class ToolCallBudgetModel:
               differently-indexed block's stop can neither end the drop early
               nor be swallowed by it.
         """
-        dropping = False
-        dropping_index: Any = _MISSING
-        forwarded_from_block = False
-        counted_block = False
+        # State is per BLOCK, not per stream. A single set of flags cannot
+        # describe a turn whose blocks interleave: an unrelated block's stop
+        # would clear the flag recording that a dropped block had already
+        # forwarded the model's text, and that block's own stop would then be
+        # swallowed -- discarding the answer.
+        blocks: dict[Any, _BlockState] = {}
+
+        def _state(event: Any) -> _BlockState:
+            key = _block_index(event)
+            state = blocks.get(key)
+            if state is None:
+                state = _BlockState()
+                blocks[key] = state
+            return state
+
         async for event in upstream:
+            state = _state(event)
+            if _is_tool_use_start(event):
+                # A fresh block: whatever the previous block with this key did
+                # says nothing about this one.
+                state.reset()
             # A tool use normally opens with ``contentBlockStart``, but Strands
             # also accepts one announced solely in a ``contentBlockDelta``
             # (``streaming.handle_content_block_delta`` fills toolUseId/name
             # from the delta). Both shapes must be counted, or such a model
-            # would slip past the cap entirely — and Strands would then re-derive
-            # ``stopReason="tool_use"`` from the surviving block, undoing the
-            # ``end_turn`` rewrite and restoring the very loop this guards.
+            # would slip past the cap entirely -- and Strands would then
+            # re-derive ``stopReason="tool_use"`` from the surviving block,
+            # undoing the ``end_turn`` rewrite and restoring the very loop this
+            # guards.
             opens_tool_use = _is_tool_use_start(event) or (
-                _is_tool_use_delta(event) and not dropping and not counted_block
+                _is_tool_use_delta(event) and not state.dropping and not state.counted
             )
             if opens_tool_use:
                 if self._tool_calls_used >= self._max_tool_calls:
                     self._note_cap_reached()
-                    dropping = True
-                    # A delta-announced tool use opens no block of its own, so
-                    # anything already forwarded from the block it rides in
-                    # stays forwarded and its stop must survive.
-                    if _is_tool_use_start(event):
-                        forwarded_from_block = False
-                    dropping_index = _block_index(event)
-                    counted_block = False
+                    state.dropping = True
                     continue
                 self._tool_calls_used += 1
-                dropping = False
-                dropping_index = _MISSING
-                counted_block = True
+                state.counted = True
+                state.forwarded = True
                 yield event
                 continue
-            if dropping and _is_tool_use_delta(event) and _same_block(dropping_index, event):
+            if state.dropping and _is_tool_use_delta(event):
                 continue
             if isinstance(event, dict) and "contentBlockStop" in event:
-                if dropping and _same_block(dropping_index, event):
-                    dropping = False
-                    dropping_index = _MISSING
-                    counted_block = False
-                    if not forwarded_from_block:
-                        # Nothing of this block reached Strands; its stop would
-                        # commit an empty block.
-                        forwarded_from_block = False
-                        continue
-                    forwarded_from_block = False
-                    yield event
+                blocks.pop(_block_index(event), None)
+                if state.dropping and not state.forwarded:
+                    # Nothing of this block reached Strands; its stop would
+                    # commit an empty block.
                     continue
-                counted_block = False
-                forwarded_from_block = False
                 yield event
                 continue
             if _block_delta(event):
-                forwarded_from_block = True
+                state.forwarded = True
             yield event
 
     async def _final_turn(

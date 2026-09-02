@@ -3442,3 +3442,23 @@ class TestGitHubRepoReader:
 
         assert calls["tree"] == 1  # single-flight: only the leader fetched the tree
         assert all(r == ["a.py"] for r in results)  # every waiter got the same listing
+
+
+def test_resolve_remote_branch_sha_validates_at_the_choke_point() -> None:
+    """Every authenticated fetch passes through here, not just the route.
+
+    `_prepare_issue_branch` reaches the same fetch with a `remote` taken from
+    the workflow payload, and validated only `default_branch`/
+    `integration_branch` — so a guard living solely on the route left that path
+    open. This is the shared choke point; validating here covers both.
+    """
+    from software_engineering_team.api import git_ops
+
+    for hostile in ("https://attacker.example/x.git", "ext::sh -c id", "--upload-pack=id"):
+        ok, msg = git_ops.resolve_remote_branch_sha("/nonexistent", hostile, "main", "tok")
+        assert ok is False
+        assert "unsafe remote name" in msg, hostile
+
+    ok, msg = git_ops.resolve_remote_branch_sha("/nonexistent", "origin", "--upload-pack=id", "tok")
+    assert ok is False
+    assert "unsafe branch ref" in msg

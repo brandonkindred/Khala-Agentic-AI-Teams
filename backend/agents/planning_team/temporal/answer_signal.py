@@ -81,8 +81,13 @@ def build_temporal_planning_answer_callback(
           order. Never fabricates an answer for a question with no matching
           entry, and never returns a default — a question with no matching
           submitted answer is simply absent from the result.
-        - Exception: a NON-EMPTY batch where NOTHING matches raises
-          ``PlanningAnswerPauseSignal`` rather than returning ``[]``. Such a
+        - Exception: a non-empty batch where ``submitted_answers`` is itself
+          non-empty and NOTHING in it matches raises
+          ``PlanningAnswerPauseSignal`` rather than returning ``[]``. An
+          explicitly EMPTY ``submitted_answers`` resolves every batch with
+          ``[]`` instead: that is a submitter saying "proceed without
+          answers", and re-pausing on it would re-ask forever with nothing
+          new to supply. Such a
           batch is not the one these answers were submitted for (Planning
           re-runs from scratch on resume, and its questions are LLM-driven, so
           a re-run can re-identify them or open a further round), and
@@ -126,7 +131,7 @@ def build_temporal_planning_answer_callback(
             and isinstance(a.get("question_id"), str)
             and a.get("question_id") in question_ids
         ]
-        if questions and not matched:
+        if questions and resolved and not matched:
             # This batch is not the one these answers were submitted for:
             # Planning re-runs from scratch on resume and its questions are
             # LLM-driven, so a re-run can ask differently-identified questions

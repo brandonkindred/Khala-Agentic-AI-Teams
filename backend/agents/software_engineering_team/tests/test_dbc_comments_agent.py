@@ -216,9 +216,10 @@ def test_dbc_run_llm_failure_surfaces_as_non_compliant_single_attempt() -> None:
     )
     assert out.already_compliant is False
     assert "failed" in out.summary.lower()
-    # No retry status exists to emit (NEEDS_RETRY was retired with the outer
-    # attempt loop); a failed chunk goes straight to FAILED, once.
-    assert not any(s.value == "needs_retry" for s in statuses)
+    # A failed chunk goes straight to FAILED, once: there is no agent-level
+    # retry to announce (the NEEDS_RETRY member was retired with the outer
+    # loop, so asserting its absence would assert nothing). The single raw LLM
+    # call asserted below is what actually pins "no outer re-attempt".
     assert statuses.count(DbcCommentsStatus.FAILED) == 1
     assert len(client.calls) == 1  # no outer retry -- exactly one raw LLM call
 

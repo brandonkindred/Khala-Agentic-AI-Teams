@@ -226,10 +226,10 @@ def test_dbc_run_malformed_response_on_a_later_chunk_fails_the_whole_run() -> No
     # own implementation detail, not part of the contract this test is
     # verifying.
     assert out.already_compliant is False
-    # No retry status exists to emit: the agent makes exactly one
-    # complete_validated call per chunk (NEEDS_RETRY was retired with the
-    # outer attempt loop), so a failure goes straight to FAILED.
-    assert not any(s.value == "needs_retry" for s in statuses)
+    # A failure goes straight to FAILED: the agent makes exactly one
+    # complete_validated call per chunk, so there is no agent-level attempt
+    # left to announce a retry for (the NEEDS_RETRY member was retired with
+    # the outer loop, so asserting its absence would assert nothing).
     assert DbcCommentsStatus.FAILED in statuses
     # A later chunk (3+) is never reached: only `responses` were queued (8
     # malformed entries -- generously more than any retry budget needs), and

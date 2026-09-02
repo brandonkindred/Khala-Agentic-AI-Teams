@@ -704,3 +704,123 @@ def test_directive_preserves_a_real_persona_verbatim() -> None:
     )
     assert new_system.startswith(persona)
     assert new_system.count("budget for this task is exhausted") == 1
+
+
+def test_an_unrelated_blocks_stop_does_not_discard_another_blocks_text() -> None:
+    """Drop bookkeeping is per block, so one block's stop cannot speak for another.
+
+    Block 0 carries the model's real text and then an over-cap tool use; an
+    unrelated block 1 opens and closes in between. With stream-wide flags,
+    block 1's stop cleared the record that block 0 had already forwarded text,
+    so block 0's own stop was swallowed as if the block were empty — Strands
+    never commits the text, `_final_turn` has already counted it as emitted so
+    no placeholder is synthesized, and the run ends in an empty assistant
+    message (`LLMSemanticExhaustionError` downstream).
+    """
+
+    class _InterleavedTextAndToolUse:
+        stateful = False
+
+        def get_config(self) -> Dict[str, Any]:
+            return {}
+
+        def update_config(self, **overrides: Any) -> None:
+            return None
+
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+            yield {"messageStart": {"role": "assistant"}}
+            yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
+            yield {
+                "contentBlockDelta": {
+                    "contentBlockIndex": 0,
+                    "delta": {"text": "Verdict: finding 0 is real"},
+                },
+            }
+            yield {
+                "contentBlockDelta": {
+                    "contentBlockIndex": 0,
+                    "delta": {"toolUse": {"toolUseId": "c1", "name": "read_file", "input": "{}"}},
+                },
+            }
+            # An unrelated block opens and closes while block 0 is still open.
+            yield {"contentBlockStart": {"contentBlockIndex": 1, "start": {}}}
+            yield {"contentBlockStop": {"contentBlockIndex": 1}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": "tool_use"}}
+
+    model = ToolCallBudgetModel(_InterleavedTextAndToolUse(), 1)
+    model._tool_calls_used = 1  # budget spent: this is the final turn
+
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    assert not any("toolUse" in json.dumps(event) for event in events)
+    assert any(_has_text_delta(event) for event in events)
+    stops = [event["contentBlockStop"] for event in events if "contentBlockStop" in event]
+    # Block 0's stop survives (its text must be committed); block 1's too.
+    assert {stop["contentBlockIndex"] for stop in stops} == {0, 1}
+    assert "No conclusion was reached" not in json.dumps(events)
+
+
+def test_a_new_block_can_announce_a_tool_use_without_an_intervening_stop() -> None:
+    """A missing `contentBlockStop` must not let the next tool use past the cap.
+
+    `counted` used to be cleared only on a stop, so a stream that opened a new
+    block without closing the previous one left the flag set — and a
+    delta-announced tool use in that new block was then neither counted nor
+    dropped. It reached Strands, which re-derives `stopReason="tool_use"` from
+    the surviving block, and the run recursed past the cap.
+    """
+
+    class _NoStopBetweenBlocks:
+        stateful = False
+
+        def get_config(self) -> Dict[str, Any]:
+            return {}
+
+        def update_config(self, **overrides: Any) -> None:
+            return None
+
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+            yield {"messageStart": {"role": "assistant"}}
+            yield {
+                "contentBlockStart": {
+                    "contentBlockIndex": 0,
+                    "start": {"toolUse": {"toolUseId": "c0", "name": "read_file"}},
+                },
+            }
+            # No contentBlockStop for block 0.
+            yield {"contentBlockStart": {"contentBlockIndex": 1, "start": {}}}
+            yield {
+                "contentBlockDelta": {
+                    "contentBlockIndex": 1,
+                    "delta": {"toolUse": {"toolUseId": "c1", "name": "read_file", "input": "{}"}},
+                },
+            }
+            yield {"messageStop": {"stopReason": "tool_use"}}
+
+    model = ToolCallBudgetModel(_NoStopBetweenBlocks(), 1)
+
+    events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
+
+    # Exactly the cap's worth of tool uses reaches Strands: block 0's, not block 1's.
+    assert model.tool_calls_used == 1
+    tool_events = [event for event in events if "toolUse" in json.dumps(event)]
+    assert len(tool_events) == 1
+    assert "c1" not in json.dumps(events)
+
+
+def test_a_falsy_tool_use_start_is_not_a_tool_call() -> None:
+    """`{"toolUse": None}` is an ordinary block to Strands, so it must be here too.
+
+    `streaming.handle_content_block_start` reads
+    `if "toolUse" in start and start["toolUse"]`. Treating mere presence as a
+    tool use charges the budget for a call that never happens, and at the cap
+    drops a block that may carry real assistant text.
+    """
+    from software_engineering_team.code_review_agent.tool_call_budget import _is_tool_use_start
+
+    assert _is_tool_use_start(
+        {"contentBlockStart": {"start": {"toolUse": {"toolUseId": "t", "name": "read_file"}}}}
+    )
+    for falsy in (None, {}, ""):
+        assert not _is_tool_use_start({"contentBlockStart": {"start": {"toolUse": falsy}}}), falsy

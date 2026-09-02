@@ -296,7 +296,9 @@ def test_callback_never_fabricates_an_answer_for_an_unmatched_question() -> None
     every batch). A batch nothing matches is a batch these answers were not
     submitted for, so it pauses again instead.
     """
-    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[])
+    cb = build_temporal_planning_answer_callback(
+        "tok-1", submitted_answers=[{"question_id": "other", "selected_option_id": "a"}]
+    )
 
     with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
         cb([{"id": "q1"}])
@@ -323,9 +325,25 @@ def test_callback_pauses_again_on_a_batch_from_a_later_round() -> None:
     assert excinfo.value.pending_questions == [{"id": "q2"}, {"id": "q3"}]
 
 
+def test_empty_submitted_answers_resolves_instead_of_pausing_forever() -> None:
+    """An explicitly empty submission means "proceed without answers".
+
+    Re-pausing on it would re-ask the same batch on every resume with nothing
+    new for the submitter to supply — an unterminating loop, which is strictly
+    worse than proceeding on their explicit choice.
+    """
+    cb = build_temporal_planning_answer_callback(
+        "tok-1", submitted_answers=[], next_resume_token=lambda: "tok-2"
+    )
+
+    assert cb([{"id": "q1"}]) == []
+
+
 def test_callback_reuses_its_token_when_no_minter_is_given() -> None:
     """Without a minter a re-pause still happens — sharing the round's token."""
-    cb = build_temporal_planning_answer_callback("tok-1", submitted_answers=[])
+    cb = build_temporal_planning_answer_callback(
+        "tok-1", submitted_answers=[{"question_id": "other", "selected_option_id": "a"}]
+    )
 
     with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
         cb([{"id": "q1"}])

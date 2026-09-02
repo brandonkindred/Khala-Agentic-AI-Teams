@@ -1608,6 +1608,7 @@ def test_run_review_hung_command_agent_does_not_block_the_chain_forever(
 
     monkeypatch.setenv("SE_COMMAND_AGENT_CHAIN_TIMEOUT_S", "1")
     release = threading.Event()
+    left_review = threading.Event()
     ran: list = []
 
     class _HungCommandAgent:
@@ -1615,8 +1616,12 @@ def test_run_review_hung_command_agent_does_not_block_the_chain_forever(
 
         def review(self, phase_inp):
             ran.append("build")
-            # Held well past the chain timeout; released by the test either way.
-            release.wait(8)
+            # Never released before the assertions: the review phase must come
+            # back without it. A self-releasing fake would pass even if the
+            # fold still joined the wedged thunk, which is the failure mode
+            # bounding only the chain wait leaves in place.
+            release.wait(120)
+            left_review.set()
             return SimpleNamespace(issues=[], recommendations=[])
 
     class _QueuedCommandAgent:
@@ -1629,6 +1634,7 @@ def test_run_review_hung_command_agent_does_not_block_the_chain_forever(
                 recommendations=[],
             )
 
+    still_wedged_on_return = False
     try:
         result = run_review(
             config=_build_config(),
@@ -1643,13 +1649,17 @@ def test_run_review_hung_command_agent_does_not_block_the_chain_forever(
             language="python",
             **_noop_runners(),
         )
+        still_wedged_on_return = not left_review.is_set()
     finally:
         release.set()
 
+    # The phase returned while the wedged agent was STILL inside review(): the
+    # per-thunk ceiling degraded it rather than the fold joining it forever.
+    # Bounding only the chain wait leaves this assertion failing.
     assert result is not None
+    assert still_wedged_on_return, "run_review waited for the wedged agent to finish"
     # The queued agent gave up its turn instead of waiting on the hang, and did
-    # not run alongside the agent that never reported. Before the wait was
-    # bounded it sat in `Event.wait()` for as long as the hang lasted.
+    # not run alongside the agent that never reported.
     assert ran == ["build"]
 
 
