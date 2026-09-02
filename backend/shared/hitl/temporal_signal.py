@@ -97,9 +97,13 @@ def _log_signal_diagnostic(msg: str, *args: Any) -> None:
           and raises ``_NotInWorkflowEventLoopError`` otherwise, so this
           checks ``workflow.in_workflow()`` first.
         - Inside a running workflow, logs at ``WARNING`` via
-          ``workflow.logger``, which suppresses log calls made during replay
-          — so this adds an operator diagnostic trail without affecting
-          determinism.
+          ``workflow.logger``. The SDK's workflow logger only suppresses
+          replayed log calls *below* ``WARNING``, so this diagnostic is
+          re-emitted on every replay (worker restart, a ``__stack_trace``
+          query, etc.) — that duplication is harmless, since logging is
+          local-only and never affects workflow determinism, and each
+          replay's re-emission reflects the same rejection or eviction
+          decision, not a new one.
     """
     if workflow.in_workflow():
         workflow.logger.warning(msg, *args)

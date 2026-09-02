@@ -404,6 +404,10 @@ def test_hitl_signal_mixin_drops_early_signal_with_no_usable_resume_token() -> N
 
 
 def test_planning_workflow_registers_submit_answers_signal() -> None:
+    # Intentionally mirrored (same name) in
+    # planning_team/tests/test_temporal_workflow_signal.py -- this copy is the
+    # CI-collected one (see module docstring); keep both in sync if either
+    # changes, especially the temporalio private API note below.
     from temporalio import workflow as _workflow
 
     from planning_team.temporal.workflows import PlanningWorkflow
@@ -431,3 +435,4 @@ def test_planning_workflow_submit_answers_accepts_and_rejects() -> None:
 
     wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
     assert wf._submitted_answers == [_answer("q1")]
+    assert wf._buffered_signals == {}

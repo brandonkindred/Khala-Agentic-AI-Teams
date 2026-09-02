@@ -20,6 +20,10 @@ from shared.hitl.temporal_signal import SUBMIT_ANSWERS_SIGNAL
 
 
 def test_planning_workflow_registers_submit_answers_signal() -> None:
+    # Intentionally mirrored (same name) in
+    # software_engineering_team/tests/test_shared_infra_gap_coverage.py, the
+    # only CI-collected copy of this check -- keep both in sync if either
+    # changes, especially the temporalio private API note below.
     # temporalio private API (_Definition); re-verify this test on temporalio upgrades.
     defn = workflow._Definition.from_class(PlanningWorkflow)
     assert defn is not None, "PlanningWorkflow is missing the @workflow.defn decorator"
@@ -45,6 +49,7 @@ def test_planning_workflow_submit_answers_accepts_matching_signal() -> None:
     assert wf._submitted_answers == [
         {"question_id": "q1", "selected_option_id": None, "other_text": None}
     ]
+    assert wf._buffered_signals == {}
 
 
 def test_planning_workflow_submit_answers_rejects_out_of_order_signal() -> None:

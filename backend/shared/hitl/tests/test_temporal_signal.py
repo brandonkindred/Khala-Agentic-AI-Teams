@@ -179,6 +179,7 @@ def test_submit_answers_sets_state_when_pause_active() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1", selected_option_id="yes")]})
 
     assert wf._submitted_answers == [_answer("q1", selected_option_id="yes")]
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_normalizes_answer_shape_through_schema() -> None:
@@ -190,6 +191,7 @@ def test_submit_answers_normalizes_answer_shape_through_schema() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [{"question_id": "q1"}]})
 
     assert wf._submitted_answers == [_answer("q1")]
+    assert wf._buffered_signals == {}
 
 
 # --------------------------------------------------------------------------
@@ -230,6 +232,7 @@ def test_submit_answers_ignores_second_submission_for_same_token() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1", selected_option_id="no")]})
 
     assert wf._submitted_answers == first
+    assert wf._buffered_signals == {}
 
 
 # --------------------------------------------------------------------------
