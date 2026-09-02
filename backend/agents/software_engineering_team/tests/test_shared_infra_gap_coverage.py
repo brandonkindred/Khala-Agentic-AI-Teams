@@ -306,6 +306,20 @@ def test_hitl_signal_mixin_ignores_non_dict_payload() -> None:
     assert wf._submitted_answers is None
 
 
+def test_hitl_signal_mixin_tolerates_zero_argument_delivery() -> None:
+    """A zero-arg signal delivery (handler.fn(*decoded_args) with no args) must
+    bind the payload: Any = None default and fall through to the non-dict
+    rejection rather than raising TypeError for a missing required argument,
+    which would permanently strand the workflow on replay."""
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers()
+
+    assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
+
+
 def test_hitl_signal_mixin_ignores_second_submission_for_same_token() -> None:
     wf = _Workflow()
     wf._active_resume_token = "tok-1"
@@ -361,6 +375,9 @@ def test_planning_workflow_registers_submit_answers_signal() -> None:
     # temporalio private API (_Definition); re-verify on temporalio upgrades.
     defn = _workflow._Definition.from_class(PlanningWorkflow)
     assert defn is not None, "PlanningWorkflow is missing the @workflow.defn decorator"
+    # Pin the literal, not just the constant: a changed SUBMIT_ANSWERS_SIGNAL value
+    # would otherwise pass CI while breaking the #7451-specified wire contract.
+    assert SUBMIT_ANSWERS_SIGNAL == "submit_answers"
     assert SUBMIT_ANSWERS_SIGNAL in defn.signals
 
 

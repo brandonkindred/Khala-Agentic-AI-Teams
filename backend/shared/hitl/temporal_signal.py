@@ -187,7 +187,7 @@ class HitlAnswerSignalMixin:
         self._buffered_signals: Dict[str, List[Dict[str, Any]]] = {}
 
     @workflow.signal(name=SUBMIT_ANSWERS_SIGNAL)
-    def submit_answers(self, payload: Any) -> None:
+    def submit_answers(self, payload: Any = None) -> None:
         """Deliver a human answer batch for the current (or a not-yet-armed) pause.
 
         Preconditions:
@@ -204,7 +204,16 @@ class HitlAnswerSignalMixin:
               conversion — never reaching the checks below — and an unhandled
               exception here fails the workflow task and, since Temporal
               replays history, would fail identically on every future replay,
-              permanently stranding the workflow.
+              permanently stranding the workflow. It defaults to ``None`` for
+              the same reason: Temporal invokes a signal handler as
+              ``handler.fn(*decoded_args)``, so a zero-argument delivery (an
+              empty-args signal, or a forwarding shim that drops an empty
+              payload) would otherwise raise ``TypeError: missing 1 required
+              positional argument`` before any validation runs — the same
+              permanent-strand failure mode, just one step earlier. With the
+              default, a zero-arg delivery binds ``payload=None`` and falls
+              through to the ``not isinstance(payload, dict)`` rejection below
+              like any other malformed payload.
         Postconditions:
             - A payload that is not a dict, or whose ``"answers"`` value fails
               :func:`_validate_answer_batch` (missing, not a list, or any

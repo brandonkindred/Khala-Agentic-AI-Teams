@@ -10,6 +10,10 @@ for the sibling implementations this module was extracted from.
 
 from __future__ import annotations
 
+import typing
+
+from temporalio.converter import value_to_type
+
 from shared.hitl.temporal_signal import (
     MAX_BUFFERED_SIGNALS,
     SUBMIT_ANSWERS_SIGNAL,
@@ -50,6 +54,22 @@ def test_submit_answers_ignores_non_dict_payload() -> None:
     wf.submit_answers("not-a-dict")
 
     assert wf._submitted_answers is None
+
+
+def test_submit_answers_tolerates_zero_argument_delivery() -> None:
+    """Temporal invokes a signal handler as handler.fn(*decoded_args) -- a
+    zero-arg delivery (e.g. an empty-args signal, or a forwarding shim that
+    drops an empty payload) must bind the ``payload: Any = None`` default and
+    fall through to the non-dict rejection rather than raising TypeError for
+    a missing required argument, which would permanently strand the workflow
+    on replay."""
+    wf = _Workflow()
+    wf._active_resume_token = "tok-1"
+
+    wf.submit_answers()
+
+    assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_ignores_non_list_answers() -> None:
@@ -277,10 +297,6 @@ def test_submit_answers_payload_annotation_survives_temporal_type_conversion() -
     isinstance-based fail-closed design. This drives the real Temporal
     converter (not a fake) against the handler's live type hint to prove a
     non-dict payload converts cleanly instead of raising."""
-    import typing
-
-    from temporalio.converter import value_to_type
-
     hints = typing.get_type_hints(HitlAnswerSignalMixin.submit_answers)
     payload_hint = hints["payload"]
 
