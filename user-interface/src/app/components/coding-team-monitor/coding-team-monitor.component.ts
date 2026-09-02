@@ -18,6 +18,31 @@ const CODING_TEAM_PHASES: PhaseDefinition[] = [
   { id: 'completed', label: 'Completed', icon: 'check_circle' },
 ];
 
+/** Char bound for the objective portion of the live-region summary — kept short since it's spoken
+ *  by assistive tech, not read visually; longer text is truncated with an ellipsis. */
+const SUMMARY_OBJECTIVE_MAX_CHARS = 60;
+
+/**
+ * One-sentence live-region summary of a coding-team run's objective and overall progress, for the
+ * hidden `aria-live="polite"` region only. Deliberately excludes roster/tool/activity detail so
+ * assistive tech isn't re-read a wall of text on every poll.
+ *
+ * Preconditions: `objective` is the run's current objective/phase text (may be arbitrarily long,
+ *   e.g. unbounded backend `status_text`); `progressPercent` is a clamped 0-100 number, or null
+ *   when no numeric progress is known yet (indeterminate).
+ * Postconditions: returns "<objective> — <progressPercent>% complete" when progressPercent is a
+ *   number, or "<objective>" alone when null. `objective` longer than
+ *   SUMMARY_OBJECTIVE_MAX_CHARS characters is truncated to that length with a trailing ellipsis.
+ *   Pure — no side effects.
+ */
+export function codingTeamStatusSummary(objective: string, progressPercent: number | null): string {
+  const trimmed =
+    objective.length > SUMMARY_OBJECTIVE_MAX_CHARS
+      ? `${objective.slice(0, SUMMARY_OBJECTIVE_MAX_CHARS)}…`
+      : objective;
+  return progressPercent === null ? trimmed : `${trimmed} — ${progressPercent}% complete`;
+}
+
 /**
  * Presentational monitor for a coding-team run. Renders the team's current objective, an overall
  * progress bar + phase stepper, the live sub-agent activity, and a per-agent roster (who is
@@ -81,6 +106,16 @@ export class CodingTeamMonitorComponent {
     const p = this.status?.progress;
     if (p === undefined || p === null) return null;
     return Math.min(Math.max(p, 0), 100);
+  }
+
+  /**
+   * Sentence for the hidden `aria-live="polite"` region. Empty until the first poll lands —
+   * `objectiveText()`'s "Coding team run" placeholder is for the visible objective line only and
+   * must never be spoken as a premature announcement.
+   */
+  statusSummary(): string {
+    if (!this.status) return '';
+    return codingTeamStatusSummary(this.objectiveText(), this.overallProgress());
   }
 
   /** Indeterminate while a started job has no numeric progress yet; else determinate. */
