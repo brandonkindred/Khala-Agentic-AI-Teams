@@ -36,6 +36,7 @@ from investment_team.strategy_lab.spec_dsl import (
     FixedFractionSizing,
     Predicate,
     StopLossRule,
+    TakeProfitRule,
 )
 from investment_team.trading_service.engine.execution_model import RealisticExecutionModel
 from investment_team.trading_service.engine.fill_simulator import FillSimulator, FillSimulatorConfig
@@ -91,8 +92,6 @@ def test_pct_equal_to_one_is_not_eligible() -> None:
 
 def test_non_stop_loss_rule_is_not_eligible() -> None:
     """A non-``StopLossRule`` exit rule is never eligible."""
-    from investment_team.strategy_lab.spec_dsl import TakeProfitRule
-
     assert _is_resting_stop_loss(TakeProfitRule(pct=0.06)) is False
 
 
@@ -236,6 +235,35 @@ def test_dispatcher_omits_attachment_for_ineligible_rule() -> None:
     rule = StopLossRule(pct=0.03, basis="entry_price", style="limit", limit_offset_pct=0.01)
     req = _emit([rule], side="long", close=100.0)
     assert req.attached_exits == []
+
+
+def test_dispatcher_attaches_stop_among_mixed_exit_rules() -> None:
+    """The dispatcher scans the full ``exit_rules`` list — an eligible stop is
+    found and attached even when a non-eligible exit rule precedes it, not just
+    when it is the spec's sole exit rule."""
+    req = _emit(
+        [TakeProfitRule(pct=0.06), StopLossRule(pct=0.03, basis="entry_price")],
+        side="long",
+        close=100.0,
+    )
+    [attachment] = req.attached_exits
+    assert isinstance(attachment, StopAttachment)
+    assert attachment.stop_price == pytest.approx(97.0)
+
+
+def test_dispatcher_picks_first_eligible_stop_among_several() -> None:
+    """When more than one eligible ``StopLossRule`` is present, the first in spec
+    order wins — mirroring ``first_side_stop_factor``'s spec-order precedent."""
+    req = _emit(
+        [
+            StopLossRule(pct=0.03, basis="entry_price"),
+            StopLossRule(pct=0.10, basis="entry_price"),
+        ],
+        side="long",
+        close=100.0,
+    )
+    [attachment] = req.attached_exits
+    assert attachment.stop_price == pytest.approx(97.0)
 
 
 def test_dispatcher_omits_attachment_for_no_exit_rules() -> None:

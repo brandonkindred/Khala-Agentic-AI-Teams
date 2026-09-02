@@ -1869,10 +1869,14 @@ def _stop_loss_rule_to_leg_specs(rule: StopLossRule) -> List[ExitLegSpec]:
     identical price math for both (see ``rule_compiler._stop_loss_level``,
     which this mirrors: ``ref_price * (1 ∓ pct)``).
     """
+    # ``rule!r`` (not its individual attributes) so the message itself can't
+    # raise: an assert message is only evaluated on failure, and this is
+    # exactly the path a non-StopLossRule input would take (the case
+    # ``_is_resting_stop_loss``'s isinstance check exists to catch), where
+    # ``rule.basis``/``rule.style`` may not exist at all.
     assert _is_resting_stop_loss(rule), (
         "_stop_loss_rule_to_leg_specs requires a resting-eligible StopLossRule "
-        f"(basis='entry_price', style='market', 0 < pct < 1.0); got "
-        f"basis={rule.basis!r} style={rule.style!r} pct={rule.pct!r}"
+        f"(basis='entry_price', style='market', 0 < pct < 1.0); got {rule!r}"
     )
     return [ExitLegSpec(kind=OrderType.STOP, pct=rule.pct)]
 
@@ -1970,6 +1974,26 @@ class _EngineEntryDispatcher:
         # short-safety auto-stop is deliberately excluded. "First" mirrors
         # ``first_side_stop_factor``'s spec-order precedent for picking among
         # multiple candidate stop rules.
+        #
+        # UNLIKE ``self._bracket``, this rule is NOT also excluded from the
+        # bar-by-bar exit evaluator (``_EngineExitDispatcher`` still calls
+        # ``evaluate_exit_rules``/``first_exit_intent_for_position`` over the
+        # unmodified ``exit_rules``, and ``rule_compiler._intent_for_rule``
+        # has no skip for this rule kind, unlike its unconditional
+        # ``OcoBracketRule`` skip). So on a bar where the level is crossed,
+        # BOTH the resting STOP child (intrabar) and the bar-close evaluator
+        # (next bar's open) can act on the same rule — a known, deliberate
+        # transitional state for this migration step. The stale-continuation
+        # guard in ``FillSimulator.process_bar`` drops a bar-close close that
+        # arrives after the resting child already closed the position, so
+        # this does not double-close in practice, but it does still cost a
+        # redundant evaluator pass and a double-counted
+        # ``exit_rule_firings`` diagnostic on that bar. Deduplicating the two
+        # paths (mirroring the bracket's unconditional skip, or the
+        # order-book-aware ``exclude_resting_limit_stop`` mechanism the
+        # limit-style stop uses) is reserved for a later step of this same
+        # migration, once the fill-semantics verification step has settled
+        # exactly when the resting child is and isn't in flight.
         self._resting_stop_loss: Optional[StopLossRule] = next(
             (r for r in self.exit_rules if _is_resting_stop_loss(r)), None
         )

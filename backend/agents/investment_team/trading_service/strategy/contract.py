@@ -302,13 +302,16 @@ class OrderRequest(BaseModel):
     attached_take_profit: Optional[LimitAttachment] = None
     # Additional resting protective/target legs beyond the two fixed bracket
     # fields above, for entries with more than a stop-loss/take-profit pair
-    # (e.g. multiple independently-attached, non-bracket exits — #7509).
-    # Kept as a separate field rather than folding the bracket pair into it
-    # so existing bracket call sites/tests constructing requests via
-    # ``attached_stop_loss=``/``attached_take_profit=`` are unaffected. Not
-    # yet populated by any production dispatcher/DSL path — that migration
-    # is out of scope here; today only tests exercising the fill simulator
-    # directly populate this.
+    # (e.g. multiple independently-attached, non-bracket exits). Kept as a
+    # separate field rather than folding the bracket pair into it so existing
+    # bracket call sites/tests constructing requests via
+    # ``attached_stop_loss=``/``attached_take_profit=`` are unaffected.
+    # Populated in production by ``_EngineEntryDispatcher`` for a
+    # resting-eligible ``StopLossRule`` (``basis="entry_price"``,
+    # ``style="market"``, ``0 < pct < 1.0`` — see that class's
+    # ``_resting_stop_loss_attachments`` in ``trading_service/service.py``);
+    # other rule kinds/bases are not yet migrated onto this path and remain
+    # bar-close-only.
     attached_exits: List[Union[StopAttachment, LimitAttachment]] = Field(default_factory=list)
     parent_order_id: Optional[str] = None
     oco_group_id: Optional[str] = None

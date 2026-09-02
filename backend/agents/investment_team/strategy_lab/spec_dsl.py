@@ -307,7 +307,14 @@ class StopLossRule(_SpecNode):
     pct: float = Field(gt=0, le=1.0)
     basis: Literal["entry_price", "trailing_high", "trailing_low"] = "entry_price"
     # Execution style for the structured close the engine emits when this rule
-    # fires. ``"market"`` (default) emits a guaranteed next-bar-open market close.
+    # fires. ``"market"`` (default) emits a guaranteed next-bar-open market close
+    # via the bar-by-bar evaluator. For an engine-dispatched entry (not the
+    # custom-code path) with a resting-eligible level (``basis="entry_price"``,
+    # ``0 < pct < 1.0``), ``_EngineEntryDispatcher`` ALSO attaches a resting STOP
+    # order at entry-fill that can close the position intrabar
+    # (``_resting_stop_loss_attachments`` in ``trading_service/service.py``) —
+    # the two paths are not yet deduplicated (a known transitional state; see
+    # that dispatcher's own comment), so both may act on the same trigger.
     # ``"limit"`` emits a *resting* STOP_LIMIT at the rule's price floor/ceiling
     # with the limit placed ``limit_offset_pct`` away on the protective side; it
     # may **not** fill on a gap-through (the position stays open), which is the
