@@ -2947,3 +2947,108 @@ def test_run_with_phase_cache_matches_cold_monolithic_run() -> None:
 
     mock_run_single_phase.assert_not_called()
     assert hit_result == cold_result
+
+
+# ---------------------------------------------------------------------------
+# Story 1 (#7837): should_continue cooperative-cancellation gate
+# ---------------------------------------------------------------------------
+
+
+def test_run_with_should_continue_false_from_start_skips_every_phase() -> None:
+    """A callable returning False before any phase runs invokes neither
+    run_single_phase nor the cache, for every phase."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+
+    with (
+        patch.object(orchestrator, "run_single_phase") as mock_run_single_phase,
+        patch.object(cache, "get") as mock_get,
+        patch.object(cache, "put") as mock_put,
+    ):
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            phase_cache=cache,
+            should_continue=lambda: False,
+        )
+
+    mock_run_single_phase.assert_not_called()
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+    assert result.strategic_core is None
+    assert result.degraded_phases == []
+
+
+def test_run_with_should_continue_false_mid_run_degrades_remaining_phases() -> None:
+    """should_continue becomes False after 2 phases: those 2 have real
+    output, the rest are (None, False) and excluded from degraded_phases."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+    calls = iter([True, True, False])
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            phase_cache=cache,
+            should_continue=lambda: next(calls),
+        )
+
+    assert mock_run_single_phase.call_count == 2
+    assert result.strategic_core is not None
+    assert result.narrative_messaging is not None
+    assert result.visual_identity is None
+    assert result.channel_activation is None
+    assert result.governance is None
+    assert result.degraded_phases == []
+
+
+def test_run_with_should_continue_latches_after_first_false() -> None:
+    """A non-monotonic callable (False then True again) does not un-cancel
+    later phases -- the first False is latched for the rest of the call."""
+    mission = make_mission()
+    cache = PhaseOutputCache()
+    orchestrator = BrandingTeamOrchestrator()
+    calls = iter([True, False, True, True, True])
+
+    with patch.object(
+        orchestrator, "run_single_phase", side_effect=_run_single_phase_fixture_side_effect
+    ) as mock_run_single_phase:
+        result = orchestrator.run(
+            mission=mission,
+            human_review=HumanReview(approved=False),
+            phase_cache=cache,
+            should_continue=lambda: next(calls),
+        )
+
+    # Only STRATEGIC_CORE ran; should_continue is never called again after
+    # its first False, so the later Trues in `calls` are never consumed.
+    assert mock_run_single_phase.call_count == 1
+    assert result.strategic_core is not None
+    assert result.narrative_messaging is None
+    assert result.visual_identity is None
+    assert result.channel_activation is None
+    assert result.governance is None
+
+
+def test_run_with_use_monolithic_true_never_invokes_should_continue() -> None:
+    """The monolithic escape hatch accepts should_continue but never calls
+    it -- a callable that would truncate the cached path has no effect."""
+    orchestrator = BrandingTeamOrchestrator()
+    should_continue = MagicMock(return_value=False)
+
+    with _patch_graph_invoke(ALL_PHASES):
+        result = orchestrator.run(
+            mission=make_mission(),
+            human_review=HumanReview(approved=True),
+            should_continue=should_continue,
+            _use_monolithic=True,
+        )
+
+    should_continue.assert_not_called()
+    assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
+    assert result.governance is not None
