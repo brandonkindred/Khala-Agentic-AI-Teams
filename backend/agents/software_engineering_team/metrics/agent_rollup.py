@@ -105,6 +105,7 @@ class AgentRollupMetrics:
     by_agent_phase: dict[str, dict[str, CallRollup]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the rollup as plain dicts (via ``asdict``), JSON-serializable end to end."""
         return asdict(self)
 
 

@@ -7,6 +7,8 @@ ratio/percentile values.
 
 from __future__ import annotations
 
+import json
+
 from software_engineering_team.metrics.agent_rollup import AgentRollupMetrics, CallRollup
 
 
@@ -68,6 +70,9 @@ def test_to_dict_round_trip_nests_plain_dicts() -> None:
     m.by_agent_phase["backend"] = {"execution": CallRollup(call_count=3, total_cost_usd=1.23)}
 
     d = m.to_dict()
+
+    # The documented invariant: the whole shape serializes to JSON end to end.
+    assert json.loads(json.dumps(d)) == d
 
     assert d["window_days"] == 30.0
     assert d["computed_at"] == "2026-09-02T00:00:00+00:00"
