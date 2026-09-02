@@ -9,6 +9,8 @@ factory.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import pytest
 
 from shared.concurrency.keyed_lazy_registry import KeyedLazyRegistry
@@ -32,7 +34,7 @@ def test_get_or_create_builds_once_per_key_and_returns_same_object() -> None:
 def test_distinct_keys_build_distinct_values() -> None:
     calls: list[str] = []
 
-    def factory_for(key: str):
+    def factory_for(key: str) -> Callable[[], object]:
         def build() -> object:
             calls.append(key)
             return object()
