@@ -41,10 +41,12 @@ from investment_team.trading_service.engine.portfolio import Portfolio
 from investment_team.trading_service.modes.backtest import run_backtest
 from investment_team.trading_service.strategy.contract import (
     Bar,
+    FillKind,
     OrderRequest,
     OrderSide,
     OrderType,
     TimeInForce,
+    UnfilledPolicy,
 )
 
 # ---------------------------------------------------------------------------
@@ -296,6 +298,104 @@ def test_insufficient_capital_emits_rejected_event() -> None:
     assert len(rejections) == 1
     assert rejections[0].reason == "insufficient_capital"
     assert rejections[0].symbol == "BBB"
+
+
+def test_continuation_insufficient_capital_emits_rejected_event() -> None:
+    """The continuation-fill gate (``_continue_entry``) rejects a requeued
+    remainder with ``insufficient_capital`` exactly like the initial-entry
+    gate (``_fill_entry``, tested above) does, and the rejection reaches
+    ``BacktestExecutionDiagnostics`` — including the dedicated
+    ``insufficient_capital_rejections`` counter — via the shared
+    ``_apply_fill_outcome_events`` drain. This is the fill-simulator's
+    second ``insufficient_capital`` gate site, previously untested at
+    either the ``FillOutcome`` or the diagnostics layer.
+
+    Two symbols decouple the capital shortfall from the (per-symbol)
+    concentration/leverage gates, same technique as the initial-entry test
+    above: 1) AAA takes a clean $900k position, leaving $100k cash: 2) BBB
+    (qty=1,800) gets a 50% participation-capped partial fill for $90k,
+    leaving only $10k cash; 3) BBB's continuation on a high-volume bar
+    targets the full $90k remainder — concentration/leverage stay low
+    (BBB is a small fraction of $1M equity throughout), but cash can't
+    cover it.
+    """
+    sim, order_book, portfolio = _make_simulator(
+        initial_capital=1_000_000.0,
+        risk_limits=RiskLimits(
+            max_position_pct=100,
+            max_gross_leverage=100.0,
+            max_symbol_concentration_pct=100.0,
+        ),
+        realistic=True,
+    )
+    order_book.submit(
+        _long(9_000),
+        submitted_at="2024-01-01",
+        submitted_equity=1_000_000.0,
+    )
+    sim.process_bar(_bar("2024-01-02", price=100.0, volume=10_000_000))
+    assert portfolio.capital == pytest.approx(100_000.0, abs=0.01)
+
+    order_book.submit(
+        OrderRequest(
+            client_order_id="bbb-entry",
+            symbol="BBB",
+            side=OrderSide.LONG,
+            qty=1_800,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+        ),
+        submitted_at="2024-01-02",
+        submitted_equity=portfolio.mark_to_market(),
+    )
+
+    bbb_bar1 = Bar(
+        symbol="BBB",
+        timestamp="2024-01-03",
+        timeframe="1d",
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=9_000,
+    )
+    bar1 = sim.process_bar(bbb_bar1)
+    assert bar1.entry_fills[0].fill_kind == FillKind.PARTIAL
+    assert portfolio.capital == pytest.approx(10_000.0, abs=0.01)
+
+    bbb_bar2 = Bar(
+        symbol="BBB",
+        timestamp="2024-01-04",
+        timeframe="1d",
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=10_000_000,
+    )
+    outcome = sim.process_bar(bbb_bar2)
+
+    assert outcome.entry_fills == []
+    rejections = [e for e in outcome.diagnostic_events if e.kind == "rejected"]
+    assert len(rejections) == 1
+    assert rejections[0].reason == "insufficient_capital"
+    assert rejections[0].symbol == "BBB"
+
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.service import _apply_fill_outcome_events
+
+    diag = BacktestExecutionDiagnostics()
+    _apply_fill_outcome_events(diag, outcome)
+    assert diag.insufficient_capital_rejections == 1
+    assert diag.orders_rejection_reasons.get("insufficient_capital") == 1
+    matching_events = [
+        e
+        for e in diag.last_order_events
+        if e.event_type == "rejected" and e.reason == "insufficient_capital"
+    ]
+    assert len(matching_events) == 1
+    assert matching_events[0].symbol == "BBB"
 
 
 def test_ioc_no_trigger_emits_rejected_event() -> None:

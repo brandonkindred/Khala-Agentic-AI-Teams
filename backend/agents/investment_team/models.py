@@ -881,6 +881,11 @@ class BacktestExecutionDiagnostics(BaseModel):
     # position. Distinguishes a concurrency-limited zero/sparse-trade run from
     # one where the entry predicate simply never matched.
     already_in_position_skips: int = Field(default=0, ge=0)
+    # Fill-side rejections where the order was accepted but the portfolio lacked
+    # capital to cover the notional (either the initial entry gate or the
+    # continuation-fill gate). Distinguishes a capital-exhausted run from the
+    # generic orders_rejection_reasons bucket and from a dead entry predicate.
+    insufficient_capital_rejections: int = Field(default=0, ge=0)
     entries_filled: int = Field(default=0, ge=0)
     exits_emitted: int = Field(default=0, ge=0)
     closed_trades: int = Field(default=0, ge=0)

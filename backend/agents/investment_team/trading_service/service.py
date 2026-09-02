@@ -2345,6 +2345,8 @@ def _apply_fill_outcome_events(
             )
         elif ev.kind == "rejected":
             _increment_rejection(diagnostics, ev.reason)
+            if ev.reason == "insufficient_capital":
+                diagnostics.insufficient_capital_rejections += 1
             _record_event(
                 diagnostics,
                 "rejected",
