@@ -150,7 +150,10 @@ There is no separate DbC gate inside this per-microtask loop; instead, `DbcComme
 Data and control-flow dependencies among the build/code-review/security/QA
 gates specifically, and which of them are safe to parallelize vs. require a
 redesign, are mapped in
-[`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md).
+[`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md). The finding
+shapes those gates emit — fields, severity vocabularies, defect categories,
+and which findings carry a file path and line number — are catalogued in
+[`docs/GATE_FINDING_INVENTORY.md`](docs/GATE_FINDING_INVENTORY.md).
 
 ## Plan folder
 
