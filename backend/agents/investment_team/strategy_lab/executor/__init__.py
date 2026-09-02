@@ -18,14 +18,28 @@ here is genuinely shared plumbing:
   simulator (``system_design/reference_ledger_trade_model.md``): reuses
   ``evaluate_entry_rules`` to open a reference position at the next bar's
   open.
+* :mod:`reference_exits` — exit-side replay for the same simulator, currently
+  covering ``StopLossRule`` across all four basis/style variants with
+  resting-order fill semantics (exact level on a through-bar, worse open on a
+  gap). Reuses :mod:`rule_compiler`'s trigger geometry and adds the fill
+  mechanics that geometry deliberately omits.
 """
 
 from .reference_entries import ReferenceEntryFill, replay_entry_rules
+from .reference_exits import (
+    ReferenceStopLossExit,
+    replay_stop_loss_exits,
+    resolve_stop_loss_exit,
+    working_exit_rules,
+)
 from .rule_compiler import (
     BarSnapshot,
     ExitIntent,
     PositionState,
     evaluate_exit_rules,
+    stop_limit_prices,
+    stop_loss_level,
+    stop_loss_triggers,
 )
 from .trade_builder import build_trade_records
 
@@ -34,7 +48,14 @@ __all__ = [
     "ExitIntent",
     "PositionState",
     "ReferenceEntryFill",
+    "ReferenceStopLossExit",
     "build_trade_records",
     "evaluate_exit_rules",
     "replay_entry_rules",
+    "replay_stop_loss_exits",
+    "resolve_stop_loss_exit",
+    "stop_limit_prices",
+    "stop_loss_level",
+    "stop_loss_triggers",
+    "working_exit_rules",
 ]

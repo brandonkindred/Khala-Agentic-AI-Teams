@@ -461,11 +461,7 @@ def _intent_for_rule(
     stop_price: Optional[float] = None
     limit_price: Optional[float] = None
     if isinstance(rule, StopLossRule) and style == "limit":
-        stop_price = _stop_loss_level(rule, position)
-        offset = stop_price * rule.limit_offset_pct
-        limit_price = protective_limit_price(
-            stop_price, offset, closing_long=(position.side == "long")
-        )
+        stop_price, limit_price = stop_limit_prices(rule, position)
     return ExitIntent(
         symbol=symbol,
         rule_kind=_kind_of(rule),
@@ -523,12 +519,14 @@ def _next_scaled_rung(
     )
 
 
-def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
+def stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     """Resolve the price level at which ``rule`` floors (long) / caps (short)
     the position. Single source of the stop-level geometry: :func:`stop_loss_triggers`
-    compares the bar against this level, and the limit-style evaluator rests a
-    STOP_LIMIT here, so the trigger decision and the resting limit can never
-    disagree.
+    compares the bar against this level, :func:`stop_limit_prices` rests a
+    STOP_LIMIT off it, and the reference-ledger exit replay derives its fill
+    price from it — so the trigger decision, the resting limit, and the modeled
+    fill can never disagree. Public for that last caller, which lives outside
+    this module and must not re-derive the formula.
 
     Preconditions: ``rule`` is side-compatible with ``position`` — the basis can
     fire for this side. ``stop_loss_triggers`` enforces this by returning early
@@ -546,6 +544,36 @@ def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
         return ref * (1.0 - pct)
     ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
     return ref * (1.0 + pct)
+
+
+def stop_limit_prices(rule: StopLossRule, position: PositionState) -> tuple[float, float]:
+    """Resolve a limit-style stop's ``(stop_price, limit_price)`` pair.
+
+    Single source of the limit-style geometry, the way :func:`stop_loss_level` is
+    for the trigger level: the offset is a fraction OF THE STOP LEVEL
+    (``stop_price * limit_offset_pct``), and only then does
+    :func:`protective_limit_price` apply the side's sign convention. Splitting
+    those two steps across call sites is how the two halves drift, so callers
+    that need the resting prices — the dispatcher's intent builder here, and the
+    reference-ledger exit replay — take them from this one place.
+
+    Preconditions: ``rule.style == "limit"``, so ``rule.limit_offset_pct`` is
+    populated and in ``(0, 1)`` and ``rule.basis`` is ``"entry_price"`` (all
+    three enforced by ``StopLossRule``'s own validator); ``position.side`` is
+    ``"long"``/``"short"`` and ``position.entry_price > 0``.
+    Postconditions: returns ``(stop_price, limit_price)`` with ``stop_price``
+    the level :func:`stop_loss_level` resolves and ``limit_price`` on the
+    protective side of it — below for a long close, above for a short. Both are
+    strictly positive: ``pct < 1.0`` and ``limit_offset_pct < 1.0`` (validator-
+    enforced) keep a long's ``entry * (1 - pct) * (1 - limit_offset_pct)``
+    above zero, and the short side only ever adds.
+    """
+    if rule.limit_offset_pct is None:
+        raise ValueError("limit-style StopLossRule requires limit_offset_pct")
+    stop_price = stop_loss_level(rule, position)
+    offset = stop_price * rule.limit_offset_pct
+    limit_price = protective_limit_price(stop_price, offset, closing_long=(position.side == "long"))
+    return stop_price, limit_price
 
 
 def _kind_of(rule: ExitRule) -> ExitRuleKind:
@@ -605,13 +633,13 @@ def stop_loss_triggers(rule: StopLossRule, position: PositionState, bar: BarSnap
             # for longs rather than firing, so a misconfigured spec doesn't
             # silently flush every long position on bar 1.
             return False
-        return bar.low <= _stop_loss_level(rule, position)
+        return bar.low <= stop_loss_level(rule, position)
 
     # short
     if rule.basis == "trailing_high":
         # ``trailing_high`` is the long-side counterpart; no-op for shorts.
         return False
-    return bar.high >= _stop_loss_level(rule, position)
+    return bar.high >= stop_loss_level(rule, position)
 
 
 def _take_profit_triggers(rule: TakeProfitRule, position: PositionState, bar: BarSnapshot) -> bool:
