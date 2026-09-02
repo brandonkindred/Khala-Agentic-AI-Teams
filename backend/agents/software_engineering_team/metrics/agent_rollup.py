@@ -107,6 +107,10 @@ class AgentRollupMetrics:
     ``computed_at`` is an ISO 8601 UTC timestamp (e.g. ``"2026-09-02T00:00:00+00:00"``);
     ``window_days`` is the length, in days, of the rolling window ending at
     ``computed_at`` over which traces were aggregated.
+
+    Like :class:`CallRollup`, these contracts are documented, not enforced: the
+    future producer is responsible for emitting ``computed_at`` in ISO 8601 UTC
+    and ``window_days > 0``.
     """
 
     window_days: float
