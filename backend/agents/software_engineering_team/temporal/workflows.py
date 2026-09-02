@@ -150,8 +150,8 @@ class RunTeamWorkflowV2(PlanningAnswerSignalMixin):
                 # one thing this loop must never do is spin -- fail the run
                 # instead, non-retryable because a retry would spin too.
                 raise ApplicationError(
-                    f"Planning paused for a {pause_round + 1}th round after being told not to "
-                    f"(MAX_PLANNING_PAUSE_ROUNDS={MAX_PLANNING_PAUSE_ROUNDS})",
+                    f"Planning paused for round {pause_round + 1} after being told not to "
+                    f"pause again (MAX_PLANNING_PAUSE_ROUNDS={MAX_PLANNING_PAUSE_ROUNDS})",
                     non_retryable=True,
                 )
             pause_round += 1

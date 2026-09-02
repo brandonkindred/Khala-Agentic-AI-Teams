@@ -271,6 +271,43 @@ def test_submit_pending_answers_clamps_progress_in_response(client, fake_job_cli
     assert resp.json()["progress"] == 100
 
 
+def _seed_temporal_native_pause(fake_job_client, job_id: str, question: dict) -> str:
+    """Seed a job with the pause envelope a Temporal-native pause persists.
+
+    Returns the resume token so callers echo the value the route will validate
+    rather than re-deriving it.
+    """
+    token = f"{job_id}:tok-1"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        resume_token=token,
+        pending_questions=[question],
+    )
+    return token
+
+
+def _patch_temporal_native_route(monkeypatch, hitl_mod, *, on_append=None, on_signal=None) -> None:
+    """Install the three patches every Temporal-native route test needs.
+
+    The ``store_submit_answers`` guard is the point: it pins the route's
+    temporal-native/thread-mode discriminator, so a regression there fails by
+    name instead of running the real store against the fake client and surfacing
+    as an opaque store error. Living in one helper means a change to the patched
+    names, or to the discriminator, is edited once rather than in every test.
+    """
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
+
+    monkeypatch.setattr(
+        hitl_mod, "store_append_submitted_answers", on_append or (lambda *_a, **_k: None)
+    )
+    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", on_signal or (lambda *_a, **_k: None))
+    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+
+
 # ---------------------------------------------------------------------------
 # submit_pending_answers — Temporal-native pause (resume_token present)
 # ---------------------------------------------------------------------------
@@ -286,19 +323,15 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
     import software_engineering_team.api.routes.hitl as hitl_mod
 
     job_id = "job-signal-1"
-    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
-    fake_job_client.update_job(
+    _seed_temporal_native_pause(
+        fake_job_client,
         job_id,
-        waiting_for_answers=True,
-        resume_token=f"{job_id}:tok-1",
-        pending_questions=[
-            {
-                "id": "q1",
-                "question_text": "Which auth provider?",
-                "required": True,
-                "options": [{"id": "okta", "label": "Okta"}],
-            }
-        ],
+        {
+            "id": "q1",
+            "question_text": "Which auth provider?",
+            "required": True,
+            "options": [{"id": "okta", "label": "Okta"}],
+        },
     )
 
     appended: dict = {}
@@ -353,30 +386,18 @@ def test_submit_pending_answers_temporal_native_stops_advertising_the_answered_p
     import software_engineering_team.api.routes.hitl as hitl_mod
 
     job_id = "job-signal-projected"
-    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
-    fake_job_client.update_job(
+    _seed_temporal_native_pause(
+        fake_job_client,
         job_id,
-        waiting_for_answers=True,
-        resume_token=f"{job_id}:tok-1",
-        pending_questions=[
-            {
-                "id": "q1",
-                "question_text": "Which auth provider?",
-                "required": True,
-                "options": [{"id": "okta", "label": "Okta"}],
-            }
-        ],
+        {
+            "id": "q1",
+            "question_text": "Which auth provider?",
+            "required": True,
+            "options": [{"id": "okta", "label": "Okta"}],
+        },
     )
 
-    def _must_not_run(*_a, **_k):  # pragma: no cover
-        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
-
-    monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", lambda *_a, **_k: None)
-    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", lambda *_a, **_k: None)
-    # Pins the route's temporal-native/thread-mode discriminator explicitly. Without
-    # it a regressed discriminator would run the real store against the fake client
-    # and surface as an opaque store error rather than a named assertion.
-    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+    _patch_temporal_native_route(monkeypatch, hitl_mod)
 
     resp = client.post(
         f"/run-team/{job_id}/answers",
@@ -412,30 +433,18 @@ def test_submit_pending_answers_temporal_native_still_advertises_a_later_pause(
     import software_engineering_team.api.routes.hitl as hitl_mod
 
     job_id = "job-signal-round2"
-    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
-    fake_job_client.update_job(
+    _seed_temporal_native_pause(
+        fake_job_client,
         job_id,
-        waiting_for_answers=True,
-        resume_token=f"{job_id}:tok-1",
-        pending_questions=[
-            {
-                "id": "q1",
-                "question_text": "Q1?",
-                "required": True,
-                "options": [{"id": "a", "label": "A"}],
-            }
-        ],
+        {
+            "id": "q1",
+            "question_text": "Q1?",
+            "required": True,
+            "options": [{"id": "a", "label": "A"}],
+        },
     )
 
-    def _must_not_run(*_a, **_k):  # pragma: no cover
-        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
-
-    monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", lambda *_a, **_k: None)
-    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", lambda *_a, **_k: None)
-    # Pins the route's temporal-native/thread-mode discriminator explicitly. Without
-    # it a regressed discriminator would run the real store against the fake client
-    # and surface as an opaque store error rather than a named assertion.
-    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+    _patch_temporal_native_route(monkeypatch, hitl_mod)
 
     resp = client.post(
         f"/run-team/{job_id}/answers",

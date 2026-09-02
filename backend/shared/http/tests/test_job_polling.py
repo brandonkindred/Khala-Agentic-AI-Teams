@@ -843,11 +843,24 @@ def test_poll_rejects_a_non_exception_passthrough_entry():
 
 
 def test_poll_rejects_a_bare_class_passed_as_passthrough_exceptions():
-    """The parameter is a *tuple* of types; a bare class is iterated character
-    by... no — it is not iterable at all, so `all(...)` raises TypeError rather
-    than asserting. Pin the tuple requirement explicitly."""
-    with pytest.raises((AssertionError, TypeError)):
+    """The parameter is a tuple of types, not a single class.
+
+    The precondition rejects a bare class before polling starts, so the mistake
+    surfaces at the call site rather than at the except clause mid-poll.
+    """
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
         poll_until_terminal(
             lambda: {"status": "running"},
             passthrough_exceptions=_PauseSignal,  # type: ignore[arg-type]
+        )
+
+
+def test_poll_rejects_a_list_of_exception_types():
+    """A LIST of real exception types is the input an element-only check lets
+    through — and the only one that still reaches ``except passthrough_exceptions:``,
+    where it raises TypeError chained onto whatever on_poll actually threw."""
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=[_PauseSignal],  # type: ignore[arg-type]
         )

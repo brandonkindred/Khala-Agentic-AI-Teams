@@ -127,6 +127,10 @@ def test_product_analysis_wait_still_fails_closed_on_an_unexpected_callback_erro
             out = wait_for_product_analysis_completion("pa-123", answer_callback=_answer_callback)
 
     assert out["status"] == "failed"
+    # Pin the error too: "failed" alone does not distinguish a broken callback
+    # from an unreadable job status, and poll_until_terminal keeps those two
+    # messages distinct precisely so a caller can tell them apart.
+    assert out["error"] == "Progress callback failed"
 
 
 def test_run_product_analysis_no_base_url():

@@ -1194,6 +1194,18 @@ def test_plan_project_activity_final_round_resolves_a_drifted_question_instead_o
     assert result.get("outcome") != "paused"
     assert result["requirements_title"] == "Test"
 
+    # The job record too, matching the sibling pause test's pattern: a final round
+    # that returned a PlanResult but left the pause envelope standing, or marked
+    # the job failed through the generic handler, would pass the assertions above.
+    # NB the answered-token marker is written by the answers ROUTE, not by this
+    # activity, so it is not assertable here; what the activity guarantees is that
+    # it consumed the envelope it re-entered on.
+    job = js.get_job("pp-final")
+    assert job["status"] != js.JOB_STATUS_FAILED
+    assert job["waiting_for_answers"] is False
+    assert job["pending_questions"] == []
+    assert job["resume_token"] is None
+
 
 def test_plan_project_activity_retry_reemits_persisted_pause_without_rerunning(
     monkeypatch, tmp_path, patched_job_store

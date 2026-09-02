@@ -183,8 +183,8 @@ def _kwargs_with_directive(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     Postconditions:
         - Returns a new dict; ``kwargs``, its content list and its blocks are
-          never mutated. When no ``system_prompt_content`` is present, the
-          kwargs are returned unchanged (a copy) and the directive rides on
+          never mutated. When ``system_prompt_content`` is absent, empty, or not a
+          list, the kwargs are returned unchanged (a copy) and the directive rides on
           the system prompt string alone.
     """
     content = kwargs.get("system_prompt_content")

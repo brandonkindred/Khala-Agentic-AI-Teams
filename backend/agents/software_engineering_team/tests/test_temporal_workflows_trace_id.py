@@ -161,19 +161,22 @@ def test_run_team_workflow_v2_accumulates_answers_across_pause_rounds():
     """
     calls: list = []
     plan_calls = {"n": 0}
+    current_token = {"value": ""}
 
     def _fake_plan(args):
         plan_calls["n"] += 1
         if plan_calls["n"] == 1:
+            current_token["value"] = "job-8:tok1"
             return {
                 "outcome": "paused",
-                "resume_token": "job-8:tok1",
+                "resume_token": current_token["value"],
                 "pending_questions": [{"id": "q1"}],
             }
         if plan_calls["n"] == 2:
+            current_token["value"] = "job-8:tok2"
             return {
                 "outcome": "paused",
-                "resume_token": "job-8:tok2",
+                "resume_token": current_token["value"],
                 "pending_questions": [{"id": "q2"}],
             }
         return {"outcome": "completed", "requirements_title": "Widget"}
@@ -185,7 +188,9 @@ def test_run_team_workflow_v2_accumulates_answers_across_pause_rounds():
     }
 
     async def _fake_wait_condition(pred, timeout=None):
-        token = workflow_obj._active_resume_token
+        # The token comes from the pause envelope the activity returned, which is
+        # what a real signal sender holds — not from the workflow's private state.
+        token = current_token["value"]
         workflow_obj.submit_planning_answers({"resume_token": token, "answers": answers[token]})
         assert pred()
 
@@ -217,6 +222,7 @@ def test_run_team_workflow_v2_bounds_the_planning_pause_loop():
     """
     calls: list = []
     round_no = {"n": 0}
+    current_token = {"value": ""}
 
     def _fake_plan(args):
         round_no["n"] += 1
@@ -225,9 +231,10 @@ def test_run_team_workflow_v2_bounds_the_planning_pause_loop():
         # brand-new question id -- the drift this bound exists for.
         if len(args) > 6 and args[6] is False:
             return {"outcome": "completed", "requirements_title": "Widget"}
+        current_token["value"] = f"job-9:tok{round_no['n']}"
         return {
             "outcome": "paused",
-            "resume_token": f"job-9:tok{round_no['n']}",
+            "resume_token": current_token["value"],
             "pending_questions": [{"id": f"q-drifted-{round_no['n']}"}],
         }
 
@@ -235,7 +242,7 @@ def test_run_team_workflow_v2_bounds_the_planning_pause_loop():
 
     async def _fake_wait_condition(pred, timeout=None):
         workflow_obj.submit_planning_answers(
-            {"resume_token": workflow_obj._active_resume_token, "answers": []}
+            {"resume_token": current_token["value"], "answers": []}
         )
         assert pred()
 
@@ -258,21 +265,32 @@ def test_run_team_workflow_v2_fails_if_planning_pauses_past_its_budget():
     the run instead."""
     calls: list = []
 
+    current_token = {"value": "job-10:tok"}
+
     def _fake_plan(args):
-        return {"outcome": "paused", "resume_token": "job-10:tok", "pending_questions": []}
+        return {
+            "outcome": "paused",
+            "resume_token": current_token["value"],
+            "pending_questions": [],
+        }
 
     workflow_obj = wfmod.RunTeamWorkflowV2()
 
     async def _fake_wait_condition(pred, timeout=None):
         workflow_obj.submit_planning_answers(
-            {"resume_token": workflow_obj._active_resume_token, "answers": []}
+            {"resume_token": current_token["value"], "answers": []}
         )
         assert pred()
 
     with _driver({"plan_project_activity": _fake_plan}, calls):
         with mock.patch.object(_wf, "wait_condition", _fake_wait_condition):
-            with pytest.raises(ApplicationError, match="MAX_PLANNING_PAUSE_ROUNDS"):
+            with pytest.raises(ApplicationError, match="MAX_PLANNING_PAUSE_ROUNDS") as exc_info:
                 asyncio.run(workflow_obj.run("job-10", "/repo"))
+
+    # Non-retryable is the load-bearing half: a plain ApplicationError would be
+    # re-run by the workflow's retry policy, which is the unbounded re-dispatch
+    # this guard exists to stop.
+    assert exc_info.value.non_retryable is True
 
     plan_args = [c[1] for c in calls if c[0] == "plan_project_activity"]
     assert len(plan_args) == wfmod.MAX_PLANNING_PAUSE_ROUNDS + 1

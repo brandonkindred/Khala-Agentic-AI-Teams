@@ -3407,3 +3407,30 @@ def test_resolve_remote_branch_sha_validates_at_the_choke_point() -> None:
     ok, msg = git_ops.resolve_remote_branch_sha("/nonexistent", "origin", "--upload-pack=id", "tok")
     assert ok is False
     assert "unsafe branch ref" in msg
+
+
+def test_prepare_issue_branch_routes_its_fetch_through_the_choke_point() -> None:
+    """The test above pins the validator; this pins that ``_prepare_issue_branch``
+    still goes through it.
+
+    That routing is the whole basis for validating in one place rather than at
+    each call site — and it is exactly what a refactor could undo silently, since
+    a direct fetch here would leave every assertion above still passing while the
+    guard no longer covers this path.
+    """
+    from unittest.mock import patch
+
+    # ``git_ops`` first, then its already-bound ``_main``: the two modules import
+    # each other, so importing ``coding_team_main`` directly here leaves a
+    # partially-initialized ``git_ops`` behind and breaks the sibling test.
+    from software_engineering_team.api import git_ops
+
+    with patch.object(git_ops._main, "resolve_remote_branch_sha") as resolver:
+        resolver.return_value = (False, "unsafe remote name: 'ext::sh -c id'")
+        ok, msg, _notes = git_ops._prepare_issue_branch(
+            "/nonexistent", "ext::sh -c id", "main", "khala/issue-1", token="tok"
+        )
+
+    assert resolver.called, "_prepare_issue_branch must resolve through the choke point"
+    assert ok is False
+    assert "unsafe remote name" in msg

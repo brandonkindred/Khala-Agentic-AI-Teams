@@ -68,7 +68,7 @@ def _text_events(text: str) -> List[Dict]:
 class _AlwaysToolCallsModel:
     """A model that never stops asking for the same tool — the production bug."""
 
-    def __init__(self, *, response_format: str = "text", final_text: str | None = None) -> None:
+    def __init__(self, *, response_format: str = "text", final_text: Optional[str] = None) -> None:
         self.config: Dict[str, Any] = {"response_format": response_format}
         self.calls: List[Dict[str, Any]] = []
         self._final_text = final_text

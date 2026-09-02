@@ -410,12 +410,16 @@ def poll_until_terminal(
     """
     assert poll_interval > 0, f"poll_interval must be positive, got {poll_interval!r}"
     assert total_timeout > 0, f"total_timeout must be positive, got {total_timeout!r}"
-    # Checked here, not left to the except clause: a bad entry (a list, a bare
-    # class, a non-exception type) surfaces there as a TypeError chained onto
-    # whatever on_poll actually raised, mid-poll and far from the call site.
-    assert all(isinstance(t, type) and issubclass(t, BaseException) for t in passthrough_exceptions), (
-        f"passthrough_exceptions must be a tuple of exception types, got {passthrough_exceptions!r}"
-    )
+    # The container type is checked too, not just the elements: a LIST of real
+    # exception types satisfies an element-only check and then reaches
+    # ``except passthrough_exceptions:`` below, where it raises TypeError
+    # ("catching classes that do not inherit from BaseException is not allowed")
+    # chained onto whatever on_poll actually threw -- two failures at once,
+    # mid-poll, neither naming the caller. That is precisely what this assert
+    # exists to prevent, so it must reject the list.
+    assert isinstance(passthrough_exceptions, tuple) and all(
+        isinstance(t, type) and issubclass(t, BaseException) for t in passthrough_exceptions
+    ), f"passthrough_exceptions must be a tuple of exception types, got {passthrough_exceptions!r}"
     start = time.monotonic()
     while (time.monotonic() - start) < total_timeout:
         try:
