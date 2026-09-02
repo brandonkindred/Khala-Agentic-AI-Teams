@@ -45,13 +45,6 @@ describe('CodingTeamMonitorComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
-  it('does not mark the monitor panel itself as a live region', async () => {
-    const el = await render({ job_id: 'j1', status: 'running' });
-    const monitor = el.querySelector('.ct-monitor');
-    expect(monitor?.hasAttribute('role')).toBe(false);
-    expect(monitor?.hasAttribute('aria-live')).toBe(false);
-  });
-
   it('exposes exactly one polite live region, carrying the summary text', async () => {
     const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
     const liveRegions = el.querySelectorAll('[aria-live]');

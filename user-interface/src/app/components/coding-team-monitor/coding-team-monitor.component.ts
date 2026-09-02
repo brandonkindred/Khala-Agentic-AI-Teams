@@ -36,11 +36,11 @@ const SUMMARY_OBJECTIVE_MAX_CHARS = 60;
  *   Pure — no side effects.
  */
 export function codingTeamStatusSummary(objective: string, progressPercent: number | null): string {
-  const trimmed =
+  const truncated =
     objective.length > SUMMARY_OBJECTIVE_MAX_CHARS
       ? `${objective.slice(0, SUMMARY_OBJECTIVE_MAX_CHARS)}…`
       : objective;
-  return progressPercent === null ? trimmed : `${trimmed} — ${progressPercent}% complete`;
+  return progressPercent === null ? truncated : `${truncated} — ${progressPercent}% complete`;
 }
 
 /**
