@@ -1206,7 +1206,7 @@ def _fill_story_placeholders(
         draft_output_path = (
             (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
         )
-        redraft_result = draft_agent.revise_from_user_feedback(
+        revised_result = draft_agent.revise_from_user_feedback(
             draft=draft_text,
             user_feedback=user_feedback,
             content_plan_text=content_plan_text,
@@ -1224,9 +1224,9 @@ def _fill_story_placeholders(
             "Post-draft revision complete: %d new stories, %d skipped topics, length=%s",
             len(new_narratives),
             len(skipped_topics),
-            len(redraft_result.draft),
+            len(revised_result.draft),
         )
-        return redraft_result, elicited_stories_text
+        return revised_result, elicited_stories_text
     except CancelledError:
         raise
     except Exception as e:

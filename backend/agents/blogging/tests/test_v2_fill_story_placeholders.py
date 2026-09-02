@@ -461,6 +461,24 @@ def test_fill_story_placeholders_rejects_missing_draft_input_kwargs_keys() -> No
         assert key in message
 
 
+def test_fill_story_placeholders_ignores_incomplete_kwargs_without_placeholders() -> None:
+    """draft_input_kwargs is only validated once a placeholder is found — a
+    draft with no placeholders must not raise even with incomplete kwargs,
+    since draft_input_kwargs goes unused on that path."""
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
+
+    out_draft, out_stories = _fill_story_placeholders(
+        **_valid_fill_kwargs(
+            draft_text="# Draft\nBody with no placeholders.",
+            draft_input_kwargs={"content_plan": _plan()},
+        )
+    )
+    assert out_draft.draft == "# Draft\nBody with no placeholders."
+    assert out_stories is None
+
+
 def test_fill_story_placeholders_rejects_non_content_plan() -> None:
     """plan must be a ContentPlan instance."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
