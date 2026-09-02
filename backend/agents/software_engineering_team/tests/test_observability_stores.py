@@ -278,6 +278,15 @@ class _FakeCursor:
     """
 
     def __init__(self, raise_on_execute: bool = False) -> None:
+        """Construct an empty recording cursor.
+
+        Preconditions:
+            None.
+        Postconditions:
+            ``self.executed`` is an empty list. ``self._raise`` is
+            ``raise_on_execute`` — when true, every subsequent ``execute``/
+            ``executemany`` call raises ``RuntimeError`` instead of recording.
+        """
         self.executed: list[tuple] = []
         self._raise = raise_on_execute
 
@@ -344,7 +353,17 @@ class _FakeCursor:
 
 
 def _rec(**overrides):
-    """A minimal telemetry-record stand-in; overrides layer on top of a base call."""
+    """A minimal telemetry-record stand-in; overrides layer on top of a base call.
+
+    Preconditions:
+        Every key in ``overrides`` names an attribute ``_R`` already defines below
+        — this is a plain ``setattr``, not a schema, so a misspelled key silently
+        adds an unused attribute rather than overriding the intended one.
+    Postconditions:
+        Returns an object exposing every ``_R`` class attribute (the
+        :class:`llm_service.telemetry.LLMCallRecord` fields ``_record_to_row``
+        reads), with any ``overrides`` values applied on top.
+    """
 
     class _R:
         timestamp = datetime.now(tz=timezone.utc).timestamp()
@@ -383,17 +402,45 @@ class _RecNoCacheAttrs:
 def _fake_cursor(monkeypatch):
     """Enable tracing and swap trace_store.pg_cursor for a recording FakeCursor.
 
-    Returns a factory: call it with no args for the default (non-raising) cursor,
-    or ``raise_on_execute=True`` to get a cursor that raises on execute/executemany
-    (for the never-raise-on-DB-failure path).
+    Preconditions:
+        ``monkeypatch`` is the pytest fixture — the substitution it installs is
+        undone automatically at test teardown.
+    Postconditions:
+        ``SE_TRACE_TO_POSTGRES`` is set for the duration of the test, and
+        ``trace_store.pg_cursor`` is replaced. Returns a factory: call it with no
+        args for the default (non-raising) cursor, or ``raise_on_execute=True``
+        for a cursor that raises on ``execute``/``executemany`` instead of
+        recording (for the never-raise-on-DB-failure path). Each call to the
+        factory installs a fresh cursor and re-patches ``pg_cursor`` to yield it.
     """
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
 
     def _make(raise_on_execute: bool = False) -> _FakeCursor:
+        """Install a fresh ``_FakeCursor`` as ``trace_store.pg_cursor`` and return it.
+
+        Preconditions:
+            None beyond the enclosing fixture's.
+        Postconditions:
+            ``trace_store.pg_cursor`` is patched to a context manager matching the
+            real ``pg_cursor(*, dict_rows=False, database=None)`` signature that
+            yields the returned cursor. Calling it again replaces the patch with a
+            new cursor — the two do not share call history.
+        """
         cursor = _FakeCursor(raise_on_execute)
 
         @contextmanager
         def _pg_cursor(*, dict_rows: bool = False, database=None):
+            """Stand-in for ``shared.postgres.pg_cursor``; yields the fake cursor.
+
+            Preconditions:
+                Signature must track the real ``pg_cursor`` — a keyword-only
+                ``dict_rows`` and ``database``, both with matching defaults — so
+                this fake stays a valid substitute if the real one's callers change
+                how they invoke it.
+            Postconditions:
+                Yields ``cursor`` unconditionally; both parameters are accepted but
+                unused, since the fake never distinguishes row-factory mode.
+            """
             yield cursor
 
         monkeypatch.setattr(trace_store, "pg_cursor", _pg_cursor)
