@@ -28,7 +28,7 @@ and `start-from-spec-form`. Every one of them was traced by import chain from th
 routes and by a repo-wide grep for its class name/selector — **none has a live
 consumer**:
 
-```
+```bash
 grep -rl "RunTeamFormComponent\|app-run-team-form" user-interface/src/app --include=*.ts --include=*.html
 grep -rl "ExecutionTasksComponent\|app-execution-tasks" user-interface/src/app --include=*.ts --include=*.html
 grep -rl "import.*JobStatusComponent.*from.*job-status/job-status" user-interface/src/app --include=*.ts
@@ -125,7 +125,7 @@ All `.ts:` / `.html:` citations in this table refer to
 | first visit | HANDLED | `activeView` starts `'empty'`; empty-state renders immediately. `software-engineering-dashboard.component.ts:38` |
 | empty | HANDLED | Same branch; stays `'empty'` if `allJobs.length === 0` after the poll resolves. `.ts:56-58` |
 | first load | MISSING | No loading state while the first `getRunningJobs` call is in flight — the empty state renders confidently before data arrives, with no spinner/skeleton. Scoped search: no `loading` field anywhere in this component. `.ts:34-65` |
-| refresh | HANDLED (partial) | `timer(0, 30_000)` re-polls and updates the lists in place — but only while every request succeeds. The poll has no error handler and dies permanently on the first failure, so refresh is robust only on the happy path (see STATE-1). `.ts:49-55` |
+| refresh | HANDLED (partial) | `timer(0, POLL_JOBS_MS)` (`POLL_JOBS_MS = 30_000`, `.ts:15`) re-polls and updates the lists in place — but only while every request succeeds. The poll has no error handler and dies permanently on the first failure, so refresh is robust only on the happy path (see STATE-1). `.ts:49-55` |
 | partial | N/A | Single all-or-nothing `getRunningJobs()` call; nothing assembles a partial view from multiple calls. |
 | populated | HANDLED | Running/Completed sections render job rows. `.html:55-102` |
 | long-running | MISSING | The page owns no per-job progress and its intended handoff is broken: both job rows link to `['/jobs', job.job_id]` (`.html:63,81`), but `app.routes.ts` defines no `jobs/:jobId` route (the only job-detail path is `blogging/jobs/:jobId/artifacts/:artifactName`), so the `{ path: '**', redirectTo: '/dashboard' }` wildcard swallows it. The user is bounced to the generic Jobs Dashboard with no job context. Filed as STATE-2. |
@@ -163,7 +163,7 @@ All `.ts:` / `.html:` citations in this table refer to
 | populated | HANDLED | Running/Recent sections. `.html:386+` |
 | long-running | HANDLED | Expanding a running run shows live `coding-team-monitor` progress. `.html:499` |
 | stalled | MISSING | `shared/stall-warning` exists in the codebase but is imported only by the two dead components (`run-team-tracking`, `job-status`) — **not used anywhere live**, despite this panel's polling being exactly the kind of long-running-job surface it exists for. Scoped search: `grep -rl StallWarning src/app/components/coding-team-page src/app/components/coding-team-monitor` → no match. |
-| failed | HANDLED | Failed runs show in Recent with a status badge that always pairs color with literal status text. |
+| failed | HANDLED | Failed runs show in Recent with a status badge that always pairs the colour class with the literal status text — `<span class="kh-badge kh-badge--{{ vm.badgeClass }}">{{ vm.status }}</span>`, so the status is never colour-only. `coding-team-page.component.html:434` (and `:482` for the expanded run's badge) |
 | permission-denied / backend-unconfigured | HANDLED | GitHub-not-configured renders a clear message + link (marred by A11Y-3's contrast). `.html:66-73`. A `listJobs()` 401/403 lands in `runsError` → `<app-inline-banner variant="error">`, which is `role="alert"`. `.ts:927-930`, `.html:377` |
 | offline / API-error | HANDLED | Same `runsError`/inline-banner path. It gets the part STATE-1's page gets wrong — the poll survives the failure — but not last-good retention: see the `stale-data` row. |
 | stale-data | MISSING | The panel does not go stale on a failed poll; it goes **empty**. `catchError` returns `of([] as CodingTeamJobListItem[])` (`coding-team-page.component.ts:931-934`), the subscription feeds that into `applyRuns` (`:939`), and `applyRuns` assigns `this.runs = mine` unconditionally (`:969`) — so a single failed poll clears the list and re-renders the `runs.length === 0` empty state (`coding-team-page.component.html:380`) beneath the error banner. There is no "as of" timestamp and no retained last-good list, so the user cannot tell how old the view is; they are shown "No runs yet" for runs that exist. |
@@ -177,8 +177,8 @@ All `.ts:` / `.html:` citations in this table refer to
 | first load | HANDLED | Uses the shared `app-loading-spinner` (`role="status" aria-live="polite" aria-busy="true"`), unlike Coding Team's hand-rolled spinners — see CLARITY-2. |
 | refresh | HANDLED | Refresh button + resilient polling; `reviewAnnouncement` is reset via a `timer(0)` tick specifically so two consecutive identical announcements still get spoken. `.ts:138-151` |
 | partial | N/A | Single-call-per-view pattern. |
-| populated | HANDLED | Repo/PR rows. |
-| long-running | HANDLED | A running review's row shows a spinner next to its status text. |
+| populated | HANDLED | Repo rows and, once a repo is expanded, its PR rows. `code-review-dashboard.component.html:89` (`cr-repo-row`), `:166` (`cr-pull-row`) |
+| long-running | HANDLED | A running review's badge renders a spinner beside the status text rather than replacing it — the `mat-spinner` at `code-review-dashboard.component.html:185` sits inside the `cr-row-badge` (`:181`) whose `{{ friendly }}` label (`:189`) and `aria-label` (`:182`) still carry the status in words. The per-run table repeats this at `pr-review-detail/pr-review-detail.component.html:71-77`. |
 | stalled | MISSING | Same gap as Coding Team — `shared/stall-warning` not used here either. |
 | failed | HANDLED | Status badge with a full human-readable mapping table for every backend status, including a safe fallback. `review-metrics.ts:145-236` |
 | permission-denied / backend-unconfigured | HANDLED | GitHub-not-configured empty state (marred by A11Y-3). For the repo/PR fetches themselves, confirmed `error:` handlers exist on every subscribe (not merely inferred): `.ts:181,207,270`. |
@@ -193,7 +193,7 @@ All `.ts:` / `.html:` citations in this table refer to
 - **What the user hits**: The very first `/run-team/jobs` request that fails (a
   transient 500, a timeout, a backend restart) throws inside an RxJS `subscribe({ next
   })` that has no `error` handler. RxJS treats an unhandled error as terminal: the
-  `timer(0, 30_000)` polling subscription dies right there. From that point on the SE
+  `timer(0, POLL_JOBS_MS)` polling subscription dies right there. From that point on the SE
   dashboard's Jobs list is frozen — no more polling, ever, for the life of the page —
   with the only evidence being one 6-second global toast (itself unreadable per
   A11Y-1). A user who steps away and comes back sees stale or perpetually-empty data
@@ -221,7 +221,7 @@ All `.ts:` / `.html:` citations in this table refer to
     last-good list stays on screen behind the banner.
   If last-good retention is the behavior the house wants, `coding-team-page`'s own
   `catchError` needs the same change — that is a separate, unfiled question this audit
-  raises rather than answers:
+  raises rather than answers. The fix below applies to the SE dashboard only:
   ```ts
   this.jobsSub = timer(0, POLL_JOBS_MS).pipe(
     switchMap(() => this.api.getRunningJobs(false).pipe(
@@ -342,7 +342,8 @@ All `.ts:` / `.html:` citations in this table refer to
           (click)="startEdit(field.key)">
   ```
   Referencing the button's own id is load-bearing, not belt-and-braces: `aria-labelledby`
-  **replaces** name-from-content rather than appending to it (accname-1.2 §4.3.1 step 2B),
+  **replaces** name-from-content rather than appending to it (the `aria-labelledby` step of
+  the accname-1.2 computation, which returns without falling through to name-from-content),
   so a list naming only the label span yields the accessible name "Project specification"
   and the field's value or placeholder is dropped entirely — a regression for filled
   fields, which announce their value today. Verified in Chromium via the CDP accessibility
@@ -540,7 +541,11 @@ All `.ts:` / `.html:` citations in this table refer to
   invariant explicitly in its own source comment.
 - **Recommended change**: narrow the live region to one small sentence
   ("Status: {{ phase }}, {{ progressPercent }}% complete") built the same
-  debounced-announcer way, and remove `aria-live` from the panel root.
+  debounced-announcer way, and remove **both** `role="status"` and `aria-live="polite"` from
+  the panel root — `role="status"` alone still implies a polite, atomic live region, so
+  deleting only the explicit `aria-live` leaves the over-announcement in place. The
+  replacement announcer element carries `aria-live="polite"` itself, matching the
+  `coding-team-page.component.ts:369-402` pattern this finding cites.
 - **Cost**: M (needs the debounce logic, not just a markup change), this component.
 - **Verification**: `coding-team-monitor.component.a11y.spec.ts` — assert the live
   region's text changes at most once per meaningful state transition, not once per poll
