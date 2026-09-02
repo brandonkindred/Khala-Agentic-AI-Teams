@@ -122,10 +122,14 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
    *
    * Preconditions: `selector` matches a rendered element carrying
    *   `tabindex="-1"` once the view swap commits.
-   * Postconditions: any previously pending focus move is superseded; the
-   *   returned timer is tracked so `ngOnDestroy` can clear it.
+   * Postconditions: any previously pending focus move is cancelled and
+   *   superseded by this one; the new timer handle is stored in
+   *   `focusTimer` so `ngOnDestroy` can clear it.
    */
   private moveFocusTo(selector: string): void {
+    if (this.focusTimer !== null) {
+      clearTimeout(this.focusTimer);
+    }
     this.focusTimer = deferFocus(this.host.nativeElement, (root) =>
       root.querySelector<HTMLElement>(selector)
     );

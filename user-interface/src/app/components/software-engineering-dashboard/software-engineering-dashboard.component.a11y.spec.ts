@@ -1,58 +1,49 @@
-import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
-import { provideRouter } from '@angular/router';
-import { provideHttpClient } from '@angular/common/http';
-import { provideHttpClientTesting } from '@angular/common/http/testing';
-import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { SoftwareEngineeringDashboardComponent } from './software-engineering-dashboard.component';
 import { expectNoAxeViolations } from '../../testing/a11y';
+import { renderDashboardShellA11y } from '../../testing/dashboard-a11y';
 
 vi.mock('rxjs', async (importOriginal) => {
   const rxjs = await importOriginal<typeof import('rxjs')>();
   return { ...rxjs, timer: vi.fn(() => rxjs.of(0)) };
 });
 
+function apiStub(jobs: { job_id: string; status: string }[] = []) {
+  return {
+    provide: SoftwareEngineeringApiService,
+    useValue: { getRunningJobs: vi.fn().mockReturnValue(of({ jobs })) },
+  };
+}
+
 describe('SoftwareEngineeringDashboardComponent a11y', () => {
-  let fixture: ComponentFixture<SoftwareEngineeringDashboardComponent>;
-  let api: { getRunningJobs: ReturnType<typeof vi.fn> };
-
-  async function setup(jobs: { job_id: string; status: string }[] = []): Promise<void> {
-    api = { getRunningJobs: vi.fn().mockReturnValue(of({ jobs })) };
-    await TestBed.configureTestingModule({
-      imports: [SoftwareEngineeringDashboardComponent, NoopAnimationsModule],
-      providers: [
-        provideHttpClient(),
-        provideHttpClientTesting(),
-        provideRouter([]),
-        { provide: SoftwareEngineeringApiService, useValue: api },
-      ],
-    }).compileComponents();
-    fixture = TestBed.createComponent(SoftwareEngineeringDashboardComponent);
-    fixture.detectChanges();
-  }
-
   it('has no axe violations on the empty view', async () => {
-    await setup([]);
+    const fixture = await renderDashboardShellA11y(SoftwareEngineeringDashboardComponent, [apiStub([])]);
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('.empty-state')).not.toBeNull();
     await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations on the new-project view', async () => {
-    await setup([]);
+    const fixture = await renderDashboardShellA11y(SoftwareEngineeringDashboardComponent, [apiStub([])]);
     fixture.componentInstance.showNewProject();
     fixture.detectChanges();
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('.new-project-view')).not.toBeNull();
+    // Guard: the embedded chat actually loaded a conversation (an assistant
+    // message painted) — so axe audits the real, populated surface, not a
+    // bare-mounted or errored chat.
+    expect(el.querySelector('app-team-assistant-chat .message.assistant')).toBeTruthy();
     await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations on the jobs view', async () => {
-    await setup([
-      { job_id: 'a', status: 'running' },
-      { job_id: 'b', status: 'completed' },
+    const fixture = await renderDashboardShellA11y(SoftwareEngineeringDashboardComponent, [
+      apiStub([
+        { job_id: 'a', status: 'running' },
+        { job_id: 'b', status: 'completed' },
+      ]),
     ]);
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('.jobs-list-view')).not.toBeNull();

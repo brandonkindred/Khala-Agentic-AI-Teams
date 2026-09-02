@@ -149,7 +149,9 @@ describe('SoftwareEngineeringDashboardComponent (extra coverage)', () => {
       vi.useFakeTimers();
       component.showNewProject();
       fixture.detectChanges();
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
       component.ngOnDestroy();
+      expect(clearTimeoutSpy).toHaveBeenCalled();
       expect(() => vi.runAllTimers()).not.toThrow();
     });
   });
