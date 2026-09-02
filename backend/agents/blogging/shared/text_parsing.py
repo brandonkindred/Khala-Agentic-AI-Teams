@@ -1,14 +1,22 @@
 """
 Shared LLM-response text-parsing helpers.
 
-These functions were independently duplicated (and, in the case of
-``extract_json_array_from_text``, allowed to drift) across
+These functions reconcile copies independently duplicated (and, in the case
+of ``extract_json_array_from_text``, allowed to drift) across
 ``blog_writer_agent/agent.py``, ``blog_writer_agent/revision.py``,
 ``blog_writer_agent/self_review.py``, and
-``agent_implementations/pipeline/_common.py``. This module is the single
-home for the correct implementation of each, so future callers configure
-or extend one copy instead of hand-rolling (or worse, re-drifting) their
-own.
+``agent_implementations/pipeline/_common.py`` (a related duplicate,
+``_unwrap_event_loop_exception``, also exists in ``shared/json_retry.py``).
+
+No caller has been migrated to this module yet: those four modules still
+run their own private copies, and ``agent.py``'s ``_extract_json_array_from_text``
+is still the drifted variant (it resumes scanning one character past the
+opening bracket rather than at the decoded value's end), so production
+still executes the bug this module's fixed implementation exists to
+correct. Migrating callers onto this module and deleting the private
+copies is deliberately deferred to a separate follow-up story, so this
+module can merge on its own; do not treat "correct implementation exists
+here" as "callers use it" until that follow-up lands.
 """
 
 from __future__ import annotations
@@ -27,9 +35,10 @@ def unwrap_llm_cause(exc: BaseException) -> BaseException:
     Preconditions:
         - ``exc`` is the exception caught at an LLM call boundary.
     Postconditions:
-        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
-          returns that original exception.
-        - Otherwise returns ``exc`` unchanged.
+        - If ``exc`` is an ``EventLoopException`` whose ``original_exception``
+          is a ``BaseException`` instance, returns that original exception.
+        - Otherwise (not an ``EventLoopException``, or its ``original_exception``
+          is ``None`` or not a ``BaseException``) returns ``exc`` unchanged.
     """
     if isinstance(exc, EventLoopException):
         original = getattr(exc, "original_exception", None)
