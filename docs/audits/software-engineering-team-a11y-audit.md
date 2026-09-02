@@ -37,8 +37,8 @@ grep -rl "import.*JobStatusComponent.*from.*job-status/job-status" src/app --inc
 
 These are leftovers from an earlier synchronous "run-team" upload flow that predates
 the current async job / GitHub-issue-driven Planning → Coding Team → Code Review
-pipeline. They are **not part of this audit's findings** (a page a user cannot reach has
-no user-facing consequence), but they are worth a decision: delete them, or — if
+pipeline. They are **not user-facing accessibility findings** (a page a user cannot reach
+has no user-facing consequence), but they are worth a decision: delete them, or — if
 they're slated for reconnection — fix them first. `src/styles/scss-contrast-guard.spec.ts`
 lints their SCSS unconditionally today even though nothing renders it, and
 `product-analysis-run-form.component.scss:1,6` has hardcoded non-token colors
@@ -57,9 +57,18 @@ The live component tree actually reviewed:
 - Global chrome on all four: `AppShellComponent` → `BreadcrumbComponent`,
   `InitialsAvatarComponent`, `ApiStatusWidgetComponent`
 
-Note also: `DashboardShellComponent` — the shared page-header/sub-nav wrapper — is used
-only by the top-level SE dashboard. Planning, Coding Team, and Code Review each
-hand-roll their own `.kh-page-header` instead, which has real consequences below
+Note also: `DashboardShellComponent` — the shared page-header/sub-nav wrapper — is the
+repo-wide dashboard convention, imported by 17 components across the app (Blogging,
+Market Research, Social Marketing, SOC2, Sales, AI Systems, Job Matching, Startup
+Advisor, Personal Assistant, Deepthought, Road Trip, Accessibility, Agent Studio, User
+Profile and the SE dashboard among them — `grep -rl DashboardShellComponent
+user-interface/src/app --include=*.ts`). Of the four SE routes, only the top-level SE
+dashboard uses it; Planning, Coding Team, and Code Review each hand-roll their own
+`.kh-page-header` instead. So those three deviate from a **repo-wide** convention, not an
+SE-local one — which strengthens rather than weakens A11Y-6's consistency argument. One
+nuance in the other direction: only the SE dashboard passes the `subTeams` input today,
+so the `aria-current` half of A11Y-6 has an SE-only blast radius at present even though
+the component itself is shared app-wide. This has real consequences below
 (no "Sub-teams" nav on Planning; no `aria-current` anywhere in that nav pattern).
 
 ## Primary task walkthrough
@@ -108,17 +117,20 @@ than in the step count.
 
 ### `/software-engineering` (SE dashboard)
 
+All `.ts:` / `.html:` citations in this table refer to
+`software-engineering-dashboard.component.ts` / `.html`.
+
 | State | Disposition | Evidence |
 |---|---|---|
 | first visit | HANDLED | `activeView` starts `'empty'`; empty-state renders immediately. `software-engineering-dashboard.component.ts:38` |
 | empty | HANDLED | Same branch; stays `'empty'` if `allJobs.length === 0` after the poll resolves. `.ts:56-58` |
 | first load | MISSING | No loading state while the first `getRunningJobs` call is in flight — the empty state renders confidently before data arrives, with no spinner/skeleton. Scoped search: no `loading` field anywhere in this component. `.ts:34-65` |
-| refresh | HANDLED | `timer(0, 30_000)` re-polls and updates the lists in place. `.ts:49-55` |
+| refresh | HANDLED (partial) | `timer(0, 30_000)` re-polls and updates the lists in place — but only while every request succeeds. The poll has no error handler and dies permanently on the first failure, so refresh is robust only on the happy path (see STATE-1). `.ts:49-55` |
 | partial | N/A | Single all-or-nothing `getRunningJobs()` call; nothing assembles a partial view from multiple calls. |
 | populated | HANDLED | Running/Completed sections render job rows. `.html:55-102` |
-| long-running | N/A | This page only lists jobs and hands off to `/jobs/:jobId` for that job's own tracking. `.html:63,81` |
-| stalled | N/A | Same handoff — no per-job progress owned here. |
-| failed | HANDLED (partial) | A terminal `failed`/`stopped` job still renders in "Completed" with its status text (`status-{{job.status}}`), but why it failed is not shown — handoff to `/jobs/:jobId`. `.html:76-92` |
+| long-running | MISSING | The page owns no per-job progress and its intended handoff is broken: both job rows link to `['/jobs', job.job_id]` (`.html:63,81`), but `app.routes.ts` defines no `jobs/:jobId` route (the only job-detail path is `blogging/jobs/:jobId/artifacts/:artifactName`), so the `{ path: '**', redirectTo: '/dashboard' }` wildcard swallows it. The user is bounced to the generic Jobs Dashboard with no job context. Filed as STATE-2. |
+| stalled | MISSING | Same broken handoff — and no stall affordance of its own. |
+| failed | HANDLED (partial) | A terminal `failed`/`stopped` job still renders in "Completed" with its status text (`status-{{job.status}}`), but why it failed is not shown, and the row's link to a per-job view does not resolve (STATE-2). `.html:76-92` |
 | permission-denied | MISSING | See STATE-1 below. |
 | backend-unconfigured | MISSING | See STATE-1 below. |
 | offline | MISSING | See STATE-1 below. |
@@ -188,30 +200,69 @@ than in the step count.
   and has no way to know why, short of a full page reload.
 - **Why it's a problem**: this is the primary landing surface for the SE team's whole
   job list; silently breaking it defeats the entire "hand it a spec, get a merged PR"
-  promise the dashboard's own subtitle makes. Compare with `coding-team-page.ts:917-934`,
-  which polls the *same kind* of job list correctly — `catchError` at the inner
-  observable keeps the `timer` alive and surfaces `runsError` via an inline
-  `role="alert"` banner. That's the fix to copy.
-- **Recommended change**: give the poll the same shape as Coding Team's:
+  promise the dashboard's own subtitle makes. Compare with
+  `coding-team-page.component.ts:917-934`, which polls the *same kind* of job list
+  correctly — `catchError` at the inner observable keeps the `timer` alive and surfaces
+  `runsError` via an inline `role="alert"` banner. That's the fix to copy.
+- **Recommended change**: give the poll the same shape as Coding Team's. The error path
+  must emit **nothing** rather than an empty response — returning
+  `of({ jobs: [] })` would run the `next` handler with an empty array and blank the
+  visible list on a transient failure, which is the opposite of the stale-data behavior
+  this audit credits Coding Team for (the last-good list stays on screen, the banner
+  signals it may be behind):
   ```ts
   this.jobsSub = timer(0, POLL_JOBS_MS).pipe(
     switchMap(() => this.api.getRunningJobs(false).pipe(
+      tap(() => { this.jobsError = null; }),
       catchError((err) => {
         this.jobsError = extractErrorDetail(err, 'Failed to load jobs.');
-        return of({ jobs: [] } as RunningJobsResponse);
-      }),
+        return EMPTY;           // completes the inner observable; outer timer survives,
+      }),                       // next never runs, so the last-good list is retained
     )),
-  ).subscribe((resp) => { /* existing next logic, plus clear jobsError on success */ });
+  ).subscribe((resp) => { /* existing next logic, unchanged */ });
   ```
-  Render `jobsError` through `<app-inline-banner variant="error" [message]="jobsError">`
-  (already imported app-wide) so the state is visible and announced, not just a
-  transient toast.
+  Render `jobsError` through the shared `<app-inline-banner variant="error">`, placed
+  outside the three `activeView` branches so it is visible in the `'empty'` view too —
+  and note `InlineBannerComponent` is not currently in this component's `imports` array,
+  so it must be added.
 - **Cost**: S, this page only (the fix pattern already exists elsewhere in the same
   team).
 - **Verification**: extend `software-engineering-dashboard.component.spec.ts` (or add
   `.a11y.spec.ts` — neither currently calls `expectNoAxeViolations` for this component)
   with a test that makes `getRunningJobs` error once, then asserts a second poll tick
   still fires and `jobsError` renders.
+
+### STATE-2 — Every job row on the SE dashboard is a dead link
+- **Severity**: High
+- **Location**: `user-interface/src/app/components/software-engineering-dashboard/software-engineering-dashboard.component.html:63` and `:81`; route table at `user-interface/src/app/app.routes.ts` (no `jobs/:jobId` entry; wildcard at `:316`); the established pattern at `user-interface/src/app/components/jobs-dashboard/jobs-dashboard.component.ts:704-719`.
+- **What the user hits**: a user opens the Jobs view, sees their Running and Completed
+  jobs, and clicks one to see what it's doing. Both sections render the row as
+  `<a class="job-item" [routerLink]="['/jobs', job.job_id]">`, but **no `jobs/:jobId`
+  route exists** — `app.routes.ts` defines only `blogging/jobs/:jobId/artifacts/:artifactName`
+  as a job-detail path, so `{ path: '**', redirectTo: '/dashboard' }` at `:316` catches
+  the navigation and dumps the user on the generic Jobs Dashboard with no job context
+  and no explanation. Every row in the list behaves this way, in both sections. Verified
+  by grep: these two lines are the only `'/jobs'` router links in the entire app.
+- **Why it's a problem**: this is not primarily a WCAG failure — it is a broken primary
+  navigation path, and it fails worst for the users this audit is about. A screen-reader
+  or keyboard user has no visual cue that they were silently redirected rather than
+  taken to a detail view, so the "nothing happened, or did it?" recovery cost is highest
+  for them. It also invalidates a chunk of this audit's own reasoning: the earlier draft
+  of the `/software-engineering` state table dispositioned `long-running` and `stalled`
+  as N/A *because* the page "hands off to `/jobs/:jobId`". That handoff does not exist,
+  so both rows are now MISSING and this page owns states it appeared to delegate.
+- **Recommended change**: adopt the repo's existing per-job navigation pattern rather
+  than inventing a route. `jobs-dashboard.component.ts:704-719` (`navigateToJob`) routes
+  to the owning team's page with the job id as a query param — for SE jobs,
+  `this.router.navigate([info.route], { queryParams: { jobId, tab } })`. Replace the two
+  `[routerLink]="['/jobs', job.job_id]"` bindings with the same shape so a job row lands
+  on the SE surface that can actually show it. Adding a real `jobs/:jobId` route is the
+  alternative, but it is the larger change and diverges from what the rest of the app does.
+- **Cost**: S for the link fix (two bindings plus a handler), M if a genuine per-job
+  detail route is preferred instead. This page only.
+- **Verification**: a router-harness spec asserting that activating a job row navigates
+  to a route that resolves — i.e. not the `**` wildcard. A keyboard walkthrough of the
+  Jobs view confirms the row lands somewhere with the job's context.
 
 ### A11Y-1 — Global error toast text is ~1.03:1 contrast — effectively unreadable
 - **Severity**: High (Blocker-level on Planning/SE-dashboard, where it's the only error channel)
@@ -268,11 +319,14 @@ than in the step count.
 - **Recommended change**: give the row's label an id, give the button its own id, and
   reference **both** from the button:
   ```html
-  <span class="field-label" [id]="'field-label-' + field.key">…</span>
+  <!-- uid is a per-instance prefix on the component, e.g. a readonly field
+       initialised from an incrementing counter — field.key alone is only unique
+       within one mounted instance (see the uniqueness note below). -->
+  <span class="field-label" [id]="uid + '-field-label-' + field.key">…</span>
   ...
   <button class="field-value"
-          [id]="'field-value-' + field.key"
-          [attr.aria-labelledby]="'field-label-' + field.key + ' field-value-' + field.key"
+          [id]="uid + '-field-value-' + field.key"
+          [attr.aria-labelledby]="uid + '-field-label-' + field.key + ' ' + uid + '-field-value-' + field.key"
           (click)="startEdit(field.key)">
   ```
   Referencing the button's own id is load-bearing, not belt-and-braces: `aria-labelledby`
@@ -336,12 +390,12 @@ than in the step count.
   opacity plus an explicit `&:focus-visible { opacity: 1; }` rule.
 - **Why it's a problem**: WCAG 2.4.7 Focus Visible (AA).
 - **Recommended change**:
+  This is an **additive** one-line change to the existing hover selector, not a
+  replacement for the whole rule — leave every other declaration in `.edit-btn`
+  (`team-assistant-chat.component.scss:197-208`) untouched:
   ```scss
-  .edit-btn {
-    opacity: 0;
-    transition: opacity 0.15s;
-    .form-field:hover &, &:focus-visible { opacity: 1; }
-  }
+  // in the existing .edit-btn rule, extend the hover selector on line 200:
+  .form-field:hover &, &:focus-visible { opacity: 1; }
   ```
 - **Cost**: S, shared primitive.
 - **Verification**: manual keyboard walkthrough of the New Project / Planning / Coding
@@ -384,9 +438,16 @@ than in the step count.
   to `#main-content` on every real navigation) — this finding is specifically about the
   *in-page* view-state transitions that route-level fix doesn't cover.
 - **Recommended change**: call `deferFocus` (or equivalent) targeting the new panel's
-  heading/first field when `activeView` flips to `'new-project'`, and targeting the
-  confirmation/detail panel's container when an issue is selected or a run is expanded.
-- **Cost**: S–M, three call sites, reusing an existing shared helper.
+  heading/first field when `activeView` flips to `'new-project'` (`showNewProject()`)
+  and when it flips to `'jobs'` via the header's "Jobs (N)" button (`showJobs()`), and
+  targeting the confirmation/detail panel's container when an issue is selected or a run
+  is expanded. Move focus **only on the user-initiated transitions**: the poll also flips
+  `activeView` from `'empty'` to `'jobs'` on its own once jobs appear
+  (`software-engineering-dashboard.component.ts:56-58`), and stealing focus on a
+  background timer would yank a user out of whatever they were reading. So the focus call
+  belongs in the two click handlers, not in a setter on `activeView`.
+- **Cost**: S–M, four call sites (`showNewProject`, `showJobs`, issue-select,
+  run-expand), reusing an existing shared helper.
 - **Verification**: add a spec assertion that after the state change, `document.activeElement` is inside the newly-rendered panel, not the trigger button.
 
 ### A11Y-6 — Sub-teams nav has no active-state indication, and omits Code Review
@@ -408,7 +469,8 @@ than in the step count.
   incomplete.
 - **Recommended change**:
   ```html
-  <a [routerLink]="team.route" routerLinkActive="active" [attr.aria-current]="isActive(team.route) ? 'page' : null">
+  <a [routerLink]="team.route" routerLinkActive="active" #rla="routerLinkActive"
+     [attr.aria-current]="rla.isActive ? 'page' : null">
   ```
   in `dashboard-shell.component.html` (mirroring `app-shell`'s existing `isActive()`
   helper), and add `{label: 'Code Review', route: '/software-engineering/code-review'}`
@@ -436,7 +498,7 @@ than in the step count.
 - **Recommended change**: add `tabindex="0"` to each of the listed elements (copying
   `health-indicator`'s pattern), or move to `mat-icon-button` + `matTooltip` where the
   element should be a real control rather than decoration.
-- **Cost**: S, seven-plus locations, same one-line fix each.
+- **Cost**: S, 11 locations (7 in `coding-team-page.component.html`, 1 in `code-review-dashboard.component.html`, 3 in `out-of-scope-issues.component.html`), same one-line fix each.
 - **Verification**: manual keyboard walkthrough — Tab to each listed element and
   confirm the tooltip opens.
 
@@ -487,7 +549,7 @@ than in the step count.
   findings"` (line 99), which fully overrides the accessible name and shares no words
   with the visible label. A voice-control user saying "click systemic pattern(s)" (what
   they can see) won't match the accessible name.
-- **Why it's a problem**: WCAG 2.5.3 Label in Name (AA) — this is a containment rule;
+- **Why it's a problem**: WCAG 2.5.3 Label in Name (A) — this is a containment rule;
   the visible label's text must appear in the accessible name.
 - **Recommended change**: drop the `aria-label` (the visible text is already clear on
   its own) or change it to contain the visible text, e.g.
@@ -636,9 +698,12 @@ API-unreachable state (which happens to exercise the API-error path directly and
 usefully — see STATE-1). Populated/long-running/stalled states for Coding Team and
 Code Review are evidenced from source (branch citations above), not from live
 observation, since driving an actual job to completion requires the backend pipeline.
-1.4.4 Resize Text (200% zoom) and 1.4.12 Text Spacing were not tested — both require
-interactive browser overrides beyond this session's scripted Playwright pass; flagged
-here as needing a manual follow-up rather than guessed at.
+1.4.4 Resize Text (200% zoom) and 1.4.12 Text Spacing were not tested, for different
+reasons. 1.4.4 needs an interactive pass — Playwright exposes no first-class browser-zoom
+API — so it stays a manual follow-up. 1.4.12 is fully scriptable and simply was not run:
+the WCAG-published text-spacing overrides can be injected with `page.addStyleTag(...)`
+and the axe pass re-run, so that gap is automatable in a follow-up rather than
+manual-only.
 
 **No test account / role variable applies**: this app has no per-role (admin/member/
 viewer) permission gating on the SE routes — confirmed by source review, not asserted
