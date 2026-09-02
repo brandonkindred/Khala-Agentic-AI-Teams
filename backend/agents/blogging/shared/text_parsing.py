@@ -84,7 +84,7 @@ def extract_draft_after_marker(raw_response: Optional[str]) -> str:
 
 def extract_json_array_from_text(
     text: str, *, required_keys: tuple[str, ...] = ()
-) -> Optional[list]:
+) -> Optional[list[dict[str, Any]]]:
     """Parse a JSON array of objects from ``text``, including when prefixed by prose.
 
     Preconditions:
@@ -184,7 +184,7 @@ def format_feedback_item_line(item: Any, index: int) -> str:
         ValueError: if ``index`` is not a positive int, or required item
             fields are missing.
     """
-    if not isinstance(index, int) or index <= 0:
+    if isinstance(index, bool) or not isinstance(index, int) or index <= 0:
         raise ValueError(f"index must be a positive int, got {index!r}")
     severity = getattr(item, "severity", None)
     category = getattr(item, "category", None)

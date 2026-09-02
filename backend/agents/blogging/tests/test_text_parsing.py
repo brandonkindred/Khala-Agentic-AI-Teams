@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from agents.blogging.shared import text_parsing as tp
 from strands.types.exceptions import EventLoopException
@@ -82,7 +84,7 @@ def test_extract_draft_after_marker_returns_empty_on_unparseable_text() -> None:
 
 
 @pytest.mark.parametrize("raw", [None, "", 123, ["not", "a", "string"]])
-def test_extract_draft_after_marker_returns_empty_for_none_or_non_string_input(raw) -> None:
+def test_extract_draft_after_marker_returns_empty_for_none_or_non_string_input(raw: Any) -> None:
     assert tp.extract_draft_after_marker(raw) == ""
 
 
@@ -217,8 +219,8 @@ def test_format_feedback_item_line_rejects_missing_required_field() -> None:
         tp.format_feedback_item_line(item, 1)
 
 
-@pytest.mark.parametrize("bad_index", [0, -1, 1.5, "1"])
-def test_format_feedback_item_line_rejects_non_positive_or_non_int_index(bad_index) -> None:
+@pytest.mark.parametrize("bad_index", [0, -1, 1.5, "1", True, False])
+def test_format_feedback_item_line_rejects_non_positive_or_non_int_index(bad_index: Any) -> None:
     item = _FeedbackItem(severity="high", category="clarity", issue="Some issue")
     with pytest.raises(ValueError, match="positive int"):
         tp.format_feedback_item_line(item, bad_index)
