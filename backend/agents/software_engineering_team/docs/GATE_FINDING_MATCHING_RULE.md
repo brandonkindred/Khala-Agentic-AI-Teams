@@ -99,7 +99,17 @@ still accepted as a resolved location if it is the leftmost match. This is
 the same trade-off as the rest of this section: refining the pattern to
 exclude version-like tokens is exactly the kind of accumulating heuristic
 this rule exists to refuse, so an occasional false positive here is an
-accepted cost of keeping the boundary at one fixed pattern.
+accepted cost of keeping the boundary at one fixed pattern. The same
+one-fixed-pattern boundary has a matching false-negative cost: the pattern
+requires at least one character before the extension dot, so a bare
+dotfile with no directory prefix — `.env`, `.npmrc`, `.gitignore` — has no
+character preceding its only dot and never matches, resolving to
+`unresolved` per §2.4 even though a directory-qualified form of the same
+path (`config/.env`) would. A realistic case this affects is a security
+finding whose free-text location names a bare `.env` file — an accepted
+cost on the false-negative side of the same boundary as the version-token
+false positive above, not a reason to special-case dotfiles into the
+pattern.
 
 This is deliberately the *only* parsing attempt specified. `location:
 "run:3"` — the real security example in `GATE_FINDING_INVENTORY.md` §3, a
@@ -274,9 +284,9 @@ order.**
 4. Each label ends the walk satisfied by at most one finding; each finding
    ends the walk assigned to at most one label. A finding left unassigned
    still counts toward that gate's total output for precision purposes — it
-   is simply not credited as satisfying any label a second time, nor is an
-   already-assigned finding double-counted against a second label it also
-   happened to pass against.
+   is simply not credited as satisfying any label. Nor is an already-assigned
+   finding double-counted against a second label it also happened to pass
+   against.
 
 This is explicitly a **greedy** assignment, not a global optimum (e.g. the
 Hungarian algorithm for maximum bipartite matching). A greedy walk can, in
