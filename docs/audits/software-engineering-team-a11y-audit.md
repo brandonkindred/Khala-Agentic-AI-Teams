@@ -18,7 +18,7 @@ Engineering:
 | `/software-engineering/coding-team` | `CodingTeamPageComponent` |
 | `/software-engineering/code-review` | `CodeReviewDashboardComponent` |
 
-## Scoping correction: 10 of the "SE" components on disk are dead code
+## Scoping correction: 11 of the "SE" components on disk are dead code
 
 The `components/` directory holds several more SE-flavored components than the four
 routes above actually use: `run-team-form`, `run-team-tracking`, `execution-tasks`,
@@ -31,7 +31,7 @@ consumer**:
 ```
 grep -rl "RunTeamFormComponent\|app-run-team-form" src/app --include=*.ts --include=*.html
 grep -rl "ExecutionTasksComponent\|app-execution-tasks" src/app --include=*.ts --include=*.html
-grep -rln "import.*JobStatusComponent.*from.*job-status/job-status" src/app --include=*.ts
+grep -rl "import.*JobStatusComponent.*from.*job-status/job-status" src/app --include=*.ts
 # etc. — all empty except the component's own files
 ```
 
@@ -136,7 +136,7 @@ than in the step count.
 | partial | N/A | No multi-call assembly. |
 | long-running / stalled | N/A | A launched job hands off entirely to the SE dashboard's Jobs list; this page only shows a confirmation snackbar. `.ts:37-41` |
 | failed | HANDLED (delegated) | Launch failure surfaces through `team-assistant-chat`'s own error branch + the global toast. |
-| permission-denied / backend-unconfigured / offline / API-error | HANDLED, degraded | Same delegation — and this is the one page where A11Y-1's toast-contrast bug is the *only* error channel (no inline banner fallback), so "handled" is functionally close to "handled unreadably." Cross-referenced under A11Y-1, not filed again here. |
+| permission-denied / backend-unconfigured / offline / API-error | HANDLED, degraded | Same delegation — and this is the only page whose errors are *handled* yet still terminate at the global toast with no inline banner of its own, so "handled" is functionally close to "handled unreadably." The SE dashboard is toast-only too, and worse: there the poll dies outright, which is filed separately as STATE-1. Cross-referenced under A11Y-1, not filed again here. |
 | stale-data | N/A | No cached "data" beyond the health check, which re-checks on its own cadence. |
 
 ### `/software-engineering/coding-team` (Jobs/Runs panel — the page's default view)
@@ -145,7 +145,7 @@ than in the step count.
 |---|---|---|
 | first visit | HANDLED | Page opens on the Jobs/Runs panel by default. `.ts:165` |
 | empty | HANDLED | "No runs yet" with a next action ("Open the GitHub view…"). `.html:380-385` |
-| first load | MISSING | `runs.length === 0` gates the same empty-state branch used for steady-state empty (`.html:380`); no distinct loading affordance for the panel's first fetch. Scoped search: no loading flag guards the empty branch. |
+| first load | MISSING | `runs.length === 0` gates the same empty-state branch used for steady-state empty (`coding-team-page.component.html:380`); no distinct loading affordance for the panel's first fetch. Scoped search: no loading flag guards the empty branch. |
 | refresh | HANDLED | `timer(0, RUNS_POLL_MS)` with `catchError` at the inner observable, so a failed poll can't kill the outer chain. `.ts:917-934` |
 | partial | N/A | Single `listJobs()` call feeds the whole panel. |
 | populated | HANDLED | Running/Recent sections. `.html:386+` |
@@ -265,20 +265,32 @@ than in the step count.
   reused by Planning, Coding Team's Chat tab, the SE dashboard's New Project view, and
   — per this component's own reuse pattern — reportedly a dozen-plus other teams'
   dashboards. One fix clears the same defect everywhere it's embedded.
-- **Recommended change**: give the row's label an id and reference it:
+- **Recommended change**: give the row's label an id, give the button its own id, and
+  reference **both** from the button:
   ```html
   <span class="field-label" [id]="'field-label-' + field.key">…</span>
   ...
-  <button class="field-value" [attr.aria-labelledby]="'field-label-' + field.key" (click)="startEdit(field.key)">
+  <button class="field-value"
+          [id]="'field-value-' + field.key"
+          [attr.aria-labelledby]="'field-label-' + field.key + ' field-value-' + field.key"
+          (click)="startEdit(field.key)">
   ```
-  (Keep the visible value text as the button's content — `aria-labelledby` on a button
-  concatenates the referenced label with the button's own text content, so the
-  announcement becomes "Project specification, Click to fill in or chat with the
-  assistant" / "Project specification, Build a todo app in React".)
+  Referencing the button's own id is load-bearing, not belt-and-braces: `aria-labelledby`
+  **replaces** name-from-content rather than appending to it (accname-1.2 §4.3.1 step 2B),
+  so a list naming only the label span yields the accessible name "Project specification"
+  and the field's value or placeholder is dropped entirely — a regression for filled
+  fields, which announce their value today. Verified in Chromium via the CDP accessibility
+  tree: `aria-labelledby="field-label-spec"` computes to `"Project specification"`, while
+  `aria-labelledby="field-label-spec field-value-spec"` computes to
+  `"Project specification Build a todo app in React"`. Because the button is repeated per
+  field and the component can be mounted more than once per page, both ids must be unique
+  per instance, not just per field key.
 - **Cost**: S, shared primitive (huge blast radius, trivial fix).
 - **Verification**: `team-assistant-chat.component.a11y.spec.ts` already exists — add an
-  assertion that each field button's computed accessible name contains its
-  `field.label`.
+  assertion that each field button's computed accessible name contains **both** its
+  `field.label` and its current value (or the empty-state placeholder). Asserting only
+  that the name contains `field.label` passes against the broken single-reference form
+  too, so it would not catch the dropped-value regression.
 
 ### A11Y-3 — The only way out of "GitHub not configured" is a near-invisible link
 - **Severity**: High
@@ -333,7 +345,7 @@ than in the step count.
   ```
 - **Cost**: S, shared primitive.
 - **Verification**: manual keyboard walkthrough of the New Project / Planning / Coding
-  Team chat forms; add a `.a11y.spec.ts` assertion is not practical for computed
+  Team chat forms; adding a `.a11y.spec.ts` assertion is not practical for computed
   `opacity` under jsdom — note as a manual check.
 
 ### A11Y-5 — Coding Team's phase stepper conveys progress by color alone
@@ -413,7 +425,8 @@ than in the step count.
   placed on a plain `<span>`/`<div>`/`<mat-icon>` with no `tabindex` — the tooltip only
   opens on mouse hover. Most of the underlying text is duplicated elsewhere (so screen
   reader users aren't blocked), but a keyboard-only user gets nothing, and in two cases
-  (`.html:256`'s "already working on this issue" chip, `.html:166`'s repo issue-count)
+  (`coding-team-page.component.html:256`'s "already working on this issue" chip,
+  `coding-team-page.component.html:166`'s repo issue-count)
   the tooltip is the *only* place that information appears. The codebase already has
   the correct pattern one component over: `health-indicator.component.html:1-7` adds
   `tabindex="0"` to its `role="img"` span specifically so its tooltip is
@@ -508,7 +521,7 @@ than in the step count.
 - **Verification**: real-browser contrast check on the icon, or simply remove the
   opacity and eyeball it against the surrounding `.kh-empty-message` text weight.
 
-### CLARITY-3 — Ten dead SE-flavored components should be deleted or fixed before reconnecting
+### CLARITY-3 — Eleven dead SE-flavored components should be deleted or fixed before reconnecting
 - **Severity**: Low
 - **Location**: see the Scoping correction section above for the full list and grep evidence.
 - **What the user hits**: nobody, today — that's the point. Filed as a maintenance
@@ -516,11 +529,16 @@ than in the step count.
   auditing or extending "the SE pages" by directory listing (as this audit's own
   request initially did), and at least one (`product-analysis-run-form.component.scss:1,6`)
   carries hardcoded non-token colors that would need fixing before any reconnection.
-- **Recommended change**: delete the ten components, or if any are slated for reuse,
+- **Recommended change**: delete the eleven components, or if any are slated for reuse,
   track that intent somewhere discoverable (a tracking doc, not a code comment per this
-  repo's own conventions) and fix their accessibility gaps (cataloged in full by
-  file:line in this audit's working notes, available on request) before wiring them
-  back into a route.
+  repo's own conventions) and fix their accessibility gaps before wiring them back into
+  a route. Treat eleven as a floor rather than a census: this audit enumerated only the
+  components it encountered while tracing the four in-scope routes, and a subsequent
+  sweep of the same `run-team`-era family found further unreferenced directories beyond
+  these eleven (`architecture-results`, `retry-failed`, and the `*-run-form` siblings of
+  the listed `*-job-status` components among them). Re-run the selector-and-class-name
+  grep over the whole `components/` directory before deleting, so the sweep is decided
+  by evidence rather than by this list.
 - **Cost**: S (delete) or M (fix-and-reconnect, per component).
 
 ## Positive findings (preserve these patterns)
@@ -531,7 +549,7 @@ works:
 - **`app-shell.component.ts:139-148`** moves focus to `#main-content` on every real
   route change (correctly skipping query-param-only updates and back/forward
   navigation) — a genuinely thorough SPA focus-management implementation.
-- **`app-shell`'s nav-group flyout** (`.ts:181-301`) hand-implements the WAI-ARIA
+- **`app-shell`'s nav-group flyout** (`app-shell.component.ts:181-301`) hand-implements the WAI-ARIA
   disclosure-navigation pattern completely and correctly: Enter/Space/ArrowRight opens
   and moves focus in, arrow keys rove, Home/End jump, Escape/ArrowLeft closes and
   restores focus to the trigger.
@@ -568,7 +586,7 @@ works:
   whether to darken/lighten the palette (a token-level change, not a per-component
   one) — flagged here rather than as findings because AA-conformant color decisions
   are a design call, not a defect.
-- **Should the ten dead components (CLARITY-3) be deleted or revived?** Needs a product
+- **Should the eleven dead components (CLARITY-3) be deleted or revived?** Needs a product
   decision; this audit only surfaces that the ambiguity exists and its cost (stale
   lint surface, misleading directory listing).
 
