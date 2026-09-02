@@ -65,6 +65,29 @@ SUBMIT_ANSWERS_SIGNAL = "submit_answers"
 MAX_BUFFERED_SIGNALS = 8
 
 
+def _log_rejection(msg: str, *args: Any) -> None:
+    """Log a ``submit_answers`` rejection via the replay-aware workflow logger.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - No-op (never raises) when called outside a running workflow, e.g.
+          from a unit test driving ``HitlAnswerSignalMixin`` as a bare object
+          (the established pattern this module's own test suite, and its
+          ``CodingTeamWorkflow``/``PlanningAnswerSignalMixin`` siblings, all
+          use to test signal-handler logic without a Temporal test server).
+          ``workflow.logger`` itself requires an active workflow event loop
+          and raises ``_NotInWorkflowEventLoopError`` otherwise, so this
+          checks ``workflow.in_workflow()`` first.
+        - Inside a running workflow, logs at ``WARNING`` via
+          ``workflow.logger``, which suppresses log calls made during replay
+          — so this adds an operator diagnostic trail without affecting
+          determinism.
+    """
+    if workflow.in_workflow():  # pragma: no cover -- only true inside a real Temporal workflow sandbox
+        workflow.logger.warning(msg, *args)
+
+
 def _validate_answer_batch(raw: Any) -> Optional[List[Dict[str, Any]]]:
     """Validate a signal payload's ``answers`` value against ``AnswerSubmission``.
 
@@ -187,14 +210,30 @@ class HitlAnswerSignalMixin:
               arrives for a pause that is not the one currently pending is
               never applied to it. Once a batch is accepted for the current
               token, a second matching-token signal (a double-submit, or two
-              clients racing) is ignored too — first submission per token
-              wins. Only a token-matching first submission with a valid
-              ``"answers"`` batch sets ``self._submitted_answers``.
+              clients racing) is ignored too, for as long as the first batch
+              remains unconsumed (``self._submitted_answers is not None``) —
+              first submission per token wins *within one pause round*. Once
+              a caller consumes it (resets ``self._submitted_answers`` to
+              ``None`` while the same token stays active), that dedup window
+              closes: a further matching signal is accepted and overwrites.
+              Deduplicating across the remainder of a pause once consumed is
+              the caller's responsibility, not this handler's. Only a
+              token-matching first submission with a valid ``"answers"``
+              batch sets ``self._submitted_answers``.
+
+        Every rejection branch below logs via :func:`_log_rejection` before
+        returning — never raises (Temporal's ``workflow.logger`` is
+        replay-aware, so this adds an operator diagnostic trail without
+        affecting determinism or violating the never-raise contract; see
+        :func:`_log_rejection` for why this is not simply
+        ``workflow.logger.warning`` called directly).
         """
         if not isinstance(payload, dict):
+            _log_rejection("submit_answers rejected: payload is not a dict (%r)", type(payload))
             return
         answers = _validate_answer_batch(payload.get("answers"))
         if answers is None:
+            _log_rejection("submit_answers rejected: malformed or empty answers batch")
             return
         resume_token = payload.get("resume_token")
         if self._active_resume_token is None:
@@ -202,10 +241,22 @@ class HitlAnswerSignalMixin:
                 if resume_token not in self._buffered_signals and len(self._buffered_signals) >= MAX_BUFFERED_SIGNALS:
                     oldest_token = next(iter(self._buffered_signals))
                     del self._buffered_signals[oldest_token]
+                    _log_rejection(
+                        "submit_answers: buffer cap reached, evicted oldest buffered resume_token=%r",
+                        oldest_token,
+                    )
                 self._buffered_signals.setdefault(resume_token, answers)
+            else:
+                _log_rejection("submit_answers dropped: no pause active and no usable resume_token to buffer against")
             return
         if resume_token != self._active_resume_token:
+            _log_rejection(
+                "submit_answers rejected: resume_token mismatch (received=%r, active=%r)",
+                resume_token,
+                self._active_resume_token,
+            )
             return
         if self._submitted_answers is not None:
+            _log_rejection("submit_answers rejected: duplicate submission for resume_token=%r", resume_token)
             return
         self._submitted_answers = answers

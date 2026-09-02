@@ -20,6 +20,7 @@ from shared.hitl.temporal_signal import SUBMIT_ANSWERS_SIGNAL
 
 
 def test_planning_workflow_registers_submit_answers_signal() -> None:
+    # temporalio private API (_Definition); re-verify this test on temporalio upgrades.
     defn = workflow._Definition.from_class(PlanningWorkflow)
     assert defn is not None, "PlanningWorkflow is missing the @workflow.defn decorator"
     assert defn.name == "PlanningWorkflow"
@@ -42,12 +43,7 @@ def test_planning_workflow_submit_answers_accepts_matching_signal() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [{"question_id": "q1"}]})
 
     assert wf._submitted_answers == [
-        {
-            "question_id": "q1",
-            "selected_option_id": None,
-            "other_text": None,
-            "selected_option_ids": [],
-        }
+        {"question_id": "q1", "selected_option_id": None, "other_text": None}
     ]
 
 

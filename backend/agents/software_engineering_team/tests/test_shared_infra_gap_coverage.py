@@ -32,7 +32,7 @@ from shared.command_runner.error_parsing import (
     parse_devops_failure,
 )
 from shared.dev_models import ToolRecommendation, model_to_dict
-from shared.hitl.temporal_signal import HitlAnswerSignalMixin
+from shared.hitl.temporal_signal import MAX_BUFFERED_SIGNALS, HitlAnswerSignalMixin
 from shared.repo_context.repo_utils import (
     int_env,
     read_repo_code,
@@ -245,12 +245,7 @@ class _Workflow(HitlAnswerSignalMixin):
 
 
 def _answer(question_id: str = "q1") -> dict:
-    return {
-        "question_id": question_id,
-        "selected_option_id": None,
-        "other_text": None,
-        "selected_option_ids": [],
-    }
+    return {"question_id": question_id, "selected_option_id": None, "other_text": None}
 
 
 def test_hitl_signal_mixin_init_state() -> None:
@@ -323,11 +318,18 @@ def test_hitl_signal_mixin_rejects_out_of_order_signal() -> None:
 
 
 def test_hitl_signal_mixin_buffers_and_evicts_past_cap() -> None:
-    from shared.hitl.temporal_signal import MAX_BUFFERED_SIGNALS
-
     wf = _Workflow()
     for i in range(MAX_BUFFERED_SIGNALS + 1):
         wf.submit_answers({"resume_token": f"tok-{i}", "answers": [_answer("q1")]})
 
     assert len(wf._buffered_signals) == MAX_BUFFERED_SIGNALS
     assert "tok-0" not in wf._buffered_signals
+
+
+def test_hitl_signal_mixin_drops_early_signal_with_no_usable_resume_token() -> None:
+    wf = _Workflow()
+
+    wf.submit_answers({"resume_token": "", "answers": [_answer("q1")]})
+    wf.submit_answers({"answers": [_answer("q1")]})
+
+    assert wf._buffered_signals == {}

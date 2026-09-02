@@ -22,12 +22,7 @@ class _Workflow(HitlAnswerSignalMixin):
 
 
 def _answer(question_id: str = "q1", **overrides) -> dict:
-    payload = {
-        "question_id": question_id,
-        "selected_option_id": None,
-        "other_text": None,
-        "selected_option_ids": [],
-    }
+    payload = {"question_id": question_id, "selected_option_id": None, "other_text": None}
     payload.update(overrides)
     return payload
 
@@ -98,6 +93,18 @@ def test_submit_answers_rejects_non_dict_answer_entry() -> None:
 
     wf.submit_answers({"resume_token": "tok-1", "answers": ["not-a-dict"]})
 
+    assert wf._submitted_answers is None
+
+
+def test_submit_answers_rejects_malformed_batch_with_no_active_pause() -> None:
+    """Payload validation runs before the buffering branch: a malformed batch
+    arriving while no pause is active must be dropped, not buffered as
+    garbage a later wait_for_planning_answers-style consumer would apply."""
+    wf = _Workflow()
+
+    wf.submit_answers({"resume_token": "future-tok", "answers": [{"selected_option_id": "no-question-id"}]})
+
+    assert wf._buffered_signals == {}
     assert wf._submitted_answers is None
 
 
