@@ -163,10 +163,16 @@ def drain() -> int:
 def register_trace_flusher() -> None:
     """Register the observer + start the background drain heartbeat (idempotent).
 
-    The observer and the batched write are both no-ops when
-    ``SE_TRACE_TO_POSTGRES`` is explicitly disabled (or Postgres is
-    unconfigured), so registering unconditionally at startup is safe and
-    cheap. Safe to call from app startup more than once.
+    The observer is a no-op when ``SE_TRACE_TO_POSTGRES`` is explicitly
+    disabled or Postgres is unconfigured, so registering it unconditionally at
+    startup is safe and cheap. The background heartbeat, however, is a
+    long-lived daemon thread — it is only started when Postgres is configured
+    (``POSTGRES_HOST`` set) at registration time, so a no-Postgres process
+    (local dev, most CI jobs) never runs a thread whose only job would be an
+    empty drain on every tick. Postgres configuration is expected to be fixed
+    for the life of the process (set via env vars before startup), so this
+    check needs to happen only once, here. Safe to call from app startup more
+    than once.
     """
     global _heartbeat, _registered
     with _register_lock:
@@ -176,6 +182,9 @@ def register_trace_flusher() -> None:
             _register_call_observer(_trace_observer)
         except Exception:
             logger.warning("could not register SE trace flusher observer", exc_info=True)
+            return
+        if not is_postgres_enabled():
+            _registered = True
             return
         _heartbeat = BackgroundHeartbeat(
             _drain,

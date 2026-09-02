@@ -236,6 +236,27 @@ def test_register_starts_heartbeat_and_registers_observer(monkeypatch) -> None:
     trace_flusher._reset_for_test()
 
 
+def test_register_skips_heartbeat_when_postgres_unconfigured(monkeypatch) -> None:
+    """register_trace_flusher still registers the (cheap, no-op) observer when
+    Postgres is unconfigured, but must not start the background heartbeat —
+    a long-lived daemon thread whose only job would be an empty drain on
+    every tick, forever, in every no-Postgres process (local dev, most CI)."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    registered: list = []
+    monkeypatch.setattr(trace_flusher, "_register_call_observer", registered.append, raising=False)
+    started: list = []
+    monkeypatch.setattr(
+        trace_flusher.BackgroundHeartbeat, "start", lambda self: started.append(self)
+    )
+
+    trace_flusher.register_trace_flusher()
+
+    assert registered == [trace_flusher._trace_observer]
+    assert started == []  # heartbeat never constructed/started
+    assert trace_flusher._heartbeat is None
+    assert trace_flusher._is_registered()
+
+
 def test_unregister_stops_heartbeat_and_removes_observer(monkeypatch) -> None:
     """unregister stops the heartbeat and removes the observer from llm_service."""
     unregistered: list = []
