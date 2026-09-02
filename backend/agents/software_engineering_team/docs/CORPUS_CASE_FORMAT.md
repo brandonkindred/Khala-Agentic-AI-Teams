@@ -81,7 +81,11 @@ Every gate listed in `gates` is scored for this case; `gates` need not
 equal the set of gates referenced by `expected_findings`. A gate listed
 with no corresponding labels means that gate is expected to report nothing
 on this fixture (a clean-fixture / false-positive-resistance case for that
-gate), not that the gate is unscored.
+gate), not that the gate is unscored. The reverse direction is a hard
+constraint, not a convention: every gate referenced by a label in
+`expected_findings` **must** appear in `gates` — a label whose `gate` is
+not listed makes the case malformed, since `gates` is the case's own
+declaration of "which gates this case scores."
 
 ### Physical layout
 
@@ -127,7 +131,7 @@ gate's own real output (see the worked multi-gate example in §5).
 label_id: L1                       # stable within the case (not globally unique)
 gate: code_review                   # one of: code_review | qa | security
 defect_class: logic                 # closed vocabulary — see §3
-severity: critical                  # critical | high | medium | low | info — required iff polarity: must_find
+severity: critical                  # critical | high | medium | low | info — required when polarity: must_find, must be omitted when polarity: must_not_find
 polarity: must_find                 # must_find | must_not_find
 file_path: app/main.py              # required — ground truth location, authored from the fixture
 line: 42                            # int, or null for a file-wide/structural finding
@@ -150,7 +154,8 @@ Field notes:
   `critical | high | medium | low | info` — because that union is
   consistent with what all three gates actually document
   (`GATE_FINDING_INVENTORY.md` §1 `CodeReviewIssueSeverity`, §2 prompt
-  set, §3 prompt set). It is `null`/omitted on a `must_not_find` label,
+  set, §3 prompt set). It is **required** on a `must_find` label and
+  **must be omitted** (not merely optional) on a `must_not_find` label,
   since there is no finding whose severity to state.
 - **`file_path`** / **`line`** / **`line_end`** are always present,
   regardless of which gate the label targets. They describe where the
@@ -158,7 +163,10 @@ Field notes:
   authored by whoever wrote the fixture, not derived from a gate's output.
   `line: null` denotes a file-wide/structural finding with no single anchor
   line, mirroring the inventory's own documented semantics for
-  `CodeReviewIssue.line` (§1). `line_end` sets an inclusive span.
+  `CodeReviewIssue.line` (§1). `line_end` sets an inclusive span: for a
+  single-line finding, `line_end` equals `line`; when `line` is `null`
+  (file-wide/structural), `line_end` is also `null`. Whenever `line` is
+  non-null, `line_end >= line`.
 
   This is a deliberate difference from code review's own field naming
   (`line` + `start_line`, where the inventory flags that `line` acts as the
@@ -291,10 +299,23 @@ expected_findings:
     polarity: must_find
     file_path: app/utils/json.py
     line: 1
-    line_end: null
+    line_end: 1
     description: >
       New helper module named `json.py` shadows the stdlib `json` module
       for any sibling file that does `import json`.
+```
+
+`diff.patch` for `CASE-0001` (the file set under review — see "Physical
+layout" in §1):
+
+```diff
+--- /dev/null
++++ b/app/utils/json.py
+@@ -0,0 +1,4 @@
++import json as _stdlib_json
++
++def dumps_sorted(obj):
++    return _stdlib_json.dumps(obj, sort_keys=True)
 ```
 
 ### Example 2 — multi-gate case, same defect, one label per gate
@@ -319,7 +340,7 @@ expected_findings:
     polarity: must_find
     file_path: app/repositories/user_repo.py
     line: 27
-    line_end: null
+    line_end: 27
     description: >
       Query built via f-string concatenation of `user_id` from the request
       path; parameterize the query.
@@ -331,7 +352,7 @@ expected_findings:
     polarity: must_find
     file_path: app/repositories/user_repo.py
     line: 27
-    line_end: null
+    line_end: 27
     description: >
       SQL injection via unparameterized string interpolation of untrusted
       request input.
@@ -343,8 +364,25 @@ expected_findings:
     polarity: must_find
     file_path: app/repositories/user_repo.py
     line: 27
-    line_end: null
+    line_end: 27
     description: >
       `user_id` from the request path is used to build a query with no
       validation of its shape before it reaches the query builder.
 ```
+
+`diff.patch` for `CASE-0002` (the file set under review — see "Physical
+layout" in §1):
+
+```diff
+--- a/app/repositories/user_repo.py
++++ b/app/repositories/user_repo.py
+@@ -26,3 +26,3 @@ class UserRepository:
+     def find_by_id(self, user_id: str) -> Optional[User]:
+-        query = "SELECT * FROM users WHERE id = %s"
+-        return self._db.execute(query, (user_id,)).fetchone()
++        query = f"SELECT * FROM users WHERE id = {user_id}"
++        return self._db.execute(query).fetchone()
+```
+
+Line 26 (the `def` line) is unchanged context; line 27 in the new file is
+the added `query = f"..."` line each of L1–L3 above points at.
