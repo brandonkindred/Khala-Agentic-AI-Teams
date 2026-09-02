@@ -525,6 +525,12 @@ Registration floors the resolved value at `60s` regardless of why it's low —
 including a deliberately configured value under 60, silently, with no warning
 — so the sweep never busy-loops. Mirrors `SE_TRACE_FLUSH_INTERVAL_S`'s pattern
 at a much slower cadence; retention is day-granularity, so tighter buys nothing.
+A sweep also runs immediately at startup (the heartbeat beats first), so a
+restart never waits a full interval for its first prune — relevant when that
+first sweep has a large stale-row backlog to delete. Pruning only applies
+when traces are stored in Postgres (`POSTGRES_HOST` set); it runs regardless
+of `SE_TRACE_TO_POSTGRES` so rows written while tracing was enabled are still
+pruned, and this variable has no observable effect otherwise.
 
 ### SE_LEARNINGS_TOPN
 Number of past-sprint learnings injected into the Tech Lead's Design prompt

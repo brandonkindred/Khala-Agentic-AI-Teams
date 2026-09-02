@@ -149,15 +149,38 @@ def test_register_starts_heartbeat_idempotent() -> None:
 
 
 def test_register_swallows_heartbeat_construction_failure(monkeypatch, caplog) -> None:
-    """A BackgroundHeartbeat construction/start failure is caught and logged,
-    not propagated — so it can't abort registrations that run after this one
-    in _se_startup's shared try/except (e.g. register_transcript_flusher)."""
+    """A BackgroundHeartbeat construction failure is caught and logged, not
+    propagated — so it can't abort registrations that run after this one in
+    _se_startup's shared try/except (e.g. register_transcript_flusher)."""
     caplog.set_level("WARNING", logger="software_engineering_team.shared.trace_pruner")
 
     def boom(*args, **kwargs):
         raise RuntimeError("thread start failed")
 
     monkeypatch.setattr(trace_pruner, "BackgroundHeartbeat", boom)
+
+    trace_pruner.register_trace_pruner()  # must not raise
+
+    assert trace_pruner._is_registered() is False
+    assert any("could not start" in r.message for r in caplog.records)
+
+
+def test_register_swallows_heartbeat_start_failure(monkeypatch, caplog) -> None:
+    """A start() failure on an otherwise successfully constructed heartbeat is
+    also caught and logged, not propagated — the other half of the same
+    try/except as the construction-failure case above. Both are pinned
+    separately since a refactor moving start() outside the guard would only
+    break this one."""
+    caplog.set_level("WARNING", logger="software_engineering_team.shared.trace_pruner")
+
+    class _FlakyHeartbeat:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(trace_pruner, "BackgroundHeartbeat", _FlakyHeartbeat)
 
     trace_pruner.register_trace_pruner()  # must not raise
 
