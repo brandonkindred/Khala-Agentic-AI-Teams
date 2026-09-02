@@ -4,41 +4,16 @@ The flusher moves ``se_agent_traces`` INSERTs off the LLM call path: the
 observer builds a row tuple (pure Python, no I/O) and appends to a bounded
 deque; a background heartbeat drains the deque via ``executemany``. These
 tests pin the three properties from the refactor spec — buffer/overflow
-semantics, the 16-column INSERT order, and zero DB I/O on enqueue.
+semantics, the 18-column INSERT order, and zero DB I/O on enqueue.
 """
 
 from __future__ import annotations
-
-from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 
 from software_engineering_team.shared import trace_flusher, trace_store
 
-
-class _Rec:
-    """Minimal stand-in for ``llm_service.telemetry.LLMCallRecord``."""
-
-    def __init__(self, **overrides: Any) -> None:
-        self.timestamp = datetime.now(tz=timezone.utc).timestamp()
-        self.team = "software_engineering"
-        self.agent_key = "backend"
-        self.job_id = "j9"
-        self.task_id = "t1"
-        self.phase = "execution"
-        self.model = "deepseek-v4-pro:cloud"
-        self.prompt_tokens = 1000
-        self.completion_tokens = 500
-        self.total_tokens = 1500
-        self.cost_usd = 0.42
-        self.latency_ms = 1200
-        self.status = "success"
-        self.outcome = "success"
-        self.objective = "write code"
-        self.request_id = "rid1"
-        for k, v in overrides.items():
-            setattr(self, k, v)
+from ._observability_test_doubles import TraceCallRecord as _Rec
 
 
 @pytest.fixture(autouse=True)

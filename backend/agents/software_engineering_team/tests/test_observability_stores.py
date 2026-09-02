@@ -9,6 +9,8 @@ import pytest
 
 from software_engineering_team.shared import learnings_store, se_events, trace_store
 
+from ._observability_test_doubles import TraceCallRecord as _Rec
+
 # --- se_events -------------------------------------------------------------
 
 
@@ -173,12 +175,6 @@ def test_trace_enabled_env(monkeypatch) -> None:
 
 def test_write_trace_disabled_by_default() -> None:
     """write_trace returns False when tracing is disabled by default."""
-
-    class _Rec:
-        timestamp = 0.0
-        team = "software_engineering"
-        job_id = "j"
-
     assert trace_store.write_trace(_Rec()) is False
 
 
@@ -194,11 +190,7 @@ def test_trace_observer_ignores_non_se(monkeypatch) -> None:
 
     trace_flusher._reset_for_test()
 
-    class _Rec:
-        team = "blogging"
-        job_id = "j"
-
-    trace_flusher._trace_observer(_Rec())
+    trace_flusher._trace_observer(_Rec(team="blogging"))
     assert trace_flusher._buffer_size() == 0  # other team → not enqueued
     trace_flusher._reset_for_test()
 
@@ -273,8 +265,13 @@ class _FakeCursor:
     ``shared.postgres.fake`` does not cover this need — it is dispatch-table
     style, patches ``get_conn`` rather than ``pg_cursor``, and offers neither
     call recording nor raise injection — which is why both suites hand-roll a
-    spy. If a third copy is ever needed, converge them into a shared recording
-    cursor rather than adding another.
+    spy. The two copies have already drifted (that one supports ``fetchone``/
+    ``fetchall``, this one adds the arity check above) — the next one to touch
+    either should converge them rather than let a third copy appear, into
+    either ``shared.postgres.testing`` (alongside the re-exported fake scaffold)
+    or an agents-pythonpath module following the ``llm_client_fakes.py``
+    precedent, whichever keeps cross-team imports out of another team's
+    private ``tests/`` package.
     """
 
     def __init__(self, raise_on_execute: bool = False) -> None:
@@ -352,52 +349,6 @@ class _FakeCursor:
         self.executed.append((sql, rows))
 
 
-def _rec(**overrides):
-    """A minimal telemetry-record stand-in; overrides layer on top of a base call.
-
-    Preconditions:
-        Every key in ``overrides`` names an attribute ``_R`` already defines below
-        — this is a plain ``setattr``, not a schema, so a misspelled key silently
-        adds an unused attribute rather than overriding the intended one.
-    Postconditions:
-        Returns an object exposing every ``_R`` class attribute (the
-        :class:`llm_service.telemetry.LLMCallRecord` fields ``_record_to_row``
-        reads), with any ``overrides`` values applied on top.
-    """
-
-    class _R:
-        timestamp = datetime.now(tz=timezone.utc).timestamp()
-        team = "software_engineering"
-        agent_key = "backend"
-        job_id = "j1"
-        task_id = "t1"
-        phase = "execution"
-        model = "m"
-        prompt_tokens = 10
-        completion_tokens = 5
-        total_tokens = 15
-        cost_usd = 0.01
-        latency_ms = 100
-        status = "success"
-        outcome = "success"
-        objective = "o"
-        request_id = "r1"
-
-    r = _R()
-    for k, v in overrides.items():
-        setattr(r, k, v)
-    return r
-
-
-class _RecNoCacheAttrs:
-    """A telemetry record with no cache-token attributes at all (missing entirely,
-    not just zero) — used to pin the never-raise/defaults-to-0 contract."""
-
-    timestamp = datetime.now(tz=timezone.utc).timestamp()
-    team = "software_engineering"
-    job_id = "j1"
-
-
 @pytest.fixture
 def _fake_cursor(monkeypatch):
     """Enable tracing and swap trace_store.pg_cursor for a recording FakeCursor.
@@ -473,7 +424,7 @@ def test_insert_sql_placeholder_count_matches_row_width() -> None:
     directly, so drift fails here with a legible message rather than as a
     swallowed error inside a write-path test.
     """
-    assert trace_store._INSERT_SQL.count("%s") == len(trace_store._record_to_row(_rec()))
+    assert trace_store._INSERT_SQL.count("%s") == len(trace_store._record_to_row(_Rec()))
 
 
 def test_insert_sql_pins_cache_column_positions() -> None:
@@ -497,7 +448,7 @@ def test_insert_sql_pins_cache_column_positions() -> None:
 def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
     """write_trace (single-row path) carries cache_read_tokens through to the INSERT params."""
     cursor = _fake_cursor()
-    assert trace_store.write_trace(_rec(cache_read_tokens=42, cache_creation_tokens=0)) is True
+    assert trace_store.write_trace(_Rec(cache_read_tokens=42, cache_creation_tokens=0)) is True
     sql, params = cursor.executed[0]
     assert "cache_read_tokens" in sql
     assert "cache_creation_tokens" in sql
@@ -507,7 +458,7 @@ def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
 def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
     """write_trace (single-row path) carries cache_creation_tokens through to the INSERT params."""
     cursor = _fake_cursor()
-    assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=17)) is True
+    assert trace_store.write_trace(_Rec(cache_read_tokens=0, cache_creation_tokens=17)) is True
     sql, params = cursor.executed[0]
     assert "cache_creation_tokens" in sql
     assert _cache_tokens(params) == (0, 17)
@@ -516,7 +467,7 @@ def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
 def test_write_trace_writes_zero_for_no_cache_usage(_fake_cursor) -> None:
     """A record reporting neither cache reads nor creation writes 0 for both, never NULL."""
     cursor = _fake_cursor()
-    assert trace_store.write_trace(_rec(cache_read_tokens=0, cache_creation_tokens=0)) is True
+    assert trace_store.write_trace(_Rec(cache_read_tokens=0, cache_creation_tokens=0)) is True
     _, params = cursor.executed[0]
     assert _cache_tokens(params) == (0, 0)
 
@@ -524,7 +475,7 @@ def test_write_trace_writes_zero_for_no_cache_usage(_fake_cursor) -> None:
 def test_write_trace_never_raises_on_missing_cache_fields(_fake_cursor) -> None:
     """The never-raise contract holds even when the record has no cache attrs at all."""
     cursor = _fake_cursor()
-    assert trace_store.write_trace(_RecNoCacheAttrs()) is True
+    assert trace_store.write_trace(_Rec()) is True
     _, params = cursor.executed[0]
     assert _cache_tokens(params) == (0, 0)
 
@@ -532,7 +483,7 @@ def test_write_trace_never_raises_on_missing_cache_fields(_fake_cursor) -> None:
 def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
     """write_rows (batch path) carries cache_read_tokens through identically to write_trace."""
     cursor = _fake_cursor()
-    row = trace_store._record_to_row(_rec(cache_read_tokens=42, cache_creation_tokens=0))
+    row = trace_store._record_to_row(_Rec(cache_read_tokens=42, cache_creation_tokens=0))
     assert trace_store.write_rows([row]) == 1
     sql, rows = cursor.executed[0]
     assert "cache_read_tokens" in sql
@@ -543,7 +494,7 @@ def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
 def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
     """write_rows (batch path) carries cache_creation_tokens through identically to write_trace."""
     cursor = _fake_cursor()
-    row = trace_store._record_to_row(_rec(cache_read_tokens=0, cache_creation_tokens=17))
+    row = trace_store._record_to_row(_Rec(cache_read_tokens=0, cache_creation_tokens=17))
     assert trace_store.write_rows([row]) == 1
     sql, rows = cursor.executed[0]
     assert "cache_creation_tokens" in sql
@@ -553,7 +504,7 @@ def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
 def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
     """write_rows (batch path) writes 0/0 for a record reporting neither, never NULL."""
     cursor = _fake_cursor()
-    row = trace_store._record_to_row(_RecNoCacheAttrs())
+    row = trace_store._record_to_row(_Rec())
     assert trace_store.write_rows([row]) == 1
     _, rows = cursor.executed[0]
     assert _cache_tokens(rows[0]) == (0, 0)
@@ -568,11 +519,11 @@ def test_write_trace_never_raises_on_cursor_failure(_fake_cursor) -> None:
     atomicity is Postgres's, not something this in-memory double can attest to.)
     """
     _fake_cursor(raise_on_execute=True)
-    assert trace_store.write_trace(_rec(cache_read_tokens=5, cache_creation_tokens=0)) is False
+    assert trace_store.write_trace(_Rec(cache_read_tokens=5, cache_creation_tokens=0)) is False
 
 
 def test_write_rows_never_raises_on_cursor_failure(_fake_cursor) -> None:
     """A DB failure on the batch path degrades to 0, never raises (mirrors write_trace)."""
     _fake_cursor(raise_on_execute=True)
-    row = trace_store._record_to_row(_rec(cache_read_tokens=5, cache_creation_tokens=0))
+    row = trace_store._record_to_row(_Rec(cache_read_tokens=5, cache_creation_tokens=0))
     assert trace_store.write_rows([row]) == 0
