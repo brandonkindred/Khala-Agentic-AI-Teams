@@ -20,7 +20,7 @@ import pytest
 from investment_team.execution.bar_safety import BarSafetyAssertion
 from investment_team.execution.risk_filter import RiskFilter, RiskLimits
 from investment_team.market_data_service import OHLCVBar
-from investment_team.models import BacktestConfig, StrategySpec
+from investment_team.models import BacktestConfig, BacktestExecutionDiagnostics, StrategySpec
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     IndicatorRef,
@@ -39,6 +39,7 @@ from investment_team.trading_service.engine.fill_simulator import (
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio
 from investment_team.trading_service.modes.backtest import run_backtest
+from investment_team.trading_service.service import _apply_fill_outcome_events
 from investment_team.trading_service.strategy.contract import (
     Bar,
     FillKind,
@@ -382,9 +383,6 @@ def test_continuation_insufficient_capital_emits_rejected_event() -> None:
     assert len(rejections) == 1
     assert rejections[0].reason == "insufficient_capital"
     assert rejections[0].symbol == "BBB"
-
-    from investment_team.models import BacktestExecutionDiagnostics
-    from investment_team.trading_service.service import _apply_fill_outcome_events
 
     diag = BacktestExecutionDiagnostics()
     _apply_fill_outcome_events(diag, outcome)
