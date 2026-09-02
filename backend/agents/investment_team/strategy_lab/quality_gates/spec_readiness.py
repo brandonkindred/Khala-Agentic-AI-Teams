@@ -1210,7 +1210,7 @@ class SpecReadinessGate(GateResultsMixin):
             # independently-maintained templates drifting apart.
             # ``fixed_notional`` reports in absolute dollars against a
             # different closing clause, so it isn't forced into this shape.
-            if kind == "fixed_fraction" or is_vol_target:
+            if is_fixed_fraction or is_vol_target:
                 worst_case_fraction = effective_worst_case_notional / capital
                 worst_case_tail = (
                     f"× worst-case concurrency {worst_case_concurrent} (min of "
@@ -1223,7 +1223,7 @@ class SpecReadinessGate(GateResultsMixin):
                     f"${capital:.0f}) if all concurrent positions filled "
                     "simultaneously."
                 )
-                if kind == "fixed_fraction":
+                if is_fixed_fraction:
                     return (
                         self._critical(
                             f"Sizing realisability: fixed_fraction {fraction:.4f} {worst_case_tail}"
