@@ -132,8 +132,9 @@ def test_leg_spec_translation_matches_bracket_shape() -> None:
 
 def test_leg_spec_translation_rejects_ineligible_rule() -> None:
     """The translation enforces its own precondition rather than silently
-    producing a leg for a rule this migration doesn't cover."""
-    with pytest.raises(AssertionError):
+    producing a leg for a rule this migration doesn't cover — via an explicit
+    raise (not assert) so the contract survives ``python -O``."""
+    with pytest.raises(ValueError, match="resting-eligible StopLossRule"):
         _stop_loss_rule_to_leg_specs(StopLossRule(pct=0.03, basis="trailing_high"))
 
 
@@ -167,7 +168,7 @@ def test_resolve_resting_stop_loss_attachment_rejects_ineligible_rule() -> None:
     resolving a rule this migration doesn't cover — unlike the leg-spec
     translation, this adapter's own ineligible-input behavior wasn't previously
     pinned by a dedicated test."""
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="resting-eligible StopLossRule"):
         resolve_resting_stop_loss_attachment(
             StopLossRule(pct=0.03, basis="trailing_high"), OrderSide.LONG, 100.0
         )
@@ -452,14 +453,18 @@ def _bar(
     close: float | None = None,
     volume: float = 1_000_000.0,
 ) -> Bar:
+    resolved_close = close if close is not None else open_price
     return Bar(
         symbol="AAA",
         timestamp=ts,
         timeframe="1d",
         open=open_price,
-        high=high if high is not None else open_price + 1.0,
-        low=low if low is not None else open_price - 1.0,
-        close=close if close is not None else open_price,
+        # Derived from both open and close (not open alone) so an override of
+        # only close still yields an OHLC-valid bar — BarSafetyAssertion
+        # rejects high < close / low > close.
+        high=high if high is not None else max(open_price, resolved_close) + 1.0,
+        low=low if low is not None else min(open_price, resolved_close) - 1.0,
+        close=resolved_close,
         volume=volume,
     )
 

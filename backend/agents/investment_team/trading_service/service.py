@@ -1841,17 +1841,20 @@ def resolve_bracket_attachments(
     return _as_bracket_attachment_pair(attachments)
 
 
-# A rule is resting-eligible only for the entry_price/market variant migrated
-# here (basis/style) with 0 < pct < 1.0 — the open bound matching
-# ``ExitLegSpec.pct``'s own ``(0, 1)`` constraint. That bound also excludes,
-# by construction, the ``pct=1.0`` short-safety auto-stop
-# ``TradingService.__init__`` injects when a spec allows shorts with no
-# explicit stop covering them: that rule is a deliberate no-op for longs
-# (``entry * (1 - 1.0) == 0``) and would fail ``ExitLegSpec``'s strict
-# upper bound if fed through this path. Excluding it leaves it exactly as
-# it behaves today — bar-close-only — rather than crashing every long
-# entry on a spec where shorts are possible.
 def _is_resting_stop_loss(rule: Any) -> bool:
+    """Return True for the resting-eligible stop-loss variant migrated here.
+
+    Eligible only for ``StopLossRule(basis="entry_price", style="market")``
+    with ``0 < pct < 1.0`` — the open upper bound matches ``ExitLegSpec.pct``'s
+    own ``(0, 1)`` constraint. That bound also excludes, by construction, the
+    ``pct=1.0`` short-safety auto-stop ``TradingService.__init__`` injects
+    when a spec allows shorts with no explicit stop covering them: that rule
+    is a deliberate no-op for longs (``entry * (1 - 1.0) == 0``) and would
+    fail ``ExitLegSpec``'s strict upper bound if fed through this path.
+    Excluding it leaves it exactly as it behaves today — bar-close-only —
+    rather than crashing every long entry on a spec where shorts are
+    possible.
+    """
     return (
         isinstance(rule, StopLossRule)
         and rule.basis == "entry_price"
@@ -1870,15 +1873,18 @@ def _stop_loss_rule_to_leg_specs(rule: StopLossRule) -> List[ExitLegSpec]:
     identical price math for both (see ``rule_compiler._stop_loss_level``,
     which this mirrors: ``ref_price * (1 ∓ pct)``).
     """
+    # Explicit raise (not assert, which ``python -O`` strips) so the contract
+    # stays enforced in optimized production runs — the same posture
+    # ``resolve_exit_leg_attachments`` documents for its own preconditions.
     # ``rule!r`` (not its individual attributes) so the message itself can't
-    # raise: an assert message is only evaluated on failure, and this is
-    # exactly the path a non-StopLossRule input would take (the case
-    # ``_is_resting_stop_loss``'s isinstance check exists to catch), where
-    # ``rule.basis``/``rule.style`` may not exist at all.
-    assert _is_resting_stop_loss(rule), (
-        "_stop_loss_rule_to_leg_specs requires a resting-eligible StopLossRule "
-        f"(basis='entry_price', style='market', 0 < pct < 1.0); got {rule!r}"
-    )
+    # raise on a non-StopLossRule input (the case ``_is_resting_stop_loss``'s
+    # isinstance check exists to catch), where ``rule.basis``/``rule.style``
+    # may not exist at all.
+    if not _is_resting_stop_loss(rule):
+        raise ValueError(
+            "_stop_loss_rule_to_leg_specs requires a resting-eligible StopLossRule "
+            f"(basis='entry_price', style='market', 0 < pct < 1.0); got {rule!r}"
+        )
     return [ExitLegSpec(kind=OrderType.STOP, pct=rule.pct)]
 
 
@@ -2156,8 +2162,7 @@ class _EngineEntryDispatcher:
     def _resting_stop_loss_attachments(
         self, side: OrderSide, ref_price: float
     ) -> List[StopAttachment]:
-        """Resolve this run's resting-eligible ``StopLossRule`` (if any) into
-        an ``attached_exits`` entry.
+        """Resolve this run's resting-eligible ``StopLossRule`` (if any) into an ``attached_exits`` entry.
 
         Kept on ``attached_exits`` rather than the fixed ``attached_stop_loss``
         field so this mechanism can never collide with a bracket's stop leg —
