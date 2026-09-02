@@ -31,6 +31,8 @@ class PipelineContext:
           stage runs.
         - ``planning_phase_result``/``plan``/``elicited_stories_text`` are populated
           by the planning stage before the draft stage reads them.
+        - ``selected_title`` is populated by the planning stage before the draft
+          stage reads it.
         - ``draft_result`` is populated by the draft stage before the gates stage
           reads it.
     """
@@ -52,6 +54,7 @@ class PipelineContext:
     planning_phase_result: Optional[PlanningPhaseResult] = None
     plan: Optional[ContentPlan] = None
     elicited_stories_text: Optional[str] = None
+    selected_title: Optional[str] = None
     draft_result: Optional["WriterOutput"] = None
     status: PipelineStatus = "PASS"
 
