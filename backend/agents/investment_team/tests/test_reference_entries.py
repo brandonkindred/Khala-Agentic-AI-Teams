@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 
@@ -57,12 +58,14 @@ def _spec(target_symbols: list[str] | None = None) -> StrategySpec:
 
 
 def test_mid_series_trigger_fills_at_next_bar_open():
+    # Distinct timestamps per bar so entry_date can only match if it is
+    # derived from the fill bar (index 2), not the trigger bar (index 1).
     bars = {
         "AAA": [
-            _bar(90, 90, 90, 90),
-            _bar(101, 101, 101, 101),
-            _bar(102, 103, 101, 102),
-            _bar(103, 104, 102, 103),
+            _bar(90, 90, 90, 90, ts="2024-01-01T00:00:00"),
+            _bar(101, 101, 101, 101, ts="2024-01-02T00:00:00"),
+            _bar(102, 103, 101, 102, ts="2024-01-03T00:00:00"),
+            _bar(103, 104, 102, 103, ts="2024-01-04T00:00:00"),
         ]
     }
     out = replay_entry_rules(_spec(), bars)
@@ -73,7 +76,7 @@ def test_mid_series_trigger_fills_at_next_bar_open():
     assert fill.entry_bar == 2
     assert fill.entry_price == 102
     assert fill.entry_rule_index == 0
-    assert fill.entry_date == "2024-01-01"
+    assert fill.entry_date == "2024-01-03"  # the fill bar's date, not the trigger bar's
 
 
 def test_trigger_on_final_bar_produces_no_record():
@@ -136,6 +139,30 @@ def test_empty_bar_sequence_is_skipped_without_error():
     assert replay_entry_rules(_spec(), {"AAA": []}) == []
 
 
+def test_symbols_replay_independently():
+    # BBB's closes never cross the rule's 100.0 threshold, so only AAA fills —
+    # proves each symbol is evaluated against its own bar sequence, not a
+    # shared/aggregated one.
+    bars = {
+        "AAA": [_bar(90, 90, 90, 90), _bar(101, 101, 101, 101), _bar(102, 103, 101, 102)],
+        "BBB": [_bar(50, 50, 50, 50), _bar(51, 51, 51, 51), _bar(52, 52, 52, 52)],
+    }
+    out = replay_entry_rules(_spec(), bars)
+    assert [(f.symbol, f.entry_bar) for f in out] == [("AAA", 2)]
+
+
+def test_suppression_is_per_symbol():
+    # Both symbols trigger on bar 0 and stay above threshold afterward; if
+    # suppression state were accidentally shared across symbols, BBB would
+    # produce no fill once AAA's suppression "latched".
+    bars = {
+        "AAA": [_bar(101, 101, 101, 101), _bar(102, 102, 102, 102), _bar(103, 103, 103, 103)],
+        "BBB": [_bar(101, 101, 101, 101), _bar(102, 102, 102, 102), _bar(103, 103, 103, 103)],
+    }
+    out = replay_entry_rules(_spec(), bars)
+    assert sorted((f.symbol, f.entry_bar) for f in out) == [("AAA", 1), ("BBB", 1)]
+
+
 # ---------------------------------------------------------------------------
 # ReferenceEntryFill.__post_init__
 # ---------------------------------------------------------------------------
@@ -176,3 +203,9 @@ def test_reference_entry_fill_rejects_invalid_entry_price(bad_price):
 def test_reference_entry_fill_rejects_invalid_side():
     with pytest.raises(ValueError, match="side"):
         ReferenceEntryFill(**{**_valid_kwargs(), "side": "sideways"})
+
+
+def test_reference_entry_fill_is_frozen():
+    fill = ReferenceEntryFill(**_valid_kwargs())
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        fill.entry_price = 200.0

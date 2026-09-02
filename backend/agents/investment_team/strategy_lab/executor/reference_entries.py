@@ -182,6 +182,9 @@ def replay_entry_rules(
                     symbol=symbol,
                     side=rule.side,
                     entry_bar=entry_bar,
+                    # ``Bar.timestamp`` is ISO-8601 (contract.py's own docstring),
+                    # so its first 10 characters are always the date, matching
+                    # production's identical ``pos.entry_timestamp[:10]`` truncation.
                     entry_date=fill_bar.timestamp[:10],
                     entry_rule_index=rule_idx,
                     entry_price=open_px,
