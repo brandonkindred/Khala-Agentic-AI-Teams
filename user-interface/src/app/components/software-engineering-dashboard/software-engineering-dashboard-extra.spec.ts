@@ -147,12 +147,14 @@ describe('SoftwareEngineeringDashboardComponent (extra coverage)', () => {
     it('ngOnDestroy clears a pending focus timer', () => {
       fixture.detectChanges();
       vi.useFakeTimers();
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
       component.showNewProject();
       fixture.detectChanges();
       const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
       component.ngOnDestroy();
-      expect(clearTimeoutSpy).toHaveBeenCalled();
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(setTimeoutSpy.mock.results[0]?.value);
       clearTimeoutSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
       expect(() => vi.runAllTimers()).not.toThrow();
     });
   });
