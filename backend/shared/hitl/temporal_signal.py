@@ -217,9 +217,11 @@ class HitlAnswerSignalMixin:
         Postconditions:
             - A payload that is not a dict, or whose ``"answers"`` value fails
               :func:`_validate_answer_batch` (missing, not a list, or any
-              element malformed), is ignored: returns without any side
-              effect, leaving the workflow's paused state exactly as it was
-              (fails closed rather than resuming with partial content).
+              element malformed), is ignored: returns without mutating any
+              workflow state — the only action taken is the operator
+              diagnostic log described at the end of this docstring — leaving
+              the workflow's paused state exactly as it was (fails closed
+              rather than resuming with partial content).
             - When no pause is currently active
               (``self._active_resume_token is None``), a well-formed payload is
               treated as an early arrival for a pause not yet armed: a
