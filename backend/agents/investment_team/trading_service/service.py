@@ -1919,6 +1919,18 @@ class _EngineEntryDispatcher:
             return
         sym = cur_bar.symbol
         if portfolio.positions.get(sym) is not None:
+            # Entry evaluation dropped because the symbol already has an open
+            # position. Bump a counter AND record an event so a zero/sparse-trade
+            # run driven by concurrency-limiting is distinguishable in the final
+            # category/summary from a dead entry predicate ("no signal").
+            result.execution_diagnostics.already_in_position_skips += 1
+            _record_event(
+                result.execution_diagnostics,
+                "already_in_position_skip",
+                timestamp=cur_bar.timestamp,
+                symbol=sym,
+                detail="entry evaluation skipped: symbol already has an open position",
+            )
             return
         if any(
             req.symbol == sym and req.side in (OrderSide.LONG, OrderSide.SHORT)

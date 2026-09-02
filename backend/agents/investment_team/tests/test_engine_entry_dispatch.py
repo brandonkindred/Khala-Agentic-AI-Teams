@@ -175,6 +175,30 @@ def test_maybe_emit_records_risk_capped_skip_when_position_cap_zeroes_entry():
     assert any(e.event_type == "risk_capped_skip" for e in events)
 
 
+def test_maybe_emit_records_already_in_position_skip_when_position_open():
+    """A matched-would-be entry signal for a symbol that already has an open
+    position is recorded as an 'already_in_position_skip' diagnostic event
+    rather than a silent no-emit, so a zero-trade run is explainable."""
+    rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
+    dispatcher = _EngineEntryDispatcher(
+        entry_rules=rules,
+        sizing=FixedFractionSizing(fraction=0.10),
+    )
+    pending: list = []
+    result = TradingServiceResult()
+    dispatcher.maybe_emit(
+        cur_bar=_make_bar(close=100.0),
+        portfolio=_make_portfolio(positions={"AAA": MagicMock()}),
+        pending_for_prev=pending,
+        views={"AAA": _build_view([80.0, 90.0, 100.0])},
+        result=result,
+    )
+    assert len(pending) == 0
+    assert result.execution_diagnostics.already_in_position_skips == 1
+    events = result.execution_diagnostics.last_order_events
+    assert any(e.event_type == "already_in_position_skip" for e in events)
+
+
 def test_zero_trade_category_distinguishes_risk_capped_from_no_orders():
     """A zero-trade run where every matched signal was risk-sized to zero is
     categorized ALL_ENTRIES_RISK_CAPPED (not the generic NO_ORDERS_EMITTED), so
