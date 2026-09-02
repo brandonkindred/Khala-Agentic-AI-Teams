@@ -217,8 +217,20 @@ def test_start_coding_team_workflow_rejects_token_in_plan_input(monkeypatch):
         "Authorization",
         "api_key",
         "API-KEY",
+        # Unseparated spellings: substring matching is literal, so "apikey"
+        # contains neither "api_key" nor "api-key" and needs its own marker.
+        "apikey",
+        "APIKey",
+        "x-apikey",
         "client_secret",
         "password",
+        # "passphrase" does NOT contain "password" -- a separate marker.
+        "passphrase",
+        "ssh_passphrase",
+        # GitHub App signing keys / SSH PEMs.
+        "private_key",
+        "PRIVATE_KEY",
+        "app_private_key",
         "credentials",
     ],
 )

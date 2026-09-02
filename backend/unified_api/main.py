@@ -1476,17 +1476,70 @@ async def list_teams() -> dict[str, Any]:
 
 _JOB_SERVICE_URL = os.environ.get("JOB_SERVICE_URL", "http://job-service:8085")
 
+# Job-record fields that hold a credential and must never leave this API, even
+# as ciphertext. Teams persist these on the job row so a worker can resume the
+# job after its orchestrator thread dies (see the software-engineering team's
+# ``github_token_encrypted``); every legitimate reader loads them from the job
+# SERVICE directly through ``JobServiceClient``, never from these proxy routes'
+# responses. Echoing the ciphertext here would instead spray it across every
+# job reader, their client caches, intermediary proxies and access logs for no
+# consumer's benefit — the classic "encrypted, so it's fine to expose" trap:
+# ciphertext at rest is a different threat model from ciphertext in transit to
+# arbitrary readers.
+_REDACTED_JOB_FIELDS = frozenset({"github_token_encrypted"})
+
+
+def _redact_job_secrets(payload: Any) -> Any:
+    """Strip :data:`_REDACTED_JOB_FIELDS` from a job-service response body.
+
+    Preconditions:
+        - ``payload`` is a decoded job-service JSON body. The two shapes these
+          proxy routes see are ``{"jobs": [<job>, ...]}`` (list) and
+          ``{"job": <job>}`` (single); any other shape is returned untouched
+          rather than guessed at.
+    Postconditions:
+        - Returns a payload identical to ``payload`` except that every job dict
+          reachable under ``"jobs"``/``"job"`` has each
+          :data:`_REDACTED_JOB_FIELDS` key REMOVED (removed, not blanked, so a
+          client cannot tell a redacted value from an absent one and no caller
+          can mistake a placeholder for a usable token).
+        - Never mutates ``payload`` in place; job dicts are copied. Never
+          raises on an unexpected shape.
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    def _clean(job: Any) -> Any:
+        if not isinstance(job, dict):
+            return job
+        if not _REDACTED_JOB_FIELDS.intersection(job):
+            return job
+        return {k: v for k, v in job.items() if k not in _REDACTED_JOB_FIELDS}
+
+    redacted = dict(payload)
+    if isinstance(payload.get("jobs"), list):
+        redacted["jobs"] = [_clean(job) for job in payload["jobs"]]
+    if "job" in payload:
+        redacted["job"] = _clean(payload["job"])
+    return redacted
+
 
 @app.get("/api/jobs/{team}", tags=["jobs"])
 async def list_team_jobs(team: str, running_only: bool = False) -> dict[str, Any]:
-    """List all jobs for a team via the job service."""
+    """List all jobs for a team via the job service.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from each job record (see
+          :func:`_redact_job_secrets`); everything else is forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=15.0) as client:
         url = f"{_JOB_SERVICE_URL}/jobs/{team}"
         if running_only:
             url += "?statuses=pending&statuses=running"
         resp = await client.get(url)
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.get("/api/se/metrics", tags=["software", "observability"])
@@ -1552,7 +1605,7 @@ async def cancel_job(team: str, job_id: str) -> dict[str, Any]:
             json={"heartbeat": False, "fields": {"status": "cancelled", "error": "Cancelled by user"}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/{job_id}/interrupt", tags=["jobs"])
@@ -1564,7 +1617,7 @@ async def interrupt_job(team: str, job_id: str) -> dict[str, Any]:
             json={"heartbeat": False, "fields": {"status": "interrupted", "error": "Marked interrupted by user"}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/{job_id}/resume", tags=["jobs"])
@@ -1576,7 +1629,7 @@ async def resume_job(team: str, job_id: str) -> dict[str, Any]:
             json={"heartbeat": True, "fields": {"status": "running", "error": None}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/{job_id}/restart", tags=["jobs"])
@@ -1588,7 +1641,7 @@ async def restart_job(team: str, job_id: str) -> dict[str, Any]:
             json={"heartbeat": True, "fields": {"status": "pending", "error": None}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/mark-all-interrupted", tags=["jobs"])

@@ -136,6 +136,30 @@ def _git(
 RESCUE_BRANCH_PREFIX = "khala/rescue/"
 ACTIVE_ISSUE_CONFIG_KEY = "khala.active-issue"
 
+# Single source of truth for the per-issue INTEGRATION BRANCH name (the branch the
+# coding team commits an issue's work to and opens its PR from). Both places that
+# build one -- the route that dispatches a GitHub-issue run
+# (``api/routes/github.py``) and the thread-mode github-hook flow
+# (``api/orchestration.py``) -- go through :func:`integration_branch_for`, so the
+# two spellings cannot drift apart. Distinct from the per-issue CHECKOUT DIRECTORY
+# name (``clone_workspace.PER_ISSUE_DIR_TEMPLATE``, ``issue-<N>``): that is a
+# filesystem path segment with no ``khala/`` namespace, so the two are deliberately
+# NOT shared. Every other module takes the branch as an ``integration_branch``
+# parameter and never reconstructs or parses it.
+INTEGRATION_BRANCH_PREFIX = "khala/issue-"
+
+
+def integration_branch_for(issue_number: int) -> str:
+    """Return the integration-branch name the coding team uses for ``issue_number``.
+
+    Preconditions:
+        - ``issue_number`` is a GitHub issue number (a positive integer).
+    Postconditions:
+        - Returns ``f"{INTEGRATION_BRANCH_PREFIX}{issue_number}"``. Pure; never
+          raises.
+    """
+    return f"{INTEGRATION_BRANCH_PREFIX}{issue_number}"
+
 
 def _utc_timestamp() -> str:
     """Wall-clock UTC stamp used in rescue branch names (patchable in tests)."""

@@ -77,6 +77,62 @@ def test_list_team_jobs_running_only_adds_status_filters(monkeypatch: pytest.Mon
     assert "statuses=running" in seen["url"]
 
 
+def test_list_team_jobs_redacts_encrypted_github_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The persisted resume credential never leaves this API, even as ciphertext.
+
+    Teams store ``github_token_encrypted`` on the job row so a worker can resume
+    after its orchestrator thread dies; every legitimate reader loads it from the
+    job SERVICE directly, never from this proxy's response. Forwarding it here
+    would spray the ciphertext across every job reader, their caches and any
+    intermediary's access logs for no consumer's benefit.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "jobs": [
+                    {"job_id": "abc", "status": "running", "github_token_encrypted": "gAAAAAsecret"},
+                    {"job_id": "def", "status": "completed"},
+                ]
+            },
+        )
+
+    _patch_async_client(monkeypatch, handler)
+    resp = client.get("/api/jobs/software-engineering")
+    assert resp.status_code == 200
+    jobs = resp.json()["jobs"]
+    # Removed outright, not blanked: a placeholder could be mistaken for a value.
+    assert "github_token_encrypted" not in jobs[0]
+    assert "gAAAAAsecret" not in resp.text
+    # Every other field is still forwarded verbatim, and a job without the
+    # field is untouched.
+    assert jobs[0] == {"job_id": "abc", "status": "running"}
+    assert jobs[1] == {"job_id": "def", "status": "completed"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["cancel", "interrupt", "resume", "restart"],
+)
+def test_single_job_routes_redact_encrypted_github_token(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    """The single-job mutation proxies echo a whole job record too, so they get the
+    same redaction as the list route -- redacting only the list would leave four
+    equivalent leaks open."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"job": {"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}},
+        )
+
+    _patch_async_client(monkeypatch, handler)
+    resp = client.post(f"/api/jobs/software-engineering/abc/{path}")
+    assert resp.status_code == 200
+    assert resp.json() == {"job": {"job_id": "abc"}}
+    assert "gAAAAAsecret" not in resp.text
+
+
 def test_delete_job_forwards_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """DELETE /api/jobs/{team}/{job_id} issues a DELETE against the job service."""
     seen = {}

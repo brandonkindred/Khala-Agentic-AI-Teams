@@ -260,9 +260,14 @@ def _running_sibling_on_checkout(
     Preconditions:
         - ``own_job_id``, when given, is the calling job's OWN id (excluded
           from the scan so a job never reports itself as its own sibling).
-          Omit it (``None``) for a pure pre-check with no job created yet —
+          Omit it (``None``) for a pre-check with no job created yet —
           there is nothing to exclude, so callers no longer need a sentinel
-          string like ``"<not-yet-created>"`` to stand in for one.
+          string like ``"<not-yet-created>"`` to stand in for one. Note this
+          is a pre-check, NOT a side-effect-free one: EVERY invocation,
+          ``own_job_id=None`` included, may best-effort mark a
+          crash-orphaned child job ``failed`` via
+          :func:`_mark_orphaned_child_failed` — see the Postconditions'
+          orphan branch below.
         - Callers needing atomicity against a concurrent admission (another
           worker starting a job on the same checkout between this scan and
           the caller's own job creation) must hold :func:`_checkout_admission`

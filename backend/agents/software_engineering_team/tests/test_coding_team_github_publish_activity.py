@@ -211,26 +211,36 @@ def _stub_push_paths(
     """
     fast_forwards: list[tuple[str, str, str]] = []
     pushes: list[tuple[str, str, str, str]] = []
-    monkeypatch.setattr(
-        api,
-        "_fast_forward",
-        lambda path, branch, source: fast_forwards.append((path, branch, source)) or (True, None),
-    )
-    monkeypatch.setattr(
-        api,
-        "_push_branch",
-        lambda path, remote, branch, token: (
-            pushes.append((path, remote, branch, token)) or (True, None)
-        ),
-    )
+
+    # Named closures rather than ``lst.append(...) or (True, None)`` lambdas:
+    # that idiom works only because ``list.append`` happens to return ``None``,
+    # so the stub's return value is coupled to an incidental property of the
+    # recording call -- an edit to the append would silently change what the
+    # stub returns. Same treatment the sibling
+    # ``test_coding_team_github_pr_publish_activity`` file's ``_fake_push``
+    # already uses.
+    def fake_fast_forward(path: str, branch: str, source: str) -> tuple[bool, None]:
+        """Record the fast-forward call and report success."""
+        fast_forwards.append((path, branch, source))
+        return True, None
+
+    def fake_push_branch(path: str, remote: str, branch: str, token: str) -> tuple[bool, None]:
+        """Record the push call and report success."""
+        pushes.append((path, remote, branch, token))
+        return True, None
+
+    monkeypatch.setattr(api, "_fast_forward", fake_fast_forward)
+    monkeypatch.setattr(api, "_push_branch", fake_push_branch)
     return fast_forwards, pushes
 
 
 def _publish_request() -> dict[str, Any]:
-    """The ``github_pr_publish_activity`` request payload shared by the
-    existing-head-push happy-path and partial-failure tests below — both
-    exercise the same PR/branch/remote, differing only in the job's
-    task_graph_snapshot."""
+    """The ``github_pr_publish_activity`` request payload shared by the tests below.
+
+    Shared by the existing-head-push happy-path and partial-failure tests —
+    both exercise the same PR/branch/remote, differing only in the job's
+    ``task_graph_snapshot``.
+    """
     return {
         "job_id": "job-1",
         "owner": "acme",

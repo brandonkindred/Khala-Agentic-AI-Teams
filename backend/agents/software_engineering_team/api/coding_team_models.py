@@ -157,8 +157,8 @@ class JobListItem(BaseModel):
 class RunFromGitHubRequest(BaseModel):
     """Request body for POST /run-from-github."""
 
-    owner: str = Field(..., description="GitHub repository owner (user or org)")
-    repo: str = Field(..., description="GitHub repository name")
+    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
+    repo: str = Field(..., min_length=1, description="GitHub repository name")
     repo_path: str = Field(..., description="Local checkout the implementation teams work in")
     label: Optional[str] = Field(default=None, description="Optional label filter")
     issue_number: Optional[int] = Field(
@@ -195,8 +195,8 @@ class RunFromGitHubResponse(BaseModel):
 class GroomGithubIssuesRequest(BaseModel):
     """Request body for POST /groom-github-issues."""
 
-    owner: str = Field(..., description="GitHub repository owner (user or org)")
-    repo: str = Field(..., description="GitHub repository name")
+    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
+    repo: str = Field(..., min_length=1, description="GitHub repository name")
     issue_number: int = Field(..., description="Issue to groom")
     github_token: Optional[str] = Field(
         default=None,
@@ -214,8 +214,8 @@ class GroomGithubIssuesResponse(BaseModel):
 class ReviewPrRequest(BaseModel):
     """Request body for POST /review-pr."""
 
-    owner: str = Field(..., description="GitHub repository owner (user or org)")
-    repo: str = Field(..., description="GitHub repository name")
+    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
+    repo: str = Field(..., min_length=1, description="GitHub repository name")
     repo_path: str = Field(
         default="",
         description="Local checkout path, accepted for parity with /run-from-github. "
@@ -257,8 +257,8 @@ class AddressCommentsRequest(BaseModel):
     then move the PR to "waiting for review".
     """
 
-    owner: str = Field(..., description="GitHub repository owner (user or org)")
-    repo: str = Field(..., description="GitHub repository name")
+    owner: str = Field(..., min_length=1, description="GitHub repository owner (user or org)")
+    repo: str = Field(..., min_length=1, description="GitHub repository name")
     repo_path: str = Field(
         default="",
         description="Local checkout path, accepted for parity with /review-pr.",
@@ -479,8 +479,8 @@ class CreateEnhancedIssuesRequest(BaseModel):
     proposal_ids: List[str] = Field(
         description="Composite ids of the form 'job_id:proposal_id' identifying which proposals to file."
     )
-    owner: str = Field(description="Repository owner (validated against stored review).")
-    repo: str = Field(description="Repository name (validated against stored review).")
+    owner: str = Field(min_length=1, description="Repository owner (validated against stored review).")
+    repo: str = Field(min_length=1, description="Repository name (validated against stored review).")
     github_token: Optional[str] = Field(
         default=None, description="Overrides GITHUB_TOKEN env var for this request."
     )

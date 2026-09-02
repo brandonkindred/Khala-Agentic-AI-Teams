@@ -23,6 +23,8 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def _pr_publish():
+    """Return ``github_pr_publish_activity``, imported lazily so the ``api`` fixture's
+    module stubbing is already in place when the activity module is first loaded."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_pr_publish_activity,
     )
@@ -31,6 +33,8 @@ def _pr_publish():
 
 
 def _branch_prep():
+    """Return ``github_branch_prep_activity``, imported lazily for the same reason
+    as :func:`_pr_publish`."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
     )
@@ -39,6 +43,8 @@ def _branch_prep():
 
 
 def _base_request(**overrides: Any) -> dict[str, Any]:
+    """A minimal VALID activity request, with ``overrides`` merged over it so each
+    test states only the one field it is exercising."""
     req = {
         "job_id": "job-1",
         "repo_path": "/repo",
@@ -50,6 +56,13 @@ def _base_request(**overrides: Any) -> dict[str, Any]:
 
 
 def _stub_token(monkeypatch: pytest.MonkeyPatch, api: Any) -> None:
+    """Stub the job lookup and force the plain ``GITHUB_TOKEN`` env-var token path.
+
+    ``INTEGRATION_ENCRYPTION_KEY`` is DELETED, not just left unset: the activities
+    resolve a token from the job's ``github_token_encrypted`` FIRST and only fall
+    back to the env var, so a key leaking in from the ambient environment would
+    change which branch these tests exercise.
+    """
     monkeypatch.setattr(api, "get_job", lambda job_id, cache_dir=None: {"job_id": job_id})
     monkeypatch.setenv("GITHUB_TOKEN", "env-pat")
     monkeypatch.delenv("INTEGRATION_ENCRYPTION_KEY", raising=False)

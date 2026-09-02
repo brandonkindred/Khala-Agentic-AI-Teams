@@ -1201,6 +1201,14 @@ class GitHubClient(_GitHubHttpMixin):
                     )
                 if not isinstance(node, dict):
                     if not strict:
+                        logger.warning(
+                            "_iter_review_thread_nodes: skipping invalid review-thread node "
+                            "for %s/%s#%s: %r",
+                            owner,
+                            repo,
+                            number,
+                            node,
+                        )
                         continue
                     raise ReviewThreadsUnavailableError(
                         owner, repo, number, "invalid review-thread node"
@@ -1215,6 +1223,14 @@ class GitHubClient(_GitHubHttpMixin):
                             "review-thread node has a missing or invalid id "
                             f"(expected non-empty str, got {thread_id!r})",
                         )
+                    logger.warning(
+                        "_iter_review_thread_nodes: review-thread node for %s/%s#%s has a "
+                        "missing or invalid id (%r); yielding it with a None id",
+                        owner,
+                        repo,
+                        number,
+                        thread_id,
+                    )
                     thread_id = None
                 is_resolved_raw = node.get("isResolved")
                 if strict and not isinstance(is_resolved_raw, bool):
@@ -1229,6 +1245,15 @@ class GitHubClient(_GitHubHttpMixin):
                 comments = node.get("comments")
                 if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list):
                     if not strict:
+                        logger.warning(
+                            "_iter_review_thread_nodes: invalid review-thread comments payload "
+                            "for %s/%s#%s (thread %r): %r; yielding no comment ids",
+                            owner,
+                            repo,
+                            number,
+                            thread_id,
+                            comments,
+                        )
                         yield thread_id, is_resolved, ()
                         continue
                     raise ReviewThreadsUnavailableError(
@@ -1253,6 +1278,15 @@ class GitHubClient(_GitHubHttpMixin):
                         comment.get("databaseId"), int
                     ):
                         if not strict:
+                            logger.warning(
+                                "_iter_review_thread_nodes: skipping review comment with a "
+                                "missing or invalid databaseId for %s/%s#%s (thread %r): %r",
+                                owner,
+                                repo,
+                                number,
+                                thread_id,
+                                comment,
+                            )
                             continue
                         raise ReviewThreadsUnavailableError(
                             owner, repo, number, "review comment missing databaseId"

@@ -33,9 +33,33 @@ from typing import AsyncIterator
 
 from shared.concurrency.flock_lock import flock_lock
 
-__all__ = ["held_checkout_lock"]
+__all__ = ["CloneLockAcquisitionError", "held_checkout_lock"]
 
 logger = logging.getLogger(__name__)
+
+
+class CloneLockAcquisitionError(OSError):
+    """Raised by :func:`held_checkout_lock` when ACQUIRING the checkout lock fails.
+
+    Exists so callers can tell "this checkout's serialization lock could not be
+    taken" (a local, transient, retryable condition worth a 503) apart from every
+    OTHER ``OSError`` that can escape the ``async with`` body -- a missing git
+    binary, a permission error writing the checkout, a full disk, or an
+    ``aiohttp.ClientOSError`` from an upstream HTTP call, none of which are lock
+    problems and none of which are necessarily retryable. Without this
+    distinction a caller wrapping the whole block in ``except OSError`` can only
+    guess, and would mislabel all of them as lock failures.
+
+    Subclasses ``OSError`` deliberately: the previously documented contract was
+    that acquisition failures propagate AS ``OSError``, and existing callers
+    catching that keep working unchanged. Callers wanting the distinction catch
+    this class BEFORE their generic ``OSError`` handler.
+
+    Invariants:
+        - Only ever raised for an acquisition failure (``mkdir`` or ``flock``),
+          never for anything raised by the ``async with`` body.
+        - The originating ``OSError`` is always attached as ``__cause__``.
+    """
 
 
 @asynccontextmanager
@@ -68,10 +92,14 @@ async def held_checkout_lock(
 
     Postconditions:
         - When acquisition (mkdir or flock) fails with an ``OSError`` and
-          ``platform_owned`` is True, the ``OSError`` propagates to the
-          caller and the block's body never runs -- callers map it to
-          whatever failure response fits their context (this helper is
-          intentionally HTTP-agnostic).
+          ``platform_owned`` is True, it propagates to the caller wrapped in
+          :class:`CloneLockAcquisitionError` (itself an ``OSError``, with the
+          original attached as ``__cause__``) and the block's body never runs
+          -- callers map it to whatever failure response fits their context
+          (this helper is intentionally HTTP-agnostic). The wrapper type is
+          what lets a caller distinguish a genuine lock-acquisition failure
+          from an unrelated ``OSError`` escaping the body, which its own
+          generic ``except OSError`` would otherwise mislabel as one.
         - When acquisition fails with an ``OSError`` and ``platform_owned``
           is False (an operator-pinned checkout), the failure degrades to no
           additional locking: a warning is logged (tagged with
@@ -123,7 +151,10 @@ async def held_checkout_lock(
             lock_acquired = True
         except OSError as e:
             if platform_owned:
-                raise
+                # Wrapped, not re-raised bare: callers wrap the whole `async
+                # with` body in an OSError handler, and only THIS failure is a
+                # lock-acquisition problem.
+                raise CloneLockAcquisitionError(f"could not acquire checkout lock {lock_path}: {e}") from e
             logger.warning(
                 "%s: could not acquire serialization lock for pinned checkout %s (%s/%s); proceeding without it: %s",
                 log_prefix,

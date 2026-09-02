@@ -15,6 +15,7 @@ from software_engineering_team.api.coding_team_models import (
     RunFromGitHubRequest,
     RunFromGitHubResponse,
 )
+from software_engineering_team.api.git_ops import integration_branch_for
 from software_engineering_team.api.routes._common import (
     raise_if_checkout_occupied,
     resolve_github_token,
@@ -249,7 +250,7 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # remote-supplied text, per ``_fail_new_job``'s safe-to-disclose contract.
             logger.error("Unable to resolve base branch head sha: %s", base_sha_or_err)
             _fail_new_job(job_id, 502, "unable to resolve base branch head sha")
-        integration_branch = f"khala/issue-{issue.number}"
+        integration_branch = integration_branch_for(issue.number)
         try:
             start_coding_team_workflow(
                 job_id,

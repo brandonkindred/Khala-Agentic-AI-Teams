@@ -127,7 +127,7 @@ def test_fetch_url_lookup_failure_fails_closed(monkeypatch) -> None:
 def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:
     """A GHES checkout (whose fetch/push URLs use the enterprise host, not
     github.com) validates when the caller passes its own `expected_host`."""
-    _patch_git(
+    calls = _patch_git(
         monkeypatch,
         {
             ("remote", "get-url", "origin"): (0, "https://ghes.example.com/acme/widget.git"),
@@ -144,6 +144,12 @@ def test_expected_host_is_threaded_through_to_both_checks(monkeypatch) -> None:
         )
         is True
     )
+    # Both halves of this test's name: asserting only the boolean would still
+    # pass if a regression made the push-URL check be SKIPPED whenever
+    # expected_host is supplied (returning True off the fetch comparison
+    # alone), silently eroding the guarantee. Pin that the push lookup was
+    # actually issued.
+    assert ("remote", "get-url", "--push", "--all", "origin") in calls
     # Without the expected_host override, the same GHES remote fails against
     # the github.com default.
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
@@ -173,9 +179,11 @@ def test_ssh_fetch_and_https_push_url_both_match(monkeypatch) -> None:
     format-agnostic (scp-style SSH vs. HTTPS) as long as host/owner/repo agree
     -- so a fetch URL in one form and a push URL in the other, both naming the
     same repo, must still validate. This pins that real behavior rather than
-    guessing it: every other test in this file happens to use byte-identical
-    fetch/push URLs, which can't distinguish exact-string comparison from this
-    owner/repo-aware comparison."""
+    guessing it: no other test in this file pairs an scp-style SSH fetch URL
+    with an HTTPS push URL, so only this one shows the comparison is
+    format-agnostic rather than exact-string. (The neighbouring
+    missing-`.git`-suffix case is pinned separately by
+    `test_missing_git_suffix_on_push_url_still_matches`.)"""
     _patch_git(
         monkeypatch,
         {

@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Sequence, Set, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -126,13 +126,35 @@ RetryResolveEntry = Tuple[str, int]
 # into the retry-resolve path meant only for confirmed RetryResolveEntry values.
 AmbiguousThreadEntry = Tuple[str, int]
 ThreadHistoryByCommentId = Dict[int, List[ReviewComment]]
-UnresolvedCommentsResult = Tuple[
-    List[ReviewComment],
-    Dict[int, ReviewThread],
-    List[RetryResolveEntry],
-    ThreadHistoryByCommentId,
-    List[AmbiguousThreadEntry],
-]
+
+
+class UnresolvedCommentsResult(NamedTuple):
+    """One PR's unresolved-review-comment snapshot, as returned by :func:`_unresolved_comments`.
+
+    A ``NamedTuple`` rather than a bare 5-tuple alias: the two production call
+    sites (this module's ``_run_address_comments`` worker and the admission
+    check in ``api/routes/reviews.py``) consume DIFFERENT subsets of the five
+    values, so a positional unpack made the field ORDER an implicit contract
+    shared across modules — reordering or inserting a field would silently
+    rebind the wrong values at a call site instead of failing. Named access
+    makes that contract explicit and checkable. Tuple unpacking still works,
+    so existing positional call sites (the test suite's, chiefly) are
+    unaffected.
+
+    Invariants:
+        - ``retry_resolve_threads`` and ``ambiguous_threads`` are disjoint: a
+          thread with no unaddressed follow-up lands in exactly one of them,
+          depending on whether persisted resolve-failure evidence exists for
+          it — never in both.
+
+    See :func:`_unresolved_comments` for each field's full contract.
+    """
+
+    comments: List[ReviewComment]
+    thread_by_comment_id: Dict[int, ReviewThread]
+    retry_resolve_threads: List[RetryResolveEntry]
+    thread_history_by_comment_id: ThreadHistoryByCommentId
+    ambiguous_threads: List[AmbiguousThreadEntry]
 
 
 def _is_khala_authored(comment: ReviewComment, authenticated_login: str) -> bool:
@@ -314,8 +336,10 @@ def _unresolved_comments(
     Preconditions:
         - ``client`` is a live :class:`GitHubClient`; ``pr_number`` names an open PR.
     Postconditions:
-        - Returns ``(comments, thread_by_comment_id, retry_resolve_threads,
-          thread_history_by_comment_id, ambiguous_threads)``.
+        - Returns an :class:`UnresolvedCommentsResult` — a ``NamedTuple``
+          carrying ``(comments, thread_by_comment_id, retry_resolve_threads,
+          thread_history_by_comment_id, ambiguous_threads)`` in that order,
+          readable either positionally or by name.
         - ``comments`` has AT MOST ONE entry per unresolved thread — its LATEST
           message in GitHub's response order — even when the thread carries
           multiple messages; a thread's replies share the same underlying issue,
@@ -606,12 +630,12 @@ def _unresolved_comments(
         # thread. Either way it is the current concern to triage.
         unresolved.append(latest)
         thread_history_by_comment_id[latest.id] = messages
-    return (
-        unresolved,
-        thread_by_comment_id,
-        retry_resolve_threads,
-        thread_history_by_comment_id,
-        ambiguous_threads,
+    return UnresolvedCommentsResult(
+        comments=unresolved,
+        thread_by_comment_id=thread_by_comment_id,
+        retry_resolve_threads=retry_resolve_threads,
+        thread_history_by_comment_id=thread_history_by_comment_id,
+        ambiguous_threads=ambiguous_threads,
     )
 
 
@@ -2326,13 +2350,12 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
             # already guards: a `None` `pr_remote` raises there rather than
             # silently reusing a stale non-None value.
             pr_remote = _pr_head_remote(owner, repo, pr, client.web_host)
-            (
-                unresolved,
-                thread_by_comment_id,
-                retry_resolve_threads,
-                thread_history_by_comment_id,
-                ambiguous_threads,
-            ) = _unresolved_comments(client, owner, repo, pr_number)
+            snapshot = _unresolved_comments(client, owner, repo, pr_number)
+            unresolved = snapshot.comments
+            thread_by_comment_id = snapshot.thread_by_comment_id
+            retry_resolve_threads = snapshot.retry_resolve_threads
+            thread_history_by_comment_id = snapshot.thread_history_by_comment_id
+            ambiguous_threads = snapshot.ambiguous_threads
 
             if unresolved or ambiguous_threads:
                 # New, actionable feedback is about to be worked through — a
@@ -2638,13 +2661,11 @@ def _run_address_comments(job_id: str, request: AddressCommentsRequest, token: s
                 }
 
                 try:
-                    (
-                        fresh_unresolved,
-                        _tbc,
-                        fresh_retry,
-                        fresh_history_by_comment_id,
-                        fresh_ambiguous,
-                    ) = _unresolved_comments(client, owner, repo, pr_number)
+                    fresh = _unresolved_comments(client, owner, repo, pr_number)
+                    fresh_unresolved = fresh.comments
+                    fresh_retry = fresh.retry_resolve_threads
+                    fresh_history_by_comment_id = fresh.thread_history_by_comment_id
+                    fresh_ambiguous = fresh.ambiguous_threads
                     blocking = [
                         c
                         for c in fresh_unresolved

@@ -27,18 +27,26 @@ _COMMENT_WORKFLOW_TIMEOUT_S = 4 * 60 * 60
 # (``authorization``, ``api_key``, ``secret``, ``password``, ``credential``)
 # must be refused at dispatch too rather than relying on every caller
 # remembering to spell it "token". Matched case-insensitively as a substring,
-# so ``API-KEY``, ``x_api_key`` and ``github_token`` all hit. None of the keys
-# the real payloads carry (``github``: owner/repo/issue_number/issue_title/
-# remote/base/integration_branch/expected_base_sha/expected_head_sha/
-# pr_number/pr_url/publish_mode/cleanup_checkout_on_success; ``plan_input``:
-# the fixed ``CodingTeamPlanInput`` fields) contains any of these markers, so
-# broadening cannot false-positive on a legitimate dispatch.
+# so ``API-KEY``, ``x_api_key`` and ``github_token`` all hit. ``apikey`` is
+# listed separately from ``api_key``/``api-key`` because substring matching is
+# literal: an unseparated ``apikey``/``APIKey`` spelling contains none of the
+# separated forms. ``private_key`` (a GitHub App signing key or an SSH PEM) and
+# ``passphrase`` (which does NOT contain ``password``) are likewise credentials
+# no other marker on this list would catch. None of the keys the real payloads
+# carry (``github``: owner/repo/issue_number/issue_title/remote/base/
+# integration_branch/expected_base_sha/expected_head_sha/pr_number/pr_url/
+# publish_mode/cleanup_checkout_on_success; ``plan_input``: the fixed
+# ``CodingTeamPlanInput`` fields) contains any of these markers, so broadening
+# cannot false-positive on a legitimate dispatch.
 _TOKEN_KEY_MARKERS = (
     "token",
     "secret",
     "password",
+    "passphrase",
     "api_key",
     "api-key",
+    "apikey",
+    "private_key",
     "authorization",
     "credential",
 )
@@ -162,12 +170,19 @@ def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, requi
           callers (``start_coding_team_workflow``) for which ``github`` is
           optional.
     Postconditions:
-        - Returns None when ``github`` passes validation: present as a
-          non-empty dict when ``required``; absent, or a dict (possibly
-          empty) containing no credential-named key (any
-          :data:`_TOKEN_KEY_MARKERS` substring — ``token``, ``secret``,
-          ``password``, ``api_key``/``api-key``, ``authorization``,
-          ``credential``) at any nesting depth, otherwise.
+        - Returns None when ``github`` passes validation. When ``required``,
+          that means exactly one shape: a non-empty dict carrying no
+          credential-named key. When NOT ``required``, it means any FALSY
+          ``github`` — ``None``, but also ``{}``, ``""``, ``0``, ``[]`` and
+          any other falsy value, since the non-dict guard is only reached for
+          a TRUTHY ``github`` — or a truthy dict carrying no credential-named
+          key. "Credential-named" is any :data:`_TOKEN_KEY_MARKERS` substring
+          (``token``, ``secret``, ``password``, ``passphrase``,
+          ``api_key``/``api-key``/``apikey``, ``private_key``,
+          ``authorization``, ``credential``) at any nesting depth. Accepting
+          falsy non-dicts here is harmless rather than a hole: a falsy value
+          carries no credential to leak, and every consumer treats it exactly
+          as it treats an absent ``github``.
     Raises:
         ValueError: ``required`` is True and ``github`` is not a non-empty
             dict; or ``github`` is truthy but not a ``dict`` (a bare truthy
@@ -301,7 +316,9 @@ def execute_coding_team_workflow(
             non-empty dict, ``plan_input`` is truthy but not a dict, or
             ``github`` or ``plan_input`` contains a ``"token"``-like key at
             any nesting depth (see :func:`_contains_token_key`).
-        RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result.
+        RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result; the
+            message names the observed type so the payload shape is diagnosable
+            from the error alone.
         Exception: Any other exception ``execute_workflow_sync`` itself raises
             (a Temporal RPC error, the workflow's own failure exception, a
             cancellation, etc.) propagates unchanged — this function does not
@@ -329,5 +346,7 @@ def execute_coding_team_workflow(
     )
     logger.info("CodingTeamWorkflow id=%s reached terminal result", workflow_id)
     if not isinstance(result, dict):
-        raise RuntimeError("CodingTeamWorkflow returned a non-dict result")
+        raise RuntimeError(
+            f"CodingTeamWorkflow returned a non-dict result: {type(result).__name__}"
+        )
     return result

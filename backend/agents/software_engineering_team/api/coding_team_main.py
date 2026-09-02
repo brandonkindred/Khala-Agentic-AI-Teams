@@ -81,6 +81,7 @@ from software_engineering_team.api.coding_team_state import (  # noqa: F401
 from software_engineering_team.api.git_ops import (  # noqa: F401
     _FORK_REMOTE_NAME,
     ACTIVE_ISSUE_CONFIG_KEY,
+    INTEGRATION_BRANCH_PREFIX,
     RESCUE_BRANCH_PREFIX,
     _checkout_remote_matches,
     _cleanup_issue_checkout,
@@ -105,6 +106,7 @@ from software_engineering_team.api.git_ops import (  # noqa: F401
     _utc_timestamp,
     _working_tree_dirty,
     _write_active_issue,
+    integration_branch_for,
     resolve_remote_branch_sha,
 )
 from software_engineering_team.api.orchestration import (  # noqa: F401

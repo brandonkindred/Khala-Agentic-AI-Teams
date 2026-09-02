@@ -2727,6 +2727,14 @@ class TestPrepareIssueBranch:
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
 
+        # Same end-state assertion the sibling success tests make
+        # (``test_clean_tree_succeeds``,
+        # ``test_expected_head_sha_matching_live_remote_tip_succeeds``):
+        # ``ok is True`` alone would still pass if a regression reported
+        # success without ever performing the checkout.
+        head = _current_branch(repo)
+        assert head == "khala/issue-9"
+
     def test_stale_expected_base_sha_rejected_before_dirty_tree_recovery(
         self, api, tmp_path
     ) -> None:
@@ -3718,6 +3726,52 @@ class TestFileContentsAndTree:
             return httpx.Response(200, json=[{"type": "file", "name": "a.py"}])
 
         content, missing = _client_with(handler).get_file_contents_detailed("o", "r", "pkg", "sha1")
+        assert content is None
+        assert missing is False
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {"type": "file", "encoding": "none", "content": "plain text"},
+                id="unsupported-encoding",
+            ),
+            pytest.param(
+                {"type": "file", "encoding": "base64", "content": {"nested": "object"}},
+                id="content-not-a-string",
+            ),
+            pytest.param(
+                {"type": "file", "encoding": "base64", "content": "a"},
+                id="content-not-valid-base64",
+            ),
+        ],
+    )
+    def test_get_file_contents_detailed_undecodable_payload_is_not_missing(self, payload) -> None:
+        """The documented "undecodable payload" branch: a 200 whose body IS a file
+        entry but whose content cannot be decoded reports ``(None, False)``.
+
+        ``missing`` staying False is the load-bearing half. It is what separates
+        this from the confirmed-404 case
+        (``test_get_file_contents_detailed_confirms_404_as_missing``): the file
+        may well still exist at this ref, so a caller must not read
+        ``content is None`` as "deleted". ``address_comments._cited_code`` relies
+        on exactly that split -- ``missing=True`` lets triage proceed with a
+        "file was deleted" note, while this branch raises
+        ``CitedCodeUnavailableError`` instead of silently triaging on prose
+        alone.
+
+        All three ways a payload can be undecodable are covered: GitHub
+        returning an encoding this client cannot read, a ``content`` field that
+        is not a string at all, and a ``content`` string that is not valid
+        base64 (``binascii.Error``).
+        """
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=payload)
+
+        content, missing = _client_with(handler).get_file_contents_detailed(
+            "o", "r", "a.py", "sha1"
+        )
         assert content is None
         assert missing is False
 

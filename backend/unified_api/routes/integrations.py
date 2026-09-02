@@ -33,7 +33,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from shared.concurrency import flock_lock, held_checkout_lock
+from shared.concurrency import CloneLockAcquisitionError, flock_lock, held_checkout_lock
 from shared.git.git_utils import remote_url_matches
 from shared.postgres import bounded_probe
 from software_engineering_team.clone_workspace import (
@@ -2923,6 +2923,15 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           operator-pinned ``repo_path`` this serialization is best-effort
           only: if the lock cannot be acquired, the request proceeds without
           it (logged as a warning) rather than failing the run.
+        - Failing to acquire that lock on a PLATFORM-OWNED checkout raises
+          :class:`CloneLockAcquisitionError` and maps to 503 (a local,
+          retryable serialization problem). Any OTHER ``OSError`` escaping the
+          locked section — a missing git binary, a permission error or full
+          disk during clone/fetch, an ``aiohttp.ClientOSError`` from the
+          forward — maps to 500 with an operation-neutral detail instead: it
+          is not a lock failure and is not necessarily transient, so reporting
+          it as a retryable 503 "could not acquire clone lock" would mislead
+          both API consumers and on-call debugging.
     """
     # Centralized validation (enabled + PAT + target repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".
@@ -3029,8 +3038,20 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
                 # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
                 generic_failure_detail="Failed to start the coding job.",
             )
-    except OSError as e:
+    except CloneLockAcquisitionError as e:
+        # ONLY a genuine lock-acquisition failure maps to 503: a local
+        # serialization problem the client can usefully retry. Must precede the
+        # generic OSError handler below -- it is a subclass.
         raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
+    except OSError as e:
+        # Any OTHER OSError escaping the locked section -- a missing git binary,
+        # a permission error or full disk during clone/fetch, an
+        # aiohttp.ClientOSError from the forward -- is not a lock problem and is
+        # not necessarily transient, so it must not claim to be either.
+        raise HTTPException(
+            status_code=500,
+            detail=f"github run-issue failed while preparing {owner}/{repo}: {e}",
+        ) from e
     try:
         return RunGitHubIssueResponse(
             job_id=data["job_id"],
@@ -3194,6 +3215,15 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
           still cannot reach into the coding-team service's own long-running
           remediation once this request returns — the coding-team service's own
           admission lock remains the authority for that window.
+        - Failing to acquire that lock on a PLATFORM-OWNED checkout raises
+          :class:`CloneLockAcquisitionError` and maps to 503 (a local,
+          retryable serialization problem). Any OTHER ``OSError`` escaping the
+          locked section maps to 500 with an operation-neutral detail —
+          identical split to ``run_github_issue``'s, and load-bearing here in
+          particular because ``aiohttp.ClientOSError`` subclasses ``OSError``:
+          a failed FORWARD (by which point the coding-team job may already have
+          started) must not be reported as "could not acquire clone lock", i.e.
+          as though nothing had happened at all.
     """
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
 
@@ -3277,8 +3307,21 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
                 timeout_detail="Coding team service timed out while starting the comment-addressing job.",
                 generic_failure_detail="Failed to start addressing the PR comments.",
             )
-    except OSError as e:
+    except CloneLockAcquisitionError as e:
+        # Same split as run_github_issue's (kept deliberately identical): only a
+        # genuine lock-acquisition failure is a retryable 503. Must precede the
+        # generic OSError handler below -- it is a subclass.
         raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
+    except OSError as e:
+        # Any OTHER OSError from the locked section is not a lock problem. This
+        # one matters especially here: aiohttp.ClientOSError subclasses OSError,
+        # so a failure of the FORWARD (by which point the coding-team job may
+        # already have started) would otherwise be reported as "the lock could
+        # not be acquired", i.e. as though nothing had happened at all.
+        raise HTTPException(
+            status_code=500,
+            detail=f"github address-comments failed while preparing {owner}/{repo}: {e}",
+        ) from e
     try:
         return AddressPrCommentsResponse(
             job_id=data["job_id"],

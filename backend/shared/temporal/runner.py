@@ -280,11 +280,27 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
     can never duplicate the workflow's work.
 
     Preconditions:
-        - ``workflow_id`` names a workflow that was already started (by the
-          caller, before the timed-out wait) on ``client``'s namespace.
+        - ``workflow_id`` names the workflow the caller started before the
+          timed-out wait, on ``client``'s namespace — with ONE documented
+          exception its only caller knowingly hits: if the wait timeout
+          cancelled the ``execute_workflow`` START before the server accepted
+          it, no such workflow was ever created and this precondition does not
+          hold (see the corresponding Postconditions edge case in
+          :func:`execute_workflow_sync`). This helper is still invoked in that
+          path deliberately; the outcome is the not-found result documented
+          below, not undefined behavior.
 
     Postconditions:
         - Returns the workflow's result once it reaches a terminal state.
+        - When the precondition's documented exception applies (the START was
+          cancelled, so no workflow with ``workflow_id`` exists),
+          ``get_workflow_handle`` still succeeds — it is a local handle
+          construction, not a lookup — and the first ``handle.result()``
+          instead raises ``temporalio.client.WorkflowNotFoundError`` (an
+          ``temporalio.service.RPCError`` with ``NOT_FOUND``), which
+          propagates to the caller uncaught. It is deliberately not swallowed:
+          "not found" is also how a genuinely purged or mistyped workflow
+          surfaces, and treating it as benign here would mask that.
         - Blocks in further ``poll_timeout_s``-sized windows for as long as the
           workflow keeps running, logging once per window at INFO (this is the
           expected shape for a long HITL pause or implementation — a WARNING

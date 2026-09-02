@@ -1240,13 +1240,21 @@ class TestPrepareIssueBranchFromFork:
         remote, clone, fork = fork_pair
         fork_url = f"file://{fork}"
         fork_feature_tip = _must(fork, "rev-parse", "feature")
+        stale_origin_main_tip = _must(clone, "rev-parse", "origin/main")
+        # Advance origin's `main` AFTER the clone, so the clone's `origin/main`
+        # is genuinely STALE going into prep. Without this the clone already
+        # holds origin's current tip from `git clone`, and the `origin/main`
+        # assertion below would pass even against an implementation that never
+        # fetches from origin at all.
+        _commit_file(remote, "origin_main.txt", "new on origin\n", "origin-only main commit")
         origin_main_tip = _must(remote, "rev-parse", "main")
+        assert origin_main_tip != stale_origin_main_tip
         # Diverge the fork's own `main` from origin's — `feature` (the PR
         # head, already checked out by fork_pair) keeps its original parent,
         # so this doesn't touch fork_feature_tip. Without this, the fork's
-        # `main` stays byte-identical to origin's, and the `origin/main`
-        # assertion below would pass even if the implementation wrongly
-        # resolved the base from the fork instead of origin.
+        # `main` stays byte-identical to the pre-advance origin tip, and the
+        # `origin/main` assertion below would pass even if the implementation
+        # wrongly resolved the base from the fork instead of origin.
         _must(fork, "checkout", "-q", "main")
         _commit_file(fork, "fork_main.txt", "stale main\n", "fork-only main commit")
         fork_main_tip = _must(fork, "rev-parse", "main")
@@ -1261,7 +1269,11 @@ class TestPrepareIssueBranchFromFork:
         assert "fork_only.txt" in _must(
             clone, "ls-tree", "-r", "--name-only", "khala-pr-head/feature"
         )
+        # Refreshed to origin's NEW tip: prep genuinely fetched from origin
+        # rather than reusing the clone's stale remote-tracking ref...
         assert _must(clone, "rev-parse", "origin/main") == origin_main_tip
+        assert _must(clone, "rev-parse", "origin/main") != stale_origin_main_tip
+        # ...and it came from origin, not from the fork's divergent `main`.
         assert _must(clone, "rev-parse", "origin/main") != fork_main_tip
 
     def test_integration_branch_still_prepared_when_fork_main_is_absent(

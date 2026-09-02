@@ -17,6 +17,7 @@ from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
     RunFromGitHubRequest,
 )
+from software_engineering_team.api.git_ops import integration_branch_for
 from software_engineering_team.github_source import (
     GitHubAPIError,
     Issue,
@@ -451,7 +452,7 @@ def _run_with_github_hooks(
 ) -> None:
     """Wrap the orchestrator with GitHub-side actions: comments, branch prep, push, PR."""
     owner, repo, num = request.owner, request.repo, issue.number
-    integration_branch = f"khala/issue-{num}"
+    integration_branch = integration_branch_for(num)
 
     with _main.GitHubClient(token=token) as client:
         # Validate the token via get_repo *before* posting the start-comment
