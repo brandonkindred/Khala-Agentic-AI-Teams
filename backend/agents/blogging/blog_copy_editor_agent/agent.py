@@ -75,8 +75,8 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         # embedded as plain text in the user prompt, so a stable prefix isn't
         # re-billed on every turn.
         self._system_prompt_content = build_blogging_system_prompt_content(
-            "--- BRAND SPEC ---\n" + brand if brand else "",
-            "--- WRITING STYLE GUIDE ---\n" + writing if writing else "",
+            ("--- BRAND SPEC ---\n" + brand if brand else ""),
+            ("--- WRITING STYLE GUIDE ---\n" + writing if writing else ""),
         )
 
     def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> bool:
@@ -184,8 +184,8 @@ class BlogCopyEditorAgent(_BlogAgentBase):
                     "---",
                     "EVALUATION INSTRUCTION:",
                     "---",
-                    "Evaluate the draft against the brand spec and writing style guide provided "
-                    "in your system instructions. Apply every rule in that guide.",
+                    "Evaluate the draft against the brand spec and writing style guidance "
+                    "provided in your system instructions. Apply every rule present there.",
                     "",
                 ]
             )

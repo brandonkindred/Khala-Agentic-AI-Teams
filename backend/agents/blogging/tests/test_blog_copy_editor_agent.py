@@ -398,7 +398,8 @@ def test_write_feedback_to_path_returns_true_on_success(tmp_path: Path) -> None:
 
 
 def test_init_includes_brand_spec_in_system_prompt_content() -> None:
-    """Brand spec content is prepended to the cached system-prompt segment at init."""
+    """Brand spec and writing style guide content are joined into the cached
+    system-prompt segment at init."""
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(),
         brand_spec_content="Acme voice: bold and direct.",

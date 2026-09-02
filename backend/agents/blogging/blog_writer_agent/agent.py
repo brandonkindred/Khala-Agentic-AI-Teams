@@ -349,7 +349,7 @@ class BlogWriterAgent(_BlogAgentBase):
         # as plain text in the user prompt, so a stable prefix isn't re-billed
         # on every turn.
         self._system_prompt_content = build_blogging_system_prompt_content(
-            "--- BRAND SPEC ---\n" + self._brand_spec_prompt if self._brand_spec_prompt else "",
+            ("--- BRAND SPEC ---\n" + self._brand_spec_prompt if self._brand_spec_prompt else ""),
             (
                 "--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt
                 if self._writing_style_prompt

@@ -99,16 +99,21 @@ def test_writer_agent_raises_on_none_llm() -> None:
 
 
 def test_writer_agent_system_prompt_content_merge() -> None:
+    from llm_service import CacheBreakpoint
+
     from .conftest import make_writer_agent
 
     a = make_writer_agent(
         writing_style_guide_content="Style A",
         brand_spec_content="Brand B",
     )
-    segment_text = a._system_prompt_content[0].text
+    segment = a._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    segment_text = segment.text
     assert "BRAND SPEC" in segment_text
     assert "Brand B" in segment_text
     assert "WRITING STYLE GUIDE" in segment_text
+    assert "Style A" in segment_text
 
 
 def test_writer_agent_deterministic_self_check() -> None:

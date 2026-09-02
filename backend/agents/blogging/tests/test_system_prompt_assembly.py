@@ -1,4 +1,4 @@
-"""Tests for the shared build_blogging_system_prompt_content() helper."""
+"""Tests for the shared system prompt assembly helpers."""
 
 from __future__ import annotations
 

@@ -66,7 +66,7 @@ def test_build_prompt_includes_band_and_context_signals() -> None:
     assert "PREVIOUS PASS FEEDBACK" in prompt
     assert "1. [should_fix] clarity [intro]: Opening is vague" in prompt
     # Style-guide branch present (guide text itself lives in the system prompt, not here).
-    assert "Evaluate the draft against the brand spec and writing style guide" in prompt
+    assert "Evaluate the draft against the brand spec and writing style guidance" in prompt
     assert prompt.rstrip().endswith("Real draft body.")
     # Base instructions live only in the Agent system prompt — not duplicated here.
     assert COPY_EDITOR_PROMPT not in prompt
@@ -91,7 +91,7 @@ def test_build_prompt_no_style_guide_branch() -> None:
     prompt = agent._build_editor_prompt(inp, draft="Body.", has_style_guide=False)
 
     assert "No style guidelines were provided." in prompt
-    assert "Evaluate the draft against the brand spec and writing style guide" not in prompt
+    assert "Evaluate the draft against the brand spec and writing style guidance" not in prompt
 
 
 def test_build_prompt_content_plan_is_included_in_full() -> None:
