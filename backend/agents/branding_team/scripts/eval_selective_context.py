@@ -330,6 +330,50 @@ def _phase_spec_context_override(
         _PHASE_SPEC[phase] = original
 
 
+def _execute_phase_variant(
+    orchestrator: BrandingTeamOrchestrator,
+    mission: BrandingMission,
+    phase: BrandPhase,
+    context_phases: tuple[BrandPhase, ...],
+    prior_outputs: dict[str, dict],
+    *,
+    variant_label: str,
+) -> tuple[object, str]:
+    """Override *phase*'s context_phases, build its task string, run it, and enforce a non-degraded output.
+
+    Preconditions:
+        ``phase`` is a key of ``_PHASE_SPEC``. ``prior_outputs`` maps upstream
+        phase value strings to JSON-safe phase-output dicts (possibly empty).
+        ``variant_label`` is the exact parenthetical text to embed in the
+        raised message identifying which run this is (e.g. ``"selective
+        variant"``, ``"full-context variant"``, ``"shared prefix"``).
+    Postconditions:
+        Returns ``(output, task_string)``: ``output`` is the real,
+        non-degraded output model ``run_single_phase`` produced for
+        ``phase``; ``task_string`` is the exact task string ``_phase_task``
+        built for it under ``context_phases``. ``_PHASE_SPEC[phase]`` is
+        restored to its original value on return, even if this raises.
+    Raises:
+        RuntimeError: if ``run_single_phase`` reports ``degraded=True`` (its
+            structured output could not be parsed and was defaulted to a
+            bare, field-empty ``model_cls()`` instead). A degraded output
+            cannot be trusted for token-count or quality comparison, so this
+            aborts loudly instead of silently propagating a placeholder.
+    """
+    with _phase_spec_context_override(phase, context_phases):
+        task_string = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
+            mission, phase, dict(prior_outputs)
+        )
+        output, degraded = orchestrator.run_single_phase(mission, phase, prior_outputs)
+    if degraded:
+        raise RuntimeError(
+            f"Phase {phase.value!r} degraded to a default-constructed output for "
+            f"mission {mission.company_name!r} ({variant_label}) -- aborting eval "
+            "rather than reporting results derived from a placeholder output."
+        )
+    return output, task_string
+
+
 def _run_variant(
     orchestrator: BrandingTeamOrchestrator, mission: BrandingMission, *, full_context: bool
 ) -> tuple[dict[BrandPhase, object], dict[BrandPhase, str]]:
@@ -373,18 +417,10 @@ def _run_variant(
         context_phases = (
             _full_context_phases(phase) if full_context else _PHASE_SPEC[phase].context_phases
         )
-        with _phase_spec_context_override(phase, context_phases):
-            task_strings[phase] = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
-                mission, phase, dict(prior_outputs)
-            )
-            output, degraded = orchestrator.run_single_phase(mission, phase, prior_outputs)
-        if degraded:
-            variant = "full-context" if full_context else "selective"
-            raise RuntimeError(
-                f"Phase {phase.value!r} degraded to a default-constructed output for "
-                f"mission {mission.company_name!r} ({variant} variant) -- aborting eval "
-                "rather than reporting results derived from a placeholder output."
-            )
+        variant_label = "full-context variant" if full_context else "selective variant"
+        output, task_strings[phase] = _execute_phase_variant(
+            orchestrator, mission, phase, context_phases, prior_outputs, variant_label=variant_label
+        )
         outputs[phase] = output
         prior_outputs[phase.value] = output.model_dump(mode="json")
 
@@ -471,17 +507,14 @@ def _run_variant_pair(
     fork_idx = PHASE_ORDER.index(fork_phase) if fork_phase is not None else len(PHASE_ORDER)
 
     for phase in PHASE_ORDER[:fork_idx]:
-        with _phase_spec_context_override(phase, _PHASE_SPEC[phase].context_phases):
-            shared_tasks[phase] = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
-                mission, phase, dict(shared_prior)
-            )
-            output, degraded = orchestrator.run_single_phase(mission, phase, shared_prior)
-        if degraded:
-            raise RuntimeError(
-                f"Phase {phase.value!r} degraded to a default-constructed output for "
-                f"mission {mission.company_name!r} (shared prefix) -- aborting eval "
-                "rather than reporting results derived from a placeholder output."
-            )
+        output, shared_tasks[phase] = _execute_phase_variant(
+            orchestrator,
+            mission,
+            phase,
+            _PHASE_SPEC[phase].context_phases,
+            shared_prior,
+            variant_label="shared prefix",
+        )
         shared_outputs[phase] = output
         shared_prior[phase.value] = output.model_dump(mode="json")
 
@@ -497,18 +530,10 @@ def _run_variant_pair(
             context_phases = (
                 _full_context_phases(phase) if full_context else _PHASE_SPEC[phase].context_phases
             )
-            with _phase_spec_context_override(phase, context_phases):
-                tasks[phase] = BrandingTeamOrchestrator._phase_task(  # noqa: SLF001
-                    mission, phase, dict(prior)
-                )
-                output, degraded = orchestrator.run_single_phase(mission, phase, prior)
-            if degraded:
-                variant = "full-context" if full_context else "selective"
-                raise RuntimeError(
-                    f"Phase {phase.value!r} degraded to a default-constructed output for "
-                    f"mission {mission.company_name!r} ({variant} variant) -- aborting eval "
-                    "rather than reporting results derived from a placeholder output."
-                )
+            variant_label = "full-context variant" if full_context else "selective variant"
+            output, tasks[phase] = _execute_phase_variant(
+                orchestrator, mission, phase, context_phases, prior, variant_label=variant_label
+            )
             outputs[phase] = output
             prior[phase.value] = output.model_dump(mode="json")
 
