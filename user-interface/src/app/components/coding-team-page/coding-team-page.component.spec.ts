@@ -216,6 +216,7 @@ describe('CodingTeamPageComponent', () => {
       showView('github');
       expandFirstRepo();
       expect(component.loadingIssues).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
       expect(statusRegions().some((el) => el.textContent?.includes('Loading issues…'))).toBe(true);
       issuesSubject.next(makeIssues(1));
       issuesSubject.complete();
@@ -233,6 +234,7 @@ describe('CodingTeamPageComponent', () => {
       component.toggleRun(run);
       fixture.detectChanges();
       expect(component.jobStatus).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
       expect(statusRegions().some((el) => el.textContent?.includes('Starting…'))).toBe(true);
     });
   });
