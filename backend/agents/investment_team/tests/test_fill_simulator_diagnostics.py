@@ -304,8 +304,7 @@ def test_continuation_insufficient_capital_emits_rejected_event() -> None:
     """The continuation-fill gate (``_continue_entry``) rejects a requeued
     remainder with ``insufficient_capital`` exactly like the initial-entry
     gate (``_fill_entry``, tested above) does, and the rejection reaches
-    ``BacktestExecutionDiagnostics`` — including the dedicated
-    ``insufficient_capital_rejections`` counter — via the shared
+    ``BacktestExecutionDiagnostics.orders_rejection_reasons`` via the shared
     ``_apply_fill_outcome_events`` drain. This is the fill-simulator's
     second ``insufficient_capital`` gate site, previously untested at
     either the ``FillOutcome`` or the diagnostics layer.
@@ -387,7 +386,6 @@ def test_continuation_insufficient_capital_emits_rejected_event() -> None:
 
     diag = BacktestExecutionDiagnostics()
     _apply_fill_outcome_events(diag, outcome)
-    assert diag.insufficient_capital_rejections == 1
     assert diag.orders_rejection_reasons.get("insufficient_capital") == 1
     matching_events = [
         e
