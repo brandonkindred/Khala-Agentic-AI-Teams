@@ -1167,44 +1167,53 @@ class SpecReadinessGate(GateResultsMixin):
         )
         fundable_capital = capital * cash_bound_multiplier
         if effective_worst_case_notional > fundable_capital:
-            if kind == "fixed_fraction":
+            # ``fixed_fraction`` and ``volatility_target`` both report the
+            # overcommit as a multiple of equity, differing only in the
+            # lead-in clause naming what's being sized — share one tail so a
+            # future wording change is a single edit instead of two
+            # independently-maintained templates drifting apart.
+            # ``fixed_notional`` reports in absolute dollars against a
+            # different closing clause, so it isn't forced into this shape.
+            if kind == "fixed_fraction" or is_vol_target:
                 worst_case_fraction = effective_worst_case_notional / capital
-                return (
-                    self._critical(
-                        f"Sizing realisability: fixed_fraction {fraction:.4f} × "
-                        f"worst-case concurrency {worst_case_concurrent} (min of "
-                        f"{len(symbols)} target symbol(s) and risk_limits."
-                        f"max_open_positions "
-                        f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring where applicable{slippage_note}) = "
-                        f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
-                        f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
-                        f"${capital:.0f}) if all concurrent positions filled "
-                        "simultaneously."
-                    ),
+                worst_case_tail = (
+                    f"× worst-case concurrency {worst_case_concurrent} (min of "
+                    f"{len(symbols)} target symbol(s) and risk_limits."
+                    f"max_open_positions "
+                    f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
+                    f"whole-lot share flooring where applicable{slippage_note}) = "
+                    f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
+                    f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
+                    f"${capital:.0f}) if all concurrent positions filled "
+                    "simultaneously."
                 )
-            if is_vol_target:
-                worst_case_fraction = effective_worst_case_notional / capital
+                if kind == "fixed_fraction":
+                    return (
+                        self._critical(
+                            f"Sizing realisability: fixed_fraction {fraction:.4f} {worst_case_tail}"
+                        ),
+                    )
                 return (
                     self._critical(
-                        f"Sizing realisability: volatility_target worst-case notional, "
+                        "Sizing realisability: volatility_target worst-case notional, "
                         f"bounded by the engine's unconditional risk_limits."
                         f"max_position_pct {ctx.spec.risk_limits.max_position_pct:.2f}% "
-                        f"clamp (the only provably safe bound — target_annual_vol has no "
-                        f"enforced ATR floor, so a low realised ATR can deploy up to this "
-                        f"clamp regardless of target_annual_vol), × worst-case concurrency "
-                        f"{worst_case_concurrent} (min of {len(symbols)} target symbol(s) "
-                        f"and risk_limits.max_open_positions "
-                        f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring where applicable{slippage_note}) "
-                        f"= {worst_case_fraction:.2f}x equity would exceed the cash-bound "
-                        f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
-                        f"${capital:.0f}) if all concurrent positions filled "
-                        "simultaneously."
+                        "clamp (the only provably safe bound — target_annual_vol has no "
+                        "enforced ATR floor, so a low realised ATR can deploy up to this "
+                        f"clamp regardless of target_annual_vol), {worst_case_tail}"
                     ),
                 )
             # fixed_notional
             if worst_case_concurrent > 1:
+                # Same rounding guard as ``slippage_note`` above: a
+                # configured slippage_bps that rounds to "0.0" at this
+                # message's precision must not claim a slippage adjustment
+                # that reads as a no-op.
+                slippage_clause = (
+                    f" and {slippage_bps_display:.1f}bps configured slippage"
+                    if round(slippage_bps_display, 1) > 0
+                    else ""
+                )
                 return (
                     self._critical(
                         f"Sizing realisability: fixed_notional ${notional:.0f} × "
@@ -1212,9 +1221,8 @@ class SpecReadinessGate(GateResultsMixin):
                         f"{len(symbols)} target symbol(s) and risk_limits."
                         f"max_open_positions "
                         f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
-                        f"whole-lot share flooring and "
-                        f"{slippage_bps_display:.1f}bps configured "
-                        f"slippage) = ${effective_worst_case_notional:.0f}, which "
+                        f"whole-lot share flooring{slippage_clause}) = "
+                        f"${effective_worst_case_notional:.0f}, which "
                         f"exceeds the cash-bound fundable capital "
                         f"${fundable_capital:.0f} if all concurrent positions filled "
                         "simultaneously."

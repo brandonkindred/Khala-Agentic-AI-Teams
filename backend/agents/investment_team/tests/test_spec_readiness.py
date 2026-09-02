@@ -1064,6 +1064,24 @@ def test_rule5_slippage_note_suppressed_for_sub_rounding_slippage_bps() -> None:
     assert not any("0.0bps" in c for c in matches), matches
 
 
+def test_rule5_fixed_notional_slippage_clause_suppressed_for_sub_rounding_bps() -> None:
+    """Same sub-rounding-slippage guard as the shared ``slippage_note``, but
+    for fixed_notional's own separately-built slippage clause: a configured
+    slippage_bps that rounds to "0.0" must not be named in the message at
+    all, rather than reproducing "...and 0.0bps configured slippage..."."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=25_000.0),
+        target_symbols=["BTC", "ETH", "SOL", "ADA"],
+        asset_class="crypto",
+        risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10},
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01", slippage_bps=0.01)
+    results = SpecReadinessGate().validate(spec, backtest_config=config)
+    matches = [c for c in _critical(results) if "fixed_notional" in c]
+    assert matches, _critical(results)
+    assert not any("0.0bps" in c for c in matches), matches
+
+
 @pytest.mark.parametrize(
     "sizing_factory,max_open_positions,expect_critical",
     [
