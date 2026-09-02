@@ -136,27 +136,65 @@ def test_single_job_routes_redact_encrypted_github_token(monkeypatch: pytest.Mon
     assert "gAAAAAsecret" not in resp.text
 
 
-def test_redact_job_secrets_warns_on_unrecognized_wrapper_key(caplog) -> None:
-    """An unrecognized wrapper must not pass through in SILENCE.
+def test_redact_job_secrets_redacts_and_warns_on_unrecognized_wrapper_key(caplog) -> None:
+    """An unrecognized wrapper must be REDACTED, and must not pass in silence.
 
-    Redaction keys off ``"jobs"``/``"job"``. If the job service ever renames
-    its wrapper, the credential resumes flowing to clients -- and with no
-    signal, nothing anywhere would say so. The warning is the tripwire.
+    Redaction is keyed on the credential FIELD NAMES, not on the envelope, so a
+    job service that renamed its wrapper cannot silently resume serving
+    credentials -- the field is stripped wherever it sits. The warning is
+    retained on top of that as a contract-drift tripwire, not as the control.
     """
     payload = {"records": [{"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}]}
     with caplog.at_level(logging.WARNING, logger="unified_api"):
-        assert main._redact_job_secrets(payload) is payload
+        out = main._redact_job_secrets(payload)
+    assert out == {"records": [{"job_id": "abc"}]}
+    # Not mutated in place: the caller's own object still carries what it had.
+    assert payload["records"][0]["github_token_encrypted"] == "gAAAAAsecret"
     assert any("neither 'jobs' nor 'job'" in r.getMessage() for r in caplog.records)
-    # The tripwire names the KEYS it saw, never the values it declined to redact.
+    # The tripwire names the KEYS it saw, never a credential value.
     assert "gAAAAAsecret" not in caplog.text
 
 
-def test_redact_job_secrets_warns_when_jobs_is_not_a_list(caplog) -> None:
+def test_redact_job_secrets_redacts_and_warns_when_jobs_is_not_a_list(caplog) -> None:
     payload = {"jobs": {"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}}
     with caplog.at_level(logging.WARNING, logger="unified_api"):
         out = main._redact_job_secrets(payload)
-    assert out == payload
+    assert out == {"jobs": {"job_id": "abc"}}
     assert any("not a list" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        # A job nested one level deeper than either known envelope.
+        (
+            {"page": {"items": [{"job_id": "a", "github_token_encrypted": "s"}]}},
+            {"page": {"items": [{"job_id": "a"}]}},
+        ),
+        # A bare list body (no envelope at all).
+        ([{"job_id": "a", "github_token_encrypted": "s"}], [{"job_id": "a"}]),
+        # A bare job object.
+        ({"job_id": "a", "github_token_encrypted": "s"}, {"job_id": "a"}),
+        # The credential inside a known envelope but under a sub-object.
+        (
+            {"job": {"job_id": "a", "meta": {"github_token_encrypted": "s"}}},
+            {"job": {"job_id": "a", "meta": {}}},
+        ),
+        # Non-container bodies are returned untouched rather than crashing.
+        ("plain", "plain"),
+        (None, None),
+        (7, 7),
+    ],
+    ids=["nested", "bare-list", "bare-job", "sub-object", "str", "none", "int"],
+)
+def test_redact_job_secrets_is_shape_agnostic(payload, expected) -> None:
+    """The redaction must depend on the KEY it strips, not on where the job sits.
+
+    The previous shape-specific version fixed the two known envelopes and
+    forwarded everything else untouched, so any job-service envelope change was
+    a silent credential leak. Every case here would leak under that version.
+    """
+    assert main._redact_job_secrets(payload) == expected
 
 
 def test_redact_job_secrets_stays_quiet_on_recognized_shapes(caplog) -> None:

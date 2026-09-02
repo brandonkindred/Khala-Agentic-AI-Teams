@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+import software_engineering_team.github_source.client as client_module
 from software_engineering_team.github_source import (
     MAX_REVIEW_COMMENTS_TRAVERSED,
     GitHubAPIError,
@@ -411,6 +412,48 @@ class TestGetResolvedReviewThreadCommentIds:
     def test_degrades_to_empty_set_on_malformed_json(self) -> None:
         client = _client_with(lambda _req: httpx.Response(200, text="not json"))
         assert client.get_resolved_review_thread_comment_ids("o", "r", 7) == set()
+
+    @pytest.mark.parametrize(
+        "bad_comments",
+        [None, [], "nodes", {"nodes": None}, {"nodes": {"databaseId": 1}}],
+        ids=["none", "list", "str", "nodes-none", "nodes-dict"],
+    )
+    def test_unreadable_comments_payload_skips_the_thread(self, bad_comments) -> None:
+        """A thread whose `comments` payload cannot be read must be SKIPPED, not
+        yielded with an empty comment tuple.
+
+        Yielded with `()` it is indistinguishable from a thread that genuinely
+        has no comments, and every consumer reads THAT as "nothing outstanding
+        on this thread" -- enough for the address-comments flow to reply-and-
+        resolve a thread whose real comments were never read. The neighbouring
+        invalid-NODE path already skips for the same reason; this is the same
+        anomaly one level down.
+
+        Asserted on the generator directly because both public consumers project
+        the yield away: the non-strict one keeps only comment ids (empty either
+        way) and the strict one raises before reaching the yield, so skip vs
+        yield-empty is invisible from either.
+        """
+        good = {
+            "id": "T_ok",
+            "isResolved": True,
+            "comments": {"pageInfo": {"hasNextPage": False}, "nodes": [{"databaseId": 1}]},
+        }
+        bad = {"id": "T_bad", "isResolved": True, "comments": bad_comments}
+        client = _client_with(
+            lambda _req: httpx.Response(
+                200, json=_review_threads_response(nodes=[bad, good])
+            )
+        )
+
+        yielded = list(
+            client._iter_review_thread_nodes(
+                "o", "r", 7, query=client_module._REVIEW_THREADS_FULL_QUERY, strict=False
+            )
+        )
+
+        assert [t[0] for t in yielded] == ["T_ok"]
+        assert yielded[0][2] == (1,)
 
 
 # ---------------------------------------------------------------------------

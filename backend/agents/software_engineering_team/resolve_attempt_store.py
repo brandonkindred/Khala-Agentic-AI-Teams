@@ -80,8 +80,19 @@ def record_resolve_failure(
           the Khala-generated reply the failed resolve followed, when known.
     Postconditions:
         - Upserts a row keyed by ``(owner, repo, pr_number, thread_id)``,
-          overwriting any prior recorded ``khala_reply_comment_id``/timestamp
-          for this thread. Never raises; no-op without Postgres.
+          always refreshing ``failed_at``.
+        - ``khala_reply_comment_id`` is updated only when the NEW value is
+          non-NULL; a later failure recorded with an UNKNOWN reply id keeps the
+          id already on record (``COALESCE``) rather than nulling it out.
+          Overwriting it with NULL would destroy the very evidence this ledger
+          exists to hold: :func:`has_recorded_resolve_failure` matches the
+          stored id against the caller's with ``IS NOT DISTINCT FROM``, so a
+          NULLed row no longer matches the real reply id and the thread silently
+          reverts to "no evidence". A row can therefore carry an id recorded by
+          an EARLIER attempt than its ``failed_at`` -- deliberate: an id that was
+          right once still identifies the Khala reply the failures concern,
+          while NULL identifies nothing.
+        - Never raises; no-op without Postgres.
     """
     if not is_postgres_enabled():
         return
@@ -93,7 +104,10 @@ def record_resolve_failure(
                       (owner, repo, pr_number, thread_id, khala_reply_comment_id, failed_at)
                    VALUES (%s, %s, %s, %s, %s, NOW())
                    ON CONFLICT (owner, repo, pr_number, thread_id) DO UPDATE SET
-                       khala_reply_comment_id = EXCLUDED.khala_reply_comment_id,
+                       khala_reply_comment_id = COALESCE(
+                           EXCLUDED.khala_reply_comment_id,
+                           address_comments_resolve_attempts.khala_reply_comment_id
+                       ),
                        failed_at = EXCLUDED.failed_at""",
                 (owner, repo, pr_number, thread_id, khala_reply_comment_id),
             )

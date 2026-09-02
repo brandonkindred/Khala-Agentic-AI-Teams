@@ -1,4 +1,5 @@
-"""Tests for shared.postgres.helpers.PostgresHelperMixin — all mocked, no live Postgres required."""
+"""Tests for shared.postgres.helpers (``best_effort_write`` and
+``PostgresHelperMixin``) — all mocked, no live Postgres required."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.postgres import client as client_mod
-from shared.postgres.helpers import PostgresHelperMixin
+from shared.postgres.helpers import PostgresHelperMixin, best_effort_write
 
 
 class _Probe(PostgresHelperMixin):
@@ -229,3 +230,88 @@ def test_transaction_raises_when_postgres_disabled(monkeypatch):
     with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
         with _Probe()._transaction():
             pass
+
+
+# ---------------------------------------------------------------------------
+# best_effort_write
+#
+# The whole contract is BEHAVIOURAL (invoke, swallow, log, never re-raise), so
+# there is nothing to assert about it except by running it. Every team store
+# whose persistence is a safety net rather than a prerequisite routes its writes
+# through here, so a regression that let an exception escape would fail an
+# address-comments or review run for a bookkeeping write that was never allowed
+# to matter.
+# ---------------------------------------------------------------------------
+
+
+def test_best_effort_write_invokes_the_write() -> None:
+    """The happy path still actually calls through -- a helper that swallowed
+    everything INCLUDING the call would pass every failure test below."""
+    calls: list[int] = []
+
+    best_effort_write("my_table", "record_thing", lambda: calls.append(1))
+
+    assert calls == [1]
+
+
+def test_best_effort_write_returns_none_on_success() -> None:
+    """No return channel: callers must not branch on a result that isn't there."""
+    assert best_effort_write("my_table", "record_thing", lambda: None) is None
+
+
+def test_best_effort_write_swallows_and_logs_the_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing write is logged with a traceback and NOT re-raised."""
+
+    def _boom() -> None:
+        raise RuntimeError("db down")
+
+    with caplog.at_level("WARNING", logger="shared.postgres.helpers"):
+        assert best_effort_write("my_table", "record_thing", _boom) is None
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    # The label is what an operator greps for, so pin its exact composition.
+    assert warnings[0].getMessage() == "my_table: record_thing failed"
+    # exc_info is the point of the log line: without it the swallowed failure
+    # leaves no way to tell WHY the write failed.
+    assert warnings[0].exc_info is not None
+    assert warnings[0].exc_info[0] is RuntimeError
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [ValueError("bad"), KeyError("missing"), TypeError("wrong")],
+    ids=["value", "key", "type"],
+)
+def test_best_effort_write_swallows_any_exception_subclass(exc: Exception) -> None:
+    """`except Exception` means EVERY ordinary failure, not just database ones:
+    a bug in the caller's own closure must not surface as a run failure either."""
+
+    def _boom() -> None:
+        raise exc
+
+    assert best_effort_write("my_table", "op", _boom) is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [KeyboardInterrupt(), SystemExit(1), BaseException("raw")],
+    ids=["keyboard-interrupt", "system-exit", "base"],
+)
+def test_best_effort_write_does_not_swallow_base_exceptions(exc: BaseException) -> None:
+    """`BaseException` is deliberately OUT of scope.
+
+    Ctrl-C and interpreter shutdown are not "the write failed" -- swallowing
+    them would make a store's bookkeeping write the one place a shutdown signal
+    goes to die, leaving the process wedged mid-teardown. The bare `except
+    Exception` (not `except BaseException`) is what keeps that true, and this
+    test is what stops it being "helpfully" widened.
+    """
+
+    def _boom() -> None:
+        raise exc
+
+    with pytest.raises(type(exc)):
+        best_effort_write("my_table", "op", _boom)

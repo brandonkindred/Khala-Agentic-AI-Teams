@@ -26,6 +26,7 @@ from software_engineering_team.github_source import (
     is_ready,
     issue_to_plan_input,
     pick_ready_issue,
+    redact_secret,
 )
 from software_engineering_team.models import JobStatus
 from software_engineering_team.temporal.coding_team_start_workflow import (
@@ -242,13 +243,21 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # treats a pending job as active, so leaving it pending here would make
             # every retry for this issue 409 forever with nothing left to
             # terminalize it. Mark it failed, same as a Temporal dispatch failure.
-            # The raw git output stays in the log only. ``resolve_remote_branch_sha``
-            # already scrubs URL-embedded credentials and the transient auth header,
-            # but that scrubbing is best-effort pattern matching over arbitrary git
-            # stderr; the stored ``error`` is echoed verbatim by
-            # GET /api/jobs/{team}, so it carries a fixed summary instead of
-            # remote-supplied text, per ``_fail_new_job``'s safe-to-disclose contract.
-            logger.error("Unable to resolve base branch head sha: %s", base_sha_or_err)
+            # The full git diagnostic stays in the log only: the stored ``error``
+            # is echoed verbatim by GET /api/jobs/{team}, so it carries a fixed
+            # summary instead of remote-supplied text, per ``_fail_new_job``'s
+            # safe-to-disclose contract.
+            #
+            # The LOG is exactly where a leaked credential persists longest
+            # (aggregators, retention), so it gets its own redaction rather than
+            # relying on ``resolve_remote_branch_sha``'s internal best-effort
+            # scrubbing: ``redact_secret`` removes THIS request's resolved token
+            # by literal value first, then pattern-scrubs any other credential
+            # shape (URL-embedded or a bare ``ghp_``-family token) still present.
+            logger.error(
+                "Unable to resolve base branch head sha: %s",
+                redact_secret(str(base_sha_or_err), token),
+            )
             _fail_new_job(job_id, 502, "unable to resolve base branch head sha")
         integration_branch = integration_branch_for(issue.number)
         try:

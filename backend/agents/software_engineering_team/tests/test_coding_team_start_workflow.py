@@ -113,12 +113,22 @@ def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
         "integration_branch": "feature",
     }
 
-    result = sw.execute_coding_team_workflow("parent:comment:2", "/repo", {"x": 1}, github)
+    plan_input = {"x": 1}
+    result = sw.execute_coding_team_workflow("parent:comment:2", "/repo", plan_input, github)
 
     assert result["status"] == "completed"
     assert captured["workflow_id"] == "coding_team-parent:comment:2"
     assert captured["task_queue"] == TASK_QUEUE
-    assert captured["args"][0]["github"] == github
+    # The WHOLE payload, not just its `github` block: `plan_input` and
+    # `repo_path` are what the workflow actually runs on, and a regression that
+    # dropped either from the durable payload would leave every `github`-only
+    # assertion green while the workflow started with nothing to do.
+    assert captured["args"][0] == {
+        "job_id": "parent:comment:2",
+        "repo_path": "/repo",
+        "plan_input": plan_input,
+        "github": github,
+    }
     assert captured["execute_timeout_s"] == sw._COMMENT_WORKFLOW_TIMEOUT_S
     # A client-side timeout must never be mistaken for workflow failure: this
     # caller reattaches to the same still-running workflow rather than giving
@@ -201,11 +211,25 @@ def test_dispatchers_reject_non_dict_plan_input(monkeypatch, dispatch):
         dispatch("ghp_secret")
 
 
-def test_start_coding_team_workflow_rejects_token_in_plan_input(monkeypatch):
-    """A dict `plan_input` is still token-scanned at any nesting depth."""
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        lambda bad: sw.start_coding_team_workflow("job-7", "/repo", bad),
+        lambda bad: sw.execute_coding_team_workflow("job-7", "/repo", bad, dict(_VALID_GITHUB)),
+    ],
+    ids=["start", "execute"],
+)
+def test_dispatchers_reject_token_in_plan_input(monkeypatch, dispatch):
+    """A dict `plan_input` is still token-scanned at any nesting depth.
+
+    Parametrized over BOTH dispatchers rather than `start` alone: they serialize
+    `plan_input` into the same durable Temporal payload, so a check present on
+    one and absent from the other writes the secret into the same permanent
+    event history -- an asymmetry only a test that exercises both can catch.
+    """
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
     with pytest.raises(ValueError, match="plan_input to not include a token"):
-        sw.start_coding_team_workflow("job-7", "/repo", {"auth": {"token": "ghp_secret"}})
+        dispatch({"auth": {"token": "ghp_secret"}})
 
 
 @pytest.mark.parametrize(

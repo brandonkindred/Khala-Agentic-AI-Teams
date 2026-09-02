@@ -546,8 +546,8 @@ class CodingTeamWorkflow:
         # failure worth posting to the issue/PR as a "publish failed" notice,
         # so a bad payload should fail the workflow task immediately rather
         # than burn an entire pipeline run first. The extracted values are
-        # reused, unchanged, at publish time below -- only WHEN this
-        # validation runs moved, not what it validates.
+        # reused, unchanged, at publish time below: this is a pure up-front
+        # check, so nothing downstream re-validates or re-reads them.
         owner = repo = base = integration_branch = None
         is_existing_pr_publish = False
         pr_number = None

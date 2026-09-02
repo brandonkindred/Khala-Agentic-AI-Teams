@@ -47,6 +47,14 @@ def _patch_git(
 
 
 def test_matching_fetch_and_push_url_passes(monkeypatch) -> None:
+    """The baseline: when the fetch URL and every push URL are the SAME remote,
+    the check passes and reports no mismatch.
+
+    This is the case every other test in the file is a deviation from, so it
+    also pins that the check is not vacuously true -- it queries BOTH
+    `remote get-url` and `remote get-url --push --all` (asserted below via the
+    recorded calls) rather than answering from the fetch URL alone.
+    """
     calls = _patch_git(
         monkeypatch,
         {

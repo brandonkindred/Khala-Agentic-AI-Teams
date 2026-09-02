@@ -486,8 +486,12 @@ class CreateEnhancedIssuesRequest(BaseModel):
     proposal_ids: List[str] = Field(
         description="Composite ids of the form 'job_id:proposal_id' identifying which proposals to file."
     )
-    owner: str = Field(min_length=1, description="Repository owner (validated against stored review).")
-    repo: str = Field(min_length=1, description="Repository name (validated against stored review).")
+    owner: str = Field(
+        ..., min_length=1, description="Repository owner (validated against stored review)."
+    )
+    repo: str = Field(
+        ..., min_length=1, description="Repository name (validated against stored review)."
+    )
     github_token: Optional[str] = Field(
         default=None, description="Overrides GITHUB_TOKEN env var for this request."
     )

@@ -308,15 +308,62 @@ def _is_safe_ref(ref: str) -> bool:
 
 
 _TOKEN_URL_RE = re.compile(r"https?://[^/\s@]+@", re.IGNORECASE)
+# Bare GitHub credential prefixes (ghp_/gho_/ghu_/ghs_/ghr_ personal, OAuth,
+# user-to-server, server-to-server and refresh tokens). A URL-embedded
+# credential is only ONE of the shapes a token reaches us in: git can also echo
+# a bare token, and a code-review finding routinely quotes the credential line
+# it is flagging. Length-bounded (>=20) so ordinary prose like "ghp_x" in a
+# sentence is not mangled, while every real GitHub token (36+ chars) matches.
+_BARE_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}")
 
 
 def scrub_token_from_text(msg: str) -> str:
-    """Best-effort redact ``https://user:token@host/...`` style remote URLs
-    that git can echo to stderr, before we put the message into a public
-    issue comment or job error field."""
+    """Best-effort redact GitHub credentials from arbitrary text.
+
+    Covers both shapes a token reaches us in: ``https://user:token@host/...``
+    style remote URLs that git echoes to stderr, and a bare ``ghp_``-family
+    token appearing anywhere in the text. Applied before a message is put into
+    a public issue comment, a job error field, a log line, a Temporal activity
+    exception, or an LLM prompt.
+
+    Postconditions:
+        - Returns ``msg`` with every URL-embedded credential rewritten to
+          ``https://***@`` and every bare ``gh[pousr]_`` token replaced with
+          ``***``. Best-effort pattern matching, not a proof of absence: a
+          caller that knows the exact secret should ALSO redact it by value.
+          Pure; never raises. Empty/falsy input is returned unchanged.
+    """
     if not msg:
         return msg
-    return _TOKEN_URL_RE.sub("https://***@", msg)
+    return _BARE_TOKEN_RE.sub("***", _TOKEN_URL_RE.sub("https://***@", msg))
+
+
+def redact_secret(text: str, secret: str | None) -> str:
+    """Redact a KNOWN secret from ``text`` by value, then pattern-scrub the rest.
+
+    :func:`scrub_token_from_text` is pattern matching over arbitrary text and
+    is therefore best-effort. When the caller already holds the exact
+    credential in scope (a resolved GitHub token, say) it can do strictly
+    better: remove that literal first, then let the pattern pass catch any
+    OTHER credential shape in the same text.
+
+    Preconditions:
+        - ``text`` is arbitrary, possibly untrusted text (git stderr, an
+          exception message). ``secret`` is the literal credential in scope, or
+          ``None``/empty when the caller holds none.
+    Postconditions:
+        - Returns ``text`` with every occurrence of a non-empty ``secret``
+          replaced by ``***``, then passed through
+          :func:`scrub_token_from_text`. Secrets shorter than 8 characters are
+          NOT substituted by value (a short literal would mangle unrelated
+          text, and no real credential is that short) -- the pattern pass still
+          applies. Pure; never raises.
+    """
+    if not text:
+        return text
+    if secret and len(secret) >= 8:
+        text = text.replace(secret, "***")
+    return scrub_token_from_text(text)
 
 
 # ---------------------------------------------------------------------------
@@ -1147,6 +1194,15 @@ class GitHubClient(_GitHubHttpMixin):
               comments do not fit one
               :data:`_REVIEW_THREAD_COMMENTS_PAGE_SIZE` page (only the first
               page's ids are yielded).
+            - A thread whose ``comments`` payload is UNREADABLE (not a dict, or
+              its ``nodes`` not a list) is SKIPPED in both modes, never yielded
+              with an empty comment tuple. A consumer cannot distinguish "this
+              thread has no comments" from "this thread's comments could not be
+              read", and reads the former as "nothing outstanding here" —
+              enough for ``address_comments`` to resolve a thread whose real
+              comments were never addressed. Skipping loses the thread from the
+              listing, which the warning announces; yielding it loses its
+              comments while claiming completeness.
             - A threads page whose ``pageInfo`` is a dict but carries a
               missing or non-bool ``hasNextPage`` is an anomaly, not an
               implicit "no more pages": strict raises and non-strict warns
@@ -1243,11 +1299,18 @@ class GitHubClient(_GitHubHttpMixin):
                 is_resolved = bool(is_resolved_raw)
                 comments = node.get("comments")
                 if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list):
+                    # SKIP the thread rather than yielding it with an empty
+                    # comment tuple. "No comments" and "comments unreadable"
+                    # are different facts, and this generator's consumers
+                    # cannot tell them apart: address-comments would treat an
+                    # unreadable thread as a thread with nothing outstanding
+                    # and resolve it, discarding comments it never read. That
+                    # is the same silent data loss the invalid-node path above
+                    # already avoids by skipping, so this matches it.
                     _unavailable(
                         f"invalid review-thread comments payload (thread {thread_id!r}): "
-                        f"{comments!r}; yielding no comment ids"
+                        f"{comments!r}; skipping the thread"
                     )
-                    yield thread_id, is_resolved, ()
                     continue
                 # Per-thread comment pagination is checked in BOTH modes: a
                 # thread with more comments than one page holds would otherwise
@@ -1760,5 +1823,6 @@ __all__ = [
     "ReviewThread",
     "ReviewThreadsUnavailableError",
     "SubIssue",
+    "redact_secret",
     "scrub_token_from_text",
 ]

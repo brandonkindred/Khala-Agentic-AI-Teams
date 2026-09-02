@@ -19,7 +19,6 @@ import pytest
 
 import shared.concurrency.checkout_lock as checkout_lock_module
 from shared.concurrency.checkout_lock import held_checkout_lock
-from shared.concurrency.flock_lock import flock_lock
 
 
 class _SlowLock:
@@ -94,6 +93,34 @@ def _assert_flock_is_held(lock_path: Path) -> None:
         probe.close()
 
 
+def _assert_flock_is_free(lock_path: Path) -> None:
+    """Assert NO open file description currently holds ``lock_path``'s flock.
+
+    The non-blocking mirror of :func:`_assert_flock_is_held`, and the reason it
+    exists: proving release with a BLOCKING ``with flock_lock(lock_path)`` turns
+    a leaked lock into a HUNG test rather than a failing one, wedging the whole
+    suite on the very bug these tests exist to catch — the opposite of the
+    bounded-wait intent :class:`_SlowLock` documents for itself.
+
+    Preconditions:
+        - ``lock_path`` exists (``flock_lock`` creates it on acquisition).
+    Postconditions:
+        - Returns None when a non-blocking ``LOCK_EX`` is GRANTED (i.e. the lock
+          is free), failing the test with a clear message when it is refused
+          instead of blocking. The probe's own lock is released and its
+          descriptor closed, so this leaves the file exactly as it found it.
+    """
+    probe = open(lock_path, "w", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:  # pragma: no cover - only on the regression
+            pytest.fail(f"flock on {lock_path} is still held; it was leaked, not released")
+        fcntl.flock(probe, fcntl.LOCK_UN)
+    finally:
+        probe.close()
+
+
 def test_lock_is_held_around_the_body_and_released_after(tmp_path: Path) -> None:
     lock_path = tmp_path / ".test.lock"
 
@@ -110,12 +137,8 @@ def test_lock_is_held_around_the_body_and_released_after(tmp_path: Path) -> None
 
     asyncio.run(_run())
 
-    # A second, independent acquisition must succeed immediately if the first
-    # call actually released the flock rather than leaking it.
-    entered = False
-    with flock_lock(lock_path):
-        entered = True
-    assert entered
+    # Probed non-blockingly: a leaked lock must FAIL this test, not hang it.
+    _assert_flock_is_free(lock_path)
 
 
 def test_body_exception_still_releases_the_lock(tmp_path: Path) -> None:
@@ -131,10 +154,7 @@ def test_body_exception_still_releases_the_lock(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         asyncio.run(_run())
 
-    entered = False
-    with flock_lock(lock_path):
-        entered = True
-    assert entered
+    _assert_flock_is_free(lock_path)
 
 
 def test_platform_owned_lock_failure_raises_oserror(tmp_path: Path) -> None:

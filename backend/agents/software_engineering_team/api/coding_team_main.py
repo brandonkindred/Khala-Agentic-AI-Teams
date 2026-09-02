@@ -253,11 +253,10 @@ def get_running_job_on_checkout(repo_path: str) -> dict[str, object] | None:
 
 
 def get_running_review_for_pr(owner: str, repo: str, pr_number: int) -> str | None:
-    """Public service-layer seam for "is a review/address-comments job already
-    running for this PR?" — the PR-scoped counterpart to
-    :func:`get_running_job_on_checkout`.
+    """Return the id of a review/address-comments job already running for this PR.
 
-    Thin wrapper over the private :func:`_running_review_for_pr` (a
+    The PR-scoped counterpart to :func:`get_running_job_on_checkout`, and a
+    thin wrapper over the private :func:`_running_review_for_pr` (a
     pr_review.py implementation detail this module re-exports for internal
     use), so a route module can depend on a stable, documented public
     function instead of reaching across module boundaries into another

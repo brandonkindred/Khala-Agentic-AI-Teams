@@ -1492,56 +1492,58 @@ _REDACTED_JOB_FIELDS = frozenset({"github_token_encrypted"})
 def _redact_job_secrets(payload: Any) -> Any:
     """Strip :data:`_REDACTED_JOB_FIELDS` from a job-service response body.
 
+    SHAPE-AGNOSTIC by design. An earlier version walked only the two envelopes
+    these routes are known to return (``{"jobs": [...]}`` and ``{"job": {...}}``)
+    and forwarded anything else untouched — which made the control FAIL OPEN: a
+    job service that renamed its wrapper key, nested a job one level deeper, or
+    grew a third envelope would resume serving credentials to clients, and the
+    only evidence would be a log line. The redaction now depends on the KEY
+    NAMES it strips, not on where in the body a job happens to sit, so no
+    envelope change can silently disable it.
+
     Preconditions:
-        - ``payload`` is a decoded job-service JSON body. The two shapes these
-          proxy routes see are ``{"jobs": [<job>, ...]}`` (list) and
-          ``{"job": <job>}`` (single); any other shape is returned untouched
-          rather than guessed at.
+        - ``payload`` is a decoded job-service JSON body (any JSON value).
     Postconditions:
-        - Returns a payload identical to ``payload`` except that every job dict
-          reachable under ``"jobs"``/``"job"`` has each
-          :data:`_REDACTED_JOB_FIELDS` key REMOVED (removed, not blanked, so a
-          client cannot tell a redacted value from an absent one and no caller
-          can mistake a placeholder for a usable token).
-        - A dict payload carrying NEITHER ``"jobs"`` nor ``"job"``, or a
-          ``"jobs"`` value that is not a list, is returned untouched AND
-          logged as a warning. Passing an unrecognized wrapper through in
-          silence is how this redaction fails open: if the job service ever
-          renames its wrapper key, credentials resume flowing to clients with
-          nothing anywhere saying so. The warning is the tripwire; it names no
-          field values, only the keys seen.
-        - Never mutates ``payload`` in place; job dicts are copied. Never
+        - Returns a structure identical to ``payload`` except that EVERY dict
+          reachable from it, at any depth and through any key or list position,
+          has each :data:`_REDACTED_JOB_FIELDS` key REMOVED (removed, not
+          blanked, so a client cannot tell a redacted value from an absent one
+          and no caller can mistake a placeholder for a usable token).
+        - Recurses through dicts, lists and tuples; every other value (str, int,
+          None, …) is returned as-is.
+        - The two envelope-shape warnings below are retained purely as
+          TRIPWIRES for job-service contract drift. They no longer gate the
+          redaction — an unrecognized body is redacted just the same — so a
+          warning here means "the envelope changed, go look", not "credentials
+          were forwarded".
+        - Never mutates ``payload`` in place; containers are rebuilt. Never
           raises on an unexpected shape.
     """
-    if not isinstance(payload, dict):
-        return payload
-    if "jobs" not in payload and "job" not in payload:
+    if isinstance(payload, dict) and "jobs" not in payload and "job" not in payload:
         logger.warning(
             "_redact_job_secrets: job-service body has neither 'jobs' nor 'job'; "
-            "forwarding unredacted. Keys seen: %s",
+            "redacting it as an unrecognized shape. Keys seen: %s",
             sorted(payload),
         )
-        return payload
-    if "jobs" in payload and not isinstance(payload["jobs"], list):
+    if isinstance(payload, dict) and "jobs" in payload and not isinstance(payload["jobs"], list):
         logger.warning(
             "_redact_job_secrets: job-service body's 'jobs' is %s, not a list; "
-            "that branch is forwarded unredacted",
+            "redacting it as an unrecognized shape",
             type(payload["jobs"]).__name__,
         )
 
-    def _clean(job: Any) -> Any:
-        if not isinstance(job, dict):
-            return job
-        if not _REDACTED_JOB_FIELDS.intersection(job):
-            return job
-        return {k: v for k, v in job.items() if k not in _REDACTED_JOB_FIELDS}
+    def _clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                k: _clean(v) for k, v in value.items() if k not in _REDACTED_JOB_FIELDS
+            }
+        if isinstance(value, list):
+            return [_clean(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(_clean(item) for item in value)
+        return value
 
-    redacted = dict(payload)
-    if isinstance(payload.get("jobs"), list):
-        redacted["jobs"] = [_clean(job) for job in payload["jobs"]]
-    if "job" in payload:
-        redacted["job"] = _clean(payload["job"])
-    return redacted
+    return _clean(payload)
 
 
 @app.get("/api/jobs/{team}", tags=["jobs"])
@@ -1550,8 +1552,9 @@ async def list_team_jobs(team: str, running_only: bool = False) -> dict[str, Any
 
     Postconditions:
         - Returns the job service's body with every credential field named in
-          :data:`_REDACTED_JOB_FIELDS` stripped from each job record (see
-          :func:`_redact_job_secrets`); everything else is forwarded verbatim.
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
     """
     async with httpx.AsyncClient(timeout=15.0) as client:
         url = f"{_JOB_SERVICE_URL}/jobs/{team}"

@@ -1190,6 +1190,44 @@ class TestEnsureNamedRemote:
         assert (name, err) == ("origin", None)
         assert "khala-pr-head" not in _must(clone, "remote").split()
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # scp-like syntax: a real remote URL to git, but it contains no
+            # "://" and so is NOT classified as a URL here.
+            "git@github.com:acme/widget.git",
+            # A bare local path -- likewise a valid `git fetch <repository>`
+            # argument with no "://".
+            "/srv/mirrors/widget.git",
+            "../sibling-checkout",
+        ],
+        ids=["scp-like", "absolute-path", "relative-path"],
+    )
+    def test_url_shapes_without_a_scheme_take_the_plain_name_branch(
+        self, api, repo_pair, value
+    ) -> None:
+        """Pins the classifier's REAL boundary: `_ensure_named_remote` splits on
+        `"://" in remote`, nothing more.
+
+        scp-like (`git@host:path`) and bare-path remotes are genuine git
+        repositories but carry no scheme, so they fall through the plain-name
+        branch and are returned UNREGISTERED and unchanged -- which then means
+        `_prepare_issue_branch` interpolates them into `{name}/{branch}` refs
+        that cannot resolve. That is narrower than "resolve a remote to a name"
+        suggests, and this test exists to say so out loud rather than to bless
+        it: it is safe only because the sole caller of the URL branch
+        (`address_comments._pr_head_remote`) always builds an `https://` value
+        from GitHub's API, exactly as the function's own Preconditions state. A
+        future caller passing an scp-like fork remote needs the classifier
+        widened, and will fail this test's name, not silently misbehave.
+        """
+        _, clone = repo_pair
+
+        name, err = api._ensure_named_remote(clone, value)
+
+        assert (name, err) == (value, None)
+        assert "khala-pr-head" not in _must(clone, "remote").split()
+
     def test_url_registers_named_remote(self, api, fork_pair) -> None:
         _, clone, fork = fork_pair
         fork_url = f"file://{fork}"
@@ -1313,4 +1351,49 @@ class TestPushBranchToFork:
 
         assert ok is True, err
         assert _must(fork, "log", "-1", "--format=%s", "khala-fix") == "the fix"
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url
+
+    def test_a_second_push_to_the_same_fork_branch_succeeds(self, api, fork_pair) -> None:
+        """The repeat push -- the `--force-with-lease` path the first push never
+        reaches.
+
+        A child job re-dispatched after a transient failure pushes AGAIN to a
+        branch its own earlier run already created on the fork. Only that second
+        push exercises `--force-with-lease`, which compares the remote ref
+        against this checkout's remote-tracking ref: the first push's `-u` is
+        what leaves that tracking ref in place, so the two pushes are one
+        contract, not two independent ones. A lease check against a ref this
+        checkout had never seen would refuse the update ("stale info") and
+        strand the fix locally.
+        """
+        _, clone, fork = fork_pair
+        fork_url = f"file://{fork}"
+        _must(clone, "checkout", "-q", "-b", "khala-fix", "origin/main")
+        _commit_file(clone, "fix.py", "x = 1\n", "the fix")
+        assert api._push_branch(clone, fork_url, "khala-fix")[0] is True
+
+        # AMEND rather than add a commit: the retried run rewrites the branch
+        # it pushed before (the pipeline squashes/re-authors its fix), so the
+        # second push is genuinely NON-fast-forward. A plain `git push` is
+        # rejected here; only `--force-with-lease` lands it, and only because
+        # the first push left this checkout's remote-tracking ref matching
+        # what is actually on the fork.
+        amend = subprocess.run(
+            ["git", "-C", clone, "commit", "-q", "--amend", "--no-gpg-sign", "-m",
+             "the better fix"],
+            capture_output=True,
+            text=True,
+            env=_identity_env(),
+        )
+        assert amend.returncode == 0, amend.stderr
+        ok, err = api._push_branch(clone, fork_url, "khala-fix")
+
+        assert ok is True, err
+        assert _must(fork, "log", "-1", "--format=%s", "khala-fix") == "the better fix"
+        # The rewrite really replaced the old commit rather than stacking on it.
+        assert _must(fork, "rev-list", "--count", "khala-fix") == _must(
+            clone, "rev-list", "--count", "khala-fix"
+        )
+        # Still exactly one registered fork remote: registration is idempotent,
+        # so a retry must not accumulate remotes or repoint an existing one.
         assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url

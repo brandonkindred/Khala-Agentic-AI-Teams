@@ -1770,12 +1770,21 @@ class TestEndpointHappyPath:
         The raw git output is deliberately NOT echoed into the response or the
         stored job ``error``: ``_fail_new_job``'s safe-to-disclose contract
         applies (``GET /api/jobs/{team}`` returns a job's ``error`` verbatim),
-        and remote-supplied git stderr is not a sanitized summary. It must still
-        reach the log, where the operator diagnostic belongs.
+        and remote-supplied git stderr is not a sanitized summary. The
+        diagnostic must still reach the log, where it belongs for operators --
+        but REDACTED, not verbatim: a log is the longest-lived copy of any text
+        that passes through it (aggregation, retention), so a credential echoed
+        in git stderr must not survive into it.
         """
         import software_engineering_team.api.coding_team_main as api_main
 
-        raw_git_error = "fatal: could not read from https://x-access-token:ghp_SECRET@example/r"
+        # A realistic credential length: `redact_secret`/`scrub_token_from_text`
+        # deliberately ignore sub-8-char literals and sub-20-char bare tokens so
+        # ordinary prose is not mangled.
+        raw_git_error = (
+            "fatal: could not read from "
+            "https://x-access-token:ghp_SECRETSECRETSECRETSECRET@example/r"
+        )
         monkeypatch.setattr(
             api_main, "resolve_remote_branch_sha", lambda *a, **kw: (False, raw_git_error)
         )
@@ -1794,7 +1803,8 @@ class TestEndpointHappyPath:
 
         assert resp.status_code == 502
         assert resp.json()["detail"] == "unable to resolve base branch head sha"
-        assert "ghp_SECRET" not in resp.text
+        assert raw_git_error not in resp.text
+        assert "ghp_SECRETSECRETSECRETSECRET" not in resp.text
 
         # The job row was already created before the SHA check ran; it must be
         # marked failed here or every retry for this issue would 409 forever
@@ -1804,9 +1814,13 @@ class TestEndpointHappyPath:
         job = patched_app["jobs"].get_job(jobs[0]["job_id"])
         assert job["status"] == "failed"
         assert job["error"] == "unable to resolve base branch head sha"
-        # Sanitized in the disclosed surfaces, but the full diagnostic still
-        # reaches the operator through the log.
-        assert raw_git_error in caplog.text
+        # Sanitized in the disclosed surfaces, and the diagnostic that reaches
+        # the operator through the log is redacted too: the surrounding git
+        # message survives (it is what makes the log useful), the credential
+        # does not.
+        assert "fatal: could not read from" in caplog.text
+        assert "ghp_SECRETSECRETSECRETSECRET" not in caplog.text
+        assert "example/r" in caplog.text
 
     def test_run_from_github_fails_job_when_persisting_github_context_raises(
         self, patched_app, monkeypatch

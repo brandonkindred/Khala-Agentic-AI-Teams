@@ -24,7 +24,8 @@ third copy of the same tokenizer/Jaccard metric
 ``github_source`` is the PR-specific package; the two are otherwise fully
 decoupled, and inverting that for a small pure function is not worth the
 coupling. The same reasoning applies to ``scrub_token_from_text`` (a two-line
-regex substitution), copied locally as :func:`_scrub_token_from_text`.
+regex substitution), copied locally as :func:`_scrub_token_from_text` — the
+copy must stay behaviourally in lockstep with the original.
 
 The pass is **fail-safe by design**: a missing client, too few findings, or
 any failure (LLM error, malformed reply) degrades to an empty list. Never
@@ -131,17 +132,24 @@ def _group_similar_findings(
 # — same rationale as the clustering copy above). ------------------------
 
 _TOKEN_URL_RE = re.compile(r"https?://[^/\s@]+@", re.IGNORECASE)
+# Bare GitHub credential prefixes. Kept in lockstep with
+# ``github_source.client._BARE_TOKEN_RE``: a finding routinely quotes the code
+# it flags, so a "hardcoded credential" finding carries the credential itself
+# into this prompt.
+_BARE_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}")
 
 
 def _scrub_token_from_text(msg: str) -> str:
-    """Best-effort redact ``https://user:token@host/...`` style remote URLs.
+    """Best-effort redact GitHub credentials from arbitrary text.
 
-    Postconditions: returns ``msg`` unchanged when it contains no such URL,
-    otherwise with every match replaced by ``https://***@``. Never raises.
+    Postconditions: returns ``msg`` unchanged when it carries no credential,
+    otherwise with every ``https://user:token@host/...`` URL replaced by
+    ``https://***@`` and every bare ``gh[pousr]_`` token replaced by ``***``.
+    Never raises.
     """
     if not msg:
         return msg
-    return _TOKEN_URL_RE.sub("https://***@", msg)
+    return _BARE_TOKEN_RE.sub("***", _TOKEN_URL_RE.sub("https://***@", msg))
 
 
 def _build_synthesis_prompt(issues: Sequence[CodeReviewIssue]) -> str:

@@ -31,6 +31,34 @@ from temporalio import activity
 _REQUIRED_FIELDS = ("job_id", "repo_path", "remote", "default_branch", "integration_branch")
 
 
+def _redact(message: str, token: str | None) -> str:
+    """Redact the activity's resolved GitHub token from an exception message.
+
+    Every ``raise`` in this module lands in Temporal's PERMANENT event history
+    (and in the workflow failure surfaced to operators), so this module's
+    contract is that no exception message may carry a secret. Most raises here
+    satisfy that trivially -- they name only missing FIELD NAMES. The
+    exceptions are the two that interpolate git's own stderr, which can echo a
+    credential embedded in a remote URL or handed to a helper.
+
+    Preconditions:
+        - ``message`` is the text about to be interpolated into an exception.
+          ``token`` is the credential resolved by
+          :func:`_require_activity_github_token`, or ``None`` when none is in
+          scope.
+    Postconditions:
+        - Returns ``message`` with the literal ``token`` removed and any other
+          GitHub credential shape pattern-scrubbed (see
+          ``github_source.redact_secret``). Pure; never raises -- a redaction
+          helper that could itself throw would convert a reportable failure
+          into an opaque one.
+    """
+    from software_engineering_team.github_source import redact_secret
+
+    return redact_secret(str(message), token)
+
+
+
 def _require_activity_github_token(request: dict[str, Any]) -> str:
     """Resolve a GitHub token for a Temporal GitHub-hook activity.
 
@@ -303,7 +331,10 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
             (checked FIRST, so a present-but-falsy ``0`` is rejected as a bad
             value rather than misreported as a missing field), or ``request``
             is missing any field in ``_PR_PUBLISH_REQUIRED_FIELDS``.
-        RuntimeError: The git fast-forward or the push to ``remote`` fails.
+        RuntimeError: The git fast-forward or the push to ``remote`` fails. The
+            git diagnostic is interpolated into the message only after
+            :func:`_redact` strips the resolved token, since activity exception
+            messages are recorded permanently in Temporal history.
     """
     token = _require_activity_github_token(request)
     # `pr_number` is validated BEFORE the missing-fields sweep, which is
@@ -335,10 +366,10 @@ def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
 
     ff_ok, ff_err = _main._fast_forward(repo_path, branch, _main.DEVELOPMENT_BRANCH)
     if not ff_ok:
-        raise RuntimeError(f"fast-forward failed: {ff_err}")
+        raise RuntimeError(f"fast-forward failed: {_redact(ff_err, token)}")
     push_ok, push_err = _main._push_branch(repo_path, remote, branch, token)
     if not push_ok:
-        raise RuntimeError(f"git push failed: {push_err}")
+        raise RuntimeError(f"git push failed: {_redact(push_err, token)}")
 
     failed = _main._failed_tasks(_main.get_job(job_id) or {})
     status = JobStatus.COMPLETED_WITH_FAILURES.value if failed else JobStatus.COMPLETED.value

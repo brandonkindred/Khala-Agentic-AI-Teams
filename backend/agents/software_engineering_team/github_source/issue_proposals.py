@@ -796,7 +796,11 @@ def _format_existing_issues(issues: list[Issue], max_issues: int = 30) -> str:
           ``<existing_issue number="N">…</existing_issue>`` tag pair: issue
           titles and bodies are attacker-influenceable on a public repo, and
           :data:`_SIMILARITY_SYSTEM_PROMPT` instructs the model to treat
-          anything inside those tags strictly as data, never as instructions. This cap is prompt-budget-specific and deliberately
+          anything inside those tags strictly as data, never as instructions.
+          Fencing and SCRUBBING are separate controls and both apply: every
+          title and body is passed through :func:`scrub_token_from_text` first,
+          so a credential pasted into an issue is not shipped to the LLM
+          provider even though the fence would stop it being obeyed. This cap is prompt-budget-specific and deliberately
           tighter than the caller's own snapshot cap
           (:func:`duplicate_check_max_open_issues`, default 100): the snapshot
           bounds GitHub round-trips, this bounds the model's context window.
@@ -807,9 +811,9 @@ def _format_existing_issues(issues: list[Issue], max_issues: int = 30) -> str:
         return "(no existing open issues)"
     lines: list[str] = []
     for issue in issues[:max_issues]:
-        title = (issue.title or "").strip()
+        title = scrub_token_from_text((issue.title or "").strip())
         # Truncate body to avoid blowing up the context window
-        body = (issue.body or "").strip()
+        body = scrub_token_from_text((issue.body or "").strip())
         if len(body) > 500:
             body = body[:500] + "..."
         labels_str = ", ".join(issue.labels) if issue.labels else "none"
@@ -850,15 +854,27 @@ def find_similar_open_issue_via_llm(proposal: dict[str, Any], open_issues: list[
           not.
         - Costs exactly one LLM call per invocation when ``open_issues`` is
           non-empty, and zero when it is empty.
+        - Every value interpolated into the prompt -- the proposal's own fields
+          AND each existing issue's title/body (see
+          :func:`_format_existing_issues`) -- is passed through
+          :func:`scrub_token_from_text` first, so no credential quoted in a
+          finding or an issue reaches the LLM provider.
     """
     if not open_issues:
         return None
 
-    description = str(proposal.get("description") or "")
-    file_path = str(proposal.get("file_path") or "")
-    category = str(proposal.get("category") or "general")
-    severity = str(proposal.get("severity") or "info")
-    suggestion = str(proposal.get("suggestion") or "")
+    # Scrubbed again here even though ``proposal_from_findings`` already scrubs
+    # ``description``/``suggestion``: this function accepts any proposal-shaped
+    # dict (including rows persisted before that scrubbing existed), and
+    # ``file_path``/``category``/``severity`` are never scrubbed on the way in.
+    # A finding routinely QUOTES the code it flags -- a "hardcoded credential"
+    # finding carries the credential itself -- so nothing here reaches the LLM
+    # provider unscrubbed.
+    description = scrub_token_from_text(str(proposal.get("description") or ""))
+    file_path = scrub_token_from_text(str(proposal.get("file_path") or ""))
+    category = scrub_token_from_text(str(proposal.get("category") or "general"))
+    severity = scrub_token_from_text(str(proposal.get("severity") or "info"))
+    suggestion = scrub_token_from_text(str(proposal.get("suggestion") or ""))
 
     existing_issues_text = _format_existing_issues(open_issues)
 
