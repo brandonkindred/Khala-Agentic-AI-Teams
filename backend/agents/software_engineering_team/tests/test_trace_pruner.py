@@ -50,16 +50,32 @@ def test_prune_interval_env_default_and_garbage(monkeypatch) -> None:
     assert trace_pruner._prune_interval_s() == 0.0  # clamped to floor
 
 
-def test_register_configures_heartbeat_with_floor_and_beat_first(monkeypatch) -> None:
-    """register_trace_pruner floors a 0/garbage-clamped interval to 60s (so the
-    heartbeat can never busy-loop) and enables beat_first (so a restart landing
-    more often than the interval still gets a sweep in)."""
+def test_register_floors_interval_regardless_of_why_its_low(monkeypatch) -> None:
+    """The 60s floor applies to any resolved value below it, not just the
+    negative/garbage-clamped-to-0 case — pinning both ends of the (0, 60)
+    band so an implementation that only special-cases <=0 (e.g. `interval if
+    interval > 0 else 60.0` instead of `max(interval, 60.0)`) would fail here
+    even though it'd pass a zero-only check."""
     monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "0")
+    trace_pruner.register_trace_pruner()
+    assert trace_pruner._heartbeat._interval_s == 60.0
 
+    trace_pruner._reset_for_test()
+    monkeypatch.setenv("SE_TRACE_PRUNE_INTERVAL_S", "30")
+    trace_pruner.register_trace_pruner()
+    assert trace_pruner._heartbeat._interval_s == 60.0
+
+
+def test_register_configures_beat_first_and_callable() -> None:
+    """register_trace_pruner enables beat_first (so a restart landing more
+    often than the interval still gets a sweep in) and hands _prune_tick to
+    the heartbeat as its beat callable — the actual wiring this PR exists to
+    establish. A mis-wired or no-op registration would otherwise pass every
+    other test in this file while production pruning silently never ran."""
     trace_pruner.register_trace_pruner()
 
-    assert trace_pruner._heartbeat._interval_s == 60.0
     assert trace_pruner._heartbeat._beat_first is True
+    assert trace_pruner._heartbeat._beat is trace_pruner._prune_tick
 
 
 def test_prune_tick_calls_prune_traces_and_logs_when_removed(monkeypatch, caplog) -> None:

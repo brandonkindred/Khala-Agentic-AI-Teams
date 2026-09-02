@@ -53,6 +53,8 @@ class _TraceRecord:
         self.objective = "o"
         self.request_id = "r0"
         for k, v in overrides.items():
+            if not hasattr(self, k):
+                raise AttributeError(f"Unknown trace record attribute: {k!r}")
             setattr(self, k, v)
 
 

@@ -530,7 +530,10 @@ Number of past-sprint learnings injected into the Tech Lead's Design prompt
 
 ### SE_LEARNINGS_RETENTION_DAYS
 Retention window (by `last_seen`) for `se_learnings` rows used by
-`learnings_store.prune_learnings` (default `365`).
+`learnings_store.prune_learnings` (default `365`). Unlike `se_agent_traces`
+(see `SE_TRACE_PRUNE_INTERVAL_S` above), nothing currently schedules
+`prune_learnings` — this window is defined but not yet enforced
+automatically; wiring it up the same way is tracked separately.
 
 ---
 
