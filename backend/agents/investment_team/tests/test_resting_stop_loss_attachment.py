@@ -301,7 +301,7 @@ def test_resolve_resting_stop_loss_attachment_delegates_to_entry_anchored_stop_p
 # Dispatcher-wiring bars: only ``close`` (and an implied symbol) vary across
 # call sites here — distinct from ``_bar`` below, which the end-to-end section
 # uses for explicit per-bar OHLC control (gaps, wicks) across a bar sequence.
-def _make_bar(symbol="AAA", close=100.0, timestamp="2024-01-10") -> Bar:
+def _make_bar(symbol: str = "AAA", close: float = 100.0, timestamp: str = "2024-01-10") -> Bar:
     return Bar(
         symbol=symbol,
         timestamp=timestamp,
@@ -314,7 +314,7 @@ def _make_bar(symbol="AAA", close=100.0, timestamp="2024-01-10") -> Bar:
     )
 
 
-def _make_portfolio(capital=10_000_000.0) -> Portfolio:
+def _make_portfolio(capital: float = 10_000_000.0) -> Portfolio:
     return Portfolio(initial_capital=capital)
 
 
