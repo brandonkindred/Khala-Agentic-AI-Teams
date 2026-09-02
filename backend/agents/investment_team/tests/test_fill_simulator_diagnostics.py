@@ -360,8 +360,9 @@ def test_continuation_insufficient_capital_emits_rejected_event() -> None:
         close=100.0,
         volume=9_000,
     )
-    bar1 = sim.process_bar(bbb_bar1)
-    assert bar1.entry_fills[0].fill_kind == FillKind.PARTIAL
+    outcome1 = sim.process_bar(bbb_bar1)
+    assert outcome1.entry_fills, "expected a participation-capped partial entry fill for BBB"
+    assert outcome1.entry_fills[0].fill_kind == FillKind.PARTIAL
     assert portfolio.capital == pytest.approx(10_000.0, abs=0.01)
 
     bbb_bar2 = Bar(
