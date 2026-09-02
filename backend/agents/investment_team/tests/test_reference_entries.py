@@ -40,6 +40,10 @@ def _bar(o: float, h: float, low: float, c: float, ts: str = "2024-01-01T00:00:0
 def _spec_with_rules(
     entry_rules: list[EntryRule], target_symbols: list[str] | None = None
 ) -> StrategySpec:
+    """Build the suite's standard test ``StrategySpec`` with explicit entry rules.
+
+    ``target_symbols=None`` disables target-symbol gating (``target_symbols or []``).
+    """
     return StrategySpec(
         strategy_id="strat-ref-entries-test",
         authored_by="test",
@@ -53,6 +57,7 @@ def _spec_with_rules(
 
 
 def _spec(target_symbols: list[str] | None = None) -> StrategySpec:
+    """Default single-rule long spec (``bar.close > 100``) used by most tests."""
     return _spec_with_rules(
         [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=100.0))],
         target_symbols=target_symbols,
@@ -126,13 +131,16 @@ def test_predicate_true_across_consecutive_bars_suppresses_to_one_fill():
     assert out[0].entry_bar == 1
 
 
-def test_multiple_entry_rules_picks_the_earliest_firing_rule_by_index():
-    # Two entry rules on the spec: rule 0 (long, close > 200) never fires in
-    # this series; rule 1 (short, close < 50) fires at bar 1. Proves
-    # entry_rule_index/side are derived from whichever rule actually
-    # matched — not hardcoded to index 0 — and that once rule 1 fills the
-    # symbol, rule 0's later-satisfiable condition (bar 3's close=250) is
-    # never reached, since the module never re-opens a symbol once filled.
+def test_entry_rule_index_and_side_come_from_the_matching_rule():
+    # Two entry rules on the spec, firing on different bars: rule 0 (long,
+    # close > 200) never fires in this series; rule 1 (short, close < 50)
+    # fires at bar 1. Proves entry_rule_index/side are derived from whichever
+    # rule actually matched — not hardcoded to index 0 — and that once rule 1
+    # fills the symbol, rule 0's later-satisfiable condition (bar 3's
+    # close=250) is never reached, since the module never re-opens a symbol
+    # once filled. This does NOT exercise a same-bar tie-break between rules —
+    # see test_multiple_entry_rules_same_bar_tie_break_picks_lowest_index for
+    # that.
     rules = [
         EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=200.0)),
         EntryRule(side="short", when=Predicate(lhs="bar.close", op="<", rhs=50.0)),
@@ -153,6 +161,32 @@ def test_multiple_entry_rules_picks_the_earliest_firing_rule_by_index():
     assert fill.entry_price == 44
     assert fill.entry_rule_index == 1
     assert fill.entry_date == "2024-01-03"
+
+
+def test_multiple_entry_rules_same_bar_tie_break_picks_lowest_index():
+    # Rule 0 (long, close > 90) and rule 1 (short, close > 95) are both false
+    # at bar 0's close of 30 and both true at bar 1's close of 100 — a
+    # genuine same-bar tie, unlike the mixed-bar scenario above.
+    # evaluate_entry_rules scans rules in list order and returns the first
+    # match, so rule 0 (the lower index) must win.
+    rules = [
+        EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0)),
+        EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=95.0)),
+    ]
+    bars = {
+        "AAA": [
+            _bar(30, 30, 30, 30, ts="2024-01-01T00:00:00"),
+            _bar(100, 100, 100, 100, ts="2024-01-02T00:00:00"),
+            _bar(101, 102, 100, 101, ts="2024-01-03T00:00:00"),
+        ]
+    }
+    out = replay_entry_rules(_spec_with_rules(rules), bars)
+    assert len(out) == 1
+    fill = out[0]
+    assert fill.side == "long"
+    assert fill.entry_rule_index == 0
+    assert fill.entry_bar == 2
+    assert fill.entry_price == 101
 
 
 def test_nonpositive_fill_bar_open_is_dropped_but_later_trigger_still_fires():
