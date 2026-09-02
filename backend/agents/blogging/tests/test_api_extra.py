@@ -95,6 +95,20 @@ def test_full_pipeline_sync_unknown_error(client: TestClient, monkeypatch) -> No
     assert "crash" in r.json()["detail"]
 
 
+def test_full_pipeline_sync_422_when_web_search_not_configured(
+    client: TestClient, monkeypatch
+) -> None:
+    """POST /full-pipeline rejects immediately (no run_pipeline call) when OLLAMA_API_KEY is unset."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(v2, "run_pipeline", _raise(AssertionError("should not be called")))
+
+    r = client.post("/full-pipeline", json={"brief": "x"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+
+
 # ---------------------------------------------------------------------------
 # Resume / restart with valid payload — happy path
 # ---------------------------------------------------------------------------

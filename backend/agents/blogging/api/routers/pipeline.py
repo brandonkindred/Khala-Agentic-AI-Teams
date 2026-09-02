@@ -17,6 +17,7 @@ from agents.blogging.api.models import (
     TitleChoiceResponse,
     _format_audience,
 )
+from agents.blogging.blog_research_agent.tools.web_search import is_web_search_configured
 from agents.blogging.shared.brand_spec import brand_spec_prompt_configured
 from agents.blogging.shared.content_plan import (
     content_plan_summary_text,
@@ -30,6 +31,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _require_web_search_configured() -> None:
+    """
+    Raise 422 immediately if research's web-search dependency is unconfigured.
+
+    Preconditions: none.
+    Postconditions: returns None if ``is_web_search_configured()`` is True;
+        otherwise raises HTTPException(422) before any job/work is created.
+    """
+    if not is_web_search_configured():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "web_search_not_configured",
+                "message": (
+                    "OLLAMA_API_KEY is not set. The research stage requires an Ollama "
+                    "API key for web search (e.g. from https://ollama.com/settings/keys)."
+                ),
+            },
+        )
+
+
 @router.post(
     "/full-pipeline",
     response_model=FullPipelineResponse,
@@ -39,6 +61,8 @@ router = APIRouter()
 def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
     """Run the full brand-aligned pipeline with artifact persistence and gates."""
     from agents.blogging.api import main as _main
+
+    _require_web_search_configured()
 
     run_pipeline = _import_run_pipeline()
 
@@ -90,6 +114,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "brand_spec_configured": brand_spec_prompt_configured(),
+        "web_search_configured": is_web_search_configured(),
     }
 
 
@@ -102,6 +127,8 @@ def health() -> dict:
 def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResponse:
     """Start the full pipeline asynchronously and return job_id for polling."""
     from agents.blogging.api import main as _main
+
+    _require_web_search_configured()
 
     if _main.create_blog_job is None:
         raise HTTPException(

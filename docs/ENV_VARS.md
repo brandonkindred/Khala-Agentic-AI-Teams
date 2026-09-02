@@ -21,9 +21,19 @@ floor/ceiling unless a row states otherwise. Per-row notes call out only the cas
 > `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError`.
 
 ### OLLAMA_API_KEY
-Used only by the operator "browse Ollama models" utility (`GET /api/llm-config/ollama-models`) to
-authenticate a listing against Ollama Cloud. It does **not** authenticate agent requests — a provider
-entry uses its own stored key.
+Used by the operator "browse Ollama models" utility (`GET /api/llm-config/ollama-models`) to
+authenticate a listing against Ollama Cloud. It does **not** authenticate LLM inference requests — a
+provider entry uses its own stored key for that.
+
+It **is**, however, the required bearer token for Ollama's `web_search` API
+(`https://ollama.com/api/web_search`), which several teams' research/trend tools call directly and
+without any fallback provider. If it's unset, those tools fail outright (not a transient error — it
+won't be retried). Required wherever web search is used:
+- `backend/agents/blogging/blog_research_agent/tools/web_search.py`
+- `backend/agents/job_matching_team/tools/web_search.py`
+- `backend/agents/personal_assistant_team/tools/web_search.py`
+- `backend/agents/software_engineering_team/architect_agents/tools/web_search.py`
+- `backend/agents/social_media_marketing_team/trend_discovery_agent.py`
 
 ### LLM_PROVIDER
 `dummy` selects the no-LLM test/dev harness (a hard override that pre-empts the provider list). Any other

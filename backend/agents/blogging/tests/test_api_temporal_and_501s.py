@@ -94,6 +94,16 @@ def test_full_pipeline_async_501_when_create_blog_job_none(client: TestClient, m
     assert r.status_code == 501
 
 
+def test_full_pipeline_async_422_when_web_search_not_configured(
+    client: TestClient, monkeypatch
+) -> None:
+    """POST /full-pipeline-async rejects before creating a job when OLLAMA_API_KEY is unset."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    r = client.post("/full-pipeline-async", json={"brief": "x"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+
+
 def test_get_job_status_501(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(_api_main, "get_blog_job", None)
     r = client.get("/job/anything")
