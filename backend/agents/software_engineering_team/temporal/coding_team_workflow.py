@@ -394,6 +394,43 @@ class CodingTeamWorkflow:
                 retry_policy=_GITHUB_ACTIVITY_RETRY,
             )
 
+    async def _best_effort_mark_job_failed(self, *, job_id: str, message: str) -> None:
+        """Terminalize the Khala job record WITHOUT posting any GitHub notice.
+
+        Used for caller-contract violations (an unusable ``github`` payload),
+        where :meth:`_best_effort_github_failure_notice` is the wrong tool for
+        two separate reasons: the payload that would address the notice is the
+        very thing that is malformed (``owner``/``repo``/``issue_number`` may be
+        absent or unusable), and a payload-wiring bug is not a run failure worth
+        announcing on the issue/PR. Terminalizing the record is still required —
+        otherwise the API layer's running-job / checkout-admission checks keep
+        seeing a permanently-failed workflow's job as active and wedge every
+        sibling run on that checkout.
+
+        Preconditions:
+            - Called from ``run`` while this workflow is executing.
+            - ``job_id`` identifies the job this workflow was started for;
+              ``message`` is the non-empty diagnostic to record against it.
+        Postconditions:
+            - Attempts ``mark_coding_team_job_failed_activity`` (bounded
+              retries) so the job record reaches a terminal state.
+            - NEVER posts a GitHub notice, and never raises: a failure to
+              terminalize is logged only, so the caller's validation error is
+              what surfaces. Returns normally in both cases.
+        """
+        try:
+            await workflow.execute_activity(
+                mark_coding_team_job_failed_activity,
+                {"job_id": job_id, "error": message},
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=_GITHUB_ACTIVITY_RETRY,
+            )
+        except Exception:
+            _log_github_side_effect_failure(
+                "best-effort mark-job-failed for an unusable github payload failed; "
+                "surfacing the validation error anyway"
+            )
+
     async def _best_effort_terminalize_then_reraise(
         self,
         *,
@@ -467,9 +504,16 @@ class CodingTeamWorkflow:
               deliberately: a bad payload is a caller-wiring bug, not an
               activity failure, so it fails the workflow task outright rather
               than burning a full pipeline run and then posting a misleading
-              "publish failed" notice. Nothing has been started at that point,
-              so no notice is posted and no job is marked failed — unlike
-              every other failure path below.
+              "publish failed" notice. No GitHub notice is posted — unlike
+              every other failure path below — because the payload that would
+              address one is the very thing that is malformed. The job record
+              IS still terminalized first, best-effort, via
+              :meth:`_best_effort_mark_job_failed`: the workflow task fails
+              before reaching any activity, so leaving the record non-terminal
+              would make the API layer's running-job / checkout-admission
+              checks treat a permanently-failed job as active and wedge every
+              sibling run on that checkout. A failure to terminalize is logged
+              only; the ``ValueError`` is always what surfaces.
             - Without GitHub metadata, returns the activity's result dict.
               With GitHub metadata, prepares the integration branch before
               running the pipeline, posts a failure notice (and marks the job
@@ -557,67 +601,86 @@ class CodingTeamWorkflow:
         pr_number = None
         issue_number = issue_title = None
         if isinstance(github, dict) and github:
-            publish_mode = github.get("publish_mode")
-            if publish_mode not in (None, "existing_pr"):
-                raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
-            is_existing_pr_publish = publish_mode == "existing_pr"
-            # A missing required key here is a caller-contract violation, exactly
-            # like the publish_mode check above: it fails the workflow task
-            # directly (ValueError, not terminalize-with-notice) rather than being
-            # treated as a runtime/activity failure worth posting a notice about —
-            # deliberately NOT wrapped in terminalization to match that convention.
+            # Every validation failure below is a caller-contract violation, and
+            # each raises immediately rather than taking the terminalize-with-
+            # notice path (no GitHub notice is posted for a payload-wiring bug).
+            # Terminalizing the JOB RECORD is a separate concern from posting
+            # that notice, and is still required: a workflow task that fails here
+            # never reaches an activity, so without this the record stays
+            # non-terminal and the API layer's running-job / checkout-admission
+            # checks keep treating a permanently-failed job as active, wedging
+            # every sibling run on the same checkout. Catching ValueError around
+            # the whole block keeps that terminalization in ONE place instead of
+            # repeating it at each raise site (where copies could drift), and
+            # leaves every diagnostic message and exception chain untouched.
             try:
-                owner = github["owner"]
-                repo = github["repo"]
-                base = github["base"]
-                integration_branch = github["integration_branch"]
-                if is_existing_pr_publish:
-                    pr_number = github["pr_number"]
-                else:
-                    issue_number = github["issue_number"]
-                    issue_title = github["issue_title"]
-            except KeyError as exc:
-                raise ValueError(f"github payload missing required key: {exc}") from exc
+                publish_mode = github.get("publish_mode")
+                if publish_mode not in (None, "existing_pr"):
+                    raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
+                is_existing_pr_publish = publish_mode == "existing_pr"
+                # A missing required key here is a caller-contract violation, exactly
+                # like the publish_mode check above: it fails the workflow task
+                # directly (ValueError, not terminalize-with-notice) rather than being
+                # treated as a runtime/activity failure worth posting a notice about.
+                # The enclosing handler still terminalizes the job record, which is a
+                # separate concern from posting that notice.
+                try:
+                    owner = github["owner"]
+                    repo = github["repo"]
+                    base = github["base"]
+                    integration_branch = github["integration_branch"]
+                    if is_existing_pr_publish:
+                        pr_number = github["pr_number"]
+                    else:
+                        issue_number = github["issue_number"]
+                        issue_title = github["issue_title"]
+                except KeyError as exc:
+                    raise ValueError(f"github payload missing required key: {exc}") from exc
 
-            # Presence alone is not enough: a payload carrying `owner=None` or
-            # `integration_branch=""` passes the KeyError check above and is then
-            # forwarded verbatim to branch prep, which fails as an ACTIVITY
-            # failure and takes the terminalize-with-notice path -- burning a run
-            # and posting a misleading "publish failed" notice for what is a
-            # caller-wiring bug. Validate the VALUES here so the same bug fails
-            # the same way (immediate ValueError) whether the key was absent or
-            # merely unusable.
-            for _name, _value in (
-                ("owner", owner),
-                ("repo", repo),
-                ("base", base),
-                ("integration_branch", integration_branch),
-            ):
-                if not isinstance(_value, str) or not _value.strip():
-                    raise ValueError(
-                        f"github payload key {_name!r} must be a non-empty string, "
-                        f"got {_value!r}"
-                    )
-            if is_existing_pr_publish:
-                if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
-                    raise ValueError(
-                        f"github payload key 'pr_number' must be a positive int, got {pr_number!r}"
-                    )
-            else:
-                if (
-                    isinstance(issue_number, bool)
-                    or not isinstance(issue_number, int)
-                    or issue_number <= 0
+                # Presence alone is not enough: a payload carrying `owner=None` or
+                # `integration_branch=""` passes the KeyError check above and is then
+                # forwarded verbatim to branch prep, which fails as an ACTIVITY
+                # failure and takes the terminalize-with-notice path -- burning a run
+                # and posting a misleading "publish failed" notice for what is a
+                # caller-wiring bug. Validate the VALUES here so the same bug fails
+                # the same way (immediate ValueError) whether the key was absent or
+                # merely unusable.
+                for _name, _value in (
+                    ("owner", owner),
+                    ("repo", repo),
+                    ("base", base),
+                    ("integration_branch", integration_branch),
                 ):
-                    raise ValueError(
-                        "github payload key 'issue_number' must be a positive int, "
-                        f"got {issue_number!r}"
-                    )
-                if not isinstance(issue_title, str) or not issue_title.strip():
-                    raise ValueError(
-                        "github payload key 'issue_title' must be a non-empty string, "
-                        f"got {issue_title!r}"
-                    )
+                    if not isinstance(_value, str) or not _value.strip():
+                        raise ValueError(
+                            f"github payload key {_name!r} must be a non-empty string, "
+                            f"got {_value!r}"
+                        )
+                if is_existing_pr_publish:
+                    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
+                        raise ValueError(
+                            f"github payload key 'pr_number' must be a positive int, got {pr_number!r}"
+                        )
+                else:
+                    if (
+                        isinstance(issue_number, bool)
+                        or not isinstance(issue_number, int)
+                        or issue_number <= 0
+                    ):
+                        raise ValueError(
+                            "github payload key 'issue_number' must be a positive int, "
+                            f"got {issue_number!r}"
+                        )
+                    if not isinstance(issue_title, str) or not issue_title.strip():
+                        raise ValueError(
+                            "github payload key 'issue_title' must be a non-empty string, "
+                            f"got {issue_title!r}"
+                        )
+            except ValueError as invalid_payload:
+                await self._best_effort_mark_job_failed(
+                    job_id=request["job_id"], message=str(invalid_payload)
+                )
+                raise
 
             # Branch prep lives under the SAME guard as the validation above (one
             # `isinstance(github, dict) and github` in this method, not two

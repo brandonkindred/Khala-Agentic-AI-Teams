@@ -27,6 +27,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 from shared.concurrency import flock_lock
 from shared.git.git_utils import (
@@ -964,6 +965,12 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
         - When ``remote`` is already a plain name (no ``"://"``, e.g.
           ``"origin"``), returns ``(remote, None)`` unchanged — no git call is
           made, so the common (non-fork) path is a pure no-op.
+        - When ``remote`` is a URL, any embedded userinfo
+          (``https://user:token@host/...``) is stripped from it FIRST, so a
+          credential can never be written into the checkout's ``.git/config``
+          by the durable registration below, nor echoed back in this
+          function's error return. Scheme, host, port and path are otherwise
+          preserved exactly. The registration then uses that normalized URL.
         - When ``remote`` is a URL, registers it as a durable local remote
           named ``_FORK_REMOTE_NAME`` — ``git remote add`` on first use,
           falling back to ``git remote set-url`` PLUS ``git remote set-url
@@ -972,8 +979,9 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
           fallback deliberately rewrites ``remote.<name>.pushurl`` too, so a
           previously-configured push URL cannot leave push and fetch pointing
           at different repositories for this remote.
-        - On a git failure returns ``(remote, error)``: the original value is
-          returned unchanged (never a name that failed to register) alongside
+        - On a git failure returns ``(remote, error)``: the caller's value is
+          returned as given for a plain name, and userinfo-stripped for a URL
+          (never a name that failed to register) alongside
           a message describing the failure. Note the fallback's two writes are
           NOT atomic: if the push-URL reset fails after the fetch URL was
           already updated, the checkout's git config is left half-updated, so
@@ -984,6 +992,20 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
     from software_engineering_team.api import coding_team_main as _main
     if "://" not in remote:
         return remote, None
+    # Strip any userinfo BEFORE the URL is written anywhere. Registration here
+    # is durable -- the remote is left in the checkout's `.git/config`
+    # afterward -- so a URL carrying an embedded credential would persist that
+    # credential to disk, contradicting the design in which the credential is
+    # supplied transiently per-invocation via `_git_auth_env(token)`. No
+    # current caller passes such a URL; this makes the guarantee structural
+    # rather than a property of the callers, and also keeps a credential out
+    # of the value echoed back in this function's error returns.
+    parts = urlsplit(remote)
+    if parts.username or parts.password:
+        netloc = parts.hostname or ""
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+        remote = urlunsplit(parts._replace(netloc=netloc))
     # `--` ends option parsing before the name/URL positionals: the only caller
     # of this URL branch (`_pr_head_remote`) always builds an "https://..."
     # value from GitHub's own API response, which can never start with `-`, but
@@ -1059,6 +1081,59 @@ def resolve_remote_branch_sha(
     if not ok:
         return False, scrub_token_from_text(_scrub_auth_header_values(msg, auth_env))
     return True, msg
+
+
+def _verify_pinned_head(
+    repo_path: str,
+    remote_issue_ref: str,
+    integration_branch: str,
+    expected_head_sha: str,
+) -> Optional[str]:
+    """Verify ``remote_issue_ref``'s live head still matches the pinned SHA.
+
+    Split out of :func:`_prepare_issue_branch` (already long, with several
+    unrelated recovery concerns) because this is one self-contained
+    verification step with two distinct failure messages. The CALLER owns
+    where this runs — immediately after the fetch and before any local branch
+    is touched — since that ordering is what makes the read fresh.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout; ``remote_issue_ref`` is the
+          remote-tracking ref for ``integration_branch``, already fetched.
+        - ``expected_head_sha`` is the non-``None`` SHA the caller's plan was
+          grounded on. A caller with nothing pinned must not call this.
+    Postconditions:
+        - Returns ``None`` when the live head resolves and equals
+          ``expected_head_sha``, compared with ``casefold`` (git SHAs are hex
+          and case-insensitive, and nothing guarantees the caller's SHA and
+          ``rev-parse``'s output agree on letter case — a same-commit
+          comparison must not fail merely because of that).
+        - Returns a caller-facing error MESSAGE — never raises, never mutates
+          the checkout — when the ref cannot be resolved at all, or when it
+          resolves to a different commit. The two messages are distinct so an
+          operator can tell a deleted/unfetchable branch from one that moved.
+    """
+    from software_engineering_team.api import coding_team_main as _main
+
+    rc_live_head, live_head = _main._git(
+        repo_path, "rev-parse", "--verify", "--quiet", remote_issue_ref
+    )
+    live_head_sha = live_head.strip() if rc_live_head == 0 else None
+    if live_head_sha is None:
+        return (
+            f"integration_branch {integration_branch!r} head could not be resolved "
+            f"from {remote_issue_ref!r}; the branch may have been deleted or is not "
+            f"fetchable. Expected {expected_head_sha!r}, so branch prep was aborted "
+            "rather than applying the plan to an unknown head"
+        )
+    if live_head_sha.casefold() != expected_head_sha.casefold():
+        return (
+            f"integration_branch {integration_branch!r} head is {live_head_sha}, "
+            f"expected {expected_head_sha!r}; the branch moved after this run's plan "
+            "was grounded, so branch prep was aborted rather than applying it to "
+            "newer code"
+        )
+    return None
 
 
 def _prepare_issue_branch(
@@ -1244,38 +1319,17 @@ def _prepare_issue_branch(
             return False, reconcile_err, notes
 
     if expected_head_sha is not None:
-        # Pin to the exact head the caller's plan was grounded on. Checked
-        # right after the fetch above (the freshest possible read of the
-        # remote) and before any local branch is touched below, so a stale
+        # Checked right after the fetch above (the freshest possible read of
+        # the remote) and before any local branch is touched below, so a stale
         # plan is rejected here rather than being silently applied to newer
-        # code that landed while this activity was queued or the caller's
-        # own LLM round-trips were in flight.
-        rc_live_head, live_head = _main._git(
-            repo_path, "rev-parse", "--verify", "--quiet", remote_issue_ref
+        # code that landed while this activity was queued or the caller's own
+        # LLM round-trips were in flight. Position is load-bearing; the check
+        # itself is factored out.
+        pin_err = _verify_pinned_head(
+            repo_path, remote_issue_ref, integration_branch, expected_head_sha
         )
-        live_head_sha = live_head.strip() if rc_live_head == 0 else None
-        if live_head_sha is None:
-            return (
-                False,
-                f"integration_branch {integration_branch!r} head could not be resolved "
-                f"from {remote_issue_ref!r}; the branch may have been deleted or is not "
-                f"fetchable. Expected {expected_head_sha!r}, so branch prep was aborted "
-                "rather than applying the plan to an unknown head",
-                notes,
-            )
-        # casefold, not a plain ==: git SHAs are hex and case-insensitive, and
-        # nothing here guarantees the caller's expected_head_sha and git's own
-        # rev-parse output agree on letter case -- a same-commit comparison
-        # must not fail merely because of that.
-        if live_head_sha.casefold() != expected_head_sha.casefold():
-            return (
-                False,
-                f"integration_branch {integration_branch!r} head is {live_head_sha}, "
-                f"expected {expected_head_sha!r}; the branch moved after this run's plan "
-                "was grounded, so branch prep was aborted rather than applying it to "
-                "newer code",
-                notes,
-            )
+        if pin_err:
+            return False, pin_err, notes
 
     seed = _select_seed(
         repo_path,

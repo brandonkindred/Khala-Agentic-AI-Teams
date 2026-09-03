@@ -22,10 +22,23 @@ class _FakeCursor:
     pins the store's read path by construction, and ``executed`` lets a test
     assert on the exact statements the store issued (and on the ones it did
     NOT).
+
+    ``execute_error``/``fetchone_error``, when set, make the corresponding call
+    raise AFTER a connection has already been handed out. Injecting only at
+    ``get_conn`` cannot distinguish a try/except that wraps the whole operation
+    from one that wraps connection acquisition alone, and it is the latter that
+    would let a mid-query failure escape into the caller.
     """
 
-    def __init__(self, fetchone_result=None) -> None:
+    def __init__(
+        self,
+        fetchone_result=None,
+        execute_error: Exception | None = None,
+        fetchone_error: Exception | None = None,
+    ) -> None:
         self.fetchone_result = fetchone_result
+        self.execute_error = execute_error
+        self.fetchone_error = fetchone_error
         self.executed: list[tuple] = []
 
     def __enter__(self) -> "_FakeCursor":
@@ -35,9 +48,13 @@ class _FakeCursor:
         return False
 
     def execute(self, query, params=None) -> None:
+        if self.execute_error is not None:
+            raise self.execute_error
         self.executed.append((str(query), params))
 
     def fetchone(self):
+        if self.fetchone_error is not None:
+            raise self.fetchone_error
         return self.fetchone_result
 
 
@@ -116,6 +133,52 @@ def test_has_recorded_resolve_failure_degrades_on_db_error(monkeypatch) -> None:
     monkeypatch.setattr(store, "get_conn", _boom)
     # A DB failure degrades to "no evidence" rather than raising or reporting
     # a false positive that would authorize an unsafe auto-resolve.
+    assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is False
+
+
+def test_writes_swallow_db_errors_raised_mid_query(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same log-and-continue guarantee must hold for a failure raised AFTER
+    a connection was obtained, not only for one raised acquiring it.
+
+    Injecting exclusively at ``get_conn`` cannot tell a try/except around the
+    whole operation from one around connection acquisition alone; a constraint
+    violation or a connection dropped mid-statement takes the latter path, and
+    would escape into the caller.
+    """
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    cursor = _FakeCursor(execute_error=RuntimeError("connection reset mid-statement"))
+    monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
+
+    with caplog.at_level("WARNING"):
+        store.record_resolve_failure("o", "r", 7, "T1", 3)
+        store.clear_resolve_attempt("o", "r", 7, "T1")
+        store.clear_resolve_attempts_for_pr("o", "r", 7)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 3
+    assert all("failed" in r.getMessage() for r in warnings)
+
+
+@pytest.mark.parametrize("fault", ["execute", "fetchone"])
+def test_has_recorded_resolve_failure_degrades_on_mid_query_error(monkeypatch, fault: str) -> None:
+    """The read must still degrade to the SAFE default (no evidence) when the
+    failure comes from ``execute`` or ``fetchone`` rather than ``get_conn``.
+
+    Raising into the caller here is the unsafe behaviour this test exists to
+    prevent: the caller treats an exception-free ``False`` as "no recorded
+    failure" and an exception as nothing at all, so a leaked error aborts the
+    run instead of routing the thread onto the conservative path.
+    """
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    boom = RuntimeError("connection reset mid-statement")
+    cursor = (
+        _FakeCursor(execute_error=boom)
+        if fault == "execute"
+        else _FakeCursor(fetchone_error=boom)
+    )
+    monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
+
     assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is False
 
 
@@ -343,6 +406,25 @@ def test_a_failure_first_recorded_without_an_id_is_readable_by_a_none_read(
 
     assert store.has_recorded_resolve_failure("o", "r", 7, "T2", None) is True
     assert store.has_recorded_resolve_failure("o", "r", 7, "T2", 3) is False
+
+
+def test_clear_for_pr_removes_only_that_prs_rows(sqlite_store) -> None:
+    """The PR-wide delete must run for real, and must not cross the PR boundary.
+
+    The shape assertions above prove the statement names the table and omits
+    ``thread_id``; they cannot catch a misspelled column, a dialect-only token,
+    or a WHERE clause broad enough to wipe a sibling PR's evidence, because a
+    fake cursor never runs the SQL. The second assertion is the one that pins
+    the scoping: wiping PR 8's ledger too would silently authorize an unsafe
+    auto-resolve on a thread whose failure is still real.
+    """
+    store.record_resolve_failure("o", "r", 7, "T1", 3)
+    store.record_resolve_failure("o", "r", 8, "T1", 3)
+
+    store.clear_resolve_attempts_for_pr("o", "r", 7)
+
+    assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is False
+    assert store.has_recorded_resolve_failure("o", "r", 8, "T1", 3) is True
 
 
 def test_clear_removes_the_row_end_to_end(sqlite_store) -> None:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import logging
 import threading
 from pathlib import Path
 
@@ -199,7 +200,12 @@ def test_operator_pinned_lock_failure_degrades_without_raising(
         asyncio.run(_run())
 
     assert body_ran
-    assert any("test-prefix" in r.message for r in caplog.records)
+    # Pin the LEVEL, not merely presence: caplog.at_level("WARNING") admits
+    # ERROR and CRITICAL too, so a bare presence check would also pass if this
+    # degraded-but-successful path were logged as an alert-worthy error.
+    assert any(
+        r.levelno == logging.WARNING and "test-prefix" in r.message for r in caplog.records
+    ), "expected a WARNING mentioning the log prefix for the degraded acquisition"
 
 
 def test_cancellation_during_acquisition_does_not_leak_the_lock(

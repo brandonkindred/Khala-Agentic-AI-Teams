@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 
 import pytest
 
@@ -998,16 +999,25 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
 
     publish_mode is now validated up front, before branch prep or the
     pipeline activity ever run (a payload-wiring bug should fail immediately,
-    not burn an entire pipeline run first) -- so NEITHER activity is called
-    here."""
+    not burn an entire pipeline run first) -- so neither branch prep nor the
+    pipeline is called here. The ONE activity that does run is the
+    mark-job-failed terminalize: the workflow task fails before reaching any
+    other activity, so the job record would otherwise stay non-terminal and
+    wedge checkout admission for every sibling run. Posting a notice and
+    terminalizing the record are separate concerns, and only the notice is
+    suppressed for a caller-wiring bug."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
         github_failure_notice_activity,
     )
-    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+        run_pipeline_activity,
+    )
 
     workflow_obj = CodingTeamWorkflow()
     calls: list = []
+    mark_failed_requests: list[dict] = []
 
     async def _fake_exec(fn, request, **_kw):
         calls.append(fn)
@@ -1015,6 +1025,9 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
             return {"ok": True, "error": None, "notes": []}
         if fn is run_pipeline_activity:
             return {"job_id": "job-1", "status": "running", "phase": "publishing"}
+        if fn is mark_coding_team_job_failed_activity:
+            mark_failed_requests.append(request)
+            return {"job_id": request["job_id"], "status": "failed"}
         if fn is github_failure_notice_activity:
             raise AssertionError("no failure notice expected for a caller-contract violation")
         raise AssertionError(f"unexpected activity {fn}")
@@ -1026,7 +1039,10 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
     with pytest.raises(ValueError, match=r"unsupported github\.publish_mode: 'existing-pr'"):
         asyncio.run(workflow_obj.run(_github_request(github=github)))
 
-    assert calls == []
+    assert calls == [mark_coding_team_job_failed_activity]
+    # The recorded error must be the validation diagnostic itself, so an
+    # operator reading the job record sees the actual misconfiguration.
+    assert mark_failed_requests[0]["error"] == "unsupported github.publish_mode: 'existing-pr'"
 
 
 @pytest.mark.parametrize(
@@ -1045,6 +1061,10 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
             r"'pr_number' must be a positive int",
         ),
         ({"publish_mode": "existing_pr", "pr_number": -1}, r"'pr_number' must be a positive int"),
+        # Pins the no-case-normalization contract the sibling test's docstring
+        # names but never exercised: validation is exact-match, so a future
+        # `mode.strip().lower()` would silently accept this and must not.
+        ({"publish_mode": "Existing_PR"}, r"unsupported github\.publish_mode: 'Existing_PR'"),
     ],
     ids=[
         "owner-none",
@@ -1057,6 +1077,7 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
         "issue-title-empty",
         "pr-number-str",
         "pr-number-negative",
+        "publish-mode-case-variant",
     ],
 )
 def test_unusable_github_payload_values_fail_closed_up_front(
@@ -1068,15 +1089,25 @@ def test_unusable_github_payload_values_fail_closed_up_front(
     would otherwise be forwarded verbatim to branch prep, fail there as an
     ACTIVITY failure, and take the terminalize-with-notice path -- burning a
     run and posting a misleading "publish failed" notice for what is really a
-    caller-wiring bug. Like the ``publish_mode`` check, this raises before any
-    activity runs, so NO activity is called.
+    caller-wiring bug. Like the ``publish_mode`` check, this raises before
+    branch prep or the pipeline runs; the ONLY activity permitted is the
+    mark-job-failed terminalize, which must run so the record does not stay
+    non-terminal and wedge checkout admission.
     """
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+    )
+
     workflow_obj = CodingTeamWorkflow()
     calls: list = []
+    mark_failed_requests: list[dict] = []
 
     async def _fake_exec(fn, request, **_kw):
         calls.append(fn)
-        raise AssertionError(f"no activity expected for a caller-contract violation: {fn}")
+        if fn is mark_coding_team_job_failed_activity:
+            mark_failed_requests.append(request)
+            return {"job_id": request["job_id"], "status": "failed"}
+        raise AssertionError(f"no other activity expected for a caller-contract violation: {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
     _forbid_wait_condition(monkeypatch)
@@ -1085,7 +1116,8 @@ def test_unusable_github_payload_values_fail_closed_up_front(
     with pytest.raises(ValueError, match=match):
         asyncio.run(workflow_obj.run(_github_request(github=github)))
 
-    assert calls == []
+    assert calls == [mark_coding_team_job_failed_activity]
+    assert re.search(match, mark_failed_requests[0]["error"]), mark_failed_requests[0]["error"]
 
 
 def test_github_publish_exception_preserves_original_when_terminalize_fails(

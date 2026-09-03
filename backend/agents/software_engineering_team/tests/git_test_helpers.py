@@ -58,6 +58,18 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
           genuine failure cannot leave every later assertion in the calling
           test running against the wrong HEAD *or* against changes the failed
           commit left staged.
+        - That reset covers TRACKED and INDEXED paths only. In the one failure
+          mode where ``write_text`` succeeds but ``git add`` itself fails (for
+          instance ``filename`` matches a ``.gitignore`` rule in the repo under
+          test), the file is never indexed, so it — and any parent directory
+          created for it — is left on disk as an untracked remnant. This is
+          deliberate rather than cleaned up: the cleanup would have to run in
+          the same ``finally`` block, where every git call raises
+          ``AssertionError`` on failure, so a failing ``git clean`` would
+          replace the original diagnostic with its own and hide the real cause.
+          The remnant is harmless in practice — the calling test has already
+          failed, and each caller builds its own throwaway repo per the
+          preconditions above.
 
     Preconditions:
         - ``repo`` is an existing on-disk git checkout with ``main`` **checked

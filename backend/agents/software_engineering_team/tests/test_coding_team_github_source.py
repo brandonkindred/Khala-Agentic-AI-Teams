@@ -14,8 +14,9 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import httpx
 import pytest
@@ -62,6 +63,33 @@ def _client_with(handler: Callable[[httpx.Request], httpx.Response]) -> GitHubCl
     client._client.close()  # type: ignore[attr-defined]
     client._client = httpx.Client(transport=transport, timeout=client._timeout)  # type: ignore[attr-defined]
     return client
+
+
+@contextmanager
+def _real_client(**kwargs: Any) -> Iterator[GitHubClient]:
+    """Yield a real GitHubClient, closing its httpx.Client on exit.
+
+    Companion to :func:`_client_with`, which cannot serve these tests: it
+    installs a MockTransport and takes no ``base_url``, whereas the host- and
+    URL-derivation tests need a genuine client built with a specific
+    ``base_url`` and make no requests at all. Extracted so the five such tests
+    share ONE teardown (and one ``type: ignore``) rather than five copies that
+    can drift.
+
+    Preconditions:
+        - ``kwargs`` are GitHubClient keyword arguments (typically
+          ``base_url``); ``token`` and a no-op ``sleep`` are supplied here.
+    Postconditions:
+        - Closes the client's underlying ``httpx.Client`` on exit, on the
+          exception path too, so no test leaks its connection pool.
+        - Makes no request and installs no transport: the client is exactly as
+          constructed.
+    """
+    client = GitHubClient(token="t", sleep=lambda _s: None, **kwargs)
+    try:
+        yield client
+    finally:
+        client._client.close()  # type: ignore[attr-defined]
 
 
 def _issue_payload(number: int, **overrides: Any) -> dict[str, Any]:
@@ -375,29 +403,18 @@ class TestClientLifecycle:
 class TestClientWebHost:
     def test_default_api_host_maps_to_github_com(self, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
-        client = GitHubClient(token="t", sleep=lambda _s: None)
-        try:
+        with _real_client() as client:
             assert client.web_host == "github.com"
-        finally:
-            client._client.close()  # type: ignore[attr-defined]
 
     def test_ghes_api_host_is_returned_unchanged(self, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
-        client = GitHubClient(
-            token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None
-        )
-        try:
+        with _real_client(base_url="https://ghes.example.com/api/v3") as client:
             assert client.web_host == "ghes.example.com"
-        finally:
-            client._client.close()  # type: ignore[attr-defined]
 
     def test_honors_github_api_url_env_var(self, monkeypatch) -> None:
         monkeypatch.setenv("GITHUB_API_URL", "https://ghes.other.com/api/v3")
-        client = GitHubClient(token="t", sleep=lambda _s: None)
-        try:
+        with _real_client() as client:
             assert client.web_host == "ghes.other.com"
-        finally:
-            client._client.close()  # type: ignore[attr-defined]
 
 
 class TestConfiguredWebHost:
@@ -705,11 +722,8 @@ class TestAbsoluteUrl:
         already joins "/graphql" onto the same host correctly — no special
         case needed there."""
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
-        client = GitHubClient(token="t", sleep=lambda _s: None)
-        try:
+        with _real_client() as client:
             assert client._absolute_url("/graphql") == "https://api.github.com/graphql"  # type: ignore[attr-defined]
-        finally:
-            client._client.close()  # type: ignore[attr-defined]
 
     def test_graphql_url_derived_separately_for_ghes(self, monkeypatch) -> None:
         """GitHub Enterprise Server's REST base is "https://host/api/v3", but
@@ -717,13 +731,8 @@ class TestAbsoluteUrl:
         "https://host/api/v3/graphql". Naively joining "/graphql" onto the
         REST base would target a URL GHES doesn't serve GraphQL from."""
         monkeypatch.delenv("GITHUB_API_URL", raising=False)
-        client = GitHubClient(
-            token="t", base_url="https://ghes.example.com/api/v3", sleep=lambda _s: None
-        )
-        try:
+        with _real_client(base_url="https://ghes.example.com/api/v3") as client:
             assert client._absolute_url("/graphql") == "https://ghes.example.com/api/graphql"  # type: ignore[attr-defined]
-        finally:
-            client._client.close()  # type: ignore[attr-defined]
 
 
 class TestClientIssueCommentMarker:

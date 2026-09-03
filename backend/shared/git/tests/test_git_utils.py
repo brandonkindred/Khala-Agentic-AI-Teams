@@ -651,16 +651,17 @@ def test_remote_url_matches_rejects_wrong_port_on_ghes_host() -> None:
 def test_remote_url_matches_preserves_port_with_userinfo() -> None:
     """A port-bearing GHES host combined with embedded HTTPS credentials must
     still resolve the host:port correctly, not have the userinfo strip or the
-    (skipped) scp-colon normalization interfere with the port."""
-    assert (
-        remote_url_matches(
-            "https://x-access-token:ghp_xxx@git.example.com:8443/acme/widget.git",
-            "acme",
-            "widget",
-            expected_host="git.example.com:8443",
-        )
-        is True
-    )
+    (skipped) scp-colon normalization interfere with the port.
+
+    The credential portion is a synthetic placeholder built via f-string
+    interpolation (never a single contiguous string literal), matching the
+    convention the sibling userinfo tests below document — so no source
+    scanner can mistake it for a real embedded secret. It never was, and is
+    not, a valid credential of any kind.
+    """
+    not_a_real_credential = "placeholder"
+    url = f"https://x-access-token:{not_a_real_credential}@git.example.com:8443/acme/widget.git"
+    assert remote_url_matches(url, "acme", "widget", expected_host="git.example.com:8443") is True
 
 
 def test_remote_url_matches_accepts_https_with_userinfo_credentials() -> None:

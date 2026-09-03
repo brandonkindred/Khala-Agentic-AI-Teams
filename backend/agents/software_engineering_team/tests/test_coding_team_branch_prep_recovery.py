@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -1237,6 +1238,48 @@ class TestEnsureNamedRemote:
         assert (name, err) == ("khala-pr-head", None)
         assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url
 
+    def test_embedded_userinfo_is_never_written_to_git_config(self, api, fork_pair) -> None:
+        """A URL carrying embedded credentials must be registered WITHOUT them.
+
+        Registration is durable -- the remote is left in `.git/config` after
+        the push -- so persisting userinfo would contradict the design in which
+        the credential is supplied transiently per-invocation via
+        `_git_auth_env(token)`. No current caller passes such a URL; this pins
+        the guarantee structurally instead of relying on the callers.
+
+        The credential portion is a synthetic placeholder built by f-string
+        interpolation (never one contiguous literal), matching the convention
+        used in `shared/git/tests/test_git_utils.py`; it never was, and is not,
+        a valid credential.
+        """
+        _, clone, fork = fork_pair
+        not_a_real_credential = "placeholder"
+        fork_url = f"file://{fork}"
+        with_userinfo = f"https://x-access-token:{not_a_real_credential}@example.invalid/o/r.git"
+
+        name, err = api._ensure_named_remote(clone, with_userinfo)
+
+        assert (name, err) == ("khala-pr-head", None)
+        stored = _must(clone, "remote", "get-url", "khala-pr-head")
+        assert stored == "https://example.invalid/o/r.git"
+        assert not_a_real_credential not in stored
+        assert "@" not in stored
+        # The whole config, not just this remote's fetch URL: `set-url --push`
+        # writes a second key, and a leak there is just as durable.
+        config = (Path(clone) / ".git" / "config").read_text(encoding="utf-8")
+        assert not_a_real_credential not in config
+        # A port-bearing host keeps its port when the userinfo is stripped.
+        name, err = api._ensure_named_remote(
+            clone, f"https://x-access-token:{not_a_real_credential}@example.invalid:8443/o/r.git"
+        )
+        assert (name, err) == ("khala-pr-head", None)
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == (
+            "https://example.invalid:8443/o/r.git"
+        )
+        # A credential-free URL is left exactly as given.
+        name, err = api._ensure_named_remote(clone, fork_url)
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url
+
     def test_repeated_calls_with_same_url_are_idempotent(self, api, fork_pair) -> None:
         """A retry on the same checkout (the child job re-dispatching after a
         transient failure) must not error just because the remote already
@@ -1370,7 +1413,8 @@ class TestPushBranchToFork:
         fork_url = f"file://{fork}"
         _must(clone, "checkout", "-q", "-b", "khala-fix", "origin/main")
         _commit_file(clone, "fix.py", "x = 1\n", "the fix")
-        assert api._push_branch(clone, fork_url, "khala-fix")[0] is True
+        ok, err = api._push_branch(clone, fork_url, "khala-fix")
+        assert ok is True, err
 
         # AMEND rather than add a commit: the retried run rewrites the branch
         # it pushed before (the pipeline squashes/re-authors its fix), so the

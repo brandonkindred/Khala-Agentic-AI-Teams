@@ -309,23 +309,40 @@ def post_address_comments(
             raise_if_checkout_occupied(request.repo_path)
 
             job_id = str(uuid.uuid4())
+            job_fields: dict[str, Any] = {
+                "github_context": {
+                    "owner": request.owner,
+                    "repo": request.repo,
+                    "pr_number": pr_number,
+                    "pr_url": pr.html_url,
+                },
+            }
+            # Temporal GitHub activities run outside this request and resolve their
+            # credential from the durable job record. Persist ciphertext only, matching
+            # /run-from-github; never put the plaintext PAT in a workflow payload.
+            encrypted = _main.encrypt_token(token)
+            if encrypted:
+                job_fields["github_token_encrypted"] = encrypted
             try:
-                _main.create_job(job_id=job_id, repo_path=request.repo_path)
-                job_fields: dict[str, Any] = {
-                    "github_context": {
-                        "owner": request.owner,
-                        "repo": request.repo,
-                        "pr_number": pr_number,
-                        "pr_url": pr.html_url,
-                    },
-                }
-                # Temporal GitHub activities run outside this request and resolve their
-                # credential from the durable job record. Persist ciphertext only, matching
-                # /run-from-github; never put the plaintext PAT in a workflow payload.
-                encrypted = _main.encrypt_token(token)
-                if encrypted:
-                    job_fields["github_token_encrypted"] = encrypted
-                _main.update_job(job_id, **job_fields)
+                # ONE write, not create-then-update, matching
+                # ``post_run_from_github``. A create followed by an update to
+                # attach the context leaves a window — an exception, but also a
+                # hard crash (SIGKILL, OOM, deploy restart) between two adjacent
+                # job-service calls — in which the row exists as 'pending'
+                # carrying ``repo_path`` but no ``github_context``. Such a row is
+                # invisible to ``_running_review_for_pr`` (no pr_number to match
+                # on) yet IS matched by the path-based
+                # ``_running_sibling_on_checkout``, so it wedges checkout-wide
+                # admission — every other PR/issue on that checkout 409s — with
+                # nothing left to terminalize it. Both fields are computable
+                # before the write, so creating the row already complete removes
+                # the window entirely; if this call raises, no row exists to
+                # orphan.
+                _main.create_job(
+                    job_id=job_id,
+                    repo_path=request.repo_path,
+                    extra_fields=job_fields,
+                )
                 created_at = _main.record_review_start(
                     job_id,
                     request.owner,
@@ -337,15 +354,13 @@ def post_address_comments(
                 _address.start_address_comments_thread(job_id, request, token)
             except Exception as e:
                 # Creation is not transactional across the job service, review store,
-                # and Python thread launcher — and now covers create_job/update_job too
-                # (not just record_review_start/thread launch): a failure at ANY point
-                # in this create -> record -> launch sequence must still terminalize
-                # whatever was persisted, or an orphaned non-terminal job (missing its
-                # github_context/token) would block the PR admission guard indefinitely
-                # while giving downstream Temporal activities none of the context they
-                # need. update_job is itself best-effort here: if create_job never
-                # actually wrote a row, this call harmlessly targets a job_id the job
-                # service has never seen.
+                # and Python thread launcher — and covers create_job as well as
+                # record_review_start/thread launch: a failure at ANY point in this
+                # create -> record -> launch sequence must still terminalize whatever
+                # was persisted, or an orphaned non-terminal job would block the PR
+                # admission guard indefinitely. The terminalizing update_job below is
+                # itself best-effort: if create_job never actually wrote a row, that
+                # call harmlessly targets a job_id the job service has never seen.
                 error = f"Could not start address-comments worker: {scrub_token_from_text(str(e))}"
                 # Each terminalization gets its OWN try/except: sequencing both in
                 # one try means an update_job failure skips update_review entirely,

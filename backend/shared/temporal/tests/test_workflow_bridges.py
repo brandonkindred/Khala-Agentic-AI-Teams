@@ -381,6 +381,33 @@ class _FakeFailingReattachHandle(_FakeReattachHandle):
         raise RuntimeError("workflow failed")
 
 
+def _await_cancelled_flag(captured, timeout_s: float = 2.0) -> None:
+    """Wait, bounded, for the abandoned waiter's cancellation to be observed.
+
+    Cancellation is delivered asynchronously on the worker loop, so the flag
+    cannot be read straight after the call returns. A bounded poll (rather than
+    one fixed sleep) avoids flaking under CI load while still failing promptly
+    if the flag is never set. Extracted rather than repeated -- for the same
+    reason :func:`_run_execute_sync_bounded` is -- so the flag name, deadline
+    and poll interval cannot drift between the success- and failure-path tests
+    that both assert on it.
+
+    Preconditions:
+        - ``captured`` is the per-test dict the fakes record into; the worker
+          loop may still be mutating it concurrently.
+        - ``timeout_s`` is the upper bound to wait, in seconds.
+    Postconditions:
+        - Returns once ``captured["execute_workflow_cancelled"]`` is ``True``.
+        - Raises ``AssertionError`` if it is still not ``True`` after
+          ``timeout_s`` -- never waits unbounded, and never returns having not
+          observed the flag.
+    """
+    deadline = time.monotonic() + timeout_s
+    while captured.get("execute_workflow_cancelled") is not True and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert captured.get("execute_workflow_cancelled") is True
+
+
 def _run_execute_sync_bounded(**kwargs):
     """Call ``runner.execute_workflow_sync`` on a bounded background thread.
 
@@ -480,10 +507,7 @@ def test_execute_workflow_sync_reattach_cancels_initial_waiter(running_loop):
     # the worker loop before asserting on it from this thread. A bounded poll
     # (rather than one fixed sleep) avoids flaking under CI load while still
     # failing promptly if the flag is never set.
-    deadline = time.monotonic() + 2.0
-    while captured.get("execute_workflow_cancelled") is not True and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert captured.get("execute_workflow_cancelled") is True
+    _await_cancelled_flag(captured)
 
 
 def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
@@ -552,10 +576,7 @@ def test_execute_workflow_sync_reattach_propagates_workflow_failure(running_loop
     # just the success path -- otherwise a failed workflow would still leak a
     # long-polling coroutine onto the shared worker loop. Bounded poll (not a
     # fixed sleep) because cancellation is delivered asynchronously.
-    deadline = time.monotonic() + 2.0
-    while captured.get("execute_workflow_cancelled") is not True and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert captured.get("execute_workflow_cancelled") is True
+    _await_cancelled_flag(captured)
 
 
 def test_bridges_are_exported():

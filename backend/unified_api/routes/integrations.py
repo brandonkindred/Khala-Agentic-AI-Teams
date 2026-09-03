@@ -2939,11 +2939,15 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           :class:`CloneLockAcquisitionError` and maps to 503 (a local,
           retryable serialization problem). Any OTHER ``OSError`` escaping the
           locked section — a missing git binary, a permission error or full
-          disk during clone/fetch, an ``aiohttp.ClientOSError`` from the
-          forward — maps to 500 with an operation-neutral detail instead: it
-          is not a lock failure and is not necessarily transient, so reporting
-          it as a retryable 503 "could not acquire clone lock" would mislead
-          both API consumers and on-call debugging.
+          disk during clone/fetch — maps to 500 with an operation-neutral
+          detail instead: it is not a lock failure and is not necessarily
+          transient, so reporting it as a retryable 503 "could not acquire
+          clone lock" would mislead both API consumers and on-call debugging.
+          The forward contributes nothing to that handler: it runs through
+          :func:`_forward_to_coding_team`, which converts every
+          ``httpx.TimeoutException``/``httpx.HTTPError`` (none of which
+          subclasses ``OSError``) into an ``HTTPException`` before it could
+          reach here.
     """
     # Centralized validation (enabled + PAT + target repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".

@@ -3980,26 +3980,70 @@ class TestAddressCommentsRoute:
         jobs = route_env["jobs"].list_jobs()
         assert jobs[-1]["status"] == "failed"
 
-    def test_context_update_failure_terminalizes_created_job(self, route_env, monkeypatch) -> None:
-        """P1 regression: a failure in the FIRST `update_job` call (persisting
-        github_context/github_token_encrypted, which sits before
-        record_review_start/thread-launch) must still terminalize the job —
-        not just a failure in record_review_start or the thread launch. Before
-        the fix, create_job/update_job sat outside the try/except, so a job
-        row could be created with no github_context and never marked failed,
-        orphaning it in a non-terminal state forever."""
+    def test_job_row_is_created_complete_in_one_write(self, route_env, monkeypatch) -> None:
+        """The row must be written ONCE, already carrying its github_context —
+        never created bare and completed by a follow-up update_job.
+
+        A create-then-update pair leaves a window (an exception, but also a
+        hard crash between two adjacent job-service calls) in which the row
+        exists as 'pending' with repo_path but no github_context. Such a row is
+        invisible to `_running_review_for_pr` (no pr_number to match on) yet IS
+        matched by the path-based `_running_sibling_on_checkout`, so it wedges
+        checkout-wide admission with nothing left to terminalize it. This pins
+        both halves: the context arrives WITH the create, and no update_job
+        runs on the success path at all."""
         from software_engineering_team.api import coding_team_main as _main
 
-        calls = {"n": 0}
+        create_kwargs: list[dict] = []
+        update_calls: list[tuple] = []
+        real_create_job = _main.create_job
         real_update_job = _main.update_job
 
-        def _flaky_update_job(job_id, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("job service unavailable")
-            return real_update_job(job_id, **kwargs)
+        def _recording_create_job(**kw):
+            create_kwargs.append(kw)
+            return real_create_job(**kw)
 
-        monkeypatch.setattr(_main, "update_job", _flaky_update_job)
+        def _recording_update_job(job_id, **kw):
+            update_calls.append((job_id, kw))
+            return real_update_job(job_id, **kw)
+
+        monkeypatch.setattr(_main, "create_job", _recording_create_job)
+        monkeypatch.setattr(_main, "update_job", _recording_update_job)
+
+        resp = route_env["client"].post(
+            "/pulls/7/address-comments",
+            json={"owner": "o", "repo": "r", "repo_path": route_env["repo_path"], "pr_number": 7},
+        )
+
+        assert resp.status_code == 200
+        assert len(create_kwargs) == 1
+        extra = create_kwargs[0]["extra_fields"]
+        assert extra["github_context"]["owner"] == "o"
+        assert extra["github_context"]["repo"] == "r"
+        assert extra["github_context"]["pr_number"] == 7
+        # No follow-up write completes the row: a crash after the create can no
+        # longer strand a context-less pending row on a shared checkout.
+        assert update_calls == []
+        # And the persisted row really carries the context, not just the call.
+        created = [j for j in route_env["jobs"].list_jobs() if j["job_id"] == resp.json()["job_id"]]
+        assert created and created[0]["github_context"]["pr_number"] == 7
+
+    def test_create_job_failure_leaves_no_row_and_no_launch(self, route_env, monkeypatch) -> None:
+        """If the single create_job write raises, there is no row to orphan and
+        the worker must never launch.
+
+        This replaces the old first-`update_job`-failure regression: with the
+        row written complete in one call there is no intermediate state to
+        terminalize, so the guarantee becomes "nothing persisted, nothing
+        started" rather than "created then marked failed"."""
+        from software_engineering_team.api import coding_team_main as _main
+
+        before = len(route_env["jobs"].list_jobs())
+
+        def _failing_create_job(**_kw):
+            raise RuntimeError("job service unavailable")
+
+        monkeypatch.setattr(_main, "create_job", _failing_create_job)
 
         resp = route_env["client"].post(
             "/pulls/7/address-comments",
@@ -4007,8 +4051,7 @@ class TestAddressCommentsRoute:
         )
 
         assert resp.status_code == 500
-        jobs = route_env["jobs"].list_jobs()
-        assert jobs[-1]["status"] == "failed"
+        assert len(route_env["jobs"].list_jobs()) == before
         assert route_env["started"] == []  # never reached the thread launch
 
 

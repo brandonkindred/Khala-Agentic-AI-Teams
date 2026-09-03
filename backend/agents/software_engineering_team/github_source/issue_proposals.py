@@ -851,8 +851,11 @@ def _format_existing_issues(
 
     Postconditions:
         - Returns a Markdown block covering at most ``max_issues`` of ``issues``
-          (in the order given), each issue's body truncated at
-          :data:`_PROMPT_BODY_TRUNCATE_CHARS` characters to bound the prompt.
+          (in the order given), each issue's body truncated to at most
+          :data:`_PROMPT_BODY_TRUNCATE_CHARS` characters PLUS a trailing
+          ``"..."`` marker (so the embedded body is bounded by
+          ``_PROMPT_BODY_TRUNCATE_CHARS + 3``, not by the constant alone) to
+          bound the prompt.
           Each issue is wrapped in an
           ``<existing_issue number="N">…</existing_issue>`` tag pair: issue
           titles and bodies are attacker-influenceable on a public repo, and
