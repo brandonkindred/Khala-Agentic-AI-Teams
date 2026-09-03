@@ -2117,9 +2117,9 @@ describe('CodingTeamPageComponent', () => {
     it('cancels the thinking-announcement settle timer on destroy', async () => {
       await setup();
       component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
-      expect(component['thinkingAnnounceTimer']).not.toBeNull();
+      expect(component['thinkingAnnouncer'].isPending).toBe(true);
       fixture.destroy();
-      expect(component['thinkingAnnounceTimer']).toBeNull();
+      expect(component['thinkingAnnouncer'].isPending).toBe(false);
     });
   });
 });

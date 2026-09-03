@@ -3,6 +3,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
+import { ANNOUNCE_SETTLE_MS, SettleAnnouncer } from '../../shared/settle-announce';
 
 /** One step of the phase stepper. Local, to keep the monitor decoupled from other features. */
 interface PhaseDefinition {
@@ -21,12 +22,6 @@ const CODING_TEAM_PHASES: PhaseDefinition[] = [
 /** Char bound for the objective portion of the live-region summary — kept short since it's spoken
  *  by assistive tech, not read visually; longer text is truncated with an ellipsis. */
 const SUMMARY_OBJECTIVE_MAX_CHARS = 60;
-
-/** Quiet period after the last differing summary before the live region's announcement updates —
- *  long enough that a screen reader user gets one followable announcement per lull in a run's
- *  progress rather than one per poll tick, mirroring THINKING_ANNOUNCE_SETTLE_MS in
- *  coding-team-page.component.ts (same reasoning: outlast a single poll interval). */
-const SUMMARY_ANNOUNCE_SETTLE_MS = 1500;
 
 /**
  * One-sentence live-region summary of a coding-team run's objective and overall progress, for the
@@ -55,7 +50,8 @@ export function codingTeamStatusSummary(objective: string, progressPercent: numb
  * working now and each agent's status). Purely `@Input()`-driven — the parent page polls
  * `/status` and re-feeds `status`, so the monitor re-renders for free. Every block is guarded so
  * a minimal/early status (no agents/progress/activity) renders cleanly. Debounces its own
- * live-region announcement (see `scheduleAnnouncement`), so `ngOnDestroy` clears the settle timer.
+ * live-region announcement via a shared `SettleAnnouncer` (see `shared/settle-announce.ts`), so
+ * `ngOnDestroy` disposes it.
  */
 @Component({
   selector: 'app-coding-team-monitor',
@@ -75,13 +71,13 @@ export class CodingTeamMonitorComponent implements OnDestroy {
    * the parent clears it.
    * Postconditions: `status` reads back `value` immediately, so every other reader (objectiveText,
    * overallProgress, the stepper/activity/roster helpers) reflects it synchronously. The live-region
-   * announcement is NOT updated synchronously — scheduleAnnouncement decides whether this change
-   * starts, replaces, or leaves untouched the pending settle timer.
+   * announcement is NOT updated synchronously — it is handed to `announcer.update()`, which decides
+   * whether this change starts, replaces, or leaves untouched the pending settle timer.
    */
   @Input()
   set status(value: CodingTeamJobStatus | null) {
     this._status = value;
-    this.scheduleAnnouncement(
+    this.announcer.update(
       value ? codingTeamStatusSummary(this.objectiveText(), this.overallProgress()) : '',
     );
   }
@@ -89,11 +85,16 @@ export class CodingTeamMonitorComponent implements OnDestroy {
     return this._status;
   }
 
-  private previousSummary = '';
-  private summaryAnnounceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly _announcedSummary = signal('');
-  /** Debounced text for the hidden live region — see scheduleAnnouncement. */
+  /** Debounced text for the hidden live region — settled by `announcer`, see
+   *  `shared/settle-announce.ts`. */
   readonly announcedSummary = this._announcedSummary.asReadonly();
+  /** Owns the settle-timer bookkeeping for `announcedSummary`; disposed in `ngOnDestroy`. No
+   *  `onChange` cue — unlike the parent page's thinking announcer, this region stays silent until
+   *  a summary actually settles, rather than showing an immediate provisional cue. */
+  private readonly announcer = new SettleAnnouncer(ANNOUNCE_SETTLE_MS, (value) =>
+    this._announcedSummary.set(value),
+  );
 
   readonly ALL_PHASES = CODING_TEAM_PHASES;
 
@@ -140,53 +141,12 @@ export class CodingTeamMonitorComponent implements OnDestroy {
   }
 
   /**
-   * Debounce the live-region announcement so a burst of differing summaries (progress ticking on
-   * most polls during active coding) settles to one announcement per quiet period instead of one
-   * per poll.
-   *
-   * Preconditions: `nextSummary` is a codingTeamStatusSummary() output, or '' for no status.
-   * Postconditions: when `nextSummary` is '' (no status), any pending settle timer is cleared and
-   * announcedSummary is cleared immediately — a run ending/clearing must go silent right away, not
-   * keep announcing a stale percentage for another settle window. When `nextSummary` equals the
-   * summary already announced or in flight, any pending settle timer is left completely untouched —
-   * neither restarted nor cancelled — and no announcement work happens. When it differs (and is
-   * non-empty), any pending settle timer is replaced with a fresh one; after
-   * SUMMARY_ANNOUNCE_SETTLE_MS with no further differing update, announcedSummary is set to
-   * `nextSummary` and the timer handle is cleared to null.
-   */
-  private scheduleAnnouncement(nextSummary: string): void {
-    if (!nextSummary) {
-      if (this.summaryAnnounceTimer) {
-        clearTimeout(this.summaryAnnounceTimer);
-        this.summaryAnnounceTimer = null;
-      }
-      this.previousSummary = '';
-      this._announcedSummary.set('');
-      return;
-    }
-    if (nextSummary === this.previousSummary) {
-      return;
-    }
-    this.previousSummary = nextSummary;
-    if (this.summaryAnnounceTimer) {
-      clearTimeout(this.summaryAnnounceTimer);
-    }
-    this.summaryAnnounceTimer = setTimeout(() => {
-      this._announcedSummary.set(nextSummary);
-      this.summaryAnnounceTimer = null;
-    }, SUMMARY_ANNOUNCE_SETTLE_MS);
-  }
-
-  /**
    * Preconditions: none.
-   * Postconditions: any pending settle timer is cleared and its handle set to null, so it can never
-   * fire against a destroyed view.
+   * Postconditions: `announcer`'s pending settle timer, if any, is cleared and its handle set to
+   * null, so it can never fire against a destroyed view.
    */
   ngOnDestroy(): void {
-    if (this.summaryAnnounceTimer) {
-      clearTimeout(this.summaryAnnounceTimer);
-      this.summaryAnnounceTimer = null;
-    }
+    this.announcer.dispose();
   }
 
   /** Indeterminate while a started job has no numeric progress yet; else determinate. */

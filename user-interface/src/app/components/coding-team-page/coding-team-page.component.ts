@@ -20,6 +20,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
+import { ANNOUNCE_SETTLE_MS, SettleAnnouncer } from '../../shared/settle-announce';
 import { CodingTeamMonitorComponent } from '../coding-team-monitor/coding-team-monitor.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { OutOfScopeIssuesComponent } from './out-of-scope-issues/out-of-scope-issues.component';
@@ -44,9 +45,6 @@ import {
 
 /** How often the Runs list is re-fetched while the page is open. */
 const RUNS_POLL_MS = 15000;
-
-/** Quiet period after the last "thinking" update before announcing a settled line count. */
-const THINKING_ANNOUNCE_SETTLE_MS = 1500;
 
 /** localStorage key for the last repo the user expanded, so it can be pre-expanded on return. */
 const LAST_REPO_STORAGE_KEY = 'coding-team-last-repo-v1';
@@ -296,12 +294,26 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * binds this instead of calling `hasPendingQuestions()` each change-detection cycle). */
   jobStatusHasPendingQuestions = false;
   /** aria-live text for the "Agent thinking" panel: a streaming cue while output is still arriving,
-   * then a settled line count once it's been quiet for `THINKING_ANNOUNCE_SETTLE_MS`. Empty when
-   * there's no thinking output to announce. */
+   * then a settled line count once it's been quiet for `ANNOUNCE_SETTLE_MS`. Empty when there's no
+   * thinking output to announce. Driven by `thinkingAnnouncer`, disposed in `ngOnDestroy`. */
   thinkingAnnouncement = '';
-  /** Debounce handle for the settled-count announcement; cleared/replaced on every new thinking token
-   * and on destroy so a stale timer never overwrites a later announcement or fires on a dead view. */
-  private thinkingAnnounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Owns the settle-timer bookkeeping for `thinkingAnnouncement` — see `shared/settle-announce.ts`.
+   * `onChange` flips to an immediate streaming cue on any differing, non-empty update; `onSettle`
+   * replaces it with a line count once the input has been quiet for `ANNOUNCE_SETTLE_MS`. */
+  private readonly thinkingAnnouncer = new SettleAnnouncer(
+    ANNOUNCE_SETTLE_MS,
+    (thinking) => {
+      if (!thinking) {
+        this.thinkingAnnouncement = '';
+        return;
+      }
+      const lineCount = thinking.split('\n').filter((line) => line.trim().length > 0).length;
+      this.thinkingAnnouncement = `${lineCount} line${lineCount === 1 ? '' : 's'} of reasoning`;
+    },
+    () => {
+      this.thinkingAnnouncement = 'Agent is thinking…';
+    },
+  );
   /** In-memory activity narrative for the selected run (Jobs thought-stream panel). */
   activityNarrative: ActivityNarrativeState = emptyActivityNarrative();
   /** Polite live-region cue for activity-only updates; never contains raw narrative lines. */
@@ -346,13 +358,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Setting the polled status refreshes the precomputed badge class, terminal flag, pending-questions
    * flag, thinking-panel announcement, and activity narrative. */
   set jobStatus(status: CodingTeamJobStatus | null) {
-    const previousThinking = this._jobStatus?.thinking ?? '';
     this._jobStatus = status;
     this.jobStatusBadgeClass = this.badgeClass(status?.status);
     this.jobStatusTerminal = isCodingTeamTerminalStatus(status?.status);
     this.jobStatusHasPendingQuestions =
       !!status?.waiting_for_answers && (status?.pending_questions?.length ?? 0) > 0;
-    this.updateThinkingAnnouncement(status?.thinking ?? '', previousThinking);
+    this.thinkingAnnouncer.update(status?.thinking ?? '');
     if (!status) {
       this.activityNarrative = emptyActivityNarrative();
       this.activityAnnouncement = '';
@@ -366,41 +377,6 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.activityAnnounceSeq += 1;
       this.activityAnnouncement = `Agent activity updated (${this.activityAnnounceSeq})`;
     }
-  }
-
-  /**
-   * Drive `thinkingAnnouncement` from a new `thinking` value without ever piping the raw (potentially
-   * very verbose) stream text into the live region.
-   *
-   * Preconditions: none.
-   * Postconditions: when `thinking` is empty, any pending settle timer is cleared and the announcement
-   * is cleared too. When `thinking` is unchanged from `previousThinking`, the announcement and any
-   * in-flight settle timer are left completely untouched — a re-render with no new output must not
-   * restart (or cancel) the debounce. When `thinking` has grown/changed, any pending settle timer is
-   * replaced, the announcement flips immediately to a streaming cue, and a new settle timer is armed
-   * to replace it with a line count after `THINKING_ANNOUNCE_SETTLE_MS` of no further change.
-   */
-  private updateThinkingAnnouncement(thinking: string, previousThinking: string): void {
-    if (!thinking) {
-      if (this.thinkingAnnounceTimer) {
-        clearTimeout(this.thinkingAnnounceTimer);
-        this.thinkingAnnounceTimer = null;
-      }
-      this.thinkingAnnouncement = '';
-      return;
-    }
-    if (thinking === previousThinking) {
-      return;
-    }
-    if (this.thinkingAnnounceTimer) {
-      clearTimeout(this.thinkingAnnounceTimer);
-    }
-    this.thinkingAnnouncement = 'Agent is thinking…';
-    this.thinkingAnnounceTimer = setTimeout(() => {
-      const lineCount = thinking.split('\n').filter(line => line.trim().length > 0).length;
-      this.thinkingAnnouncement = `${lineCount} line${lineCount === 1 ? '' : 's'} of reasoning`;
-      this.thinkingAnnounceTimer = null;
-    }, THINKING_ANNOUNCE_SETTLE_MS);
   }
 
   /**
@@ -444,10 +420,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       clearTimeout(this.copyResetTimer);
       this.copyResetTimer = null;
     }
-    if (this.thinkingAnnounceTimer) {
-      clearTimeout(this.thinkingAnnounceTimer);
-      this.thinkingAnnounceTimer = null;
-    }
+    this.thinkingAnnouncer.dispose();
     this.refreshTrigger$.complete();
   }
 

@@ -438,6 +438,7 @@ describe('CodingTeamMonitorComponent', () => {
       // A differing update mid-settle restarts the window instead of announcing early.
       expect(region()?.textContent).toBe('');
 
+      // t=1000: another differing update restarts the window again — new deadline t=2500.
       await vi.advanceTimersByTimeAsync(500);
       fixture.componentRef.setInput('status', {
         job_id: 'j1',
@@ -448,8 +449,15 @@ describe('CodingTeamMonitorComponent', () => {
       fixture.detectChanges();
       expect(region()?.textContent).toBe('');
 
-      // No further update: the window settles on the latest value only, once.
-      await vi.advanceTimersByTimeAsync(1500);
+      // Prove the restart, not just the final value: crossing the ORIGINAL 1500ms deadline (t=1500,
+      // i.e. 500ms from here) must still be silent — a weaker "keep the original timer, announce
+      // whatever's latest when it fires" implementation would already have announced by t=1500.
+      await vi.advanceTimersByTimeAsync(500); // t=1500
+      fixture.detectChanges();
+      expect(region()?.textContent).toBe('');
+
+      // Now cross the actually-restarted deadline (t=2500): settles once on the latest value.
+      await vi.advanceTimersByTimeAsync(1000); // t=2500
       fixture.detectChanges();
       expect(region()?.textContent).toContain('30% complete');
       expect(region()?.textContent).not.toContain('10% complete');
@@ -486,7 +494,7 @@ describe('CodingTeamMonitorComponent', () => {
 
       // An unchanged summary must neither restart nor cancel an in-flight timer — here there is no
       // timer at all, because the update was a no-op.
-      expect(component['summaryAnnounceTimer']).toBeNull();
+      expect(component['announcer'].isPending).toBe(false);
       const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
       expect(regionAfter).toBe(region);
       expect(regionAfter?.textContent).toBe(before);
@@ -508,16 +516,16 @@ describe('CodingTeamMonitorComponent', () => {
       const region = (fixture.nativeElement as HTMLElement).querySelector(
         '.visually-hidden[aria-live="polite"]',
       );
-      expect(component['summaryAnnounceTimer']).not.toBeNull();
+      expect(component['announcer'].isPending).toBe(true);
       // Nothing has settled yet, so the DOM-observable text is still empty.
       expect(region?.textContent).toBe('');
 
       fixture.destroy();
-      expect(component['summaryAnnounceTimer']).toBeNull();
+      expect(component['announcer'].isPending).toBe(false);
 
       // Advancing time after destroy must not resurrect the timer, throw, or update the DOM.
       await vi.advanceTimersByTimeAsync(1500);
-      expect(component['summaryAnnounceTimer']).toBeNull();
+      expect(component['announcer'].isPending).toBe(false);
       expect(region?.textContent).toBe('');
     } finally {
       vi.useRealTimers();
@@ -545,7 +553,7 @@ describe('CodingTeamMonitorComponent', () => {
 
       // Goes silent right away — no lingering stale percentage for another settle window.
       expect(region?.textContent).toBe('');
-      expect(component['summaryAnnounceTimer']).toBeNull();
+      expect(component['announcer'].isPending).toBe(false);
     } finally {
       vi.useRealTimers();
     }
