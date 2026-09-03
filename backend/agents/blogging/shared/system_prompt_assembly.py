@@ -26,12 +26,13 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from llm_service import CacheBreakpoint, build_system_prompt_with_content
+from llm_service import CacheBreakpoint, SystemContentSegment, build_system_prompt_with_content
 
 __all__ = [
     "build_blogging_system_prompt_content",
     "build_headed_blogging_system_prompt_content",
     "build_system_prompt_with_content",
+    "SystemContentSegment",
 ]
 
 

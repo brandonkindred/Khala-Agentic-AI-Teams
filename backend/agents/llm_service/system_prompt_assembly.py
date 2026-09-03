@@ -24,7 +24,7 @@ from typing import Any
 
 from .cache_breakpoint import CacheBreakpoint
 
-__all__ = ["build_system_prompt_with_content"]
+__all__ = ["build_system_prompt_with_content", "SystemContentSegment"]
 
 SystemContentSegment = str | dict[str, Any] | CacheBreakpoint
 

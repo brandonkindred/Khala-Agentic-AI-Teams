@@ -24,6 +24,7 @@ from agents.blogging.shared.content_profile import LengthPolicy
 from agents.blogging.shared.json_retry import run_json_gate
 from agents.blogging.shared.prompt_budget import resolve_model_context_tokens
 from agents.blogging.shared.system_prompt_assembly import (
+    SystemContentSegment,
     build_headed_blogging_system_prompt_content,
     build_system_prompt_with_content,
 )
@@ -356,7 +357,7 @@ class BlogWriterAgent(_BlogAgentBase):
         )
 
     def _call_agent(
-        self, model: Any, prompt: str, system_prompt: Union[str, List[Any]] = ""
+        self, model: Any, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
     ) -> str:
         """Construct a Strands Agent, invoke it, and return stripped text.
 
@@ -381,7 +382,9 @@ class BlogWriterAgent(_BlogAgentBase):
         agent = Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
         return str(agent(prompt)).strip()
 
-    def _call_text(self, prompt: str, system_prompt: Union[str, List[Any]] = "") -> str:
+    def _call_text(
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> str:
         """Call the text-mode Strands Agent and return its stripped text output.
 
         Used for drafting and revision paths that emit the ``---DRAFT---``
@@ -395,7 +398,9 @@ class BlogWriterAgent(_BlogAgentBase):
         """
         return self._call_agent(self._text_model, prompt, system_prompt)
 
-    def _call_json_raw(self, prompt: str, system_prompt: Union[str, List[Any]] = "") -> str:
+    def _call_json_raw(
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> str:
         """Invoke the injected model via Strands and return its stripped assistant text.
 
         Uses ``self._model`` as supplied by the caller (typically already configured
@@ -412,7 +417,9 @@ class BlogWriterAgent(_BlogAgentBase):
         """
         return self._call_agent(self._model, prompt, system_prompt)
 
-    def _call_agent_json(self, prompt: str, system_prompt: Union[str, List[Any]] = "") -> dict:
+    def _call_agent_json(
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> dict:
         """Invoke the injected model via Strands and parse JSON from the result.
 
         Appends a soft JSON-only instruction and runs ``extract_json_from_response``
@@ -440,7 +447,7 @@ class BlogWriterAgent(_BlogAgentBase):
         return data
 
     def _fallback_draft_via_json(
-        self, prompt: str, system_prompt: Union[str, List[Any]] = ""
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
     ) -> Optional[str]:
         """Parse a revised draft via shared JSON retry when the text path fails.
 
@@ -1230,6 +1237,10 @@ class BlogWriterAgent(_BlogAgentBase):
         cycle where the user acts as the editor.
 
         Postconditions:
+            - Brand-spec and writing-guideline content is delivered via the
+              system prompt (``self._writing_system_prompt_with_content``) on
+              both the primary text path and the JSON fallback path, not
+              embedded in the user prompt.
             - The prompt includes an ALLOWED CLAIMS section (per
               ``_render_allowed_claims_section``) when ``allowed_claims`` yields
               a non-empty rendered section, so `[CLAIM:id]` tags survive this

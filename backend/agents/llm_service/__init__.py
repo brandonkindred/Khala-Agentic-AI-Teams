@@ -57,7 +57,7 @@ from .structured import (
     complete_validated,
     complete_validated_via_reasoning,
 )
-from .system_prompt_assembly import build_system_prompt_with_content
+from .system_prompt_assembly import SystemContentSegment, build_system_prompt_with_content
 from .telemetry import (
     get_recent_calls,
     get_usage_summary,
@@ -172,4 +172,5 @@ __all__ = [
     "get_usage_summary",
     "provider_supports_structured_output",
     "build_system_prompt_with_content",
+    "SystemContentSegment",
 ]

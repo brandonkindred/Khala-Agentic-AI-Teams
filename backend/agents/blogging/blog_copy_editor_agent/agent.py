@@ -235,7 +235,11 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         this method does not re-implement them.
 
         Args:
-            prompt: Fully assembled per-request editor context (style/brand/draft).
+            prompt: Fully assembled per-request editor context (length intent,
+                guidance signals, content plan, draft). Brand/style guidance is
+                delivered via the system prompt (``self._system_prompt_content``,
+                see the ``build_system_prompt_with_content`` call below), not
+                embedded here.
             on_llm_request: Optional progress callback invoked once before the helper
                 runs (status text: "Reviewing draft for style and clarity...").
 
