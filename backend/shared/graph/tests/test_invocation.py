@@ -65,7 +65,11 @@ class _FakeNodeResult:
 
 
 class _FakeMultiAgentResult:
-    def __init__(self, nodes: dict[str, Any]) -> None:
+    def __init__(self, nodes: Any) -> None:
+        """``nodes`` is duck-typed like the rest of this module — usually a dict,
+        but ``test_extract_node_text_swallows_lookup_failures`` deliberately
+        passes a non-dict whose ``get`` raises, so this must not pin ``dict``.
+        """
         self.result = nodes
 
 

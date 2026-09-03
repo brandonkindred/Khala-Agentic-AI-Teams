@@ -282,7 +282,11 @@ def test_build_span_exporter_selects_the_grpc_transport(monkeypatch) -> None:
     try:
         assert isinstance(exporter, OTLPSpanExporter)
     finally:
-        exporter.shutdown()
+        # Only shut down a real exporter — calling .shutdown() unconditionally
+        # here would, on assertion failure, raise from inside the finally block
+        # and replace the AssertionError as the reported failure.
+        if isinstance(exporter, OTLPSpanExporter):
+            exporter.shutdown()
 
 
 def test_build_metric_exporter_selects_the_grpc_transport(monkeypatch) -> None:
@@ -300,7 +304,8 @@ def test_build_metric_exporter_selects_the_grpc_transport(monkeypatch) -> None:
     try:
         assert isinstance(exporter, OTLPMetricExporter)
     finally:
-        exporter.shutdown()
+        if isinstance(exporter, OTLPMetricExporter):
+            exporter.shutdown()
 
 
 def test_build_span_exporter_returns_none_when_the_package_is_missing(monkeypatch) -> None:
@@ -668,10 +673,18 @@ def test_init_otel_is_latched_after_the_first_call(reinitializable_otel, monkeyp
     build_calls: list[int] = []
     monkeypatch.setattr(reinitializable_otel, "_build_span_exporter", lambda: build_calls.append(1))
 
-    first = reinitializable_otel.init_otel(service_name="ignored", team_key="ignored")
-    assert build_calls == [1], "the test's own first call must run the real init path"
+    try:
+        first = reinitializable_otel.init_otel(service_name="ignored", team_key="ignored")
+        assert build_calls == [1], "the test's own first call must run the real init path"
 
-    second = reinitializable_otel.init_otel(service_name="also-ignored", team_key="also")
+        second = reinitializable_otel.init_otel(service_name="also-ignored", team_key="also")
 
-    assert second is first
-    assert build_calls == [1], "a second call must not rebuild the exporter"
+        assert second is first
+        assert build_calls == [1], "a second call must not rebuild the exporter"
+    finally:
+        # This call's own first init_otel builds real (local, non-global) provider
+        # objects — stop them, mirroring test_init_otel_wires_exporters_when_they_resolve.
+        if reinitializable_otel._meter_provider is not None:
+            reinitializable_otel._meter_provider.shutdown()
+        if reinitializable_otel._tracer_provider is not None:
+            reinitializable_otel._tracer_provider.shutdown()

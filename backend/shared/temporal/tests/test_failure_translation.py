@@ -65,8 +65,11 @@ def test_marker_nested_under_an_activity_error_is_translated() -> None:
     marker = MarkedError("JobNotFound", "job 42 is gone")
     head = _chain(PlainError("workflow failed"), PlainError("activity failed"), marker)
 
-    with pytest.raises(JobNotFound, match="job 42 is gone"):
+    with pytest.raises(JobNotFound, match="job 42 is gone") as caught:
         translate_workflow_failure(head, MARKERS)
+
+    # Chained from the exception passed in, not the (possibly nested) marker node.
+    assert caught.value.__cause__ is head
 
 
 def test_context_links_are_followed_when_no_cause_is_set() -> None:
@@ -74,8 +77,10 @@ def test_context_links_are_followed_when_no_cause_is_set() -> None:
     head = PlainError("workflow failed")
     head.__context__ = marker
 
-    with pytest.raises(Conflict, match="already claimed"):
+    with pytest.raises(Conflict, match="already claimed") as caught:
         translate_workflow_failure(head, MARKERS)
+
+    assert caught.value.__cause__ is head
 
 
 def test_an_unmatched_cause_chain_shadows_a_matching_context() -> None:
@@ -104,8 +109,10 @@ def test_str_is_used_when_the_node_carries_no_message() -> None:
 def test_the_first_matching_marker_in_the_chain_wins() -> None:
     head = _chain(MarkedError("Conflict", "outer"), MarkedError("JobNotFound", "inner"))
 
-    with pytest.raises(Conflict, match="outer"):
+    with pytest.raises(Conflict, match="outer") as caught:
         translate_workflow_failure(head, MARKERS)
+
+    assert caught.value.__cause__ is head
 
 
 def test_unmatched_marker_returns_normally() -> None:
@@ -147,5 +154,7 @@ def test_max_depth_is_configurable() -> None:
     head = _chain(PlainError("a"), PlainError("b"), MarkedError("JobNotFound", "reachable"))
 
     assert translate_workflow_failure(head, MARKERS, max_depth=2) is None
-    with pytest.raises(JobNotFound, match="reachable"):
+    with pytest.raises(JobNotFound, match="reachable") as caught:
         translate_workflow_failure(head, MARKERS, max_depth=3)
+
+    assert caught.value.__cause__ is head
