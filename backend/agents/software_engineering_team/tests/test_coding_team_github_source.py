@@ -3431,6 +3431,13 @@ def test_prepare_issue_branch_routes_its_fetch_through_the_choke_point() -> None
             "/nonexistent", "ext::sh -c id", "main", "khala/issue-1", token="tok"
         )
 
-    assert resolver.called, "_prepare_issue_branch must resolve through the choke point"
+    # The arguments matter as much as the call: a refactor that validated a
+    # substituted value (a hardcoded "origin", say) while still fetching with
+    # the payload's raw remote would leave ``resolver.called`` true and reopen
+    # the validate-one-value/fetch-with-another hole. Pinning the exact call
+    # means such a change fails here rather than passing silently -- and a
+    # deliberate signature change is a security-relevant edit that should have
+    # to come back through this test.
+    resolver.assert_called_once_with("/nonexistent", "ext::sh -c id", "main", "tok")
     assert ok is False
     assert "unsafe remote name" in msg

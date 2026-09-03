@@ -187,9 +187,12 @@ def test_resolve_cap_defaults_and_env_override(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_rejects_invalid_construction() -> None:
-    with pytest.raises(ValueError):
+    # Matched on the message, not just the type: a bare ``ValueError`` would
+    # still pass if a future check fired first for an unrelated reason while
+    # the rejection each line exists to pin regressed.
+    with pytest.raises(ValueError, match="inner model is required"):
         ToolCallBudgetModel(None, 5)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"max_tool_calls must be >= 1"):
         ToolCallBudgetModel(_AlwaysToolCallsModel(), 0)
 
 
