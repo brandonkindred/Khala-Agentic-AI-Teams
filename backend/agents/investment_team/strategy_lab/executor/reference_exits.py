@@ -9,20 +9,25 @@ standalone ``TakeProfitRule`` and laddered ``ScaledTakeProfitRule``. Signal
 exits and the combined simulator that lets every kind compete on the same bar
 are later steps.
 
-Stop-loss trigger decisions are NOT re-derived here: they come from the
-shared, pure ``rule_compiler.stop_loss_triggers`` (and its ``stop_loss_level``
-/ ``stop_limit_prices`` geometry), the same functions the live evaluator and
-the post-hoc conformance gate call. Take-profit's trigger/target formula
-(``entry * (1 ± pct)``, then a single bar-range comparison) is instead
-inlined directly in this module rather than importing ``rule_compiler``'s
-private ``_take_profit_triggers``: it is a two-line, self-contained formula
-with no drift risk, the same stance ``entry_price_basis``/``_round_price``
-already take on other small production-adjacent formulas with no public
-export. What this module adds — and what neither the shared stop-loss
-functions nor the inlined take-profit formula cover on their own — is
-resting-order FILL mechanics: which bar an order fills on, at what price, gap
-handling, the stop's trailing watermark ratchet, the stop-limit arm/latch, and
-the take-profit ladder's rung cursor / materialization lifecycle.
+Trigger decisions and per-position rule-priority resolution are NOT
+re-derived here, for either exit kind this module covers: stop-loss comes
+from the shared, pure ``rule_compiler.stop_loss_triggers`` (and its
+``stop_loss_level`` / ``stop_limit_prices`` geometry), and the take-profit
+family's trigger decision AND its per-bar winner resolution both come from
+``rule_compiler.evaluate_exit_rules_for_position`` — the same functions the
+live evaluator and the post-hoc conformance gate call, per the design doc's
+Reuse mandate. A ``PositionState`` whose ``high_since_entry``/
+``low_since_entry`` are held FIXED at the post-slippage anchor (never
+extended bar-over-bar) makes that shared evaluator's watermark-based
+ladder-rung test provably equivalent to a current-bar-only test for these
+fixed targets — see :class:`_RestingTakeProfitFamily`'s docstring for the
+proof — so reusing it does not reintroduce the fabricated-fill risk a naive
+pass-through of the live evaluator's own extended watermark would. What this
+module adds — and what the shared evaluator does not cover — is resting-order
+FILL mechanics: which bar an order fills on, at what price, gap handling, the
+stop's trailing watermark ratchet, the stop-limit arm/latch, and the
+take-profit ladder's rung cursor / materialization lifecycle and quantity
+bookkeeping.
 
 Target behavior, not shipped behavior
 -------------------------------------
@@ -95,6 +100,7 @@ from .reference_entries import ReferenceEntryFill, replay_entry_rules
 from .rule_compiler import (
     BarSnapshot,
     PositionState,
+    evaluate_exit_rules_for_position,
     stop_limit_prices,
     stop_loss_level,
     stop_loss_triggers,
@@ -809,9 +815,13 @@ def replay_stop_loss_exits(
 def _take_profit_target(anchor: float, pct: float, side: Literal["long", "short"]) -> float:
     """The exact resting-limit target for one standalone rule or ladder rung.
 
-    Single source of the take-profit-family target formula, inlined here
-    rather than imported (see this module's docstring) since it is a
-    two-line, self-contained formula with no drift risk.
+    The shared evaluator's ``ExitIntent`` (below) confirms THAT a rule/rung
+    triggered but does not resolve WHAT price it fills at — that fill-price
+    mechanic is this module's own to add, per the design doc's Reuse/division
+    of labor. This is that one remaining piece: a two-line, self-contained
+    formula with no drift risk against the shared evaluator, since it uses the
+    exact same ``entry_price`` field the evaluator's own trigger check reads
+    (see :class:`_RestingTakeProfitFamily`'s docstring).
 
     Preconditions: ``anchor`` is the position's post-slippage
     :func:`entry_price_basis`; ``pct`` is the rule's/rung's positive profit
@@ -823,27 +833,6 @@ def _take_profit_target(anchor: float, pct: float, side: Literal["long", "short"
     rule).
     """
     return anchor * (1.0 + pct) if side == "long" else anchor * (1.0 - pct)
-
-
-def _take_profit_target_reached(side: Literal["long", "short"], bar: "Bar", target: float) -> bool:
-    """Whether ``bar``'s OWN range reaches ``target`` — no watermark involved.
-
-    This is deliberately NOT the live engine's ``_next_scaled_rung`` test
-    (which folds in a running high-water-mark since entry, so a rung a single
-    spike bar clears stays "eligible" on every later bar even after a
-    retrace). A take-profit target is a fixed price, so "the current bar's own
-    extreme reaches it" is a strict superset of any watermark-based test — the
-    watermark always folds in the current bar's own extreme by construction —
-    and the design doc requires firing to depend only on THIS bar's own range,
-    never an earlier bar's spike alone. So no cross-bar price state exists
-    anywhere in this module's take-profit-family code; see
-    :class:`_RestingTakeProfitFamily`'s docstring for the fuller argument.
-
-    Preconditions: ``target`` is the resolved take-profit-family target price.
-    Postconditions: returns ``True`` iff ``bar.high >= target`` for a long (a
-    sell) or ``bar.low <= target`` for a short (a buy).
-    """
-    return bar.high >= target if side == "long" else bar.low <= target
 
 
 @dataclass
@@ -891,34 +880,43 @@ class _TakeProfitFireResult(NamedTuple):
     level_index: Optional[int]
 
 
-class _Candidate(NamedTuple):
-    """One take-profit-family candidate reachable on the bar being evaluated."""
-
-    exit_rule_index: int
-    exit_rule_kind: Literal["take_profit", "scaled_take_profit"]
-    price: float
-    qty: float
-    level_index: Optional[int]
-    ladder: Optional[_LadderCursor]
-
-
 class _RestingTakeProfitFamily:
     """One modeled take-profit-family resting-order book for one open position.
 
     Owns every standalone ``TakeProfitRule`` and every ``ScaledTakeProfitRule``
-    ladder attached to one position, racing them together bar by bar exactly
-    as the live engine's ``first_exit_intent_for_position`` walks one combined
-    rule list in spec order and fires at most one intent per position per bar
-    — the SAME per-position (not per-rule, not per-ladder) firing budget, so a
-    bar reachable by two different ladders' cursor rungs, or by a standalone
+    ladder attached to one position, racing them together bar by bar via the
+    shared, pure ``rule_compiler.evaluate_exit_rules_for_position`` — the same
+    per-position rule-priority resolution the live evaluator and this design's
+    own Reuse mandate specify, rather than a second, locally re-implemented
+    tie-break. ``first_only=False`` asks it for every triggered intent in spec
+    order (not just the winner), because a ``StopLossRule``/``SignalExitRule``
+    intent could otherwise "win" the walk and mask a lower-priority take-profit
+    candidate this module must still see — this class filters the returned
+    list down to ``take_profit``/``scaled_take_profit`` kinds and takes the
+    first (i.e. lowest ``exit_rule_index``) survivor, which is exactly the
+    SAME per-position (not per-rule, not per-ladder) firing budget as before:
+    a bar reachable by two different ladders' cursor rungs, or by a standalone
     target and a rung, still only fires the lower-``exit_rule_index`` one.
 
     Unlike :class:`_RestingStopLoss`, this object carries NO cross-bar price
-    watermark. See :func:`_take_profit_target_reached`'s docstring for why: a
-    take-profit-family target is a FIXED price resolved once at entry, so the
-    current bar's own range is provably sufficient (and required) on its own.
-    The only cross-bar state this object owns is per-ladder cursor bookkeeping
-    — a real simplification versus step 1's trailing-stop watermark.
+    watermark — it passes a ``PositionState`` whose ``high_since_entry``/
+    ``low_since_entry`` are HELD FIXED at the post-slippage anchor on every
+    call, never extended bar-over-bar. This is not an approximation: a
+    take-profit-family target is a FIXED price, so the shared evaluator's
+    watermark-based ladder-rung test — ``max(high_since_entry, bar.high) >=
+    entry * (1 + pct)`` for a long — is PROVABLY EQUIVALENT to a current-bar
+    -only test when ``high_since_entry`` never moves off the anchor: since the
+    anchor is always strictly below every rung's target (a positive ``pct``
+    guarantees it), ``max(anchor, bar.high) >= target`` reduces exactly to
+    ``bar.high >= target``. So freezing the watermark at construction is what
+    makes reuse here behavior-preserving rather than reintroducing the
+    fabricated-fill risk the design doc warns against (a rung that stays
+    "eligible" on a later bar purely because an EARLIER bar's spike, not this
+    bar's own range, once reached it) — see this module's own top docstring
+    for the same argument at the module level. The only cross-bar state this
+    object owns is per-ladder cursor bookkeeping (``_ladders``) plus the
+    running fill/quantity ledger — the shared evaluator is stateless and is
+    handed fresh cursor positions on every call.
 
     A fired ladder rung that does not exhaust the position's remaining
     quantity does NOT emit a closing outcome — it advances internal state
@@ -933,12 +931,20 @@ class _RestingTakeProfitFamily:
     Invariants:
       * ``_remaining_qty`` only ever decreases.
       * Each ladder's ``next_rung`` only ever increases.
+      * Once :meth:`step` has returned a non-``None`` result, every later call
+        returns ``None`` unconditionally — the position is closed, and this
+        object records no further fills. This is enforced by an explicit guard
+        at the top of :meth:`step`, not left to the caller's own bar-walk
+        discipline: this class is also usable directly by a future driver (the
+        combined multi-kind simulator this module's docstring anticipates)
+        that may not share :func:`resolve_take_profit_family_exit`'s
+        stop-on-first-result contract.
       * The FIRST rung of every ladder, and every standalone rule, is only
-        ever checked starting at ``entry_bar + 1``: this object's only caller
-        (:func:`resolve_take_profit_family_exit`) starts its bar walk there,
-        so ``step`` is simply never invoked for ``entry_bar`` itself — the
-        materialization-bar deferral for a position's FIRST candidate needs no
-        state on this object either, for the same structural reason
+        ever checked starting at ``entry_bar + 1``: this object's only current
+        caller (:func:`resolve_take_profit_family_exit`) starts its bar walk
+        there, so ``step`` is simply never invoked for ``entry_bar`` itself —
+        the materialization-bar deferral for a position's FIRST candidate
+        needs no state on this object either, for the same structural reason
         :class:`_LadderCursor` needs none for a ladder's LATER rungs.
     """
 
@@ -946,17 +952,24 @@ class _RestingTakeProfitFamily:
         self,
         *,
         side: Literal["long", "short"],
+        symbol: str,
         anchor: float,
-        standalone: Sequence[Tuple[int, TakeProfitRule]],
-        ladders: Sequence[Tuple[int, ScaledTakeProfitRule]],
+        rules: Sequence[ExitRule],
     ) -> None:
         """Arm a take-profit-family resting-order book for a freshly filled position.
 
         Preconditions: ``anchor`` is the position's post-slippage
-        :func:`entry_price_basis` (finite, ``> 0``); ``standalone``/``ladders``
-        are the ``(spec_index, rule)`` pairs from :func:`take_profit_rules` /
-        :func:`scaled_take_profit_rules`, together non-empty. The caller must
-        not invoke :meth:`step` for the position's own entry bar — only for
+        :func:`entry_price_basis` (finite, ``> 0``); ``rules`` is the WORKING
+        exit-rule list from :func:`working_exit_rules` — every member's
+        position in ``rules`` is used as-is as its ``exit_rule_index``, so
+        this must be the same list (not a filtered subset) the caller derived
+        :func:`take_profit_rules`/:func:`scaled_take_profit_rules` from; it may
+        freely contain non-take-profit-family members (``StopLossRule``,
+        ``SignalExitRule``), which this object evaluates harmlessly but never
+        selects as a winner (see class docstring). ``rules`` together must
+        contain at least one ``TakeProfitRule``/``ScaledTakeProfitRule`` (the
+        caller checks this before constructing). The caller must not invoke
+        :meth:`step` for the position's own entry bar — only for
         ``entry_bar + 1`` onward — which is this object's only source of
         materialization-bar deferral for a position's first candidates; see
         this class's own Invariants for why no additional state is needed
@@ -967,14 +980,36 @@ class _RestingTakeProfitFamily:
         ``_RestingStopLoss`` takes).
         """
         self._side = side
+        self._symbol = symbol
         self._anchor = anchor
-        self._standalone = list(standalone)
+        self._rules = list(rules)
         self._ladders = [
-            _LadderCursor(rule_index=idx, rule=rule, next_rung=0) for idx, rule in ladders
+            _LadderCursor(rule_index=idx, rule=rule, next_rung=0)
+            for idx, rule in scaled_take_profit_rules(self._rules)
         ]
         self._original_qty = 1.0
         self._remaining_qty = 1.0
         self._fills: List[Tuple[float, float]] = []
+
+    def _position(self) -> PositionState:
+        """Snapshot the position with the watermark FROZEN at the anchor.
+
+        Preconditions: none. Postconditions: returns a ``PositionState`` whose
+        ``high_since_entry``/``low_since_entry`` both equal ``self._anchor`` —
+        never the running extremes — which is the frozen-watermark construction
+        this class's own docstring proves makes the shared evaluator's
+        watermark-based ladder test equivalent to a current-bar-only test.
+        ``qty`` is ``self._remaining_qty`` (only ever called while ``> 0``, per
+        :meth:`step`'s own already-closed guard).
+        """
+        return PositionState(
+            symbol=self._symbol,
+            side=self._side,
+            qty=self._remaining_qty,
+            entry_price=self._anchor,
+            high_since_entry=self._anchor,
+            low_since_entry=self._anchor,
+        )
 
     def step(self, bar: "Bar") -> Optional[_TakeProfitFireResult]:
         """Evaluate ``bar``, applying at most one winning candidate.
@@ -986,58 +1021,66 @@ class _RestingTakeProfitFamily:
         Postconditions: returns the position's FINAL closing outcome once this
         bar's winning candidate exhausts ``_remaining_qty`` (within
         :data:`_FILL_QTY_REL_TOL`); returns ``None`` otherwise, whether because
-        no candidate was reachable this bar or because the winning rung fired
-        but left the position open. Internal state advances whenever a
-        candidate fires, whether or not this call returns a result.
+        the position was already fully closed on an earlier call, no candidate
+        was reachable this bar, or the winning rung fired but left the
+        position open. Internal state advances whenever a candidate fires,
+        whether or not this call returns a result.
         """
-        candidates: List[_Candidate] = []
-        for idx, rule in self._standalone:
-            target = _take_profit_target(self._anchor, rule.pct, self._side)
-            if _take_profit_target_reached(self._side, bar, target):
-                # A standalone rule is always a full close of whatever
-                # remains — the design doc's "every other exit rule kind is
-                # always a full-position close."
-                candidates.append(
-                    _Candidate(idx, "take_profit", target, self._remaining_qty, None, None)
-                )
-        for ladder in self._ladders:
-            if ladder.next_rung >= len(ladder.rule.levels):
-                continue  # ladder exhausted
-            level = ladder.rule.levels[ladder.next_rung]
-            target = _take_profit_target(self._anchor, level.pct, self._side)
-            if _take_profit_target_reached(self._side, bar, target):
-                rung_qty = min(level.qty_fraction * self._original_qty, self._remaining_qty)
-                candidates.append(
-                    _Candidate(
-                        ladder.rule_index,
-                        "scaled_take_profit",
-                        target,
-                        rung_qty,
-                        ladder.next_rung,
-                        ladder,
-                    )
-                )
-        if not candidates:
+        if self._fills and self._remaining_qty <= self._original_qty * _FILL_QTY_REL_TOL:
+            return None  # already fully closed on an earlier bar; see Invariants
+
+        cursor_map = {ladder.rule_index: ladder.next_rung for ladder in self._ladders}
+        intents = evaluate_exit_rules_for_position(
+            self._rules,
+            self._symbol,
+            self._position(),
+            _snapshot(bar),
+            first_only=False,
+            cursor_map=cursor_map,
+        )
+        winner = next(
+            (
+                intent
+                for intent in intents
+                if intent.rule_kind in ("take_profit", "scaled_take_profit")
+            ),
+            None,
+        )
+        if winner is None:
             return None
 
-        # Ascending exit_rule_index tie-break: the single rule that makes the
-        # firing budget per-POSITION rather than per-ladder/per-rule, since
-        # only one element of this combined list is ever taken regardless of
-        # how many standalone rules/ladders were reachable this bar.
-        winner = min(candidates, key=lambda c: c.exit_rule_index)
-        self._fills.append((winner.qty, winner.price))
-        self._remaining_qty -= winner.qty
-        if winner.ladder is not None:
-            winner.ladder.next_rung += 1
+        rule = self._rules[winner.rule_index]
+        ladder: Optional[_LadderCursor] = None
+        if winner.rule_kind == "take_profit":
+            # A standalone rule is always a full close of whatever remains —
+            # the design doc's "every other exit rule kind is always a
+            # full-position close."
+            pct = rule.pct
+            qty = self._remaining_qty
+        else:
+            level = rule.levels[winner.level_index]
+            pct = level.pct
+            qty = min(winner.qty_fraction * self._original_qty, self._remaining_qty)
+            ladder = next(
+                candidate
+                for candidate in self._ladders
+                if candidate.rule_index == winner.rule_index
+            )
+
+        price = _take_profit_target(self._anchor, pct, self._side)
+        self._fills.append((qty, price))
+        self._remaining_qty -= qty
+        if ladder is not None:
+            ladder.next_rung += 1
 
         if self._remaining_qty > self._original_qty * _FILL_QTY_REL_TOL:
             return None  # rung fired, position still open — keep walking
 
-        total_qty = sum(qty for qty, _ in self._fills)
-        weighted_price = sum(qty * price for qty, price in self._fills) / total_qty
+        total_qty = sum(q for q, _ in self._fills)
+        weighted_price = sum(q * p for q, p in self._fills) / total_qty
         return _TakeProfitFireResult(
-            exit_rule_index=winner.exit_rule_index,
-            exit_rule_kind=winner.exit_rule_kind,
+            exit_rule_index=winner.rule_index,
+            exit_rule_kind=winner.rule_kind,
             raw_price=weighted_price,
             level_index=winner.level_index,
         )
@@ -1091,16 +1134,14 @@ def resolve_take_profit_family_exit(
         raise ValueError(
             f"entry.entry_bar {entry.entry_bar!r} is out of range for {len(symbol_bars)} bars"
         )
-    standalone = take_profit_rules(rules)
-    ladders = scaled_take_profit_rules(rules)
-    if not standalone and not ladders:
+    if not take_profit_rules(rules) and not scaled_take_profit_rules(rules):
         return None
     anchor = entry_price_basis(symbol_bars[entry.entry_bar].open, entry.side, entry_slippage_bps)
     family = _RestingTakeProfitFamily(
         side=entry.side,
+        symbol=entry.symbol,
         anchor=anchor,
-        standalone=standalone,
-        ladders=ladders,
+        rules=rules,
     )
     for exit_bar in range(entry.entry_bar + 1, len(symbol_bars)):
         bar = symbol_bars[exit_bar]

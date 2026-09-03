@@ -915,11 +915,29 @@ def test_math_helper_is_used_for_the_finiteness_guard():
 
 
 def test_fill_qty_rel_tol_is_a_local_constant_not_imported_from_order_book():
-    """A cheap guard so a future contributor doesn't "fix" the deliberate
-    duplication by importing the forbidden ``order_book`` module."""
+    """Guards the deliberate duplication of ``FILL_QTY_REL_TOL``: the constant
+    must be defined locally, never imported from the forbidden ``order_book``
+    module. A value-only assertion would not catch a future contributor
+    replacing the local definition with an import of the same-valued
+    constant, so this also parses the module's own AST and checks no
+    ``import``/``from ... import`` statement names ``order_book`` — narrower
+    than a source-text substring check, which would also trip on this
+    module's own docstring prose describing the forbidden-module list.
+    """
+    import ast
+    import inspect
+
     from investment_team.strategy_lab.executor import reference_exits
 
     assert reference_exits._FILL_QTY_REL_TOL == 1e-12
+    tree = ast.parse(inspect.getsource(reference_exits))
+    import_module_names = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ] + [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    assert not any("order_book" in name for name in import_module_names)
 
 
 # ---------------------------------------------------------------------------
@@ -1265,6 +1283,30 @@ def test_two_ladders_on_one_position_fire_at_most_one_rung_per_bar_even_when_bot
     got = _resolve_tp(rules, bars)
     assert got.exit_bar == 3  # not 2 — proves the two ladders did not both fire on bar 2
     assert got.exit_price == pytest.approx(104.0)  # 0.5*102 + 0.5*106
+
+
+# ---------------------------------------------------------------------------
+# _RestingTakeProfitFamily.step — re-invocation after a full close
+# ---------------------------------------------------------------------------
+
+
+def test_step_returns_none_on_any_call_after_the_position_has_fully_closed():
+    """White-box test of the already-closed guard: ``resolve_take_profit_family_exit``
+    itself never calls ``step`` again after a non-None result, so this exercises
+    the contract a future direct caller (the docstring's anticipated combined
+    multi-kind simulator) would rely on instead."""
+    from investment_team.strategy_lab.executor.reference_exits import (
+        _RestingTakeProfitFamily,
+    )
+
+    rules = [TakeProfitRule(pct=0.05)]
+    family = _RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
+    closing_bar = _bar(101.0, 106.0, 100.0, 105.0)
+    assert family.step(closing_bar) is not None
+    # A second bar that would ALSO reach the target if evaluated fresh proves
+    # the guard suppresses re-evaluation, not merely that nothing fired.
+    also_reaches_target = _bar(101.0, 106.0, 100.0, 105.0)
+    assert family.step(also_reaches_target) is None
 
 
 # ---------------------------------------------------------------------------
