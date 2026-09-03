@@ -316,3 +316,171 @@ def test_min_evaluated_bars_boundary_19_vs_20() -> None:
     at = probe.probe(spec, {"AAA": _rising_bars(24)})
     assert at[0].evaluated == 20
     assert at[0].judged is True
+
+
+# ---------------------------------------------------------------------------
+# probe_pairs: pairwise entry-predicate co-occurrence analysis.
+# ---------------------------------------------------------------------------
+
+
+def test_pair_later_fires_independently_of_earlier() -> None:
+    # Disjoint firing sets (no indicators, so neither predicate warms up):
+    # earlier fires on the early bars, later fires on the late bars.
+    earlier = Predicate(lhs="bar.close", op="<", rhs=150.0)  # fires i in [0, 49]
+    later = Predicate(lhs="bar.close", op=">", rhs=250.0)  # fires i in [151, 299]
+    probe = PredicateReachabilityProbe()
+    spec = _spec(earlier, extra_entries=[EntryRule(side="long", when=later)])
+    pairs = probe.probe_pairs(spec, _MD)
+    assert len(pairs) == 1
+    pair = pairs[0]
+    assert pair.earlier_index == 0 and pair.later_index == 1
+    assert pair.judged
+    assert pair.later_fires > 0
+    assert pair.later_independent_fires == pair.later_fires
+    assert pair.later_never_independent is False
+    assert pair.later_dead is False
+
+
+def test_pair_later_never_fires_independently_of_earlier() -> None:
+    # _ALIVE (close>sma(200)) is judged (and always fires) only from i=199 on
+    # (sma(200) warmup). A later rule whose firing window sits entirely inside
+    # that judged range can never fire independently of it.
+    later = Predicate(lhs="bar.close", op=">", rhs=310.0)  # fires i > 210
+    probe = PredicateReachabilityProbe()
+    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=later)])
+    pairs = probe.probe_pairs(spec, _MD)
+    assert len(pairs) == 1
+    pair = pairs[0]
+    assert pair.judged
+    assert pair.later_fires > 0
+    assert pair.later_independent_fires == 0
+    assert pair.later_never_independent is True
+    assert pair.later_dead is False
+
+
+def test_pair_later_dead_is_distinct_from_never_independent() -> None:
+    # A later rule that never fires at all is "dead" (already reported
+    # elsewhere) — the pairwise analysis must not also call it "never
+    # independent", which is reserved for a rule that fires but is shadowed.
+    probe = PredicateReachabilityProbe()
+    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=_DEAD)])
+    pairs = probe.probe_pairs(spec, _MD)
+    assert len(pairs) == 1
+    pair = pairs[0]
+    assert pair.judged
+    assert pair.later_fires == 0
+    assert pair.later_dead is True
+    assert pair.later_never_independent is False
+
+
+def test_pair_leg_diagnostics_decompose_later_rule_two_leg_all_of() -> None:
+    # Leg 1 (close>300) fires i in [201, 299] — entirely inside _ALIVE's
+    # judged, always-firing range [199, 299]. Leg 2 (close<360) fires i in
+    # [0, 259]; its early fires (i < 199) land on bars where _ALIVE is still
+    # in warmup, which the co-occurrence tally excludes from `evaluated`
+    # altogether. So both legs — and hence the all_of as a whole — never fire
+    # independently of _ALIVE, exercising the per-leg breakdown.
+    later = AllOf(
+        of=[
+            Predicate(lhs="bar.close", op=">", rhs=300.0),  # fires i > 200
+            Predicate(lhs="bar.close", op="<", rhs=360.0),  # fires i < 260
+        ]
+    )
+    probe = PredicateReachabilityProbe()
+    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=later)])
+    pairs = probe.probe_pairs(spec, _MD)
+    assert len(pairs) == 1
+    pair = pairs[0]
+    assert pair.later_never_independent is True
+    assert len(pair.legs) == 2
+    for leg in pair.legs:
+        assert leg.evaluated == pair.evaluated
+        assert leg.fires > 0
+        assert leg.independent_fires == 0
+
+
+def test_pair_mixed_side_still_pairs() -> None:
+    probe = PredicateReachabilityProbe()
+    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="short", when=_DEAD)])
+    pairs = probe.probe_pairs(spec, _MD)
+    assert len(pairs) == 1
+    pair = pairs[0]
+    assert pair.earlier_side == "long"
+    assert pair.later_side == "short"
+
+
+def test_pair_fewer_than_two_rules_returns_empty() -> None:
+    probe = PredicateReachabilityProbe()
+    assert probe.probe_pairs(_spec(_ALIVE), _MD) == []
+
+
+def test_pair_no_market_data_returns_empty() -> None:
+    probe = PredicateReachabilityProbe()
+    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=_DEAD)])
+    assert probe.probe_pairs(spec, None) == []
+    assert probe.probe_pairs(spec, {}) == []
+    assert probe.probe_pairs(spec, {"AAA": []}) == []
+
+
+def test_pair_min_evaluated_bars_boundary_19_vs_20() -> None:
+    # Neither predicate involves an indicator, so evaluated == the bar count
+    # exactly (no warmup on either side) — the exact abstention edge.
+    earlier = Predicate(lhs="bar.close", op=">", rhs=0.0)
+    later = Predicate(lhs="bar.close", op=">", rhs=50.0)
+    probe = PredicateReachabilityProbe()
+    spec = _spec(earlier, extra_entries=[EntryRule(side="long", when=later)])
+
+    below = probe.probe_pairs(spec, {"AAA": _rising_bars(19)})
+    assert below[0].evaluated == 19
+    assert below[0].judged is False
+
+    at = probe.probe_pairs(spec, {"AAA": _rising_bars(20)})
+    assert at[0].evaluated == 20
+    assert at[0].judged is True
+
+
+def test_cooccurrence_counts_pure_function_hand_built() -> None:
+    # Direct unit test of the pure computation: no probe, spec, or bars
+    # involved — just two hand-built, positionally-aligned status sequences.
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _cooccurrence_counts,
+    )
+
+    later_statuses = ["satisfied", "satisfied", "warmup", "miss"]
+    earlier_statuses = ["miss", "satisfied", "satisfied", "miss"]
+    # Bar 2 excluded (later is warmup there). Of the remaining 3: later fires
+    # at 0 and 1 (evaluated=3, later_fires=2); of those, only bar 0 has the
+    # earlier rule not satisfied (later_independent_fires=1).
+    assert _cooccurrence_counts(later_statuses, earlier_statuses) == (3, 2, 1)
+
+
+def test_cooccurrence_counts_pure_function_excludes_earlier_side_warmup() -> None:
+    # Same pure function, but pinning the OTHER side of the warmup contract:
+    # a bar where the EARLIER rule is warmup (not the later one) must also be
+    # excluded from `evaluated`, not silently counted as an independent fire.
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _cooccurrence_counts,
+    )
+
+    later_statuses = ["satisfied", "satisfied", "satisfied"]
+    earlier_statuses = ["warmup", "satisfied", "miss"]
+    # Bar 0 excluded (earlier is warmup there). Of the remaining 2: later
+    # fires at both (evaluated=2, later_fires=2); of those, only bar 2 has
+    # the earlier rule not satisfied (later_independent_fires=1).
+    assert _cooccurrence_counts(later_statuses, earlier_statuses) == (2, 2, 1)
+
+
+def test_sweep_statuses_matches_sweep_aggregate() -> None:
+    # Guards the _sweep refactor: its (evaluated, fires) counts must still
+    # match what _sweep_statuses's raw per-bar sequence implies.
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _build_views,
+        _sweep,
+        _sweep_statuses,
+    )
+
+    views = _build_views(_MD)
+    statuses = _sweep_statuses(_ALIVE, views)
+    evaluated = sum(1 for s in statuses if s != "warmup")
+    fires = sum(1 for s in statuses if s == "satisfied")
+    assert _sweep(_ALIVE, views) == (evaluated, fires)

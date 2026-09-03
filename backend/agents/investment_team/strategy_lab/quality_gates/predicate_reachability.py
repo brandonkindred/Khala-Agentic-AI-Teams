@@ -29,9 +29,9 @@ Path semantics:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, List
+from typing import Any, ClassVar, Dict, List, Sequence
 
-from ..executor.predicate_evaluator import PandasHistoryView, evaluate_tree
+from ..executor.predicate_evaluator import EvalStatus, PandasHistoryView, evaluate_tree
 from ..spec_dsl import EntryRule, iter_leaf_predicates
 from .alignment_checks import _bars_to_frame, _format_predicate
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
@@ -43,6 +43,42 @@ GATE = "predicate_reachability_probe"
 # Below this the probe abstains (an ``info``) — a short window is a coverage
 # problem the warmup / data checks own, not a reachability verdict.
 _MIN_EVALUATED_BARS = 20
+
+
+def _entry_rules(spec: Any) -> List[EntryRule]:
+    """Entry rules of ``spec`` in authored order — the probe's index space.
+
+    Preconditions: ``spec`` is a ``StrategySpec`` (or any object exposing an
+    ``entry_rules`` attribute).
+    Postconditions: returns every ``EntryRule`` in ``spec.entry_rules``, in
+    order, skipping any non-``EntryRule`` element; ``[]`` when ``spec`` has no
+    ``entry_rules`` attribute or it is falsy. Shared by :meth:`probe` and
+    :meth:`probe_pairs` so both index into the SAME filtered list.
+    """
+    return [r for r in (getattr(spec, "entry_rules", None) or []) if isinstance(r, EntryRule)]
+
+
+def _build_views(market_data: Any) -> List[PandasHistoryView]:
+    """Build one PandasHistoryView per symbol with usable bars.
+
+    Preconditions: ``market_data`` is ``Optional[Dict[str, List[OHLCVBar]]]`` or
+    falsy.
+    Postconditions: one view per symbol with non-empty bars and a non-empty
+    frame, in ``market_data``'s iteration order; an empty list when
+    ``market_data`` is falsy or every symbol's bars are empty/unusable. Pure;
+    no caching across calls.
+    """
+    views: List[PandasHistoryView] = []
+    if not market_data:
+        return views
+    for bars in market_data.values():
+        if not bars:
+            continue
+        df = _bars_to_frame(bars)
+        if df.empty:
+            continue
+        views.append(PandasHistoryView(df, {}))
+    return views
 
 
 @dataclass(frozen=True)
@@ -75,6 +111,74 @@ class _RuleReachability:
         return self.judged and self.fires == 0
 
 
+@dataclass(frozen=True)
+class _PairLegCooccurrence:
+    """Per-leaf-predicate co-occurrence tally for one leaf of the LATER rule,
+    evaluated against one specific earlier rule (mirrors :class:`_LegReachability`).
+    """
+
+    predicate: str
+    evaluated: int
+    fires: int
+    independent_fires: int
+
+
+@dataclass(frozen=True)
+class _PairCooccurrence:
+    """Pairwise co-occurrence tally: does the later rule ever fire on a bar
+    where the earlier rule doesn't, over the fetched bars.
+
+    Invariants: ``earlier_index < later_index`` (an ordered pair; both index
+    into the SAME filtered ``entry_rules`` list :meth:`PredicateReachabilityProbe.probe_pairs`
+    builds, matching :meth:`PredicateReachabilityProbe.probe`'s existing indexing
+    convention) — enforced in :meth:`__post_init__`.
+    """
+
+    earlier_index: int
+    later_index: int
+    earlier_side: str
+    later_side: str
+    evaluated: int
+    later_fires: int
+    later_independent_fires: int
+    legs: tuple[_PairLegCooccurrence, ...]
+
+    def __post_init__(self) -> None:
+        """Enforce the ``earlier_index < later_index`` invariant at construction time."""
+        assert self.earlier_index < self.later_index, (
+            "earlier_index must be less than later_index (an ordered pair)"
+        )
+
+    @property
+    def judged(self) -> bool:
+        """True when enough jointly-judged bars exist to trust the verdict."""
+        return self.evaluated >= _MIN_EVALUATED_BARS
+
+    @property
+    def later_dead(self) -> bool:
+        """True when the later rule never fires at all against this pair's
+        jointly-judged bars.
+
+        This is the pre-existing "dead" concept (already reported by
+        :meth:`PredicateReachabilityProbe.probe`/``to_gate_results``) — NOT
+        this analysis's new "never independent" verdict. Kept so callers can
+        tell the two apart rather than conflating them.
+        """
+        return self.judged and self.later_fires == 0
+
+    @property
+    def later_never_independent(self) -> bool:
+        """True when the later rule fires, but only on bars the earlier rule
+        also fires on.
+
+        This pair alone would starve the later rule; the true, union-based
+        "structurally starved" verdict (checked against every earlier rule at
+        once, not just this one) is a later step's responsibility, not this
+        analysis's.
+        """
+        return self.judged and self.later_fires > 0 and self.later_independent_fires == 0
+
+
 def _sweep(node: Any, views: List[PandasHistoryView]) -> tuple[int, int]:
     """Count ``(evaluated, fires)`` for ``node`` across every bar of every view.
 
@@ -103,19 +207,59 @@ def _sweep(node: Any, views: List[PandasHistoryView]) -> tuple[int, int]:
     this cost is paid at most once per distinct entry-rule set — not once per
     refinement round.
     """
-    assert node is not None, "node must be a PredicateTree"
+    assert node is not None, "node must be non-None"
     assert isinstance(views, list), "views must be a list of PandasHistoryView"
-    evaluated = 0
-    fires = 0
-    for view in views:
-        for i in range(view.length()):
-            status = evaluate_tree(node, view, i).status
-            if status == "warmup":
-                continue
-            evaluated += 1
-            if status == "satisfied":
-                fires += 1
+    statuses = _sweep_statuses(node, views)
+    evaluated = sum(1 for s in statuses if s != "warmup")
+    fires = sum(1 for s in statuses if s == "satisfied")
     return evaluated, fires
+
+
+def _sweep_statuses(node: Any, views: List[PandasHistoryView]) -> List[EvalStatus]:
+    """Per-bar evaluation status of ``node`` across every bar of every view.
+
+    Preconditions: ``node`` is a ``PredicateTree`` (whole ``when`` tree or a
+    leaf); ``views`` are :class:`PandasHistoryView`s over each symbol's bars.
+    Postconditions: returns ``evaluate_tree(node, view, i).status`` for every
+    ``(view, i)`` pair, in view-major/bar-minor order — the same length and
+    order as any other call given the SAME ``views`` list, so two such calls'
+    results are positionally alignable per bar. Deterministic; no I/O.
+    """
+    assert node is not None, "node must be non-None"
+    assert isinstance(views, list), "views must be a list of PandasHistoryView"
+    return [evaluate_tree(node, view, i).status for view in views for i in range(view.length())]
+
+
+def _cooccurrence_counts(
+    later_statuses: Sequence[EvalStatus], earlier_statuses: Sequence[EvalStatus]
+) -> tuple[int, int, int]:
+    """Pairwise co-occurrence tally between two same-length status sequences.
+
+    Preconditions: ``later_statuses`` and ``earlier_statuses`` have equal
+    length and are positionally aligned — both produced by ``_sweep_statuses``
+    over the SAME ``views`` list, so index ``k`` names the same bar in both.
+    Postconditions: pure (no I/O, no bar-walking); returns ``(evaluated,
+    later_fires, later_independent_fires)``. ``evaluated`` counts bars where
+    BOTH sequences are non-``"warmup"`` — the only bars where "did the earlier
+    rule also fire here" is a judged fact rather than an unknowable warmup
+    gap. ``later_fires`` counts the subset of those bars where
+    ``later_statuses[k] == "satisfied"``. ``later_independent_fires`` counts
+    the further subset where ``earlier_statuses[k] != "satisfied"`` — i.e. the
+    later rule fired on a bar the earlier rule did not.
+    """
+    assert len(later_statuses) == len(earlier_statuses), "status sequences must be aligned"
+    evaluated = 0
+    later_fires = 0
+    later_independent_fires = 0
+    for later_status, earlier_status in zip(later_statuses, earlier_statuses):
+        if later_status == "warmup" or earlier_status == "warmup":
+            continue
+        evaluated += 1
+        if later_status == "satisfied":
+            later_fires += 1
+            if earlier_status != "satisfied":
+                later_independent_fires += 1
+    return evaluated, later_fires, later_independent_fires
 
 
 class PredicateReachabilityProbe(GateResultsMixin):
@@ -140,19 +284,10 @@ class PredicateReachabilityProbe(GateResultsMixin):
         at most once per (symbol, indicator).
         """
         assert spec is not None, "spec must be a StrategySpec"
-        entry_rules = [
-            r for r in (getattr(spec, "entry_rules", None) or []) if isinstance(r, EntryRule)
-        ]
+        entry_rules = _entry_rules(spec)
         if not entry_rules or not market_data:
             return []
-        views: List[PandasHistoryView] = []
-        for bars in market_data.values():
-            if not bars:
-                continue
-            df = _bars_to_frame(bars)
-            if df.empty:
-                continue
-            views.append(PandasHistoryView(df, {}))
+        views = _build_views(market_data)
         if not views:
             return []
 
@@ -172,6 +307,78 @@ class PredicateReachabilityProbe(GateResultsMixin):
                     rule_index=idx, side=rule.side, evaluated=evaluated, fires=fires, legs=legs
                 )
             )
+        return out
+
+    def probe_pairs(self, spec: Any, market_data: Any) -> List[_PairCooccurrence]:
+        """Pairwise co-occurrence tally for every ordered (earlier, later)
+        entry-rule pair against ``market_data``.
+
+        Preconditions: ``spec`` is a ``StrategySpec``; ``market_data`` is
+        ``Optional[Dict[str, List[OHLCVBar]]]`` (the fetched bars) or falsy.
+        Postconditions: one :class:`_PairCooccurrence` per ordered pair
+        ``(i, j)`` with ``i < j`` over ``spec.entry_rules`` (same ``EntryRule``
+        filtering, and hence the same index space, as :meth:`probe`) — empty
+        when there are fewer than 2 entry rules or no usable bars. Every rule
+        pairs with every earlier rule regardless of ``side``, matching
+        ``evaluate_entry_rules``'s default ``side_filter=None`` (the current
+        sole caller doesn't pass it, so priority applies across long/short
+        alike). Per-leg diagnostics are computed only for a pair where the
+        later rule fires but never independently of that specific earlier
+        rule (the diagnostic is only needed then), decomposing the LATER
+        rule's own leaves — never the earlier rule's, mirroring
+        ``_leg_diagnostic``'s single-rule decomposition pattern. This is a
+        pure computation over already-evaluated predicate results: no
+        severity, no ``QualityGateResult`` — finding emission is a separate,
+        later step.
+        """
+        assert spec is not None, "spec must be a StrategySpec"
+        entry_rules = _entry_rules(spec)
+        if len(entry_rules) < 2 or not market_data:
+            return []
+        views = _build_views(market_data)
+        if not views:
+            return []
+
+        statuses = [_sweep_statuses(rule.when, views) for rule in entry_rules]
+        leaves = [list(iter_leaf_predicates(rule.when)) for rule in entry_rules]
+        leaf_status_cache: Dict[int, tuple[List[EvalStatus], ...]] = {}
+
+        out: List[_PairCooccurrence] = []
+        for j in range(1, len(entry_rules)):
+            for i in range(j):
+                evaluated, later_fires, later_independent = _cooccurrence_counts(
+                    statuses[j], statuses[i]
+                )
+                legs: tuple[_PairLegCooccurrence, ...] = ()
+                if (
+                    evaluated >= _MIN_EVALUATED_BARS
+                    and later_fires > 0
+                    and later_independent == 0
+                    and len(leaves[j]) > 1
+                ):
+                    if j not in leaf_status_cache:
+                        leaf_status_cache[j] = tuple(
+                            _sweep_statuses(leaf, views) for leaf in leaves[j]
+                        )
+                    legs = tuple(
+                        _PairLegCooccurrence(
+                            _format_predicate(leaf),
+                            *_cooccurrence_counts(leaf_statuses, statuses[i]),
+                        )
+                        for leaf, leaf_statuses in zip(leaves[j], leaf_status_cache[j])
+                    )
+                out.append(
+                    _PairCooccurrence(
+                        earlier_index=i,
+                        later_index=j,
+                        earlier_side=entry_rules[i].side,
+                        later_side=entry_rules[j].side,
+                        evaluated=evaluated,
+                        later_fires=later_fires,
+                        later_independent_fires=later_independent,
+                        legs=legs,
+                    )
+                )
         return out
 
     def all_entries_dead(self, reach: List[_RuleReachability]) -> bool:
