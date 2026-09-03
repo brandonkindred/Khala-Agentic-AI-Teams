@@ -20,7 +20,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
-import { ANNOUNCE_SETTLE_MS, SettleAnnouncer } from '../../shared/settle-announce';
+import { SettleAnnouncer } from '../../shared/settle-announce';
 import { CodingTeamMonitorComponent } from '../coding-team-monitor/coding-team-monitor.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { OutOfScopeIssuesComponent } from './out-of-scope-issues/out-of-scope-issues.component';
@@ -45,6 +45,13 @@ import {
 
 /** How often the Runs list is re-fetched while the page is open. */
 const RUNS_POLL_MS = 15000;
+
+/** Quiet period after the last "thinking" token before announcing a settled line count — tuned for
+ *  a raw LLM token stream (many updates per second), not this page's HTTP poll cadence. Local to
+ *  this component; NOT shared with coding-team-monitor.component.ts's summary announcer, which polls
+ *  at a much slower, fixed cadence and needs its own differently-sized window (see
+ *  SUMMARY_ANNOUNCE_SETTLE_MS there) — only the SettleAnnouncer timer mechanism is shared. */
+const THINKING_ANNOUNCE_SETTLE_MS = 1500;
 
 /** localStorage key for the last repo the user expanded, so it can be pre-expanded on return. */
 const LAST_REPO_STORAGE_KEY = 'coding-team-last-repo-v1';
@@ -294,16 +301,17 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * binds this instead of calling `hasPendingQuestions()` each change-detection cycle). */
   jobStatusHasPendingQuestions = false;
   /** aria-live text for the "Agent thinking" panel: a streaming cue while output is still arriving,
-   * then a settled line count once it's been quiet for `ANNOUNCE_SETTLE_MS`. Empty when there's no
-   * thinking output to announce. Driven by `thinkingAnnouncer`, disposed in `ngOnDestroy`. */
+   * then a settled line count once it's been quiet for `THINKING_ANNOUNCE_SETTLE_MS`. Empty when
+   * there's no thinking output to announce. Driven by `thinkingAnnouncer`, disposed in
+   * `ngOnDestroy`. */
   thinkingAnnouncement = '';
   /** Owns the settle-timer bookkeeping for `thinkingAnnouncement` — see `shared/settle-announce.ts`.
    * `onChange` flips to an immediate streaming cue on any differing, non-empty update; `onSettle`
-   * replaces it with a line count once the input has been quiet for `ANNOUNCE_SETTLE_MS`. */
+   * replaces it with a line count once the input has been quiet for `THINKING_ANNOUNCE_SETTLE_MS`. */
   private readonly thinkingAnnouncer = new SettleAnnouncer(
-    ANNOUNCE_SETTLE_MS,
+    THINKING_ANNOUNCE_SETTLE_MS,
     (thinking) => {
-      if (!thinking) {
+      if (!thinking.trim()) {
         this.thinkingAnnouncement = '';
         return;
       }
@@ -314,6 +322,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.thinkingAnnouncement = 'Agent is thinking…';
     },
   );
+  /** True while `thinkingAnnouncer` has a pending settle timer — exposed so callers/tests can check
+   *  debounce state without reaching into the private field. */
+  get thinkingAnnouncementPending(): boolean {
+    return this.thinkingAnnouncer.isPending;
+  }
   /** In-memory activity narrative for the selected run (Jobs thought-stream panel). */
   activityNarrative: ActivityNarrativeState = emptyActivityNarrative();
   /** Polite live-region cue for activity-only updates; never contains raw narrative lines. */

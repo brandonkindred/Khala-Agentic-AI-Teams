@@ -403,7 +403,7 @@ describe('CodingTeamMonitorComponent', () => {
       // Nothing is announced yet — the settle timer hasn't fired.
       expect(region()?.textContent).toBe('');
 
-      await vi.advanceTimersByTimeAsync(1500);
+      await vi.advanceTimersByTimeAsync(6000);
       fixture.detectChanges();
       expect(region()?.textContent).toContain('Implementing the task graph');
       expect(region()?.textContent).toContain('47% complete');
@@ -423,11 +423,11 @@ describe('CodingTeamMonitorComponent', () => {
         status: 'running',
         phase: 'coding',
         progress: 10,
-      } as CodingTeamJobStatus);
+      } as CodingTeamJobStatus); // t=0, original deadline would be t=6000
       fixture.detectChanges();
       expect(region()?.textContent).toBe('');
 
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(2000); // t=2000
       fixture.componentRef.setInput('status', {
         job_id: 'j1',
         status: 'running',
@@ -438,8 +438,7 @@ describe('CodingTeamMonitorComponent', () => {
       // A differing update mid-settle restarts the window instead of announcing early.
       expect(region()?.textContent).toBe('');
 
-      // t=1000: another differing update restarts the window again — new deadline t=2500.
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(2000); // t=4000: restarts again — new deadline t=10000
       fixture.componentRef.setInput('status', {
         job_id: 'j1',
         status: 'running',
@@ -449,15 +448,15 @@ describe('CodingTeamMonitorComponent', () => {
       fixture.detectChanges();
       expect(region()?.textContent).toBe('');
 
-      // Prove the restart, not just the final value: crossing the ORIGINAL 1500ms deadline (t=1500,
-      // i.e. 500ms from here) must still be silent — a weaker "keep the original timer, announce
-      // whatever's latest when it fires" implementation would already have announced by t=1500.
-      await vi.advanceTimersByTimeAsync(500); // t=1500
+      // Prove the restart, not just the final value: crossing the ORIGINAL t=0 deadline (t=6000)
+      // must still be silent — a weaker "keep the original timer, announce whatever's latest when
+      // it fires" implementation would already have announced by t=6000.
+      await vi.advanceTimersByTimeAsync(2000); // t=6000
       fixture.detectChanges();
       expect(region()?.textContent).toBe('');
 
-      // Now cross the actually-restarted deadline (t=2500): settles once on the latest value.
-      await vi.advanceTimersByTimeAsync(1000); // t=2500
+      // Now cross the actually-restarted deadline (t=10000): settles once on the latest value.
+      await vi.advanceTimersByTimeAsync(4000); // t=10000
       fixture.detectChanges();
       expect(region()?.textContent).toContain('30% complete');
       expect(region()?.textContent).not.toContain('10% complete');
@@ -477,7 +476,7 @@ describe('CodingTeamMonitorComponent', () => {
         progress: 47,
       } as CodingTeamJobStatus);
       fixture.detectChanges();
-      await vi.advanceTimersByTimeAsync(1500);
+      await vi.advanceTimersByTimeAsync(6000);
       fixture.detectChanges();
       const el = fixture.nativeElement as HTMLElement;
       const region = el.querySelector('.visually-hidden[aria-live="polite"]');
@@ -493,11 +492,48 @@ describe('CodingTeamMonitorComponent', () => {
       fixture.detectChanges();
 
       // An unchanged summary must neither restart nor cancel an in-flight timer — here there is no
-      // timer at all, because the update was a no-op.
-      expect(component['announcer'].isPending).toBe(false);
+      // timer at all, because the update was a no-op (the degenerate case; see the next test for the
+      // case where a timer IS in flight when the repeat arrives).
+      expect(component.announcementPending).toBe(false);
       const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
       expect(regionAfter).toBe(region);
       expect(regionAfter?.textContent).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves an in-flight settle timer running (neither cancelled nor restarted) when a repeat of the same summary arrives mid-settle', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = fixture.nativeElement as HTMLElement;
+      const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
+
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 47,
+      } as CodingTeamJobStatus); // t=0, deadline t=6000
+      fixture.detectChanges();
+
+      await vi.advanceTimersByTimeAsync(2000); // t=2000, timer still in flight
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 47, // identical summary
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      // A cancel-on-unchanged regression would clear this to false; a restart-on-unchanged
+      // regression would still show true here but push the deadline out to t=8000.
+      expect(component.announcementPending).toBe(true);
+
+      // Advancing to exactly the ORIGINAL deadline (t=6000) proves neither regression happened: a
+      // cancelled timer would stay silent forever, and a restarted one wouldn't fire until t=8000.
+      await vi.advanceTimersByTimeAsync(4000); // t=6000
+      fixture.detectChanges();
+      expect(region()?.textContent).toContain('47% complete');
     } finally {
       vi.useRealTimers();
     }
@@ -516,16 +552,16 @@ describe('CodingTeamMonitorComponent', () => {
       const region = (fixture.nativeElement as HTMLElement).querySelector(
         '.visually-hidden[aria-live="polite"]',
       );
-      expect(component['announcer'].isPending).toBe(true);
+      expect(component.announcementPending).toBe(true);
       // Nothing has settled yet, so the DOM-observable text is still empty.
       expect(region?.textContent).toBe('');
 
       fixture.destroy();
-      expect(component['announcer'].isPending).toBe(false);
+      expect(component.announcementPending).toBe(false);
 
       // Advancing time after destroy must not resurrect the timer, throw, or update the DOM.
-      await vi.advanceTimersByTimeAsync(1500);
-      expect(component['announcer'].isPending).toBe(false);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(component.announcementPending).toBe(false);
       expect(region?.textContent).toBe('');
     } finally {
       vi.useRealTimers();
@@ -542,7 +578,7 @@ describe('CodingTeamMonitorComponent', () => {
         progress: 47,
       } as CodingTeamJobStatus);
       fixture.detectChanges();
-      await vi.advanceTimersByTimeAsync(1500);
+      await vi.advanceTimersByTimeAsync(6000);
       fixture.detectChanges();
       const el = fixture.nativeElement as HTMLElement;
       const region = el.querySelector('.visually-hidden[aria-live="polite"]');
@@ -553,7 +589,7 @@ describe('CodingTeamMonitorComponent', () => {
 
       // Goes silent right away — no lingering stale percentage for another settle window.
       expect(region?.textContent).toBe('');
-      expect(component['announcer'].isPending).toBe(false);
+      expect(component.announcementPending).toBe(false);
     } finally {
       vi.useRealTimers();
     }

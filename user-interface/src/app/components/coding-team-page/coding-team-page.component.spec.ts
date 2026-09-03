@@ -2117,9 +2117,22 @@ describe('CodingTeamPageComponent', () => {
     it('cancels the thinking-announcement settle timer on destroy', async () => {
       await setup();
       component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
-      expect(component['thinkingAnnouncer'].isPending).toBe(true);
+      expect(component.thinkingAnnouncementPending).toBe(true);
       fixture.destroy();
-      expect(component['thinkingAnnouncer'].isPending).toBe(false);
+      expect(component.thinkingAnnouncementPending).toBe(false);
+    });
+
+    it('settles a whitespace-only thinking value to an empty announcement, not "0 lines"', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        component.jobStatus = { job_id: 'j1', status: 'running', thinking: '   ' };
+        expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(component.thinkingAnnouncement).toBe('');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

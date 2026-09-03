@@ -1,19 +1,19 @@
-/** Quiet period a differing value must hold before a SettleAnnouncer fires its `onSettle`
- *  callback — long enough to outlast a single poll interval, so a screen reader user gets one
- *  followable announcement per lull instead of one per poll tick. Shared by
- *  coding-team-page.component.ts's thinking announcer and coding-team-monitor.component.ts's
- *  summary announcer so the two quiet windows cannot silently drift apart. */
-export const ANNOUNCE_SETTLE_MS = 1500;
-
 /**
- * Debounces a rapidly-changing text value (e.g. fed by a poll loop) into occasional "settled"
- * announcements for a polite `aria-live` region, replacing the hand-rolled
+ * Debounces a rapidly-changing text value (e.g. fed by a poll loop or a token stream) into
+ * occasional "settled" announcements for a polite `aria-live` region, replacing the hand-rolled
  * `setTimeout`/`clearTimeout` bookkeeping previously duplicated across
  * `coding-team-page.component.ts` (`updateThinkingAnnouncement`) and
  * `coding-team-monitor.component.ts` (`scheduleAnnouncement`).
  *
+ * This class owns only the timer bookkeeping (unchanged/differing/settle/dispose), not any
+ * particular quiet-period value: for the debounce to actually coalesce updates rather than just
+ * add a fixed delay to each one, `settleMs` must exceed the real gap between the source's updates
+ * (e.g. a poll interval), which differs per consumer — a fast raw token stream and a 5-second HTTP
+ * poll need very different windows. Each call site therefore supplies (and documents) its own
+ * `settleMs`, derived from its own update cadence, rather than sharing one constant.
+ *
  * @example
- * private readonly announcer = new SettleAnnouncer(ANNOUNCE_SETTLE_MS, (value) => this.text = value);
+ * private readonly announcer = new SettleAnnouncer(MY_SETTLE_MS, (value) => this.text = value);
  * // on each new poll value:
  * this.announcer.update(nextValue);
  * // on destroy:

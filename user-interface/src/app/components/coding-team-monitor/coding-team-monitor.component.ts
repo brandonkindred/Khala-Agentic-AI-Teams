@@ -3,7 +3,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
-import { ANNOUNCE_SETTLE_MS, SettleAnnouncer } from '../../shared/settle-announce';
+import { SettleAnnouncer } from '../../shared/settle-announce';
 
 /** One step of the phase stepper. Local, to keep the monitor decoupled from other features. */
 interface PhaseDefinition {
@@ -22,6 +22,17 @@ const CODING_TEAM_PHASES: PhaseDefinition[] = [
 /** Char bound for the objective portion of the live-region summary — kept short since it's spoken
  *  by assistive tech, not read visually; longer text is truncated with an ellipsis. */
 const SUMMARY_OBJECTIVE_MAX_CHARS = 60;
+
+/** Quiet period a differing summary must hold before the live region's announcement settles.
+ *  `status` is fed by the parent page's `pollJobStatus` poll (job-status-poller.ts, default
+ *  `intervalMs = 5000`, used unmodified by coding-team-page.component.ts's `startPolling`), so this
+ *  must exceed 5000ms — otherwise a status that changes on every poll would still restart and
+ *  re-fire the timer once per poll (a fixed delay, not real coalescing). Sized at the poll interval
+ *  plus a margin, so a run whose progress changes on every single poll stays silent until it
+ *  actually plateaus for a beat, and only a genuine lull produces an announcement. NOT shared with
+ *  coding-team-page.component.ts's THINKING_ANNOUNCE_SETTLE_MS, which is tuned for a much faster
+ *  raw token stream — only the SettleAnnouncer timer mechanism is shared, not this value. */
+const SUMMARY_ANNOUNCE_SETTLE_MS = 6000;
 
 /**
  * One-sentence live-region summary of a coding-team run's objective and overall progress, for the
@@ -92,9 +103,14 @@ export class CodingTeamMonitorComponent implements OnDestroy {
   /** Owns the settle-timer bookkeeping for `announcedSummary`; disposed in `ngOnDestroy`. No
    *  `onChange` cue — unlike the parent page's thinking announcer, this region stays silent until
    *  a summary actually settles, rather than showing an immediate provisional cue. */
-  private readonly announcer = new SettleAnnouncer(ANNOUNCE_SETTLE_MS, (value) =>
+  private readonly announcer = new SettleAnnouncer(SUMMARY_ANNOUNCE_SETTLE_MS, (value) =>
     this._announcedSummary.set(value),
   );
+  /** True while `announcer` has a pending settle timer — exposed so callers/tests can check
+   *  debounce state without reaching into the private field. */
+  get announcementPending(): boolean {
+    return this.announcer.isPending;
+  }
 
   readonly ALL_PHASES = CODING_TEAM_PHASES;
 
