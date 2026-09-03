@@ -1059,8 +1059,13 @@ class TestScrubTokenFromText:
         contiguous literal."""
         token = f"github_pat_{'F' * 12}_{'G' * 12}"
         out = scrub_token_from_text(f"leaked: {token} in config.py")
+        # Pinned on the FULL output, not just "the exact input string is gone":
+        # a scrubber that redacted only part of the token (leaving the
+        # `github_pat_` head or a trailing body segment behind) would satisfy
+        # both weaker assertions while still leaking most of the secret.
+        assert out == "leaked: *** in config.py"
         assert token not in out
-        assert "***" in out
+        assert "github_pat_" not in out
 
     def test_idempotent_on_clean_text(self) -> None:
         assert scrub_token_from_text("nothing sensitive here") == "nothing sensitive here"
@@ -2687,6 +2692,26 @@ class TestPrepareIssueBranch:
         assert ok is False
         assert "moved" in (msg or "")
 
+    def test_empty_expected_head_sha_is_treated_as_provided(self, api, tmp_path) -> None:
+        """``""`` for ``expected_head_sha`` means "provided", not "absent" --
+        the mirror of ``test_empty_expected_base_sha_is_treated_as_provided``.
+
+        Both optional SHA parameters must answer this the same way: a
+        truthiness guard (``if expected_head_sha:``) instead of ``is not None``
+        would silently SKIP the freshness check a caller explicitly asked for,
+        and nothing else in this class would notice.
+        """
+        repo = self._init_repo(tmp_path)
+        commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_head_sha=""
+        )
+        assert ok is False, msg
+        # The failure names the (empty) expectation it failed closed on,
+        # whichever head-check branch fires -- "moved" or "not resolvable".
+        assert "''" in (msg or "")
+
     def test_stale_expected_base_sha_rejected_before_any_checkout(self, api, tmp_path) -> None:
         """The base moved since triage: fail closed, before touching the checkout."""
 
@@ -3369,8 +3394,8 @@ class TestPublishWindowLiveness:
 
 
 class TestEphemeralCheckoutCleanup:
-    """The per-issue clone is deleted only on a clean completion when the
-    caller flagged the checkout as platform-owned and ephemeral."""
+    """The per-issue and per-PR clones are deleted only on a clean completion
+    when the caller flagged the checkout as platform-owned and ephemeral."""
 
     def test_request_default_cleanup_flag_is_false(self) -> None:
         """RunFromGitHubRequest defaults cleanup_checkout_on_success to False."""
@@ -3417,7 +3442,7 @@ class TestEphemeralCheckoutCleanup:
     ) -> None:
         """A repo-level checkout (no ``issue-N``/``pr-N`` final component) that
         merely sits under an ephemeral root is never removed, even with ``.git``
-        present and the cleanup flag set: per-issue AND per-PR clones are
+        present: per-issue AND per-PR clones are
         reclaimable, but a bare repo-level checkout — where the PR-review flow's
         own checkout lives — is not."""
         api = patched_app["api"]

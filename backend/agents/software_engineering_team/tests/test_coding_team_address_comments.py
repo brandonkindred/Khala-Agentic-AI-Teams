@@ -455,6 +455,28 @@ class TestReviewThreadNodesStrictPageInfo:
         with pytest.raises(ReviewThreadsUnavailableError):
             client.list_review_threads("o", "r", 7)
 
+    def test_fails_closed_when_end_cursor_is_not_a_string(self) -> None:
+        """A truthy but non-string ``endCursor`` is present-but-invalid, not
+        usable: forwarded as the ``after`` argument it would surface as a raw
+        GraphQL type error on the NEXT request instead of this function's own
+        fail-closed diagnostic, so it is rejected here like every other
+        malformed ``pageInfo`` field."""
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": True, "endCursor": 17},
+                            "nodes": [],
+                        }
+                    }
+                }
+            }
+        }
+        client = _client_with(lambda _r: httpx.Response(200, json=payload))
+        with pytest.raises(ReviewThreadsUnavailableError, match="endCursor"):
+            client.list_review_threads("o", "r", 7)
+
     def test_fails_closed_when_has_next_page_is_not_a_bool(self) -> None:
         payload = {
             "data": {

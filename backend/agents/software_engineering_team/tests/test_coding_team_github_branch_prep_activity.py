@@ -186,7 +186,10 @@ def test_branch_prep_activity_expected_head_sha_mismatch_fails_closed(
         }
     )
 
-    assert out["ok"] is False
+    # `out`, not `out["error"]`: in the regression this test pins (the activity
+    # stops failing closed) `error` is None, so the sibling `, out["error"]`
+    # convention would print nothing -- the full result dict carries the notes.
+    assert out["ok"] is False, out
     assert stale_sha in (out["error"] or "")
     head = current_branch(repo)
     assert head == "main"

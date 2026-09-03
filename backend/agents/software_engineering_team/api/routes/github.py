@@ -75,8 +75,14 @@ def _fail_new_job(
           exception-chaining.
     Postconditions:
         - The job is marked ``FAILED`` with ``error`` and ``current_activity``
-          cleared. Always raises ``HTTPException(status_code=http_status,
-          detail=detail or error)`` — never returns normally.
+          cleared, then raises ``HTTPException(status_code=http_status,
+          detail=detail or error)`` — it never returns normally.
+        - If the job-store update itself raises (the store is down, the row
+          vanished), THAT exception propagates instead: the row may be left
+          non-terminal and the caller's intended ``http_status`` is replaced by
+          an unhandled 500. This is deliberate — a store outage is a different
+          failure from the one being reported, and surfacing the real error is
+          the more useful signal than masking it behind a tidy 4xx/503.
     """
     _main.update_job(
         job_id,
@@ -308,7 +314,8 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             # so raw dispatch-exception text (host names, connection strings,
             # anything a Temporal client puts in its message) would reach any
             # caller that can read the job. The full diagnostic still reaches the
-            # log through the logger.exception above and the chained `cause`.
+            # log through the logger.exception call below and the chained
+            # `cause`.
             logger.exception("Coding team Temporal dispatch failed: %s", e)
             _fail_new_job(
                 job_id,

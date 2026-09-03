@@ -1479,8 +1479,18 @@ class GitHubClient(_GitHubHttpMixin):
             if not has_next_page:
                 return
             after = page_info.get("endCursor")
-            if not after:
-                _unavailable("reviewThreads page missing endCursor")
+            if not isinstance(after, str) or not after:
+                # Type-checked like every sibling validation in this function
+                # (``pageInfo`` dict, ``hasNextPage`` bool, ``databaseId``
+                # non-bool int): a truthy NON-string cursor would otherwise be
+                # forwarded as ``after`` on the next request and surface as a
+                # raw GraphQL type error instead of this structured
+                # fail-closed diagnostic. "missing or invalid", since a
+                # present-but-wrongly-typed cursor is not missing.
+                _unavailable(
+                    "reviewThreads page has a missing or invalid endCursor "
+                    f"(expected non-empty str, got {after!r})"
+                )
                 return
 
     def get_resolved_review_thread_comment_ids(

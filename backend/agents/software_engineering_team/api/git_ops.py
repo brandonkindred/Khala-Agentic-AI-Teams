@@ -966,12 +966,20 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
           made, so the common (non-fork) path is a pure no-op.
         - When ``remote`` is a URL, registers it as a durable local remote
           named ``_FORK_REMOTE_NAME`` — ``git remote add`` on first use,
-          falling back to ``git remote set-url`` when it is already
-          registered (idempotent across retries on the same checkout) — and
-          returns ``(_FORK_REMOTE_NAME, None)``.
+          falling back to ``git remote set-url`` PLUS ``git remote set-url
+          --push`` when it is already registered (idempotent across retries on
+          the same checkout) — and returns ``(_FORK_REMOTE_NAME, None)``. The
+          fallback deliberately rewrites ``remote.<name>.pushurl`` too, so a
+          previously-configured push URL cannot leave push and fetch pointing
+          at different repositories for this remote.
         - On a git failure returns ``(remote, error)``: the original value is
           returned unchanged (never a name that failed to register) alongside
-          a message describing the failure.
+          a message describing the failure. Note the fallback's two writes are
+          NOT atomic: if the push-URL reset fails after the fetch URL was
+          already updated, the checkout's git config is left half-updated, so
+          callers must treat the returned error as fatal for this checkout
+          rather than retrying the fetch through the partially-configured
+          remote.
     """
     from software_engineering_team.api import coding_team_main as _main
     if "://" not in remote:

@@ -358,7 +358,12 @@ def execute_coding_team_workflow(
           workflow may later succeed and push code with nobody watching. The
           caller is a per-comment background-thread worker (see
           ``address_comments._dispatch_implementation``), which can afford to
-          keep blocking — there is no request deadline to respect here.
+          keep blocking — there is no request deadline to respect here. The
+          residual cost, for operators: a workflow that never reaches a
+          terminal state (e.g. it is paused on an answer signal nobody ever
+          sends) pins its background thread for the lifetime of the process —
+          one leaked thread per stuck workflow, with no abandonment path short
+          of terminating the workflow in Temporal.
     Raises:
         ValueError: ``job_id``/``repo_path`` are empty, ``github`` is not a
             non-empty dict, ``plan_input`` is not ``None`` and not a dict, or

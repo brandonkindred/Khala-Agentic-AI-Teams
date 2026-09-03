@@ -458,8 +458,12 @@ class CodingTeamWorkflow:
 
         Postconditions:
             - Raises ``ValueError`` BEFORE any other work when ``github`` is a
-              non-empty dict carrying an unsupported ``publish_mode`` or
-              missing a required key for its mode. This validation runs first
+              non-empty dict carrying an unsupported ``publish_mode``, missing
+              a required key for its mode, or carrying an UNUSABLE value for
+              one (``owner``/``repo``/``base``/``integration_branch`` must be
+              non-empty strings; ``pr_number``/``issue_number`` positive
+              non-bool ints; ``issue_title`` a non-empty string). This
+              validation runs first
               deliberately: a bad payload is a caller-wiring bug, not an
               activity failure, so it fails the workflow task outright rather
               than burning a full pipeline run and then posting a misleading
@@ -574,6 +578,46 @@ class CodingTeamWorkflow:
                     issue_title = github["issue_title"]
             except KeyError as exc:
                 raise ValueError(f"github payload missing required key: {exc}") from exc
+
+            # Presence alone is not enough: a payload carrying `owner=None` or
+            # `integration_branch=""` passes the KeyError check above and is then
+            # forwarded verbatim to branch prep, which fails as an ACTIVITY
+            # failure and takes the terminalize-with-notice path -- burning a run
+            # and posting a misleading "publish failed" notice for what is a
+            # caller-wiring bug. Validate the VALUES here so the same bug fails
+            # the same way (immediate ValueError) whether the key was absent or
+            # merely unusable.
+            for _name, _value in (
+                ("owner", owner),
+                ("repo", repo),
+                ("base", base),
+                ("integration_branch", integration_branch),
+            ):
+                if not isinstance(_value, str) or not _value.strip():
+                    raise ValueError(
+                        f"github payload key {_name!r} must be a non-empty string, "
+                        f"got {_value!r}"
+                    )
+            if is_existing_pr_publish:
+                if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
+                    raise ValueError(
+                        f"github payload key 'pr_number' must be a positive int, got {pr_number!r}"
+                    )
+            else:
+                if (
+                    isinstance(issue_number, bool)
+                    or not isinstance(issue_number, int)
+                    or issue_number <= 0
+                ):
+                    raise ValueError(
+                        "github payload key 'issue_number' must be a positive int, "
+                        f"got {issue_number!r}"
+                    )
+                if not isinstance(issue_title, str) or not issue_title.strip():
+                    raise ValueError(
+                        "github payload key 'issue_title' must be a non-empty string, "
+                        f"got {issue_title!r}"
+                    )
 
             # Branch prep lives under the SAME guard as the validation above (one
             # `isinstance(github, dict) and github` in this method, not two

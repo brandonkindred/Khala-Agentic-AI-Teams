@@ -1029,6 +1029,65 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("github_overrides", "match"),
+    [
+        ({"owner": None}, r"'owner' must be a non-empty string"),
+        ({"repo": ""}, r"'repo' must be a non-empty string"),
+        ({"base": "   "}, r"'base' must be a non-empty string"),
+        ({"integration_branch": 7}, r"'integration_branch' must be a non-empty string"),
+        ({"issue_number": "9"}, r"'issue_number' must be a positive int"),
+        ({"issue_number": 0}, r"'issue_number' must be a positive int"),
+        ({"issue_number": True}, r"'issue_number' must be a positive int"),
+        ({"issue_title": ""}, r"'issue_title' must be a non-empty string"),
+        (
+            {"publish_mode": "existing_pr", "pr_number": "12"},
+            r"'pr_number' must be a positive int",
+        ),
+        ({"publish_mode": "existing_pr", "pr_number": -1}, r"'pr_number' must be a positive int"),
+    ],
+    ids=[
+        "owner-none",
+        "repo-empty",
+        "base-blank",
+        "integration-branch-int",
+        "issue-number-str",
+        "issue-number-zero",
+        "issue-number-bool",
+        "issue-title-empty",
+        "pr-number-str",
+        "pr-number-negative",
+    ],
+)
+def test_unusable_github_payload_values_fail_closed_up_front(
+    monkeypatch: pytest.MonkeyPatch, github_overrides: dict, match: str
+) -> None:
+    """A PRESENT-but-unusable value must fail exactly like an absent key.
+
+    Presence alone is not enough: ``owner=None`` or ``integration_branch=""``
+    would otherwise be forwarded verbatim to branch prep, fail there as an
+    ACTIVITY failure, and take the terminalize-with-notice path -- burning a
+    run and posting a misleading "publish failed" notice for what is really a
+    caller-wiring bug. Like the ``publish_mode`` check, this raises before any
+    activity runs, so NO activity is called.
+    """
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        raise AssertionError(f"no activity expected for a caller-contract violation: {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    _forbid_wait_condition(monkeypatch)
+
+    github = {**_GITHUB, **github_overrides}
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(workflow_obj.run(_github_request(github=github)))
+
+    assert calls == []
+
+
 def test_github_publish_exception_preserves_original_when_terminalize_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

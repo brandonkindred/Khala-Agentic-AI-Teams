@@ -338,7 +338,11 @@ def test_local_scrubber_stays_in_lockstep_with_github_source(text: str) -> None:
     assert _scrub_token_from_text(text) == scrub_token_from_text(text)
 
 
-@pytest.mark.parametrize("token", [_GHP, _PAT], ids=["classic", "fine-grained"])
+@pytest.mark.parametrize(
+    "token",
+    [_GHP, _GHU, _GHS, _GHR, _GHO, _GHP2, _PAT],
+    ids=["classic", "ghu", "ghs", "ghr", "gho", "classic2", "fine-grained"],
+)
 def test_local_scrubber_actually_redacts_a_full_length_token(token: str) -> None:
     """Positive control for the parity test above.
 
@@ -355,3 +359,16 @@ def test_local_scrubber_actually_redacts_a_full_length_token(token: str) -> None
     assert scrubbed != text
     assert token not in scrubbed
     assert "***" in scrubbed
+
+
+def test_local_scrubber_actually_redacts_a_credentialed_url() -> None:
+    """Positive control for the ``user:password@host`` redaction path.
+
+    The parametrized case above only covers the token-prefix alternatives; the
+    URL-embedded credential is otherwise guarded by parity alone, so an
+    identical regression on both sides would go unnoticed. Asserted on the FULL
+    output (not just "the secret is gone") so a partial redaction that leaves
+    the credential's head or tail visible still fails.
+    """
+    scrubbed = _scrub_token_from_text(f"clone https://x-access-token:{_GHP}@github.com/o/r")
+    assert scrubbed == "clone https://***@github.com/o/r"

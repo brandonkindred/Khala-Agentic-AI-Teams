@@ -15,6 +15,22 @@ from software_engineering_team.tests.conftest import _ensure_real_modules, _stub
 
 @pytest.fixture
 def api(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Return the ``coding_team_main`` module with only its orchestrator stubbed.
+
+    The ORDER here is load-bearing and is what the lazy-import docstrings on
+    ``_pr_publish``/``_branch_prep`` below rely on: the real modules are
+    restored and the orchestrator stubbed BEFORE ``coding_team_main`` is
+    imported, so the activities under test resolve their seams (``get_job``/
+    ``update_job``, ``_fast_forward``/``_push_branch``, ...) through THIS
+    module object -- the same namespace every test monkeypatches.
+
+    Preconditions:
+        - ``monkeypatch`` is the per-test fixture (the orchestrator stub is
+          undone at teardown).
+    Postconditions:
+        - Returns the imported ``coding_team_main`` module. Nothing else is
+          stubbed: each test patches the seams it needs.
+    """
     _ensure_real_modules()
     _stub_orchestrator_only(monkeypatch)
     from software_engineering_team.api import coding_team_main as api_main
@@ -163,6 +179,20 @@ class TestGithubPrPublishActivityStatusMapping:
     def _stub_git_ok(
         self, monkeypatch: pytest.MonkeyPatch, api: Any, clear_active_issue_calls: list | None = None
     ) -> None:
+        """Make the publish activity's git seams succeed so status mapping is isolated.
+
+        Preconditions:
+            - ``api`` is the module-level ``api`` fixture's ``coding_team_main``.
+            - ``clear_active_issue_calls``, when given, is a list the caller
+              owns and inspects after the activity runs.
+        Postconditions:
+            - ``_fast_forward``/``_push_branch`` report success, so any
+              non-``completed`` outcome comes from the status mapping under
+              test rather than from git.
+            - ``_clear_active_issue_if_matches`` becomes a silent no-op when
+              ``clear_active_issue_calls`` is ``None``, and a recording spy
+              appending ``(args, kwargs)`` to that list when it is passed.
+        """
         monkeypatch.setattr(api, "_fast_forward", lambda *a, **kw: (True, None))
         monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: (True, None))
         if clear_active_issue_calls is None:

@@ -171,6 +171,46 @@ def post_address_comments(
     request = request.model_copy(update={"pr_number": pr_number})
     token = resolve_github_token(request)
 
+    # Hoisted ABOVE the GitHub round-trips below: this check reads only the
+    # request and the local filesystem, so a request naming a missing or
+    # non-git checkout is rejected without spending GitHub rate-limit budget
+    # or network latency first. Only the `_checkout_remote_matches` half
+    # (which needs `expected_host` from the client) stays after them.
+    # repo_path defaults to "" (documented as accepted "for parity with
+    # /review-pr", which genuinely never touches a checkout). Earlier this was
+    # only required when THIS snapshot already had unresolved comments — but
+    # the background worker takes its OWN, later snapshot (`_run_address_
+    # comments`), and a reviewer can add genuinely new feedback in the gap
+    # between this admission-time snapshot and that one. A job admitted with
+    # no repo_path because nothing was unresolved YET would then discover a
+    # real issue it cannot implement a fix for. Require a usable checkout
+    # unconditionally instead of guessing from a snapshot that can go stale.
+    stripped = request.repo_path.strip()
+    has_git = False
+    if stripped:
+        try:
+            has_git = (Path(stripped) / ".git").exists()
+        except (ValueError, OSError):
+            # An embedded null byte raises ValueError, other unusable paths
+            # (e.g. one exceeding the platform's path-length limit) can raise
+            # OSError -- both mean "not a usable checkout", same as `.git`
+            # genuinely not existing, so this falls into the 400 branch below
+            # instead of surfacing as an unhandled 500.
+            has_git = False
+    if not stripped or not has_git:
+        # A non-empty path naming a non-existent directory or an ordinary
+        # (non-git) folder is exactly as unusable to every real-issue child as
+        # an empty one — `(path / ".git").exists()` matches this codebase's
+        # existing git-checkout test (see `_is_deletable_ephemeral_checkout`),
+        # and also accepts a worktree-style `.git` FILE, not just a directory.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "repo_path is required and must be an existing git checkout: a "
+                "real-issue fix needs one to implement and push to."
+            ),
+        )
+
     # Validate the PR exists, is open, and gather the unresolved-comment count BEFORE
     # taking the admission lock (the GitHub round-trips are the slow part).
     with _main.GitHubClient(token=token) as client:
@@ -214,40 +254,6 @@ def post_address_comments(
         except GitHubAPIError as e:
             raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
 
-    # repo_path defaults to "" (documented as accepted "for parity with
-    # /review-pr", which genuinely never touches a checkout). Earlier this was
-    # only required when THIS snapshot already had unresolved comments — but
-    # the background worker takes its OWN, later snapshot (`_run_address_
-    # comments`), and a reviewer can add genuinely new feedback in the gap
-    # between this admission-time snapshot and that one. A job admitted with
-    # no repo_path because nothing was unresolved YET would then discover a
-    # real issue it cannot implement a fix for. Require a usable checkout
-    # unconditionally instead of guessing from a snapshot that can go stale.
-    stripped = request.repo_path.strip()
-    has_git = False
-    if stripped:
-        try:
-            has_git = (Path(stripped) / ".git").exists()
-        except (ValueError, OSError):
-            # An embedded null byte raises ValueError, other unusable paths
-            # (e.g. one exceeding the platform's path-length limit) can raise
-            # OSError -- both mean "not a usable checkout", same as `.git`
-            # genuinely not existing, so this falls into the 400 branch below
-            # instead of surfacing as an unhandled 500.
-            has_git = False
-    if not stripped or not has_git:
-        # A non-empty path naming a non-existent directory or an ordinary
-        # (non-git) folder is exactly as unusable to every real-issue child as
-        # an empty one — `(path / ".git").exists()` matches this codebase's
-        # existing git-checkout test (see `_is_deletable_ephemeral_checkout`),
-        # and also accepts a worktree-style `.git` FILE, not just a directory.
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "repo_path is required and must be an existing git checkout: a "
-                "real-issue fix needs one to implement and push to."
-            ),
-        )
     if not _main._checkout_remote_matches(
         stripped, request.owner, request.repo, expected_host=expected_host
     ):
