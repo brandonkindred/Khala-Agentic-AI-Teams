@@ -1104,6 +1104,12 @@ describe('CodingTeamPageComponent', () => {
       expect(component.repoRowTooltip({ ...REPO, description: '' })).toBe(
         'Open issues and pull requests reported by GitHub'
       );
+      expect(component.repoRowTooltip({ ...REPO, description: '   ' })).toBe(
+        'Open issues and pull requests reported by GitHub'
+      );
+      expect(component.repoRowTooltip({ ...REPO, description: '  Padded widget factory.  ' })).toBe(
+        'Padded widget factory. — Open issues and pull requests reported by GitHub'
+      );
     });
   });
 
