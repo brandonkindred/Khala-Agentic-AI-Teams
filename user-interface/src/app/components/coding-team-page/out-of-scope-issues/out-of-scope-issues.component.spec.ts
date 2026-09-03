@@ -297,7 +297,11 @@ describe('OutOfScopeIssuesComponent', () => {
     });
 
     it('shows the in-button filing spinner and disables both actions while filing', async () => {
-      await setup([proposal('p0')]);
+      const p0 = proposal('p0');
+      await setup([p0]);
+      // Select first, so `filing` is the only thing disabling the file button —
+      // an empty selection would disable it regardless and make the assertion vacuous.
+      component.toggleSelection(p0);
       fixture.componentRef.setInput('filing', true);
       fixture.detectChanges();
       expect(host().textContent).toContain('Filing...');
@@ -305,6 +309,7 @@ describe('OutOfScopeIssuesComponent', () => {
       expect(inButton).not.toBeNull();
       expect(inButton?.getAttribute('aria-hidden')).toBe('true');
       expect(buttonWithText('Refresh')?.disabled).toBe(true);
+      expect(buttonWithText('Filing...')?.disabled).toBe(true);
     });
   });
 
@@ -353,8 +358,8 @@ describe('OutOfScopeIssuesComponent', () => {
       const [p0, p1] = [proposal('p0'), proposal('p1')];
       await setup([p0, p1]);
       component.selectAll();
-      // Mutate the array in place so `pruneSelection` is the only thing that runs
-      // (an input replacement would go through ngOnChanges instead).
+      // Assign the property directly rather than through setInput, so ngOnChanges
+      // never fires and pruneSelection() is the only thing that prunes.
       component.proposals = [p1];
       component.pruneSelection();
       expect(component.selectedCount).toBe(1);
