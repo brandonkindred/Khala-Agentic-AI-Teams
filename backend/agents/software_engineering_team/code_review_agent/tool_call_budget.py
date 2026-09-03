@@ -242,6 +242,11 @@ class ToolCallBudgetModel:
         - ``label`` names the calling pass (e.g. ``"scope_verify"``) in the log
           lines this wrapper emits. It is diagnostic only and does not affect
           enforcement.
+        - ``__init__`` raises ``ValueError`` -- not ``TypeError`` -- for every
+          violation above: ``inner`` being ``None``, and ``max_tool_calls``
+          being a non-int (``bool`` included) or an int < 1. The wrong-type case
+          would conventionally be a ``TypeError``, so the single exception type
+          is stated here rather than left for a caller to guess.
 
     Postconditions:
         - Below the cap: every event of ``inner.stream`` is yielded

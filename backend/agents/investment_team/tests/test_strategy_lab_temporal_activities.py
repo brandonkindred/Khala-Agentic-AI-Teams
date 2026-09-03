@@ -4179,7 +4179,15 @@ def test_probe_only_resume_failure_logs_info_without_a_traceback(caplog) -> None
 
     assert result == (None, None, None)
     assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
-    assert "ADR-012 resume is in effect" in caplog.text
+    info_records = [rec for rec in caplog.records if rec.levelno < logging.WARNING]
+    assert any("ADR-012 resume is in effect" in rec.getMessage() for rec in info_records)
+    # The level assertion alone does not pin the traceback: an implementation
+    # that logged the same message at INFO with exc_info=True would still dump
+    # the reconstruction failure's stack, which is half of the misreading this
+    # branch exists to avoid.
+    assert all(rec.exc_info is None for rec in info_records), (
+        "probe-only resume failure must not carry a traceback"
+    )
 
 
 def test_non_probe_resume_failure_still_logs_warning_with_a_traceback(caplog) -> None:

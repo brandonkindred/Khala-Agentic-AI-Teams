@@ -843,12 +843,14 @@ def _cross_attempt_resume_from_params(
                 exc,
             )
         else:
+            # No inline %s for the exception: exc_info=True already puts its
+            # message on the first line of the attached traceback, and repeating
+            # it inline prints the same text twice in one record.
             logger.warning(
                 "cross-attempt resume params for run %s attempt %s failed to "
-                "reconstruct (treating as no resume): %s",
+                "reconstruct (treating as no resume)",
                 run_id,
                 design_attempt_index,
-                exc,
                 exc_info=True,
             )
         return None, None, None

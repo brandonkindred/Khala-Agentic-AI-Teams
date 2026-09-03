@@ -144,10 +144,14 @@ def test_run_team_workflow_v2_pauses_and_resumes_on_planning_answer_signal():
     # The re-invocation carries the same resume_token, the resolved answers, and
     # the pause budget still being open.
     _, _, second_plan_args = (c[1] for c in calls[:3])
+    # The allow_repause flag is `pause_round < MAX_PLANNING_PAUSE_ROUNDS`, so it
+    # is derived rather than hard-coded: a literal True here would only be right
+    # while the constant stays above 1, and lowering it would fail with a bare
+    # assertion diff that says nothing about the coupling.
     assert second_plan_args[-3:] == [
         "job-7:tok1",
         [{"question_id": "q1", "selected_option_id": "a"}],
-        True,
+        1 < wfmod.MAX_PLANNING_PAUSE_ROUNDS,
     ]
 
 
@@ -200,13 +204,19 @@ def test_run_team_workflow_v2_accumulates_answers_across_pause_rounds():
 
     plan_args = [c[1] for c in calls if c[0] == "plan_project_activity"]
     assert len(plan_args) == 3
-    # Round 2 carries round 1's answer.
-    assert plan_args[1][-3:] == ["job-8:tok1", answers["job-8:tok1"], True]
+    # Round 2 carries round 1's answer. The trailing flag is
+    # `pause_round < MAX_PLANNING_PAUSE_ROUNDS`, derived here for the same
+    # reason as above rather than pinned to the constant's current value.
+    assert plan_args[1][-3:] == [
+        "job-8:tok1",
+        answers["job-8:tok1"],
+        1 < wfmod.MAX_PLANNING_PAUSE_ROUNDS,
+    ]
     # Round 3 carries BOTH rounds', in order.
     assert plan_args[2][-3:] == [
         "job-8:tok2",
         answers["job-8:tok1"] + answers["job-8:tok2"],
-        True,
+        2 < wfmod.MAX_PLANNING_PAUSE_ROUNDS,
     ]
 
 

@@ -1622,11 +1622,24 @@ def test_process_one_bar_registers_an_attached_exits_only_entry_as_a_bracket_par
         attached_exits=[StopAttachment(stop_price=90.0)],
     )
     assert req.attached_stop_loss is None and req.attached_take_profit is None
+    # The complement, submitted through the same call: an entry with no exits at
+    # all must NOT be registered as a bracket parent. Without it, a service that
+    # hardcoded expect_brackets=True — over-registering every plain entry — would
+    # satisfy the positive assertion below.
+    plain_req = OrderRequest(
+        client_order_id="co-plain",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+    )
+    assert not plain_req.has_attached_exits
 
     submitted: dict = {}
 
     def _submit(request, *, submitted_at, submitted_equity, expect_brackets=False):
-        submitted["expect_brackets"] = expect_brackets
+        submitted[request.client_order_id] = expect_brackets
         return SimpleNamespace(working_against_entry_order_id=None)
 
     outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
@@ -1640,7 +1653,7 @@ def test_process_one_bar_registers_an_attached_exits_only_entry_as_a_bracket_par
             prev_bar=prev_bar,
             is_warmup=False,
             fetch_response=lambda: ([], []),
-            pending_for_prev=[req],
+            pending_for_prev=[req, plain_req],
             portfolio=SimpleNamespace(
                 update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0
             ),
@@ -1656,7 +1669,8 @@ def test_process_one_bar_registers_an_attached_exits_only_entry_as_a_bracket_par
             streaming_views={},
         )
 
-    assert submitted["expect_brackets"] is True
+    assert submitted["co-1"] is True
+    assert submitted["co-plain"] is False
 
 
 def test_process_one_bar_updates_position_tracker_when_exit_rules_present() -> None:

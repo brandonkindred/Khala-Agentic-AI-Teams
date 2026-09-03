@@ -317,9 +317,12 @@ def build_job_status_response(job_id: str, data: Dict[str, Any]) -> JobStatusRes
     # workflow's first-wins signal rule. Project the pause as resolved once the
     # record says answers for THIS token were accepted; the raw envelope is
     # untouched, so re-entry classification is unaffected.
+    # Read once and reuse: the gate below and the projection at the bottom must
+    # agree about WHICH token they are talking about, and three independent
+    # lookups let a normalization added to one site drift from the others.
+    resume_token = data.get("resume_token")
     answers_accepted = bool(
-        data.get("resume_token")
-        and data.get("answers_submitted_for_token") == data.get("resume_token")
+        resume_token and data.get("answers_submitted_for_token") == resume_token
     )
 
     # Materialize via the shared helper: model_validate keeps EVERY stored field
@@ -354,7 +357,7 @@ def build_job_status_response(job_id: str, data: Dict[str, Any]) -> JobStatusRes
         "waiting_for_answers": (
             False if answers_accepted else bool(data.get("waiting_for_answers", False))
         ),
-        "resume_token": None if answers_accepted else data.get("resume_token"),
+        "resume_token": None if answers_accepted else resume_token,
         "planning_subprocess": data.get("planning_subprocess"),
         "planning_completed_phases": data.get("planning_completed_phases") or [],
         "analysis_subprocess": data.get("analysis_subprocess"),

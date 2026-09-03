@@ -23,6 +23,24 @@ from software_engineering_team.code_review_agent.tool_call_budget import (
 )
 
 
+class _StatelessModel:
+    """Scaffolding every stream double in this file needs and none of them vary.
+
+    Strands reads ``stateful`` off the model it is handed and calls
+    ``get_config``/``update_config`` on it, so a double omitting them fails for
+    a reason unrelated to the scenario under test. Subclasses override only
+    ``stream`` -- the part that actually encodes the scenario.
+    """
+
+    stateful = False
+
+    def get_config(self) -> Dict[str, Any]:
+        return {}
+
+    def update_config(self, **overrides: Any) -> None:
+        return None
+
+
 def _tool_use_events(tool_use_id: str, name: str, tool_input: Dict[str, Any]) -> List[Dict]:
     return [
         {"messageStart": {"role": "assistant"}},
@@ -392,16 +410,8 @@ def test_cap_of_one_executes_exactly_one_tool_call() -> None:
     assert model.tool_calls_used == 1
 
 
-class _TruncatedFinalTurnModel:
+class _TruncatedFinalTurnModel(_StatelessModel):
     """Asks for a tool, then hits the token limit on the tool-free final turn."""
-
-    stateful = False
-
-    def get_config(self) -> Dict[str, Any]:
-        return {}
-
-    def update_config(self, **overrides: Any) -> None:
-        return None
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
         if not _sees_budget_directive(system_prompt):
@@ -426,7 +436,7 @@ def test_final_turn_preserves_a_terminal_stop_reason() -> None:
     assert stops == [{"stopReason": "max_tokens"}]
 
 
-class _DeltaAnnouncedToolUseModel:
+class _DeltaAnnouncedToolUseModel(_StatelessModel):
     """Announces its tool use in the delta only — a shape Strands accepts.
 
     `streaming.handle_content_block_delta` fills toolUseId/name from the delta
@@ -434,14 +444,6 @@ class _DeltaAnnouncedToolUseModel:
     `stopReason="tool_use"` from any surviving tool-use block — so a block in
     this shape that slipped past the cap would restore the infinite loop.
     """
-
-    stateful = False
-
-    def get_config(self) -> Dict[str, Any]:
-        return {}
-
-    def update_config(self, **overrides: Any) -> None:
-        return None
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
         yield {"messageStart": {"role": "assistant"}}
@@ -526,16 +528,8 @@ def test_default_hard_cap_exceeds_advisory_tool_budget() -> None:
     assert DEFAULT_AGENT_TOOL_CALL_CAP > false_positive_filter._MAX_TOTAL_TOOL_CALLS
 
 
-class _TextAndToolUseInOneBlockModel:
+class _TextAndToolUseInOneBlockModel(_StatelessModel):
     """Puts real text and a tool use in a single content block."""
-
-    stateful = False
-
-    def get_config(self) -> Dict[str, Any]:
-        return {}
-
-    def update_config(self, **overrides: Any) -> None:
-        return None
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
         yield {"messageStart": {"role": "assistant"}}
@@ -583,15 +577,7 @@ def test_dropped_tool_use_keeps_its_block_stop_when_text_shares_the_block() -> N
 def test_drop_state_is_scoped_to_the_block_that_opened_it() -> None:
     """Another block's stop must neither end the drop nor be swallowed by it."""
 
-    class _InterleavedModel:
-        stateful = False
-
-        def get_config(self) -> Dict[str, Any]:
-            return {}
-
-        def update_config(self, **overrides: Any) -> None:
-            return None
-
+    class _InterleavedModel(_StatelessModel):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
             yield {"messageStart": {"role": "assistant"}}
             # Over-cap tool use opens block 0 and is dropped...
@@ -698,6 +684,11 @@ def test_directive_keeps_system_prompt_and_content_in_step() -> None:
     blocks = [{"text": "You are a reviewer."}, {"text": "Follow the contract."}]
     system_prompt = "\n".join(block["text"] for block in blocks)
     kwargs = {"system_prompt_content": blocks}
+    # Snapshot BEFORE the call. Comparing kwargs["system_prompt_content"] to
+    # `blocks` afterwards compares the list to itself -- they are the same
+    # object -- so it cannot fail, and an in-place edit of a block dict would
+    # pass while breaking the non-mutation contract.
+    snapshot = [dict(block) for block in blocks]
 
     new_system = _system_with_directive(system_prompt)
     new_kwargs = _kwargs_with_directive(kwargs)
@@ -707,8 +698,8 @@ def test_directive_keeps_system_prompt_and_content_in_step() -> None:
         new_system, [block["text"] for block in new_blocks]
     )
     # The caller's list and blocks are untouched.
-    assert kwargs["system_prompt_content"] == blocks
-    assert len(blocks) == 2
+    assert kwargs["system_prompt_content"] == snapshot
+    assert [dict(block) for block in blocks] == snapshot
     # With no content blocks, the kwargs come back unchanged.
     assert _kwargs_with_directive({"invocation_state": {}}) == {"invocation_state": {}}
 
@@ -757,15 +748,7 @@ def test_an_unrelated_blocks_stop_does_not_discard_another_blocks_text() -> None
     message (`LLMSemanticExhaustionError` downstream).
     """
 
-    class _InterleavedTextAndToolUse:
-        stateful = False
-
-        def get_config(self) -> Dict[str, Any]:
-            return {}
-
-        def update_config(self, **overrides: Any) -> None:
-            return None
-
+    class _InterleavedTextAndToolUse(_StatelessModel):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
             yield {"messageStart": {"role": "assistant"}}
             yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
@@ -810,15 +793,7 @@ def test_a_new_block_can_announce_a_tool_use_without_an_intervening_stop() -> No
     the surviving block, and the run recursed past the cap.
     """
 
-    class _NoStopBetweenBlocks:
-        stateful = False
-
-        def get_config(self) -> Dict[str, Any]:
-            return {}
-
-        def update_config(self, **overrides: Any) -> None:
-            return None
-
+    class _NoStopBetweenBlocks(_StatelessModel):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
             yield {"messageStart": {"role": "assistant"}}
             yield {
@@ -875,15 +850,7 @@ def test_a_forwarded_block_start_keeps_its_stop_even_when_its_tool_use_is_droppe
     delta-announced tool use is the only thing in an already-opened block.
     """
 
-    class _PlainStartThenOverCapToolDelta:
-        stateful = False
-
-        def get_config(self) -> Dict[str, Any]:
-            return {}
-
-        def update_config(self, **overrides: Any) -> None:
-            return None
-
+    class _PlainStartThenOverCapToolDelta(_StatelessModel):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
             yield {"messageStart": {"role": "assistant"}}
             # A plain start (no toolUse) — forwarded, so Strands opens a block.

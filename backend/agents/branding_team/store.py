@@ -446,7 +446,7 @@ class BrandingStore(PostgresHelperMixin):
             raise ValueError("mission must be a BrandingMission")
         if status is not None and not isinstance(status, BrandStatus):
             raise ValueError("status must be a BrandStatus")
-        patch: dict[str, Any] = {"updated_at": now_iso()}
+        patch: Dict[str, Any] = {"updated_at": now_iso()}
         if mission is not None:
             patch["mission"] = mission.model_dump(mode="json")
             # A mission edit invalidates any previously generated output: it was
