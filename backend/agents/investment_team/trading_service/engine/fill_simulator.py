@@ -1682,7 +1682,7 @@ class FillSimulator:
         resolved_stop_price = sl.stop_price
         if sl.entry_price_pct is not None and entry_fill_price is not None:
             resolved_stop_price = protective_stop_price(
-                entry_fill_price, sl.entry_price_pct, is_long=req.side == OrderSide.LONG
+                entry_fill_price, sl.entry_price_pct, is_long=(req.side == OrderSide.LONG)
             )
         is_trailing = sl.trail_offset is not None
         # ``trail_offset`` and ``limit_offset`` are mutually exclusive

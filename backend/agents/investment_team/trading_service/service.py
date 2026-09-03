@@ -1920,8 +1920,11 @@ def resolve_resting_stop_loss_attachment(
     # raises on any length mismatch.
     if not isinstance(attachment, StopAttachment):
         raise TypeError(f"expected StopAttachment for STOP leg, got {attachment!r}")
-    attachment.entry_price_pct = rule.pct
-    return attachment
+    # Immutable-style update (not a post-construction mutation) so the
+    # attachment's final shape is established in one step; StopAttachment is a
+    # Pydantic BaseModel, so model_copy (not dataclasses.replace) is the
+    # correct mechanism here.
+    return attachment.model_copy(update={"entry_price_pct": rule.pct})
 
 
 @dataclass
