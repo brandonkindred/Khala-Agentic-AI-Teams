@@ -86,8 +86,10 @@ class KeyedLazyRegistry(Generic[K, _T]):
           for the key it is building, directly or transitively: the per-key lock
           is not reentrant and is held for the duration of ``factory``.
         - ``factory`` does not call :meth:`get_or_create` on this same instance
-          for a key that was seen earlier *and left unbuilt* — that is, a key
-          whose own ``factory`` previously raised. The underlying manager
+          for a key that was seen earlier *and is not yet built* — either
+          because its own ``factory`` previously raised, or because another
+          thread is building it right now. The in-flight case raises too; it
+          does not wait for that thread's build to finish. The underlying manager
           assigns each key a global order at first sight and refuses to nest a
           lower-order acquisition under a higher-order one, which is what rules
           out an A-builds-B/B-builds-A deadlock cycle.
@@ -174,8 +176,9 @@ class KeyedLazyRegistry(Generic[K, _T]):
             non-``None`` ``_T`` or raises. On nesting, see the class
             Preconditions, which state the rule authoritatively — in short,
             ``factory`` must not call :meth:`get_or_create` on this same
-            instance for ``key`` itself, nor for a key seen earlier *and left
-            unbuilt* (one whose own ``factory`` previously raised); both raise
+            instance for ``key`` itself, nor for a key seen earlier *and not yet
+            built* (its ``factory`` either previously raised or is in flight on
+            another thread); both raise
             ``RuntimeError`` from the underlying
             :class:`~shared.concurrency.keyed_lock_manager.KeyedLockManager`
             rather than deadlocking. Building a key this registry has not seen,

@@ -187,12 +187,14 @@ def test_factory_nesting_into_a_seen_but_unbuilt_key_raises_instead_of_deadlocki
     def boom() -> str:
         raise RuntimeError("boom")
 
-    # A *failed* build is what leaves "b" seen-but-unbuilt: it holds the lower
-    # global order yet has no value, so a later nested call for it really does
-    # reach the lock and is refused. This is the only shape that exercises the
-    # guard — nesting into a successfully built key takes the fast path instead
-    # (see the test above), so a test written that way would pass without ever
-    # reaching the ordering check.
+    # A failed build is one of the two ways "b" ends up seen-but-unbuilt: it
+    # holds the lower global order yet has no value, so a later nested call for
+    # it really does reach the lock and is refused. (The other way is a build
+    # still in flight on another thread, which raises identically rather than
+    # waiting — not covered here because it needs two threads, and this module
+    # is the single-threaded suite.) Nesting into a *successfully* built key
+    # takes the fast path instead (see the test above), so a test written that
+    # way would pass without ever reaching the ordering check.
     with pytest.raises(RuntimeError, match="boom"):
         registry.get_or_create("b", boom)
 
