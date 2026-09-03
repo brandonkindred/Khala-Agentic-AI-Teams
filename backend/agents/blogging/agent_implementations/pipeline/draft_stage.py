@@ -52,8 +52,10 @@ def run_draft_stage(
 
     Preconditions:
         - The planning stage populated ``ctx.plan``/``ctx.planning_phase_result``/
-          ``ctx.elicited_stories_text``. ``ctx.selected_title`` is also read and is
-          optional: ``None`` (its default) leaves the writer free to choose a title.
+          ``ctx.elicited_stories_text``. ``ctx.selected_title`` is also read, but
+          no stage produces it — it is caller-seeded and ``None`` in every current
+          entry point, which leaves the writer free to choose its own title (see
+          ``PipelineContext``'s invariants).
         - The human-in-the-loop steps (story-placeholder filling and the interactive
           draft-review loop with uncertainty questions / author feedback / guideline
           updates) require a job store: they run only when BOTH ``ctx.job_id`` and
