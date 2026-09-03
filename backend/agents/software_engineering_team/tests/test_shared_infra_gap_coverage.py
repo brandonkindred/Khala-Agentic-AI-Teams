@@ -469,22 +469,15 @@ def test_hitl_signal_mixin_drops_early_signal_with_no_usable_resume_token() -> N
 
 
 def test_planning_workflow_registers_submit_answers_signal() -> None:
-    # Intentionally mirrored (same name) in
-    # planning_team/tests/test_temporal_workflow_signal.py -- this copy is the
-    # CI-collected one (see module docstring); keep both in sync if either
-    # changes, especially the temporalio private API note below.
-    from temporalio import workflow as _workflow
-
+    # Shared assertion body lives in shared/hitl/temporal_signal_checks.py --
+    # this is the CI-collected call to it (see module docstring); the mirror
+    # in planning_team/tests/test_temporal_workflow_signal.py calls the same
+    # helper, so there is one implementation instead of two hand-maintained
+    # copies of the temporalio private-API specifics.
     from planning_team.temporal.workflows import PlanningWorkflow
-    from shared.hitl.temporal_signal import SUBMIT_ANSWERS_SIGNAL
+    from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
 
-    # temporalio private API (_Definition); re-verify on temporalio upgrades.
-    defn = _workflow._Definition.from_class(PlanningWorkflow)
-    assert defn is not None, "PlanningWorkflow is missing the @workflow.defn decorator"
-    # Pin the literal, not just the constant: a changed SUBMIT_ANSWERS_SIGNAL value
-    # would otherwise pass CI while breaking the #7451-specified wire contract.
-    assert SUBMIT_ANSWERS_SIGNAL == "submit_answers"
-    assert SUBMIT_ANSWERS_SIGNAL in defn.signals
+    assert_workflow_registers_submit_answers(PlanningWorkflow)
 
 
 def test_planning_workflow_submit_answers_accepts_and_rejects() -> None:

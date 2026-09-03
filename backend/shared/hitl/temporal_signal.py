@@ -314,9 +314,18 @@ class HitlAnswerSignalMixin:
         if not isinstance(payload, dict):
             _log_signal_diagnostic("submit_answers rejected: payload is not a dict (%r)", type(payload))
             return
-        answers = _validate_answer_batch(payload.get("answers"))
+        raw_answers = payload.get("answers")
+        answers = _validate_answer_batch(raw_answers)
         if answers is None:
-            _log_signal_diagnostic("submit_answers rejected: malformed or empty answers batch")
+            # %r of the raw value itself is deliberately omitted -- it is
+            # unvalidated client input and could be arbitrarily large; the type
+            # alone is enough to distinguish "missing", "wrong shape", and
+            # "empty list" from this log line, matching the diagnostic detail
+            # the sibling rejection branches below already carry.
+            _log_signal_diagnostic(
+                "submit_answers rejected: malformed or empty answers batch (raw type=%r)",
+                type(raw_answers),
+            )
             return
         resume_token = payload.get("resume_token")
         if self._active_resume_token is None:

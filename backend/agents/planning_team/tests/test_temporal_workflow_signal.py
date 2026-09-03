@@ -16,21 +16,20 @@ from __future__ import annotations
 from temporalio import workflow
 
 from planning_team.temporal.workflows import PlanningWorkflow
-from shared.hitl.temporal_signal import SUBMIT_ANSWERS_SIGNAL
+from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
 
 
 def test_planning_workflow_registers_submit_answers_signal() -> None:
-    # Intentionally mirrored (same name) in
-    # software_engineering_team/tests/test_shared_infra_gap_coverage.py, the
-    # only CI-collected copy of this check -- keep both in sync if either
-    # changes, especially the temporalio private API note below.
-    # temporalio private API (_Definition); re-verify this test on temporalio upgrades.
+    # Shared assertion body lives in shared/hitl/temporal_signal_checks.py --
+    # this test and its CI-collected mirror in
+    # software_engineering_team/tests/test_shared_infra_gap_coverage.py both
+    # call it, so there is one implementation instead of two hand-maintained
+    # copies of the temporalio private-API specifics.
+    assert_workflow_registers_submit_answers(PlanningWorkflow)
+
     defn = workflow._Definition.from_class(PlanningWorkflow)
-    assert defn is not None, "PlanningWorkflow is missing the @workflow.defn decorator"
     assert defn.name == "PlanningWorkflow"
     assert defn.run_fn.__name__ == "run"
-    assert SUBMIT_ANSWERS_SIGNAL in defn.signals
-    assert defn.signals[SUBMIT_ANSWERS_SIGNAL].name == "submit_answers"
 
 
 def test_planning_workflow_submit_answers_accepts_matching_signal() -> None:
