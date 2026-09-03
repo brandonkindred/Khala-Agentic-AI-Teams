@@ -236,7 +236,8 @@
                             type="button"
                             [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
-                            [attr.aria-controls]="confirmPanelId(vm.number)"
+                            [attr.aria-controls]="selectedIssue?.number === vm.number ? confirmPanelId(vm.number) : null"
+                            [attr.data-issue-number]="vm.number"
                             (click)="selectIssue(vm.issue)"
                           >
                             <span class="github-issue-row__number">#{{ vm.number }}</span>

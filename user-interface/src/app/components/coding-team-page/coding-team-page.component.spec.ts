@@ -2165,6 +2165,11 @@ describe('CodingTeamPageComponent', () => {
         showView('github');
         expandFirstRepo();
         const issue = component.issues[0];
+        const el: HTMLElement = fixture.nativeElement;
+        // Capture the row before selecting — aria-controls is only present on the selected row,
+        // so it can't be used to relocate the row once cancelSelection() deselects it.
+        const row = el.querySelector<HTMLButtonElement>('.github-issue-row');
+        expect(row).not.toBeNull();
 
         component.selectIssue(issue);
         fixture.detectChanges();
@@ -2176,10 +2181,8 @@ describe('CodingTeamPageComponent', () => {
         await vi.advanceTimersByTimeAsync(0);
         fixture.detectChanges();
 
-        const el: HTMLElement = fixture.nativeElement;
-        const row = el.querySelector<HTMLButtonElement>(`[aria-controls="${component.confirmPanelId(issue.number)}"]`);
-        expect(row).not.toBeNull();
         expect(document.activeElement).toBe(row);
+        expect(row?.getAttribute('aria-controls')).toBeNull();
         expect(el.querySelector('.github-confirm-panel')).toBeNull();
       } finally {
         vi.useRealTimers();

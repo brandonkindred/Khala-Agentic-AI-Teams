@@ -810,12 +810,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   /**
    * After the confirm panel for `issueNumber` unmounts, move focus back to its row's button
-   * (found via the row's existing `aria-controls` wiring — the row has no id of its own). Repo
-   * full names can't contain `"`, so interpolating the id into this attribute selector is safe.
+   * (found via `data-issue-number`, which — unlike `aria-controls` — stays on the row regardless
+   * of selection state, since `aria-controls` is removed the same tick `selectedIssue` clears).
    */
   private moveFocusToIssueRow(issueNumber: number): void {
-    const id = this.confirmPanelId(issueNumber);
-    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[aria-controls="${id}"]`));
+    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[data-issue-number="${issueNumber}"]`));
   }
 
   /** True when the issue is blocked by, or depends on, one or more other issues. */
