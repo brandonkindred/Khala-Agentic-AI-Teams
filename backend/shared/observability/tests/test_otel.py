@@ -542,11 +542,22 @@ def reinitializable_otel(monkeypatch):
 
 
 def test_init_otel_honors_otel_sdk_disabled(reinitializable_otel, monkeypatch) -> None:
-    """The standard opt-out short-circuits before any provider is built."""
+    """The standard opt-out short-circuits before any provider is built.
+
+    Compares before/after rather than asserting ``None``: the module globals
+    are process-wide and another test in this file (the exporter-wiring test)
+    may already have populated them, restored only when that test tears down —
+    the ``reinitializable_otel`` fixture snapshots current values for
+    restoration, it does not reset them to ``None`` on entry.
+    """
     monkeypatch.setenv("OTEL_SDK_DISABLED", "TRUE")
+    tracer_provider_before = reinitializable_otel._tracer_provider
+    meter_provider_before = reinitializable_otel._meter_provider
 
     assert reinitializable_otel.init_otel(service_name="x", team_key="x") is False
     assert reinitializable_otel.is_otel_enabled() is False
+    assert reinitializable_otel._tracer_provider is tracer_provider_before
+    assert reinitializable_otel._meter_provider is meter_provider_before
 
 
 def test_init_otel_returns_false_when_the_sdk_is_missing(reinitializable_otel, monkeypatch) -> None:

@@ -165,6 +165,18 @@ def test_extract_node_text_returns_concatenated_text() -> None:
     assert extract_node_text(_FakeMultiAgentResult({"n": node}), "n") == "first second"
 
 
+def test_extract_node_text_uses_the_last_agent_result() -> None:
+    """Mirrors extract_node_output's last-result pin, for the text-extraction path."""
+    node = _FakeNodeResult(
+        [
+            _FakeAgentResult({"content": [{"text": "stale"}]}),
+            _FakeAgentResult({"content": [{"text": "fresh"}]}),
+        ]
+    )
+
+    assert extract_node_text(_FakeMultiAgentResult({"n": node}), "n") == "fresh"
+
+
 @pytest.mark.parametrize(
     "result",
     [
