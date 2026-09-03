@@ -123,9 +123,7 @@ def test_build_revise_all_items_prompt_persistent_issues_getattr() -> None:
         draft="# Draft\n\nBody.",
         feedback_items=[],
         revision_plan="Fix persistent issues.",
-        style_guide_text="Style Guide",
         revise_input=revise_input,
-        brand_section="Brand Spec",
         llm=None,
     )
     assert "PERSISTENT ISSUES" in prompt
@@ -159,9 +157,7 @@ def test_build_revise_all_items_prompt_previous_feedback_items_getattr() -> None
         draft="# Draft\n\nBody.",
         feedback_items=[],
         revision_plan="Fix feedback.",
-        style_guide_text="Style Guide",
         revise_input=revise_input,
-        brand_section="Brand Spec",
         llm=None,
     )
     assert "RECENTLY RESOLVED FEEDBACK" in prompt
@@ -185,9 +181,7 @@ def test_build_revise_all_items_prompt_tone_and_audience_no_extra_blank_lines() 
         draft="# Draft\n\nBody.",
         feedback_items=[],
         revision_plan="Fix things.",
-        style_guide_text="Style Guide",
         revise_input=revise_input,
-        brand_section="Brand Spec",
         llm=None,
     )
     expected_prefix = (
@@ -208,9 +202,7 @@ def test_build_revise_all_items_prompt_selected_title_and_stories() -> None:
         draft="# Draft\n\nBody.",
         feedback_items=[],
         revision_plan="Fix things.",
-        style_guide_text="Style Guide",
         revise_input=revise_input,
-        brand_section="Brand Spec",
         llm=None,
     )
     assert "AUTHOR-CHOSEN TITLE (preserve this exact H1): My Chosen Title" in prompt
@@ -225,9 +217,7 @@ def test_build_revise_all_items_prompt_default_length_block() -> None:
         draft="# Draft\n\nBody.",
         feedback_items=[],
         revision_plan="Fix things.",
-        style_guide_text="Style Guide",
         revise_input=revise_input,
-        brand_section="Brand Spec",
         llm=None,
     )
     assert "TARGET LENGTH: Aim for roughly 1000 words" in prompt
@@ -242,9 +232,7 @@ def test_build_revise_all_items_prompt_includes_allowed_claims_section() -> None
         draft="# Draft\n\nBody.",
         feedback_items=[],
         revision_plan="Fix things.",
-        style_guide_text="Style Guide",
         revise_input=revise_input,
-        brand_section="Brand Spec",
         llm=None,
         allowed_claims_section=claims_section,
     )
@@ -258,9 +246,7 @@ def test_build_revise_all_items_prompt_omits_allowed_claims_section_by_default()
         draft="# Draft\n\nBody.",
         feedback_items=[],
         revision_plan="Fix things.",
-        style_guide_text="Style Guide",
         revise_input=revise_input,
-        brand_section="Brand Spec",
         llm=None,
     )
     assert "ALLOWED CLAIMS" not in prompt

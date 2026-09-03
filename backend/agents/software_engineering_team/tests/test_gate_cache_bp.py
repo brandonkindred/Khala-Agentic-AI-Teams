@@ -86,6 +86,14 @@ def test_build_system_prompt_with_content_normalizes_bare_strings() -> None:
     assert result[1] == {"text": "extra context"}
 
 
+def test_reexport_is_llm_service_implementation() -> None:
+    """This team's module re-exports llm_service's implementation rather than
+    owning a second copy — pin the identity so import-path drift is caught here."""
+    import llm_service
+
+    assert build_system_prompt_with_content is llm_service.build_system_prompt_with_content
+
+
 def test_run_structured_persona_passes_cache_breakpoint_to_agent() -> None:
     """When system_prompt_content contains a CacheBreakpoint, the agent
     receives a list-form system_prompt with the breakpoint intact."""
