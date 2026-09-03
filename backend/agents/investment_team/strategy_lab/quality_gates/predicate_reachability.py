@@ -347,7 +347,8 @@ class PredicateReachabilityProbe(GateResultsMixin):
                         )
                     legs = tuple(
                         _PairLegCooccurrence(
-                            _format_predicate(leaf), *_cooccurrence_counts(leaf_statuses, statuses[i])
+                            _format_predicate(leaf),
+                            *_cooccurrence_counts(leaf_statuses, statuses[i]),
                         )
                         for leaf, leaf_statuses in zip(leaves[j], leaf_status_cache[j])
                     )

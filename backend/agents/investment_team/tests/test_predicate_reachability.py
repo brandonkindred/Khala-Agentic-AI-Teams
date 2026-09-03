@@ -342,15 +342,10 @@ def test_pair_later_fires_independently_of_earlier() -> None:
 
 
 def test_pair_later_never_fires_independently_of_earlier() -> None:
-    # _ALIVE (close>sma(200)) fires on every bar it's judged over; a later rule
-    # confined to a window fully inside that judged range can never fire
-    # independently of it.
-    later = AllOf(
-        of=[
-            Predicate(lhs="bar.close", op=">", rhs=250.0),  # fires i > 150
-            Predicate(lhs="bar.close", op="<", rhs=280.0),  # fires i < 180
-        ]
-    )
+    # _ALIVE (close>sma(200)) is judged (and always fires) only from i=199 on
+    # (sma(200) warmup). A later rule whose firing window sits entirely inside
+    # that judged range can never fire independently of it.
+    later = Predicate(lhs="bar.close", op=">", rhs=310.0)  # fires i > 210
     probe = PredicateReachabilityProbe()
     spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=later)])
     pairs = probe.probe_pairs(spec, _MD)
