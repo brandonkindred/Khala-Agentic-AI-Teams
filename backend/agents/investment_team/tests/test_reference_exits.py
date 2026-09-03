@@ -656,16 +656,7 @@ def test_replay_handles_symbols_independently():
 def test_replay_fires_the_injected_short_safety_stop():
     """A short with no authored stop still closes when price doubles against it,
     attributed to the injected rule at index ``len(spec.exit_rules)``."""
-    spec = StrategySpec(
-        strategy_id="s",
-        authored_by="t",
-        asset_class="stocks",
-        hypothesis="h",
-        signal_definition="s",
-        timeframe="1d",
-        entry_rules=[EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=100.0))],
-        exit_rules=[],
-    )
+    spec = _spec(exit_rules=[], entry_side="short")
     bars = {"AAA": [_flat(101.0), _flat(100.0), _bar(150.0, 210.0, 150.0, 205.0)]}
     (got,) = replay_stop_loss_exits(spec, bars)
     assert (got.exit_rule_index, got.exit_price) == (0, 200.0)

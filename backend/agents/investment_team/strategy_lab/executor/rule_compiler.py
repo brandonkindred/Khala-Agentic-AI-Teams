@@ -574,23 +574,31 @@ def stop_limit_prices(rule: StopLossRule, position: PositionState) -> StopLimitP
     that need the resting prices — the dispatcher's intent builder here, and the
     reference-ledger exit replay — take them from this one place.
 
-    Preconditions: ``rule.style == "limit"``, ``rule.basis == "entry_price"``,
-    and ``rule.limit_offset_pct`` populated and in ``(0, 1)``.
-    ``StopLossRule``'s validator already enforces all three, but they are
+    Preconditions, on ``rule``: ``style == "limit"``, ``basis ==
+    "entry_price"``, and ``limit_offset_pct`` populated and in ``(0, 1)``.
+    ``StopLossRule``'s validator already enforces all four, but they are
     re-asserted here rather than delegated: this helper is the single source of
     the limit-style geometry for both the dispatcher and the reference ledger,
     so a future loosening of that validator would otherwise let it silently
-    compute prices for a shape it was never designed for (a trailing-basis
+    compute prices for a shape it was never designed for — a trailing-basis
     limit stop re-prices every bar, which a static resting limit cannot
-    represent). ``position.side`` is ``"long"``/``"short"`` and
-    ``position.entry_price > 0``.
+    represent, and an offset outside ``(0, 1)`` rests the limit level with the
+    stop (``0.0``) or through zero (``>= 1.0``), neither of which is
+    protective.
+    Preconditions, on ``position``: ``side`` is ``"long"``/``"short"`` and
+    ``entry_price > 0``. These are the CALLER's to establish and are not
+    re-checked here — :func:`stop_loss_level`, which resolves the level this
+    builds on, reads the same fields under the same unchecked contract, so
+    guarding them on this path alone would make the market-style and
+    limit-style paths disagree about who owns them.
     Postconditions: returns a :class:`StopLimitPrices` whose ``stop_price`` is
     the level :func:`stop_loss_level` resolves and whose ``limit_price`` sits on
     the protective side of it — below for a long close, above for a short. Both
-    are strictly positive: ``pct < 1.0`` and ``limit_offset_pct < 1.0``
-    (validator-enforced) keep a long's ``entry * (1 - pct) *
-    (1 - limit_offset_pct)`` above zero, and the short side only ever adds.
-    Raises ``ValueError`` when any precondition above is violated.
+    are strictly positive: ``pct < 1.0`` and ``limit_offset_pct < 1.0`` keep a
+    long's ``entry * (1 - pct) * (1 - limit_offset_pct)`` above zero, and the
+    short side only ever adds.
+    Raises ``ValueError`` when any of the four ``rule`` preconditions above is
+    violated.
     """
     if rule.style != "limit":
         raise ValueError(f"stop_limit_prices requires style='limit', got {rule.style!r}")
@@ -601,6 +609,11 @@ def stop_limit_prices(rule: StopLossRule, position: PositionState) -> StopLimitP
         )
     if rule.limit_offset_pct is None:
         raise ValueError("limit-style StopLossRule requires limit_offset_pct")
+    if not 0.0 < rule.limit_offset_pct < 1.0:
+        raise ValueError(
+            "limit_offset_pct must be in (0, 1) for the limit to rest on the "
+            f"protective side of the stop, got {rule.limit_offset_pct!r}"
+        )
     stop_price = stop_loss_level(rule, position)
     offset = stop_price * rule.limit_offset_pct
     limit_price = protective_limit_price(stop_price, offset, closing_long=(position.side == "long"))

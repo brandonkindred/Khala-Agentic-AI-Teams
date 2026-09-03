@@ -620,7 +620,10 @@ def test_market_style_does_not_oversize_for_entry_continuation():
 
 
 def _limit_position(side: str = "long") -> PositionState:
-    """A flat long/short position at 100, for the geometry helper's own tests."""
+    """A minimal long/short position anchored at 100 with unextended watermarks
+    (``high_since_entry == low_since_entry == entry_price``), so a trailing
+    basis would resolve the same level a fixed one does and every price below
+    is attributable to the offset alone."""
     return PositionState(
         symbol="AAA",
         side=side,
@@ -660,8 +663,34 @@ def test_stop_limit_prices_rejects_a_trailing_basis():
 
 
 def test_stop_limit_prices_rejects_a_missing_limit_offset():
+    """Pins the helper's own limit_offset_pct guard, reached past the validator
+    via ``object.__setattr__``, so a future validator loosening cannot silently
+    let the helper price a limit-style rule with no protective offset."""
     rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
     object.__setattr__(rule, "limit_offset_pct", None)
 
     with pytest.raises(ValueError, match="limit_offset_pct"):
         stop_limit_prices(rule, _limit_position())
+
+
+@pytest.mark.parametrize(
+    ("offset", "degenerate"),
+    [
+        (0.0, "limit rests ON the stop, so it is not protective at all"),
+        (1.0, "limit rests at zero"),
+        (1.5, "limit rests through zero, i.e. negative"),
+    ],
+    ids=["zero", "one", "above_one"],
+)
+def test_stop_limit_prices_rejects_an_offset_outside_the_open_unit_interval(offset, degenerate):
+    """The range is what makes the returned limit protective, so it is guarded
+    here and not left to the validator alone. Without it each case below prices
+    silently: at 100 with a 5% stop the limit would come back 95.0, 0.0 and
+    -47.5 respectively — all well-formed floats, none of them a usable resting
+    limit."""
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
+    object.__setattr__(rule, "limit_offset_pct", offset)
+
+    with pytest.raises(ValueError, match=r"limit_offset_pct must be in \(0, 1\)") as excinfo:
+        stop_limit_prices(rule, _limit_position())
+    assert repr(offset) in str(excinfo.value), degenerate
