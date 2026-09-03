@@ -1026,6 +1026,15 @@ def _fill_story_placeholders(
           LLM calls.
         - When no placeholders exist, returns a ``WriterOutput`` wrapping the
           original ``draft_text`` and the unchanged ``elicited_stories_text``.
+        - When placeholders exist and ``work_dir`` is not ``None``, the
+          post-fill revision is written to a distinct
+          ``draft_v{iteration}.md``-sibling artifact,
+          ``draft_v{iteration}_stories.md`` — the pre-fill draft at
+          ``draft_v{iteration}.md`` (written by the caller before this
+          function runs, and already through ``_self_review``) is never
+          reopened or overwritten here, so both remain on disk for
+          diffing. When ``work_dir`` is ``None``, no artifact is written
+          for either draft.
         - If the post-story revision call raises a non-cancellation
           exception, the original ``draft_text`` — including any unfilled
           ``[Author: ...]`` placeholders — is returned unchanged alongside
@@ -1211,7 +1220,7 @@ def _fill_story_placeholders(
 
         content_plan_text = content_plan_to_outline_markdown(plan)
         draft_output_path = (
-            (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
+            (Path(work_dir) / f"draft_v{iteration}_stories.md") if work_dir is not None else None
         )
         revised_result = draft_agent.revise_from_user_feedback(
             draft=draft_text,

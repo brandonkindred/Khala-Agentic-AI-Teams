@@ -133,3 +133,13 @@ def test_allowed_claims_json_producer_matches_planning_stage() -> None:
     entry = ARTIFACT_PRODUCER["allowed_claims.json"]
     assert entry["producer_phase"] == "planning"
     assert entry["producer_agent"] == "BlogPlanningAgent"
+
+
+def test_draft_v1_stories_producer_matches_story_elicitation_stage() -> None:
+    """draft_v1_stories.md is written by _fill_story_placeholders's post-fill
+    revision (agent_implementations/pipeline/_common.py), distinct from the
+    pre-fill draft_v1.md it revises from; the registry must attribute it to
+    the story_elicitation phase it reports via job_updater."""
+    entry = ARTIFACT_PRODUCER["draft_v1_stories.md"]
+    assert entry["producer_phase"] == "story_elicitation"
+    assert entry["producer_agent"] == "BlogWriterAgent"

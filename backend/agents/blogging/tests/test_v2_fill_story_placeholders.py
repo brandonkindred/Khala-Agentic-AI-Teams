@@ -6,6 +6,7 @@ Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 from agents.blogging.blog_writer_agent.models import WriterOutput
@@ -234,6 +235,56 @@ def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) 
     from agents.blogging.shared.content_plan import content_plan_to_outline_markdown
 
     assert captured["kwargs"]["content_plan_text"] == content_plan_to_outline_markdown(_plan())
+
+
+def test_fill_story_placeholders_preserves_prefill_draft_artifact(monkeypatch, tmp_path) -> None:
+    """The pre-fill draft_v1.md (written by the caller before this helper runs)
+    must survive on disk, distinct from the post-fill draft_v1_stories.md this
+    helper writes -- the helper must not clobber the draft it revises from."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
+
+    job_id = str(uuid.uuid4())[:8]
+    bjs.create_blog_job(job_id, "brief")
+
+    import agents.blogging.ghost_writer_agent as gw
+
+    monkeypatch.setattr(
+        gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A debug story.")
+    )
+
+    # Simulate what draft_stage.py already did before calling this helper:
+    # draft_v1.md holds the reviewed pre-fill draft.
+    prefill_content = "# Pre-fill draft\n[Author: a debug story]\nBody."
+    (tmp_path / "draft_v1.md").write_text(prefill_content, encoding="utf-8")
+
+    class _StubAgent:
+        def revise_from_user_feedback(self, *, draft_output_path=None, **kw):
+            content = "# Post-fill draft\nNarrative incorporated."
+            if draft_output_path is not None:
+                Path(draft_output_path).write_text(content, encoding="utf-8")
+            return WriterOutput(draft=content)
+
+    out_draft, _ = v2._fill_story_placeholders(
+        draft_text=prefill_content,
+        plan=_plan(),
+        llm_client=object(),
+        job_id=job_id,
+        job_updater=lambda **kw: None,
+        elicited_stories_text=None,
+        draft_agent=_StubAgent(),
+        draft_input_kwargs=_full_draft_input_kwargs(),
+        work_dir=tmp_path,
+        iteration=1,
+    )
+
+    assert out_draft.draft == "# Post-fill draft\nNarrative incorporated."
+    # The pre-fill draft is untouched...
+    assert (tmp_path / "draft_v1.md").read_text(encoding="utf-8") == prefill_content
+    # ...and the post-fill revision landed at a distinct path, not draft_v1.md.
+    assert (tmp_path / "draft_v1_stories.md").read_text(
+        encoding="utf-8"
+    ) == "# Post-fill draft\nNarrative incorporated."
 
 
 def test_fill_story_placeholders_redraft_fails_keeps_original(monkeypatch, tmp_path) -> None:

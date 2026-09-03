@@ -47,6 +47,10 @@ ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
     "allowed_claims.json": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "outline.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "draft_v1.md": {"producer_phase": "draft_initial", "producer_agent": "BlogWriterAgent"},
+    "draft_v1_stories.md": {
+        "producer_phase": "story_elicitation",
+        "producer_agent": "BlogWriterAgent",
+    },
     "draft_v2.md": {"producer_phase": "copy_edit", "producer_agent": "BlogCopyEditorAgent"},
     "final.md": {"producer_phase": "finalize", "producer_agent": "BlogCopyEditorAgent"},
     "compliance_report.json": {
