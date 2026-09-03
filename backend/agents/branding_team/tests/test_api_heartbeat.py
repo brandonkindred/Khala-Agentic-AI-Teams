@@ -14,10 +14,9 @@ import threading
 
 from branding_team.api import background as background_mod
 from branding_team.api import main as api_main
-from branding_team.models import BrandPhase, HumanReview
+from branding_team.models import BrandPhase, HumanReview, StrategicCoreOutput
 from branding_team.shared import job_store
 from branding_team.tests.conftest import make_mission
-from branding_team.tests.test_orchestrator import _full_strategic_core
 
 
 class _RecordingJobManager:
@@ -116,6 +115,7 @@ def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) ->
     itself.
     """
     monkeypatch.setattr(api_main, "_job_manager", None)
+    job_id = "job-cancel-mid-run"
 
     class _CancelState:
         def __init__(self) -> None:
@@ -123,8 +123,10 @@ def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) ->
             self.cancelled = False
 
     state = _CancelState()
+    seen_job_ids: list[str] = []
 
-    def _fake_is_job_cancelled(job_id: str) -> bool:
+    def _fake_is_job_cancelled(seen_job_id: str) -> bool:
+        seen_job_ids.append(seen_job_id)
         state.is_cancelled_calls += 1
         # Not cancelled for the check before strategic_core; cancelled from
         # the check before narrative_messaging on -- mirrors
@@ -137,7 +139,8 @@ def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) ->
 
     job_store_calls: list[dict] = []
 
-    def _fake_update_if_not_cancelled(job_id, **kw):
+    def _fake_update_if_not_cancelled(seen_job_id, **kw):
+        seen_job_ids.append(seen_job_id)
         if state.cancelled:
             return False
         job_store_calls.append(kw)
@@ -149,12 +152,12 @@ def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) ->
 
     def _fake_run_single_phase(mission, phase, prior_outputs=None):
         phases_run.append(phase.value)
-        return _full_strategic_core(), False
+        return StrategicCoreOutput(positioning_statement="cancel-test-core"), False
 
     monkeypatch.setattr(api_main.orchestrator, "run_single_phase", _fake_run_single_phase)
 
     api_main._run_branding_core(
-        job_id="job-cancel-mid-run",
+        job_id=job_id,
         mission=make_mission(),
         human_review=HumanReview(approved=True),
         brand_checks=[],
@@ -167,3 +170,8 @@ def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) ->
 
     assert phases_run == [BrandPhase.STRATEGIC_CORE.value]
     assert job_store_calls == [{"status": job_store.JOB_STATUS_RUNNING}]
+    # The cancellation gate and the job-store writes must both act on this
+    # run's own job_id -- proving the id actually threads through
+    # _run_branding_core -> _job_not_cancelled -> is_job_cancelled, not just
+    # that some cancellation flag flipped.
+    assert seen_job_ids and set(seen_job_ids) == {job_id}
