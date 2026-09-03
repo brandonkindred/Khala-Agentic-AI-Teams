@@ -343,12 +343,9 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
     def _fake_signal(workflow_id, signal, payload):
         signaled.update(workflow_id=workflow_id, signal=signal, payload=payload)
 
-    def _must_not_run(*_a, **_k):  # pragma: no cover
-        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
-
-    monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", _fake_append)
-    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", _fake_signal)
-    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+    _patch_temporal_native_route(
+        monkeypatch, hitl_mod, on_append=_fake_append, on_signal=_fake_signal
+    )
 
     resp = client.post(
         f"/run-team/{job_id}/answers",
