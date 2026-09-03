@@ -24,7 +24,7 @@ from agents.blogging.shared.content_profile import LengthPolicy
 from agents.blogging.shared.json_retry import run_json_gate
 from agents.blogging.shared.prompt_budget import resolve_model_context_tokens
 from agents.blogging.shared.system_prompt_assembly import (
-    build_blogging_system_prompt_content,
+    build_headed_blogging_system_prompt_content,
     build_system_prompt_with_content,
 )
 from pydantic import ValidationError
@@ -348,13 +348,8 @@ class BlogWriterAgent(_BlogAgentBase):
         # Agent(system_prompt=...) at the call sites below rather than embedded
         # as plain text in the user prompt, so a stable prefix isn't re-billed
         # on every turn.
-        self._system_prompt_content = build_blogging_system_prompt_content(
-            ("--- BRAND SPEC ---\n" + self._brand_spec_prompt if self._brand_spec_prompt else ""),
-            (
-                "--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt
-                if self._writing_style_prompt
-                else ""
-            ),
+        self._system_prompt_content = build_headed_blogging_system_prompt_content(
+            self._brand_spec_prompt, self._writing_style_prompt
         )
         self._writing_system_prompt_with_content = build_system_prompt_with_content(
             WRITING_SYSTEM_PROMPT, self._system_prompt_content
@@ -374,7 +369,8 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``system_prompt`` is a plain persona string, or a Strands
               system-content-block list (e.g. from
               ``build_system_prompt_with_content``) when a cacheable segment
-              is being attached.
+              is being attached. When falsy (``""`` or ``None``), falls back
+              to ``WRITING_SYSTEM_PROMPT``.
         Postconditions:
             - Returns the agent's response as a stripped string.
         Raises:
@@ -394,6 +390,8 @@ class BlogWriterAgent(_BlogAgentBase):
 
         Preconditions:
             - ``prompt`` is a non-empty string (enforced by ``_call_agent``).
+            - ``system_prompt``, if falsy, falls back to
+              ``WRITING_SYSTEM_PROMPT`` (via ``_call_agent``).
         """
         return self._call_agent(self._text_model, prompt, system_prompt)
 
@@ -409,6 +407,8 @@ class BlogWriterAgent(_BlogAgentBase):
 
         Preconditions:
             - ``prompt`` is a non-empty string (enforced by ``_call_agent``).
+            - ``system_prompt``, if falsy, falls back to
+              ``WRITING_SYSTEM_PROMPT`` (via ``_call_agent``).
         """
         return self._call_agent(self._model, prompt, system_prompt)
 

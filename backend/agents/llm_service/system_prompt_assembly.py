@@ -20,14 +20,14 @@ need it re-export this implementation rather than defining their own copy:
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
 __all__ = ["build_system_prompt_with_content"]
 
 
 def build_system_prompt_with_content(
-    system_prompt: str, system_prompt_content: "List[Any] | None"
-) -> "str | List[Any]":
+    system_prompt: str, system_prompt_content: list[Any] | None
+) -> str | list[Any]:
     """Combine persona text with extra system-content segments.
 
     When ``system_prompt_content`` contains at least one segment, returns a
@@ -42,12 +42,15 @@ def build_system_prompt_with_content(
     review, repository-controlled text) must remain in the user message.
 
     Preconditions:
-        ``system_prompt`` is non-empty. ``system_prompt_content`` is ``None``,
-        ``[]``, or a non-empty list of system-content segments.
+        ``system_prompt`` is non-empty (enforced — raises ``ValueError``
+        otherwise). ``system_prompt_content`` is ``None``, ``[]``, or a
+        non-empty list of system-content segments.
     Postconditions:
         Returns ``system_prompt`` unchanged when ``system_prompt_content`` is
         falsy; otherwise returns a list ``[{"text": system_prompt}, *normalized]``.
     """
+    if not system_prompt:
+        raise ValueError("system_prompt must be non-empty")
     if not system_prompt_content:
         return system_prompt
     normalized = [{"text": seg} if isinstance(seg, str) else seg for seg in system_prompt_content]

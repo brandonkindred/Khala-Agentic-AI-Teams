@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from agents.blogging.shared.system_prompt_assembly import (
     build_blogging_system_prompt_content,
+    build_headed_blogging_system_prompt_content,
     build_system_prompt_with_content,
 )
 
@@ -43,6 +44,39 @@ def test_mixed_blank_and_whitespace_one_side() -> None:
     result = build_blogging_system_prompt_content("brand spec text", "   \n")
 
     assert result == [CacheBreakpoint("brand spec text")]
+
+
+def test_headed_both_texts_present_adds_headings_and_joins() -> None:
+    result = build_headed_blogging_system_prompt_content(
+        "brand spec text", "writing guideline text"
+    )
+
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert isinstance(result[0], CacheBreakpoint)
+    assert result[0].text == (
+        "--- BRAND SPEC ---\nbrand spec text\n\n--- WRITING STYLE GUIDE ---\nwriting guideline text"
+    )
+
+
+def test_headed_brand_spec_only_omits_writing_guide_heading() -> None:
+    result = build_headed_blogging_system_prompt_content("brand spec text", "")
+
+    assert result == [CacheBreakpoint("--- BRAND SPEC ---\nbrand spec text")]
+
+
+def test_headed_writing_guideline_only_omits_brand_spec_heading() -> None:
+    result = build_headed_blogging_system_prompt_content("", "writing guideline text")
+
+    assert result == [CacheBreakpoint("--- WRITING STYLE GUIDE ---\nwriting guideline text")]
+
+
+def test_headed_both_empty_returns_none() -> None:
+    assert build_headed_blogging_system_prompt_content("", "") is None
+
+
+def test_headed_whitespace_only_texts_return_none() -> None:
+    assert build_headed_blogging_system_prompt_content("   \n", "\t  ") is None
 
 
 def test_with_content_returns_persona_unchanged_when_content_is_none() -> None:

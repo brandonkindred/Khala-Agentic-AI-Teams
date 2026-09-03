@@ -14,9 +14,12 @@ result to Strands ``Agent(system_prompt=...)`` is not blogging-specific, so
 ``CacheBreakpoint``) rather than duplicated — see
 ``llm_service.system_prompt_assembly`` for its implementation and contract.
 
-The ``--- BRAND SPEC ---`` / ``--- WRITING STYLE GUIDE ---`` heading text
-itself stays caller-owned: pass already-headed text in for a heading to
-appear in the cached segment.
+``build_headed_blogging_system_prompt_content`` additionally owns the
+``--- BRAND SPEC ---`` / ``--- WRITING STYLE GUIDE ---`` heading text, since
+every current caller wants the same headings — it was previously duplicated
+in each agent constructor. ``build_blogging_system_prompt_content`` stays
+available as the un-headed primitive for a caller that wants different (or
+no) labels.
 """
 
 from __future__ import annotations
@@ -25,7 +28,11 @@ from typing import List, Optional
 
 from llm_service import CacheBreakpoint, build_system_prompt_with_content
 
-__all__ = ["build_blogging_system_prompt_content", "build_system_prompt_with_content"]
+__all__ = [
+    "build_blogging_system_prompt_content",
+    "build_headed_blogging_system_prompt_content",
+    "build_system_prompt_with_content",
+]
 
 
 def build_blogging_system_prompt_content(
@@ -53,3 +60,34 @@ def build_blogging_system_prompt_content(
     if not parts:
         return None
     return [CacheBreakpoint("\n\n".join(parts))]
+
+
+def build_headed_blogging_system_prompt_content(
+    brand_spec_text: str, writing_guideline_text: str
+) -> Optional[List[CacheBreakpoint]]:
+    """
+    Apply the standard ``--- BRAND SPEC ---`` / ``--- WRITING STYLE GUIDE ---``
+    headings, then delegate to :func:`build_blogging_system_prompt_content`.
+
+    Centralizes the heading text that every current blogging agent
+    constructor wants, rather than each constructor formatting its own
+    headed text before calling the un-headed primitive.
+
+    Preconditions:
+        - ``brand_spec_text`` and ``writing_guideline_text`` are ``str``
+          (either may be empty or whitespace-only).
+    Postconditions:
+        - Returns ``None`` when both arguments are empty or whitespace-only.
+        - Otherwise returns a one-element list ``[CacheBreakpoint(text)]``
+          where each non-blank argument is prefixed with its heading before
+          being joined, in ``(brand_spec_text, writing_guideline_text)``
+          order; a blank argument contributes neither text nor heading.
+        - Pure: no LLM client, no file I/O, no agent import, no module-level
+          state; neither argument is mutated.
+    """
+    return build_blogging_system_prompt_content(
+        f"--- BRAND SPEC ---\n{brand_spec_text}" if brand_spec_text.strip() else "",
+        f"--- WRITING STYLE GUIDE ---\n{writing_guideline_text}"
+        if writing_guideline_text.strip()
+        else "",
+    )

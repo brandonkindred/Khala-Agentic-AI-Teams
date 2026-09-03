@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Optional, Union
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.json_retry import run_json_gate
 from agents.blogging.shared.system_prompt_assembly import (
-    build_blogging_system_prompt_content,
+    build_headed_blogging_system_prompt_content,
     build_system_prompt_with_content,
 )
 from agents.blogging.shared.word_count import count_words
@@ -74,10 +74,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         # run_json_gate's system_prompt (see _invoke_editor_llm) rather than
         # embedded as plain text in the user prompt, so a stable prefix isn't
         # re-billed on every turn.
-        self._system_prompt_content = build_blogging_system_prompt_content(
-            ("--- BRAND SPEC ---\n" + brand if brand else ""),
-            ("--- WRITING STYLE GUIDE ---\n" + writing if writing else ""),
-        )
+        self._system_prompt_content = build_headed_blogging_system_prompt_content(brand, writing)
 
     def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> bool:
         """
@@ -483,7 +480,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
                 )
             return output
 
-        has_style_guide = bool(self._system_prompt_content)
+        has_style_guide = self._system_prompt_content is not None
 
         logger.info(
             "Copy editing: draft len=%s, has_style_guide=%s",

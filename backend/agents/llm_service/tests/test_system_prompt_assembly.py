@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import pytest
+
 from llm_service.cache_breakpoint import CacheBreakpoint
 from llm_service.system_prompt_assembly import build_system_prompt_with_content
+
+
+def test_rejects_empty_persona_with_content() -> None:
+    with pytest.raises(ValueError, match="system_prompt"):
+        build_system_prompt_with_content("", [CacheBreakpoint("cached prefix")])
+
+
+def test_rejects_empty_persona_without_content() -> None:
+    with pytest.raises(ValueError, match="system_prompt"):
+        build_system_prompt_with_content("", None)
 
 
 def test_returns_str_when_no_content() -> None:

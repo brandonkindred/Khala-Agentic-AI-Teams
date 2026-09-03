@@ -11,7 +11,7 @@ from agents.blogging.blog_copy_editor_agent import (
     FeedbackItem,
 )
 
-from llm_service import DummyLLMClient
+from llm_service import CacheBreakpoint, DummyLLMClient
 
 # Inline style guide passed at agent init so tests do not load the default file.
 _TEST_STYLE_GUIDE = "Clear, conversational prose at ~8th grade. No em dashes."
@@ -405,10 +405,14 @@ def test_init_includes_brand_spec_in_system_prompt_content() -> None:
         brand_spec_content="Acme voice: bold and direct.",
         writing_style_guide_content="Use short sentences.",
     )
-    segment_text = agent._system_prompt_content[0].text
+    assert len(agent._system_prompt_content) == 1
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    segment_text = segment.text
     assert "--- BRAND SPEC ---" in segment_text
     assert "Acme voice" in segment_text
     assert "--- WRITING STYLE GUIDE ---" in segment_text
+    assert "Use short sentences." in segment_text
 
 
 def test_build_editor_prompt_includes_optional_context() -> None:
