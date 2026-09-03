@@ -109,6 +109,13 @@ def _log_signal_diagnostic(msg: str, *args: Any) -> None:
         workflow.logger.warning(msg, *args)
 
 
+#: The private attribute names ``HitlAnswerSignalMixin`` owns. Single source of
+#: truth for both the ``__init__`` composition guard and the attributes it sets
+#: -- keeping one list means a future added attribute can't be added to the
+#: assignments while the guard's coverage silently stays stale.
+_OWNED_STATE_ATTRS = ("_active_resume_token", "_submitted_answers", "_buffered_signals")
+
+
 def _validate_answer_batch(raw: Any) -> Optional[List[Dict[str, Any]]]:
     """Validate a signal payload's ``answers`` value against ``AnswerSubmission``.
 
@@ -202,7 +209,7 @@ class HitlAnswerSignalMixin:
         # overwriting its state here would alias its signal contract onto this one.
         # Failing loudly at construction time turns that into a deterministic,
         # replay-safe error instead of runtime state corruption.
-        for _attr in ("_active_resume_token", "_submitted_answers", "_buffered_signals"):
+        for _attr in _OWNED_STATE_ATTRS:
             if hasattr(self, _attr):
                 raise TypeError(
                     f"{type(self).__name__} already defines {_attr!r}; composing "
@@ -210,6 +217,9 @@ class HitlAnswerSignalMixin:
                     "same state (e.g. PlanningAnswerSignalMixin) is unsupported -- "
                     "see this module's docstring."
                 )
+        # Kept as explicit, individually-annotated assignments (rather than a loop
+        # over _OWNED_STATE_ATTRS) so each attribute keeps its own type annotation;
+        # the names themselves come from that one shared tuple above.
         self._active_resume_token: Optional[str] = None
         self._submitted_answers: Optional[List[Dict[str, Any]]] = None
         self._buffered_signals: Dict[str, List[Dict[str, Any]]] = {}

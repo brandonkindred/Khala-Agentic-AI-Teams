@@ -45,7 +45,11 @@ from shared.command_runner.error_parsing import (
     parse_devops_failure,
 )
 from shared.dev_models import ToolRecommendation, model_to_dict
-from shared.hitl.temporal_signal import MAX_BUFFERED_SIGNALS, HitlAnswerSignalMixin
+from shared.hitl.temporal_signal import (
+    _OWNED_STATE_ATTRS,
+    MAX_BUFFERED_SIGNALS,
+    HitlAnswerSignalMixin,
+)
 from shared.repo_context.repo_utils import (
     int_env,
     read_repo_code,
@@ -293,6 +297,14 @@ def test_hitl_signal_mixin_init_raises_if_a_prior_mixin_owns_the_same_state() ->
 
     with pytest.raises(TypeError, match="_active_resume_token"):
         _Both()
+
+
+def test_hitl_signal_mixin_init_assigns_exactly_the_owned_state_attrs() -> None:
+    """Pins the guarantee _OWNED_STATE_ATTRS exists for: the attributes __init__
+    actually assigns must exactly match the tuple the composition guard checks."""
+    wf = _Workflow()
+
+    assert set(wf.__dict__.keys()) == set(_OWNED_STATE_ATTRS)
 
 
 def test_hitl_signal_mixin_rejects_malformed_answer_batch() -> None:
