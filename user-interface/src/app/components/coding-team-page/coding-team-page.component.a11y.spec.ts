@@ -223,6 +223,30 @@ describe('CodingTeamPageComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
+  it('exposes the run detail as a tooltip on the run row button, with no nested tab stops, and no tooltip when there is no detail', async () => {
+    await setup();
+    openRun(ghRun({ status: 'running' }), { job_id: 'j-run', status: 'running', phase: 'coding' });
+
+    const runRowDebugEl = fixture.debugElement.query(By.css('.coding-run-item'));
+    expect((runRowDebugEl.nativeElement as HTMLElement).tagName).toBe('BUTTON');
+    // Pinned to the literal detail string (not vm.detail) so this assertion independently
+    // catches a wrongly hoisted tooltip rather than trivially agreeing with whatever the
+    // view-model currently returns.
+    expect(runRowDebugEl.injector.get(MatTooltip).message).toBe('writing files');
+    expect((runRowDebugEl.nativeElement as HTMLElement).querySelectorAll('[tabindex]').length).toBe(0);
+
+    // A terminal run has no detail — the button still carries the matTooltip binding
+    // (coalesced from null to ''), and MatTooltip's own empty-message handling is what
+    // keeps this a no-op tooltip rather than a separate guard on the binding itself.
+    openRun(ghRun({ status: 'failed' }), { job_id: 'j-run', status: 'failed' });
+    const failedRunRowDebugEl = fixture.debugElement.query(By.css('.coding-run-item'));
+    expect(failedRunRowDebugEl.injector.get(MatTooltip).message).toBe('');
+    expect((failedRunRowDebugEl.nativeElement as HTMLElement).querySelectorAll('[tabindex]').length).toBe(0);
+
+    const el: HTMLElement = fixture.nativeElement;
+    await expectNoAxeViolations(el);
+  }, 15000);
+
   it('has no axe violations on the Jobs view with no runs', async () => {
     await setup();
     showView('jobs');
