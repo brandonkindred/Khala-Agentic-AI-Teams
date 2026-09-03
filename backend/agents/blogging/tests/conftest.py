@@ -157,9 +157,10 @@ def make_stub_llm_class() -> type:
           ``DummyLLMClient``), suitable for use as ``ResearchAgent(llm_client=...)`` or
           ``strands.Agent(model=...)``. ``complete_json`` inspects the prompt text for
           keywords distinguishing the blog research pipeline's topic-analysis, query-plan,
-          combined candidate scoring+summarization, and similar-topics stages, and returns
-          the matching canned response; prompts matching none of those keyword sets get a
-          generic analysis/outline response.
+          combined candidate scoring+summarization, and similar-topics stages (plus two
+          now-legacy single-purpose scoring-only and summarization-only branches kept for
+          older prompt shapes), and returns the matching canned response; prompts matching
+          none of those keyword sets get a generic analysis/outline response.
     """
     from llm_service import DummyLLMClient
 
