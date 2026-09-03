@@ -3,10 +3,11 @@
 ## Purpose
 
 Step 4 of 4 for the gate-evaluation corpus and finding-label specification
-(closing out the design work the evaluation harness's runner and corpus
-stories implement against). This document specifies the two gaps the prior
-three steps deliberately left open, and closes them without changing the
-case format, the label schema, or the matching rule:
+(#7586, closing issue #7677), closing out the design work the evaluation
+harness's runner and corpus stories (#7578) implement against. This
+document specifies the two gaps the prior three steps deliberately left
+open, and closes them without changing the case format, the label schema,
+or the matching rule:
 
 - [`GATE_FINDING_INVENTORY.md`](GATE_FINDING_INVENTORY.md) — the factual
   catalogue of what the code-review, QA, security, and
@@ -40,22 +41,30 @@ No production code accompanies this document.
 
 ## 1. False-positive resistance is a positive declaration, never an absence
 
-A case's `expected_findings` list being empty for a given gate does not, on
-its own, give the matching rule anything to check that gate's output
-against. `CORPUS_CASE_FORMAT.md` §1 already describes a gate listed in
-`gates` with zero corresponding labels as "expected to report nothing on
-this fixture (a clean-fixture / false-positive-resistance case for that
-gate)" — but that is a statement of authoring intent, not an operational
-one. `GATE_FINDING_MATCHING_RULE.md` §4's match test only ever runs against
-an actual label, comparing a finding's resolved gate, location, and class
-to a label's; with zero labels there is no label to run that test against,
-so a gate hallucinating a finding on such a case is neither caught nor
-scored as a false positive by anything specified so far. The intent §1
-describes is real, but nothing enforces it — this is exactly the gap this
-issue's acceptance criteria name: false-positive resistance has to be
-something the matching rule can actually check, which means it has to be a
-label the rule can compare a finding against, never an absence it would
-have to infer intent from.
+A gate listed in `gates` with zero corresponding labels is not the same
+thing as a gate never listed in `gates` at all, and this section is about
+the former. `CORPUS_CASE_FORMAT.md` §1 already rules on exactly that case,
+and its ruling stands unchanged here: such a gate is "expected to report
+nothing on this fixture (a clean-fixture / false-positive-resistance case
+for that gate), not that the gate is unscored." That intent is real, and
+this document does not dispute or override it.
+
+What this document adds is a second, complementary mechanism for the same
+underlying goal, needed precisely where the whole-gate shortcut above can't
+reach: `GATE_FINDING_MATCHING_RULE.md` §4's match test only ever runs
+against an actual label, comparing a finding's resolved gate, location, and
+class to a label's — it has no way to test a finding against a gate-wide
+"expect nothing" intent that isn't written down as a label, because nothing
+in `GATE_FINDING_MATCHING_RULE.md` specifies how a runner would operationalize
+that whole-gate intent without one. Operationalizing it is out of this
+document's scope — that would be a new, gate-wide matching mechanism, not
+"elaborating the `must_not_find` label already defined" (this document's
+stated scope). So a case that wants a checkable, per-region or per-class
+guarantee today — or one that wants `must_not_find` resistance in a region
+of a gate that also carries `must_find` labels elsewhere, where the
+zero-labels shortcut isn't available at all — needs the label-based
+mechanism below regardless of what `CORPUS_CASE_FORMAT.md` §1 already says
+about the zero-label case.
 
 False-positive resistance for a gate over a region is therefore expressed
 **only** by one or more `must_not_find` labels naming that region, reusing
@@ -107,29 +116,40 @@ label's location is (`CORPUS_CASE_FORMAT.md` §2, `file_path` + `line` +
   §4 already handles by comparing only `file_path`.
 
 Neither region shape is new — both already exist in the schema. What is new
-here is the **whole-diff** shape AC2 requires be distinguishable from a case
-carrying no labels at all. There is no dedicated schema field for "the
-entire diff" — no wildcard `file_path`, no case-level flag — because a label
-is always anchored to one file, and introducing one would be a schema
-change this document is out of scope to make. Instead, whole-diff
-resistance is a **usage convention**, built from the existing fields:
+here is the **whole-diff** shape, which must be distinguishable in
+particular from a gate that's listed in `gates` but carries zero labels —
+the case §1 already covers, where `CORPUS_CASE_FORMAT.md` §1's intent
+stands but nothing enforces it. There is no dedicated schema field for "the
+entire diff" — no
+wildcard `file_path`, no case-level flag — because a label is always
+anchored to one file, and introducing one would be a schema change this
+document is out of scope to make. Instead, whole-diff resistance is a
+**usage convention**, built from the existing fields:
 
 > To assert that a gate must not report a given defect class anywhere in a
 > case's diff, add one file-wide (`line: null`, `line_end: null`)
 > `must_not_find` label with that `defect_class`, for every file path the
 > diff touches.
 
-This is sufficient to make the AC2 distinction concrete and checkable:
+This is sufficient to make that distinction concrete and checkable — and,
+laid out against the two other shapes a case's relationship to a gate can
+take, it clarifies rather than disputes what `CORPUS_CASE_FORMAT.md` §1
+already rules on:
 
 | | `expected_findings` for the gate | What is asserted |
 |---|---|---|
-| No labels at all | `[]`, or the gate simply not addressed | Nothing — the gate is unscored for this case; a hallucination here is invisible to the metric. |
-| Whole-diff resistance | One file-wide `must_not_find` label per file in the diff, per guarded class | Positively and checkably asserts: for each named class, no finding of that class exists anywhere in each named file. |
+| Gate not listed in `gates` | N/A — the gate isn't named by the case at all | Nothing; genuinely out of scope. `gates` is the case's own declaration of which gates it scores (`CORPUS_CASE_FORMAT.md` §1), so a gate absent from it is not scored, full stop — no tension with §1 here. |
+| Gate listed in `gates`, zero labels | `[]` for that gate | Per `CORPUS_CASE_FORMAT.md` §1: the gate **is** scored, and is expected to report nothing — "not that the gate is unscored." That ruling stands. But no label exists for §4's match test to check a finding against, so nothing specified in `GATE_FINDING_MATCHING_RULE.md` enforces it: a hallucination here is invisible to the label-based mechanism this document specifies, even though the intent says it shouldn't be there. |
+| Whole-diff `must_not_find` resistance | One file-wide `must_not_find` label per file in the diff, per guarded class | Positively and checkably asserts, per class: no finding of that class exists anywhere in each named file — enforced by the existing §4 match test today, unlike the row above. |
 
-These two are structurally different YAML — one has an empty or
-gate-omitting `expected_findings`, the other carries N labels — so a
-labeler, a schema validator, and the matching rule all see the difference
-directly; nothing has to be inferred from what's missing.
+The middle and bottom rows are the pair this document is actually about:
+same underlying intent (this gate shouldn't report certain things here),
+but only the bottom row is something the matching rule as specified can
+check. The three rows are also structurally distinguishable YAML — an
+absent `gates` entry, an empty `expected_findings`, or N `must_not_find`
+labels — so a labeler, a schema validator, and the matching rule all see
+which case they're looking at directly; nothing has to be inferred from
+what's missing.
 
 **What this convention deliberately does not claim.** It is per-class, not
 "this gate finds nothing of any kind." A case asserting whole-diff
@@ -292,6 +312,13 @@ backup of {target_dir}")` line — L2's region.
   never eligible to violate `L2` in the first place.
 - No finding was emitted anywhere near line 13. **L2 is not violated.** The
   case scores cleanly: the real defect is caught, the decoy is not flagged.
+- `L1`'s expanded range (`[5, 12]`) and `L2`'s (`[10, 16]`) overlap on lines
+  10–12. That is not a defect in this case — a hallucinated `injection`
+  finding anywhere in that shared span would satisfy `L1` *and* violate `L2`
+  at once, which is exactly what the rule as stated in §3 predicts: nothing
+  narrows a finding's candidacy to only its "nearest" label. This walkthrough
+  doesn't exercise that zone (the finding lands at line 9), but a corpus
+  author should expect it, not be surprised by it.
 
 **Walkthrough B — the same gate additionally hallucinates on the decoy:**
 
@@ -443,10 +470,13 @@ four remain unviolated. **The case passes.**
   all — different `file_path`. Unaffected.
 
 **Contrast with no labels at all:** had this case instead shipped with
-`expected_findings: []` for `code_review` (asserting nothing, per §1), the
-exact same hallucinated `naming` finding on `app/utils/formatting.py` would
-have nothing to violate — the metric would show a clean run, not a false
-positive, on the identical gate output. This is the concrete form of the
-AC2 distinction: the four `must_not_find` labels are what make this
-specific hallucination visible to the metric; their absence would have
-hidden it, not proven the gate innocent.
+`expected_findings: []` for `code_review`, `CORPUS_CASE_FORMAT.md` §1 would
+still call that a clean-fixture expectation for the gate — but per §1 of
+this document, there would be no label for the exact same hallucinated
+`naming` finding on `app/utils/formatting.py` to violate, so the metric
+would show a clean run, not a false positive, on the identical gate output.
+This is the concrete form of the distinction §2 draws between an unlabeled
+case and one declaring whole-diff resistance: the four `must_not_find`
+labels are what make this specific hallucination checkable by the matching
+rule; their absence leaves the same underlying intent unenforced, not
+disproven.
