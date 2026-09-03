@@ -16,7 +16,7 @@ drop-in change, not a technical blocker — :meth:`ConcurrentFirstCallHarness.ho
 accepts any zero-arg callable, including one that wraps a monkeypatched constructor.
 It is left undone here because it is out of scope for the issue this module was
 written for (``shared/concurrency`` only, no call-site or existing-test migration);
-tracked as a separate, opportunistic follow-up.
+tracked in https://github.com/brandonkindred/Khala-Agentic-AI-Teams/issues/7977.
 """
 
 from __future__ import annotations
@@ -136,10 +136,12 @@ class ConcurrentFirstCallHarness(Generic[_T]):
             See the class Postconditions: every started thread is joined and
             confirmed finished before this call returns, or ``AssertionError`` names
             the ones still alive. If any thread's ``call`` raised an exception that
-            escaped it, the first such exception (in thread-start order) is
-            re-raised on the calling thread after the join/still-alive checks, with
-            its original type and traceback — a crashed worker surfaces as itself
-            rather than as a downstream assertion elsewhere in the caller.
+            escaped it, the first such exception captured (chronologically — not
+            necessarily the one from the lowest-indexed thread, since workers race
+            each other) is re-raised on the calling thread after the join/
+            still-alive checks, with its original type and traceback — a crashed
+            worker surfaces as itself rather than as a downstream assertion
+            elsewhere in the caller.
         """
         assert thread_count >= 1, f"thread_count must be >= 1, got {thread_count}"
         exceptions: list[BaseException] = []
@@ -163,7 +165,15 @@ class ConcurrentFirstCallHarness(Generic[_T]):
             for i in range(thread_count)
         ]
         threads[0].start()
-        assert self._started.wait(timeout=self._wait_timeout), "first thread never entered hold_open"
+        if not self._started.wait(timeout=self._wait_timeout):
+            # The first thread never reached hold_open. If its call already raised
+            # (e.g. a bug in the test itself, or the code under test erroring before
+            # ever invoking the factory), that real exception is sitting captured in
+            # exceptions — surface it instead of a misleading timeout message and a
+            # full wait_timeout stall for no reason.
+            if exceptions:
+                raise exceptions[0]
+            raise AssertionError("first thread never entered hold_open")
         for t in threads[1:]:
             t.start()
         # Give the other threads a chance to reach (and queue up behind) the first
