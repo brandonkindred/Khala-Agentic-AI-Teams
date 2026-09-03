@@ -29,12 +29,20 @@ class PipelineContext:
     Invariants:
         - ``llm_client`` and ``length_policy`` are resolved (non-None) before any
           stage runs.
-        - ``planning_phase_result``/``plan``/``elicited_stories_text``/
-          ``covered_sections`` are populated by the planning stage before the draft
-          stage reads them. ``covered_sections`` is the de-duplicated set of plan
-          section titles that already received an author narrative (a fresh
-          interview or a story-bank hit); it is ``None`` only before the planning
-          stage runs and a ``set[str]`` (possibly empty) afterward.
+        - ``planning_phase_result``/``plan``/``elicited_stories_text`` are populated
+          by the planning stage before the draft stage reads them.
+        - ``covered_sections`` is the de-duplicated set of plan section titles that
+          already received an author narrative (a fresh interview or a story-bank
+          hit). It is populated by the planning stage before the draft stage reads
+          it **in thread mode only**: it is ``None`` before the planning stage
+          runs and a ``set[str]`` (possibly empty) afterward. It is not yet
+          threaded across the Temporal activity boundary — ``PlanningStageResult``
+          doesn't carry it and neither ``draft_stage_activity`` nor
+          ``gates_stage_activity`` re-seed it (unlike ``elicited_stories_text``,
+          which both do) — so in Temporal mode a stage's freshly rebuilt context
+          sees the dataclass default (``None``) regardless of what planning
+          computed. Extending the Temporal carriage is a follow-up (mirrors how
+          ``selected_title`` below documents its own no-in-pipeline-producer gap).
         - ``selected_title`` has no in-pipeline producer: no stage writes it, so it
           holds whatever the caller passed at construction (``None`` by default).
           The draft stage reads it and threads it into the writer/revision inputs;

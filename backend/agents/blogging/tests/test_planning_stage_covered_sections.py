@@ -24,10 +24,13 @@ def _make_ctx(monkeypatch, *, job_id="job-1", **ctx_overrides):
     Preconditions:
         - ``ctx_overrides`` keys are valid ``PipelineContext`` field names.
     Postconditions:
-        - Returns a ``PipelineContext`` whose ``run_planning_stage`` call will
-          reach and complete the outline-approval loop on its first iteration
-          (auto-approved), so only the story-elicitation block under test
-          drives ``covered_sections``.
+        - With the default ``job_id``, a ``run_planning_stage`` call reaches and
+          completes the outline-approval loop on its first iteration
+          (auto-approved), so only the story-elicitation block under test drives
+          ``covered_sections``.
+        - With ``job_id=None``, both the interview block and the outline-approval
+          block are short-circuited; the stage returns right after story-bank
+          retrieval.
     """
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.agent_implementations.pipeline.context import PipelineContext
@@ -187,6 +190,26 @@ def test_bank_hits_populate_covered_sections(monkeypatch) -> None:
     assert "Section B" in ctx.elicited_stories_text
 
 
+def test_whitespace_only_bank_narrative_contributes_no_section(monkeypatch) -> None:
+    """A whitespace-only story-bank narrative must not add its section, mirroring
+    the interview source's non-empty guard."""
+    from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
+
+    _stub_find_story_gaps(monkeypatch, [])
+    _stub_find_relevant_stories(
+        monkeypatch,
+        [
+            {"section_title": "Section A", "narrative": "A banked narrative about A."},
+            {"section_title": "Section B", "narrative": "   "},
+        ],
+    )
+
+    ctx = _make_ctx(monkeypatch)
+    assert run_planning_stage(ctx) is None
+
+    assert ctx.covered_sections == {"Section A"}
+
+
 def test_covered_sections_deduplicated_across_sources(monkeypatch) -> None:
     """The same section satisfied by both an interview and a bank hit appears once."""
     from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
@@ -214,6 +237,8 @@ def test_covered_sections_empty_when_nothing_elicited(monkeypatch) -> None:
     _stub_find_relevant_stories(monkeypatch, [])
 
     ctx = _make_ctx(monkeypatch)
+    assert ctx.covered_sections is None  # None before the planning stage runs
+
     assert run_planning_stage(ctx) is None
 
     assert ctx.covered_sections == set()

@@ -54,9 +54,12 @@ def run_planning_stage(
           drawn from two sources: sections with a non-empty fresh-interview
           narrative (derived from ``collected_story_pairs``, never by
           substring-matching ``elicited_stories_text``) and sections with a
-          story-bank hit. It is always a ``set[str]`` — empty when story
-          elicitation is skipped, fails, or finds nothing — reproducing today's
-          behavior exactly since nothing downstream reads the field yet.
+          non-empty story-bank narrative. It is always a ``set[str]`` — empty when
+          story elicitation is skipped or finds nothing; a non-cancellation
+          failure in either source leaves whatever was collected so far (empty
+          only if the failure occurs before any section is collected) —
+          reproducing today's behavior exactly since nothing downstream reads the
+          field yet.
         - Returns a terminal ``(planning_phase_result, None, "FAIL")`` tuple if the
           HITL wait ends without a human response — either the job was
           cancelled/failed while awaiting outline approval, or the job record
@@ -249,8 +252,12 @@ def run_planning_stage(
         bank_results = find_relevant_stories(bank_keywords, limit=5)
         # A banked story satisfies its section just as a fresh interview does,
         # regardless of whether its narrative text also happens to duplicate
-        # something already in elicited_stories_text (checked below).
-        covered_sections.update(r["section_title"] for r in bank_results)
+        # something already in elicited_stories_text (checked below). Guarded
+        # the same way as the interview source: an empty/whitespace-only
+        # narrative contributes no section.
+        covered_sections.update(
+            r["section_title"] for r in bank_results if r.get("narrative", "").strip()
+        )
         if bank_results:
             bank_stories = []
             for r in bank_results:
