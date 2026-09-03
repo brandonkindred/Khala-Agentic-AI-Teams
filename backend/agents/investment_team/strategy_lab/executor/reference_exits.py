@@ -327,7 +327,10 @@ class _RestingStopLoss:
 
     Owns the two pieces of per-position state the shared, stateless
     ``rule_compiler`` decision functions cannot carry across bars: the trailing
-    watermark and the stop-limit arm/latch flag. Kept as an object rather than
+    watermark and the PER-RULE stop-limit arm/latch state (``_armed`` latches
+    each limit-style rule's index independently, since ``_rules`` may hold
+    several limit-style stops competing on one position). Kept as an object
+    rather than
     loop locals because the later combined simulator must interleave this with
     take-profit and signal-exit candidates bar by bar, asking each "would you
     fill on this bar?" — which is exactly :meth:`step`.

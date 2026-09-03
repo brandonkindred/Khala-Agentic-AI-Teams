@@ -20,6 +20,7 @@ from investment_team.strategy_lab.executor.reference_exits import (
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
+    ExitRule,
     OcoBracketRule,
     Predicate,
     StopLossRule,
@@ -89,8 +90,18 @@ def _entry(
     )
 
 
-def _spec(exit_rules=None, entry_side: str = "long", target_symbols=None) -> StrategySpec:
-    """Standard test spec: enters when ``bar.close > 100``."""
+def _spec(
+    exit_rules: list[ExitRule] | None = None,
+    entry_side: str = "long",
+    target_symbols: list[str] | None = None,
+) -> StrategySpec:
+    """Standard test spec: enters when ``bar.close > 100``.
+
+    ``exit_rules`` is annotated with the ``ExitRule`` union rather than
+    ``StopLossRule``, because callers here also pass ``TakeProfitRule`` and
+    ``OcoBracketRule`` to exercise the non-stop-rule paths — matching what
+    ``StrategySpec.exit_rules`` itself declares.
+    """
     return StrategySpec(
         strategy_id="strat-ref-exits-test",
         authored_by="test",

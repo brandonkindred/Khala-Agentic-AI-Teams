@@ -645,6 +645,21 @@ def test_stop_limit_prices_returns_a_named_pair():
     assert tuple(prices) == (prices.stop_price, prices.limit_price)
 
 
+def test_stop_limit_prices_puts_a_shorts_limit_above_its_stop():
+    """The short side's geometry, pinned at the helper's own boundary rather
+    than only through the dispatcher: closing a short buys back, so its stop
+    caps ABOVE the entry and the protective limit sits above that stop again —
+    the opposite sign from the long case. A helper that returned the long
+    arithmetic for both sides would still produce plausible positive prices,
+    so the sign is what has to be asserted, not merely the magnitude."""
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
+    prices = stop_limit_prices(rule, _limit_position("short"))
+
+    assert prices.stop_price == 105.0
+    assert prices.limit_price == pytest.approx(107.1)
+    assert prices.limit_price > prices.stop_price > 100.0
+
+
 def test_stop_limit_prices_rejects_a_market_style_rule():
     """The helper re-asserts what StopLossRule's validator enforces, so a future
     loosening there cannot silently widen this helper's contract."""
