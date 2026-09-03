@@ -1416,7 +1416,13 @@ def _run_title_selection(
             ):
                 return None
 
-            job_data = get_blog_job(job_id) or {}
+            job_data = get_blog_job(job_id)
+            if job_data is None:
+                logger.warning(
+                    "Job %s not found after HITL wait during title selection — stopping",
+                    job_id,
+                )
+                return None
             selected_title = job_data.get("selected_title")
 
             if selected_title:

@@ -78,6 +78,36 @@ def test_run_title_selection_returns_loved_title() -> None:
     assert out == "First"
 
 
+def test_run_title_selection_returns_none_when_job_missing() -> None:
+    """job_id absent from the store (restart/TTL eviction/stale id) → returns None promptly.
+
+    Regression test: previously the poll loop busy-spun with no sleep whenever the job
+    was missing, because ``get_blog_job(job_id) or {}`` masked the "not found" signal.
+    The `_update` call count is asserted to catch that regression by failing fast
+    instead of hanging the test suite.
+    """
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
+
+    job_id = str(uuid.uuid4())[:8]  # deliberately never created via bjs.create_blog_job
+
+    call_count = {"n": 0}
+
+    def _update(phase, **kw):
+        call_count["n"] += 1
+        if call_count["n"] > 3:
+            raise AssertionError("busy-looped instead of terminating on a missing job")
+
+    out = _run_title_selection(
+        plan=_plan(),
+        llm_client=object(),
+        job_id=job_id,
+        job_updater=lambda **kw: None,
+        _update=_update,
+    )
+    assert out is None
+    assert call_count["n"] == 1
+
+
 def test_run_title_selection_returns_none_on_cancellation() -> None:
     """When the job is cancelled mid-wait, return None."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
