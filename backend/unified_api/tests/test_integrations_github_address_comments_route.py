@@ -274,7 +274,9 @@ class _SpyLock:
     """Stand-in for shared.concurrency.flock_lock: records enter/exit order (in
     the module-level ``_lock_events`` list — tests must ``.clear()`` it, not
     reassign it, since each instance appends to that same shared record) and
-    can be made to fail acquisition. Uses ``"lock_enter"``/``"lock_exit"``
+    can be made to fail acquisition (recording ``"lock_fail"`` in that case, so
+    a test can prove the lock was ATTEMPTED and not silently skipped). Uses
+    ``"lock_enter"``/``"lock_exit"``
     tokens (rather than bare ``"enter"``/``"exit"``) so a test can interleave
     them with other instrumented steps (HTTP calls, the clone) in the SAME
     list and assert the full ordering, not just that the lock was taken and
@@ -285,6 +287,11 @@ class _SpyLock:
 
     def __enter__(self):
         if self._fail:
+            # Record the ATTEMPT before raising: without this, a failing
+            # acquisition leaves no trace at all, and a test asserting only
+            # "the request still succeeded" would pass just as happily against
+            # a route that skipped the lock entirely.
+            _lock_events.append("lock_fail")
             raise OSError("lock busy")
         _lock_events.append("lock_enter")
         return self
@@ -367,13 +374,22 @@ def test_503_when_platform_owned_lock_acquisition_fails(mock_cfg, mock_cred, moc
 def test_operator_pinned_lock_failure_degrades_gracefully(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch):
     """An operator-pinned path may live under a parent this service cannot
     write; failing to acquire the (best-effort) serialization lock there must
-    not fail an otherwise-valid request."""
+    not fail an otherwise-valid request.
+
+    Asserting only "the request succeeded" would pass equally for a route that
+    skipped locking on pinned paths altogether, so the lock_fail event is what
+    actually pins "attempted, then degraded gracefully".
+    """
+    _lock_events.clear()
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     fake = _FakeAsyncClient(result=_FakeResp(200, _OK))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_URL, json={})
     assert resp.status_code == 200
     assert resp.json() == {**_OK, "created_at": None}
+    # Attempted (and failed) exactly once; no lock_enter/lock_exit pair, since
+    # acquisition never succeeded.
+    assert _lock_events == ["lock_fail"]
     mock_clone.assert_called_once_with(
         "/srv/pinned-checkout", "acme", "widget", "ghp", platform_owned=False, acquire_lock=False
     )

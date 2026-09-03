@@ -288,6 +288,22 @@ class TestRunningSiblingOnCheckoutUnit:
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [own])
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
 
+    def test_precheck_reports_a_job_whose_own_id_is_missing(self, monkeypatch, tmp_path) -> None:
+        """``own_job_id=None`` (a PRE-CHECK) must exclude NOTHING.
+
+        A plain ``j.get("job_id") == own_job_id`` equality would silently treat
+        a malformed active job carrying no ``job_id`` as "the caller's own" and
+        skip it, letting admission proceed to mutate a working tree an
+        UNIDENTIFIABLE job may still be using -- the exact outcome this scan
+        exists to prevent. In a pre-check there is no caller job, so nothing
+        can be the caller's own.
+        """
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        anonymous = {"job_id": None, "repo_path": str(repo_dir)}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [anonymous])
+        assert pr_review._running_sibling_on_checkout(str(repo_dir)) == anonymous
+
     def test_different_path_returns_none(self, monkeypatch, tmp_path) -> None:
         repo_dir = tmp_path / "repo"
         other_dir = tmp_path / "other"

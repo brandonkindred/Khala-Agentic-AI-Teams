@@ -277,7 +277,10 @@ def _running_sibling_on_checkout(
           from the scan so a job never reports itself as its own sibling).
           Omit it (``None``) for a pre-check with no job created yet —
           there is nothing to exclude, so callers no longer need a sentinel
-          string like ``"<not-yet-created>"`` to stand in for one. Note this
+          string like ``"<not-yet-created>"`` to stand in for one, and NO
+          active job is excluded in that mode (not even one whose own
+          ``job_id`` is missing or ``None``, which is unidentifiable rather
+          than the caller's). Note this
           is a pre-check, NOT a side-effect-free one: EVERY invocation,
           ``own_job_id=None`` included, may best-effort mark a
           crash-orphaned child job ``failed`` via
@@ -331,7 +334,13 @@ def _running_sibling_on_checkout(
             "github_context": {},
         }
     for j in jobs:
-        if not j or j.get("job_id") == own_job_id:
+        # ``own_job_id is not None`` guard, not plain equality: in a PRE-CHECK
+        # (``own_job_id=None``) there is no caller job, so a malformed active
+        # job whose ``job_id`` is missing or None is NOT "the caller's own" --
+        # plain equality would silently skip it and let admission proceed to
+        # mutate a working tree an unidentifiable job may still be using, the
+        # exact outcome this scan exists to prevent.
+        if not j or (own_job_id is not None and j.get("job_id") == own_job_id):
             continue
         sibling_path = j.get("repo_path")
         if not sibling_path:

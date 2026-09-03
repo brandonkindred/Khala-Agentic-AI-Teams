@@ -25,6 +25,7 @@ from software_engineering_team.tests.conftest import (
 )
 from software_engineering_team.tests.git_test_helpers import (
     commit_on_branch,
+    current_branch,
     expected_basic_header,
 )
 
@@ -67,16 +68,6 @@ def _git(repo: str, *args: str) -> None:
     Raises ``subprocess.CalledProcessError`` on a non-zero exit.
     """
     subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True, text=True)
-
-
-def _checked_out_branch(repo: str) -> str:
-    """Return the name of the branch currently checked out in ``repo``."""
-    return subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
 
 
 def _init_repo(path: pathlib.Path) -> str:
@@ -131,7 +122,7 @@ def test_branch_prep_activity_clean_checkout_returns_ok_true(api, monkeypatch, t
     )
 
     assert out == {"ok": True, "error": None, "notes": []}
-    head = _checked_out_branch(repo)
+    head = current_branch(repo)
     assert head == "khala/issue-9"
 
 
@@ -162,7 +153,7 @@ def test_branch_prep_activity_expected_head_sha_match_succeeds(api, monkeypatch,
     # prep actually ran" from "the parameter was silently ignored" — both
     # produce True. Pin the observable postcondition: prep actually checked
     # out the integration branch.
-    head = _checked_out_branch(repo)
+    head = current_branch(repo)
     assert head == "khala/issue-9"
 
 
@@ -197,7 +188,7 @@ def test_branch_prep_activity_expected_head_sha_mismatch_fails_closed(
 
     assert out["ok"] is False
     assert stale_sha in (out["error"] or "")
-    head = _checked_out_branch(repo)
+    head = current_branch(repo)
     assert head == "main"
 
 

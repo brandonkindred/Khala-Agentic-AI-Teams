@@ -46,6 +46,7 @@ from software_engineering_team.github_source.client_http import (
 from software_engineering_team.models import CodingTeamPlanInput
 from software_engineering_team.tests.git_test_helpers import (
     commit_on_branch,
+    current_branch,
     expected_basic_header,
 )
 
@@ -1518,29 +1519,6 @@ def _body(issue_number: int = 1, **overrides: Any) -> dict[str, Any]:
     }
 
 
-def _current_branch(repo: str) -> str:
-    """Return ``repo``'s currently checked-out branch name.
-
-    One shared spelling of the ``git rev-parse --abbrev-ref HEAD`` subprocess
-    call the branch-prep tests assert on repeatedly, so the invocation (and its
-    ``check=True``/text handling) exists once instead of once per assertion.
-
-    Preconditions:
-        - ``repo`` is a git checkout with a resolvable HEAD.
-    Postconditions:
-        - Returns the abbreviated branch name, whitespace-stripped. Raises
-          ``subprocess.CalledProcessError`` if ``rev-parse`` fails.
-    """
-    import subprocess
-
-    return subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-
 def _post_run_from_github_then_run_legacy_hooks(patched_app, json: dict[str, Any]):
     """Post to the route, then explicitly drive the *legacy* hook path.
 
@@ -2645,7 +2623,7 @@ class TestPrepareIssueBranch:
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
 
-        head = _current_branch(repo)
+        head = current_branch(repo)
         assert head == "khala/issue-9"
 
     def test_unsafe_default_branch_rejected(self, api, tmp_path) -> None:
@@ -2672,7 +2650,7 @@ class TestPrepareIssueBranch:
         )
         assert ok is True, msg
 
-        head = _current_branch(repo)
+        head = current_branch(repo)
         assert head == "khala/issue-9"
 
     def test_matching_expected_base_sha_succeeds(self, api, tmp_path) -> None:
@@ -2719,7 +2697,7 @@ class TestPrepareIssueBranch:
         self._git(repo, "add", "README.md")
         self._git(repo, "commit", "-q", "--no-gpg-sign", "-m", "advance")
 
-        original_head_on_disk = _current_branch(repo)
+        original_head_on_disk = current_branch(repo)
 
         ok, msg, _notes = api._prepare_issue_branch(
             repo, "origin", "main", "khala/issue-9", expected_base_sha="0" * 40
@@ -2729,7 +2707,7 @@ class TestPrepareIssueBranch:
         assert "0" * 40 in (msg or "")
 
         # No checkout switch happened -- HEAD is exactly where the test left it.
-        head_after = _current_branch(repo)
+        head_after = current_branch(repo)
         assert head_after == original_head_on_disk
 
     def test_expected_head_sha_mismatch_blocks_prep_without_mutating_checkout(
@@ -2776,7 +2754,7 @@ class TestPrepareIssueBranch:
         # The checkout must be left exactly where _init_repo put it -- no
         # branch switch, no local integration/rescue branch created, no
         # uncommitted changes left behind.
-        head = _current_branch(repo)
+        head = current_branch(repo)
         assert head == "main"
         assert _local_branches() == branches_before
         assert _status() == ""
@@ -2805,7 +2783,7 @@ class TestPrepareIssueBranch:
         # ``test_expected_head_sha_matching_live_remote_tip_succeeds``):
         # ``ok is True`` alone would still pass if a regression reported
         # success without ever performing the checkout.
-        head = _current_branch(repo)
+        head = current_branch(repo)
         assert head == "khala/issue-9"
 
     def test_stale_expected_base_sha_rejected_before_dirty_tree_recovery(

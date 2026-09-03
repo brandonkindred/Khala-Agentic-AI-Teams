@@ -143,11 +143,18 @@ _BARE_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z
 def _scrub_token_from_text(msg: str) -> str:
     """Best-effort redact GitHub credentials from arbitrary text.
 
-    Postconditions: returns ``msg`` unchanged when it carries no credential,
-    otherwise with every ``https://user:token@host/...`` URL replaced by
-    ``https://***@`` and every bare ``gh[pousr]_``/``github_pat_`` token
-    replaced by ``***``.
-    Never raises.
+    Postconditions:
+        - Returns ``msg`` with every ``http(s)://<userinfo>@host`` URL prefix
+          replaced by ``https://***@`` and every bare
+          ``gh[pousr]_``/``github_pat_`` token (20+ body chars) replaced by
+          ``***``. The URL rewrite is deliberately WIDER than "credentials
+          only": any userinfo is redacted whether or not it carries a
+          password, and a plain ``http://`` prefix is normalized to
+          ``https://`` in the process. Over-redaction is the fail-safe
+          direction for text headed into an LLM prompt.
+        - Text matching NEITHER pattern is returned unchanged (``""`` and
+          ``None``-ish falsy input short-circuit).
+        - Never raises. Pure.
     """
     if not msg:
         return msg

@@ -21,6 +21,28 @@ def expected_basic_header(token: str) -> str:
     return f"Authorization: Basic {encoded}"
 
 
+def current_branch(repo: str) -> str:
+    """Return ``repo``'s currently checked-out branch name.
+
+    One shared spelling of the ``git rev-parse --abbrev-ref HEAD`` subprocess
+    call the branch-prep tests assert on repeatedly, so the invocation (and its
+    ``check=True``/text handling) exists once for every test module instead of
+    once per module.
+
+    Preconditions:
+        - ``repo`` is a git checkout with a resolvable HEAD.
+    Postconditions:
+        - Returns the abbreviated branch name, whitespace-stripped. Raises
+          ``subprocess.CalledProcessError`` if ``rev-parse`` fails.
+    """
+    return subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> str:
     """Commit ``contents`` to ``filename`` on ``branch`` in the on-disk git repo
     at ``repo``, and return the resulting commit SHA, leaving the checkout back

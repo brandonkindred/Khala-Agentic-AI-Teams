@@ -130,7 +130,7 @@ def _is_token_key(key: Any) -> bool:
     return any(marker in lowered for marker in _TOKEN_KEY_MARKERS)
 
 
-def _validate_common_args(job_id: str, repo_path: str, caller: str) -> None:
+def _validate_common_args(job_id: str, repo_path: str, *, caller: str) -> None:
     """Shared job_id/repo_path presence validation for both dispatchers.
 
     Preconditions:
@@ -161,9 +161,10 @@ def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: st
           raised message.
     Postconditions:
         - Returns None when ``plan_input`` is ``None``, or is a dict containing
-          no credential-named key (any :data:`_TOKEN_KEY_MARKERS` substring —
-          ``token``, ``secret``, ``password``, ``api_key``/``api-key``,
-          ``authorization``, ``credential``) at any nesting depth.
+          no CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token,
+          secret, password, passphrase, api_key/api-key/apikey,
+          private_key/private-key/privatekey, authorization, credential) at
+          any nesting depth.
     Raises:
         ValueError: ``plan_input`` is not ``None`` and not a ``dict`` (a
             non-dict, e.g. a token string, would otherwise bypass
@@ -181,7 +182,10 @@ def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: st
     if plan_input is not None and not isinstance(plan_input, dict):
         raise ValueError(f"{caller} requires plan_input to be a dict when provided")
     if plan_input and _contains_token_key(plan_input):
-        raise ValueError(f"{caller} requires plan_input to not include a token")
+        raise ValueError(
+            f"{caller} requires plan_input to not include a credential-named key "
+            "(any _TOKEN_KEY_MARKERS substring)"
+        )
 
 
 def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, required: bool) -> None:
@@ -201,13 +205,12 @@ def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, requi
           ``github`` — ``None``, but also ``{}``, ``""``, ``0``, ``[]`` and
           any other falsy value, since the non-dict guard is only reached for
           a TRUTHY ``github`` — or a truthy dict carrying no credential-named
-          key. "Credential-named" is any :data:`_TOKEN_KEY_MARKERS` substring
-          (``token``, ``secret``, ``password``, ``passphrase``,
-          ``api_key``/``api-key``/``apikey``, ``private_key``,
-          ``authorization``, ``credential``) at any nesting depth. Accepting
-          falsy non-dicts here is harmless rather than a hole: a falsy value
-          carries no credential to leak, and every consumer treats it exactly
-          as it treats an absent ``github``.
+          key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password,
+          passphrase, api_key/api-key/apikey,
+          private_key/private-key/privatekey, authorization, credential) at
+          any nesting depth. Accepting falsy non-dicts here is harmless rather
+          than a hole: a falsy value carries no credential to leak, and every
+          consumer treats it exactly as it treats an absent ``github``.
     Raises:
         ValueError: ``required`` is True and ``github`` is not a non-empty
             dict; or ``github`` is truthy but not a ``dict`` (a bare truthy
@@ -222,7 +225,10 @@ def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, requi
     elif github and not isinstance(github, dict):
         raise ValueError(f"{caller} requires github to be a dict when provided")
     if github and _contains_token_key(github):
-        raise ValueError(f"{caller} github workflow payload must not include a token")
+        raise ValueError(
+            f"{caller} github workflow payload must not include a credential-named key "
+            "(any _TOKEN_KEY_MARKERS substring)"
+        )
 
 
 def _workflow_id(job_id: str) -> str:
@@ -276,8 +282,10 @@ def start_coding_team_workflow(
           called ``create_job`` before dispatching).
         - ``repo_path`` is a non-empty str; ``plan_input`` is a JSON-serializable
           plan dict (a run with no plan has nothing to execute) that must not
-          contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key/private-key/privatekey, authorization, credential) at any nesting
-          depth (see :func:`_contains_token_key`) — it is serialized into the
+          contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` —
+          token, secret, password, passphrase, api_key/api-key/apikey,
+          private_key/private-key/privatekey, authorization, credential) at
+          any nesting depth (see :func:`_contains_token_key`) — it is serialized into the
           same durable Temporal payload as ``github``.
         - ``github``, when provided, is a dict of GitHub-issue run metadata for
           the workflow (owner/repo/issue/base/integration_branch/expected_base_sha/...).
@@ -298,7 +306,7 @@ def start_coding_team_workflow(
         RuntimeError: the worker's Temporal client never becomes available
             within the wait window.
     """
-    _validate_common_args(job_id, repo_path, "start_coding_team_workflow")
+    _validate_common_args(job_id, repo_path, caller="start_coding_team_workflow")
     _validate_github_arg(github, caller="start_coding_team_workflow", required=False)
     _validate_plan_input_arg(plan_input, caller="start_coding_team_workflow")
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
@@ -329,7 +337,10 @@ def execute_coding_team_workflow(
           existing child job.
         - ``repo_path`` is a non-empty str.
         - ``github`` is a REQUIRED ``dict`` of GitHub PR/comment metadata and
-          must not contain a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase, api_key/api-key/apikey, private_key/private-key/privatekey, authorization, credential);
+          must not contain a CREDENTIAL-named key (any of
+          :data:`_TOKEN_KEY_MARKERS` — token, secret, password, passphrase,
+          api_key/api-key/apikey, private_key/private-key/privatekey,
+          authorization, credential);
           activities resolve credentials from the child job's encrypted token
           or ``GITHUB_TOKEN`` instead.
         - ``plan_input``, when not ``None``, is a JSON-serializable plan dict
@@ -363,7 +374,7 @@ def execute_coding_team_workflow(
             worker must be prepared for these, not just the two explicit
             raises above.
     """
-    _validate_common_args(job_id, repo_path, "execute_coding_team_workflow")
+    _validate_common_args(job_id, repo_path, caller="execute_coding_team_workflow")
     _validate_github_arg(github, caller="execute_coding_team_workflow", required=True)
     _validate_plan_input_arg(plan_input, caller="execute_coding_team_workflow")
     payload = _build_workflow_payload(job_id, repo_path, plan_input, github)

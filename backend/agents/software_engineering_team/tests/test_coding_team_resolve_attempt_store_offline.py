@@ -249,10 +249,17 @@ class _SqliteCursor:
 class _SqliteConn:
     """Context-manager wrapper around a real sqlite connection that COMMITS on exit.
 
-    Mirrors the transaction boundary the production store relies on around
-    ``get_conn()``: without the commit-on-exit, a write made inside one ``with``
-    block would not be visible to the next one and the offline round-trip tests
-    would pass or fail for the wrong reason.
+    Mirrors the commit-on-exit transaction boundary the production ``get_conn()``
+    context manager provides, so the store's write path is exercised against the
+    same commit semantics it sees in production.
+
+    NOT load-bearing for cross-call visibility in this fixture, and deliberately
+    documented as such: ``get_conn`` is monkeypatched to hand out a wrapper over
+    ONE shared sqlite connection, and a connection always sees its own
+    uncommitted writes. Anyone "fixing" the fixture to hand out a fresh
+    connection per call would give each call its own separate ``:memory:``
+    database and break every round-trip test in this file, so the reason this
+    commit is here is production fidelity, not test correctness.
     """
 
     def __init__(self, conn) -> None:

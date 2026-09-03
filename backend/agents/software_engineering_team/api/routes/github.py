@@ -101,9 +101,10 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
           preparation failure — anticipated (400/500/502) or not — leaves no row
           behind: an orphaned 'pending' row counts as active for
           ``_running_job_for_issue`` and would 409 every later retry for this
-          issue with nothing left to terminalize it. When a token encryption key is configured, the encrypted
-          token is stored on the job record too, so a later resume can re-drive
-          the GitHub publish flow without the caller supplying it again.
+          issue with nothing left to terminalize it.
+        - When a token encryption key is configured, the encrypted token is
+          stored on the job record too, so a later resume can re-drive the
+          GitHub publish flow without the caller supplying it again.
         - The CodingTeamWorkflow is started with a GitHub payload that contains
           branch metadata (including the base branch's HEAD SHA at this
           moment, so branch prep can detect the base moving before it runs)
@@ -219,7 +220,13 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         # deferring the write costs no serialization.
         base = request.base_branch or default_branch
         if not base:
-            logger.error("Unable to resolve base branch for GitHub-issue run")
+            logger.error(
+                "Unable to resolve base branch for GitHub-issue run "
+                "(repo=%s remote=%s issue=%s)",
+                request.repo_path,
+                request.remote,
+                issue.number,
+            )
             raise HTTPException(
                 status_code=500, detail="unable to resolve base branch for GitHub-issue run"
             )
@@ -247,6 +254,13 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                 redact_secret(str(base_sha_or_err), token),
             )
             raise HTTPException(status_code=502, detail="unable to resolve base branch head sha")
+        # Re-bind under an unambiguous name: past this guard the union-typed
+        # ``base_sha_or_err`` is known to hold the resolved SHA, but that is a
+        # purely positional invariant -- a later edit that reorders the guard
+        # or moves the dispatch below would otherwise ship an ERROR STRING to
+        # the workflow as ``expected_base_sha``, silently defeating the drift
+        # detection this pinning exists for.
+        base_sha = base_sha_or_err
         integration_branch = integration_branch_for(issue.number)
         # ONE source for the serialized plan: the persisted job row and the
         # workflow payload below must carry the same plan by construction, not
@@ -282,7 +296,7 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                     "issue_title": issue.title,
                     "base": base,
                     "integration_branch": integration_branch,
-                    "expected_base_sha": base_sha_or_err,
+                    "expected_base_sha": base_sha,
                 },
             )
         except Exception as e:

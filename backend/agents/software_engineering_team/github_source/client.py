@@ -1447,9 +1447,15 @@ class GitHubClient(_GitHubHttpMixin):
                         or isinstance(database_id, bool)
                         or not isinstance(database_id, int)
                     ):
+                        # "missing OR invalid", matching every sibling
+                        # diagnostic in this function: this branch also fires
+                        # for a PRESENT id that is a bool or a non-int, and
+                        # calling those "missing" misdirects anyone debugging
+                        # a fail-closed strict-mode error.
                         _unavailable(
-                            "review comment missing databaseId (thread "
-                            f"{thread_id!r}): {comment!r}"
+                            "review comment has a missing or invalid databaseId "
+                            f"(expected non-bool int, got {database_id!r}; comment "
+                            f"{comment!r}, thread {thread_id!r})"
                         )
                         continue
                     comment_ids_list.append(database_id)

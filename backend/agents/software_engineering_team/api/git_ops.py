@@ -932,8 +932,8 @@ def _merge_recovered_wip(
     )
 
 
-# Name a fork's clone URL is registered under once it has been added as a local
-# git remote (see _ensure_named_remote). Fixed rather than per-fork: the
+# Name under which a fork's clone URL is registered once it has been added as a
+# local git remote (see _ensure_named_remote). Fixed rather than per-fork: the
 # per-PR checkout isolation (unified_api's pr-{N} namespacing) already
 # guarantees at most one PR's head repository is ever relevant to a given
 # checkout, so there is never more than one fork remote to register at a time.

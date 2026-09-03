@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 import sys
 from functools import partial
 from pathlib import Path
@@ -404,3 +405,77 @@ def test_se_metrics_alias_returns_502_on_non_json_body(monkeypatch: pytest.Monke
     _patch_async_client(monkeypatch, handler)
     resp = client.get("/api/se/metrics")
     assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# Redaction denylist drift guard
+# ---------------------------------------------------------------------------
+
+# Job records carry free-form extra fields (there is no single model to
+# introspect), so the source itself is the only source of truth for which
+# credential-bearing fields exist. Every team writes them the same way: a
+# literal key assigned into the ``*_fields`` dict handed to ``create_job`` /
+# ``update_job``.
+_JOB_FIELD_ASSIGNMENT_RE = re.compile(r"""\b\w*_fields\[["'](?P<key>[\w.-]+)["']\]\s*=""")
+_CREDENTIAL_FIELD_RE = re.compile(r"token|secret|credential|password|passphrase|api[_-]?key", re.I)
+
+# Fields the name-based scan matches that are deliberately NOT redacted, each
+# with the reason it is safe. A new match must be resolved here explicitly --
+# either by adding it to ``_REDACTED_JOB_FIELDS`` or by justifying it below --
+# which is the whole point of the guard: no credential field can be added to
+# the job record without someone making that call.
+_NON_CREDENTIAL_JOB_FIELDS = {
+    # A HITL pause CORRELATION id, not a secret: a client that discovers the
+    # pause by polling the job record has no other way to obtain the token it
+    # must echo back on SubmitAnswersRequest, so redacting it here would break
+    # the documented resume contract.
+    "resume_token",
+}
+
+
+def _credential_job_fields() -> set[str]:
+    """Every credential-looking job-record field name assigned anywhere in ``backend``.
+
+    Preconditions:
+        - ``_backend`` points at the repository's ``backend`` directory.
+    Postconditions:
+        - Returns the set of literal ``*_fields["<key>"] = ...`` keys found in
+          non-test Python sources whose name matches
+          :data:`_CREDENTIAL_FIELD_RE`. Pure apart from reading the tree; an
+          unreadable file is skipped rather than failing the scan.
+    """
+    found: set[str] = set()
+    for py in _backend.rglob("*.py"):
+        parts = py.parts
+        if "tests" in parts or "__pycache__" in parts or py.name.startswith("test_"):
+            continue
+        try:
+            text = py.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):  # pragma: no cover - unreadable source
+            continue
+        for m in _JOB_FIELD_ASSIGNMENT_RE.finditer(text):
+            key = m.group("key")
+            if _CREDENTIAL_FIELD_RE.search(key):
+                found.add(key)
+    return found
+
+
+def test_redacted_job_fields_covers_every_credential_job_field() -> None:
+    """The denylist must not drift behind the job record it protects.
+
+    ``_REDACTED_JOB_FIELDS`` is a NAME-based denylist: it fails closed against
+    envelope drift (the redaction walks every dict, whatever the wrapper), but
+    it fails OPEN against field drift -- a team adding a second credential
+    column to the job row would have it proxied to every job reader until
+    someone remembered to update the set. Nothing else ties the two together,
+    so this scan does: any ``*_fields["...token/secret/credential/..."]``
+    assignment in backend source that is neither in the denylist nor in the
+    justified :data:`_NON_CREDENTIAL_JOB_FIELDS` allowlist fails here.
+    """
+    credential_fields = _credential_job_fields()
+    # Self-check: the scan is only a guard if it actually finds the field the
+    # denylist was written for. A regex that silently matched nothing would
+    # make the assertion below vacuously true forever.
+    assert "github_token_encrypted" in credential_fields
+    leaky = credential_fields - main._REDACTED_JOB_FIELDS - _NON_CREDENTIAL_JOB_FIELDS
+    assert not leaky, f"credential job fields missing from _REDACTED_JOB_FIELDS: {sorted(leaky)}"

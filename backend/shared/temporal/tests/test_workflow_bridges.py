@@ -381,16 +381,18 @@ class _FakeFailingReattachHandle(_FakeReattachHandle):
         raise RuntimeError("workflow failed")
 
 
-def _run_reattach_sync_bounded(**kwargs):
+def _run_execute_sync_bounded(**kwargs):
     """Call ``runner.execute_workflow_sync`` on a bounded background thread.
 
-    Every reattach test needs the SAME bound: a regression that makes reattach
-    hang forever (re-polling an already-cancelled waiter, say) must fail here
-    with a message naming the cause, not at CI's own global timeout with no
-    clue which test caused it. Calling directly on the test thread gives no
-    such bound, and pytest runs these tests in file order, so an unbounded
-    earlier test would stall before any bounded later one ever ran. Extracted
-    rather than triplicated so the scaffolding cannot drift between them.
+    Every test in this section needs the SAME bound -- the reattach ones (a
+    regression that re-polls an already-cancelled waiter hangs forever) and
+    the default no-reattach one alike (a dropped internal wait timeout hangs
+    just as hard) -- and a hang must fail here with a message naming the
+    cause, not at CI's own global timeout with no clue which test caused it.
+    Calling directly on the test thread gives no such bound, and pytest runs
+    these tests in file order, so an unbounded earlier test would stall before
+    any bounded later one ever ran. Extracted rather than repeated so the
+    scaffolding cannot drift between them.
 
     Preconditions:
         - ``kwargs`` are the keyword arguments of
@@ -415,8 +417,8 @@ def _run_reattach_sync_bounded(**kwargs):
     worker.start()
     worker.join(timeout=5.0)
     assert not worker.is_alive(), (
-        "execute_workflow_sync(reattach_on_timeout=True) did not return within the 5s bound -- "
-        "reattach appears to have hung instead of giving up early or completing"
+        "execute_workflow_sync did not return within the 5s bound -- the call appears to have "
+        "hung instead of raising or completing"
     )
     if "exc" in result_box:
         raise result_box["exc"]
@@ -430,9 +432,7 @@ def test_execute_workflow_sync_without_reattach_raises_timeout(running_loop):
     client_mod.set_temporal_loop(running_loop)
 
     with pytest.raises(TimeoutError):
-        runner.execute_workflow_sync(
-            object(), workflow_id="wid", task_queue="q", execute_timeout_s=0.05
-        )
+        _run_execute_sync_bounded(workflow_id="wid", task_queue="q", execute_timeout_s=0.05)
 
 
 def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loop):
@@ -445,7 +445,7 @@ def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loo
     client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
     client_mod.set_temporal_loop(running_loop)
 
-    out = _run_reattach_sync_bounded(
+    out = _run_execute_sync_bounded(
         workflow_id="wid",
         task_queue="q",
         execute_timeout_s=0.01,
@@ -468,7 +468,7 @@ def test_execute_workflow_sync_reattach_cancels_initial_waiter(running_loop):
     client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
     client_mod.set_temporal_loop(running_loop)
 
-    out = _run_reattach_sync_bounded(
+    out = _run_execute_sync_bounded(
         workflow_id="wid",
         task_queue="q",
         execute_timeout_s=0.01,
@@ -494,7 +494,7 @@ def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
     (which would leak concurrent waiters for a long-running workflow).
 
     ``execute_workflow_sync`` is called through
-    :func:`_run_reattach_sync_bounded` -- a background thread with a bounded
+    :func:`_run_execute_sync_bounded` -- a background thread with a bounded
     ``join`` rather than the test's own thread: a regression that made reattach
     give up too early would still pass eventually if it instead hung forever
     (e.g. re-polling the same already-cancelled waiter), and a bare hanging
@@ -508,7 +508,7 @@ def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
     client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
     client_mod.set_temporal_loop(running_loop)
 
-    out = _run_reattach_sync_bounded(
+    out = _run_execute_sync_bounded(
         workflow_id="wid",
         task_queue="q",
         execute_timeout_s=0.02,
@@ -538,7 +538,7 @@ def test_execute_workflow_sync_reattach_propagates_workflow_failure(running_loop
     client_mod.set_temporal_loop(running_loop)
 
     with pytest.raises(RuntimeError, match="workflow failed"):
-        _run_reattach_sync_bounded(
+        _run_execute_sync_bounded(
             workflow_id="wid",
             task_queue="q",
             execute_timeout_s=0.01,

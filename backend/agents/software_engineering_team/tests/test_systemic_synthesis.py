@@ -302,6 +302,7 @@ _GHU = f"ghu_{'B' * 22}"
 _GHS = f"ghs_{'C' * 22}"
 _GHR = f"ghr_{'D' * 22}"
 _GHP2 = f"ghp_{'E' * 22}"
+_GHO = f"gho_{'H' * 24}"
 # Fine-grained PAT shape: its body contains underscores, which is exactly why
 # the ``gh[pousr]_[A-Za-z0-9]+`` alternative can never match it.
 _PAT = f"github_pat_{'F' * 12}_{'G' * 12}"
@@ -313,7 +314,7 @@ _PAT = f"github_pat_{'F' * 12}_{'G' * 12}"
         "",
         "no credentials here",
         f"clone https://x-access-token:{_GHP}@github.com/o/r",
-        "token gho_abcdef0123456789abcdef01 quoted inside a finding",
+        f"token {_GHO} quoted inside a finding",
         f"{_GHU} and {_GHS} and {_GHR}",
         f"https://{_FAKE}@example.com/path plus {_GHP2}",
         f"fine-grained {_PAT} quoted inside a finding",

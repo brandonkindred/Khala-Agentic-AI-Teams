@@ -161,7 +161,7 @@ def test_execute_coding_team_workflow_requires_repo_path():
 def test_execute_coding_team_workflow_rejects_plaintext_token():
     # Preconditions must be enforced reliably (not via `assert`, which is
     # stripped under python -O) since this rejects a real secret-leak risk.
-    with pytest.raises(ValueError, match="must not include a token"):
+    with pytest.raises(ValueError, match="must not include a credential-named key"):
         sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {"token": "ghp_secret"})
 
 
@@ -169,14 +169,14 @@ def test_execute_coding_team_workflow_rejects_nested_plaintext_token():
     """P1 regression: a token buried under a sub-dict (e.g. `github["auth"]
     ["token"]`) must be rejected too — a top-level-only check would let it
     slip into the durable Temporal event history."""
-    with pytest.raises(ValueError, match="must not include a token"):
+    with pytest.raises(ValueError, match="must not include a credential-named key"):
         sw.execute_coding_team_workflow(
             "job-7", "/repo", {"x": 1}, {"auth": {"token": "ghp_secret"}}
         )
 
 
 def test_execute_coding_team_workflow_rejects_token_nested_in_list():
-    with pytest.raises(ValueError, match="must not include a token"):
+    with pytest.raises(ValueError, match="must not include a credential-named key"):
         sw.execute_coding_team_workflow(
             "job-7", "/repo", {"x": 1}, {"extra": [{"token": "ghp_secret"}]}
         )
@@ -233,7 +233,7 @@ def test_dispatchers_reject_token_in_plan_input(monkeypatch, dispatch):
     event history -- an asymmetry only a test that exercises both can catch.
     """
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
-    with pytest.raises(ValueError, match="plan_input to not include a token"):
+    with pytest.raises(ValueError, match="plan_input to not include a credential-named key"):
         dispatch({"auth": {"token": "ghp_secret"}})
 
 
@@ -275,6 +275,11 @@ def test_contains_token_key_flags_every_credential_marker(key):
     permanent event history."""
     assert sw._contains_token_key({key: "value"}) is True
     assert sw._contains_token_key({"outer": [{key: "value"}]}) is True
+    # A TUPLE container too, not just a list: the traversal guard admits
+    # dict/list/tuple, and a regression narrowing it to ``isinstance(v, list)``
+    # would otherwise pass this whole suite while a tuple-carried credential
+    # reached Temporal's permanent event history unscanned.
+    assert sw._contains_token_key({"outer": ({key: "value"},)}) is True
 
 
 @pytest.mark.parametrize(
@@ -368,7 +373,12 @@ def _docstring_marker_enumerations(doc: str) -> list[set[str]]:
 
 @pytest.mark.parametrize(
     "func",
-    [sw.start_coding_team_workflow, sw.execute_coding_team_workflow],
+    [
+        sw.start_coding_team_workflow,
+        sw.execute_coding_team_workflow,
+        sw._validate_plan_input_arg,
+        sw._validate_github_arg,
+    ],
 )
 def test_docstring_marker_enumeration_matches_the_data(func):
     """The enumeration is spelled out ONCE per docstring, and pinned to the data.
@@ -380,6 +390,16 @@ def test_docstring_marker_enumeration_matches_the_data(func):
     documenting one that is not enforced, fails here. Every OTHER mention in
     these docstrings carries the bare ``:data:`` cross-reference, so there is
     only ever one list to keep true.
+
+    The rule this pins, deliberately covering EVERY docstring that describes
+    the screen (both public dispatchers AND the two shared validators they
+    delegate to, which is where the enumerations previously drifted apart
+    unnoticed): each such docstring enumerates the markers exactly once, in
+    the single canonical spelling
+    ``(any of :data:`_TOKEN_KEY_MARKERS` — a, b/c)``. Keeping the list rather
+    than dropping it is what makes the contract readable without opening the
+    source; parametrizing over every docstring that carries one is what keeps
+    it honest. A new function documenting the screen must be added here too.
     """
     enumerations = _docstring_marker_enumerations(func.__doc__ or "")
     assert len(enumerations) == 1, f"{func.__name__} should enumerate the markers exactly once"

@@ -2601,13 +2601,13 @@ def _resolve_repo_path(
         val = os.environ.get(env_var, "").strip()
         if val:
             base = Path(val) / f"{owner}_{repo}"
-            target = base / namespace_segment if namespace_segment else base
+            target = (base / namespace_segment) if namespace_segment else base
             return str(target.resolve())
 
     # Shared AGENT_CACHE resolver (single source of truth) so the derived path
     # and the cleanup safety root in ephemeral_workspace_roots never diverge.
     base = Path(agent_cache_dir()) / "github_workspaces" / owner / repo
-    target = base / namespace_segment if namespace_segment else base
+    target = (base / namespace_segment) if namespace_segment else base
     return str(target.resolve())
 
 
@@ -3057,9 +3057,12 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
     except OSError as e:
         # Any OTHER OSError escaping the locked section -- a missing git binary,
-        # a permission error or full disk during clone/fetch, an
-        # aiohttp.ClientOSError from the forward -- is not a lock problem and is
-        # not necessarily transient, so it must not claim to be either.
+        # a permission error or full disk during clone/fetch -- is not a lock
+        # problem and is not necessarily transient, so it must not claim to be
+        # either. The forward itself contributes nothing here: it goes through
+        # `_forward_to_coding_team`, which is httpx-based and converts every
+        # `httpx.HTTPError` (none of which subclasses OSError) into an
+        # HTTPException before it can reach this handler.
         raise HTTPException(
             status_code=500,
             detail=f"github run-issue failed while preparing {owner}/{repo}: {e}",
@@ -3325,11 +3328,14 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
         # generic OSError handler below -- it is a subclass.
         raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
     except OSError as e:
-        # Any OTHER OSError from the locked section is not a lock problem. This
-        # one matters especially here: aiohttp.ClientOSError subclasses OSError,
-        # so a failure of the FORWARD (by which point the coding-team job may
-        # already have started) would otherwise be reported as "the lock could
-        # not be acquired", i.e. as though nothing had happened at all.
+        # Any OTHER OSError from the locked section is not a lock problem and
+        # must not be reported as "the lock could not be acquired", i.e. as
+        # though nothing had happened at all. What lands here is clone/fetch
+        # preparation failing (a missing git binary, a permission error, a full
+        # disk) -- NOT the forward: `_forward_to_coding_team` is httpx-based and
+        # converts every `httpx.HTTPError` (none of which subclasses OSError)
+        # into an HTTPException, so the "while preparing" wording below is
+        # accurate for every error that can actually arrive.
         raise HTTPException(
             status_code=500,
             detail=f"github address-comments failed while preparing {owner}/{repo}: {e}",

@@ -575,8 +575,12 @@ def test_ensure_repo_clone_fetch_success_on_existing_worktree_checkout(tmp_path)
     with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]) as mock_run:
         err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
     assert err is None
-    # Fetched (the existing-checkout branch), never attempted a clone.
+    # Fetched (the existing-checkout branch), never attempted a clone. The argv
+    # assertion is what actually pins that: a regression that fell through to
+    # `git clone` would still make two mocked calls and still return None, so
+    # call_count alone cannot tell fetch from clone.
     assert mock_run.call_count == 2
+    assert mock_run.call_args_list[1].args[0] == ["git", "-C", str(repo), "fetch", "origin"]
 
 
 def test_ensure_repo_clone_fetch_targets_origin_only(tmp_path):
@@ -1702,15 +1706,18 @@ def test_github_api_base_strips_trailing_slash(monkeypatch):
 
 
 def test_github_api_base_strips_multiple_trailing_slashes(monkeypatch):
+    """GITHUB_API_URL with SEVERAL trailing slashes is normalized to exactly one stripped base."""
     monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3///")
     assert _github_api_base() == "https://ghes.example.com/api/v3"
 
 
 def test_github_api_base_no_trailing_slash_unaffected(monkeypatch):
+    """GITHUB_API_URL without a trailing slash is returned unchanged."""
     monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3")
     assert _github_api_base() == "https://ghes.example.com/api/v3"
 
 
 def test_github_api_base_default_when_unset(monkeypatch):
+    """GITHUB_API_URL unset falls back to the public GitHub API base."""
     monkeypatch.delenv("GITHUB_API_URL", raising=False)
     assert _github_api_base() == "https://api.github.com"
