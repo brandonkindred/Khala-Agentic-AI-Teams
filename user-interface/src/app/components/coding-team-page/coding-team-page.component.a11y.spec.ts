@@ -186,6 +186,9 @@ describe('CodingTeamPageComponent a11y', () => {
   }, 15000);
 
   it('has no axe violations on the GitHub view with a blocked issue selected', async () => {
+    await setup();
+    // Set after setup() (which installs its own default) and before expandFirstRepo() (which
+    // triggers the fetch this override needs to win), so this mock can never be clobbered.
     integrationsSpy.getGitHubIssues.mockReturnValue(
       of([
         {
@@ -200,7 +203,6 @@ describe('CodingTeamPageComponent a11y', () => {
         },
       ]),
     );
-    await setup();
     showView('github');
     expandFirstRepo();
     component.selectIssue(component.issues[0]);

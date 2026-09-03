@@ -282,6 +282,7 @@
                           @if (selectedIssue?.number === vm.number) {
                             <div
                               class="github-confirm-panel"
+                              role="region"
                               [id]="confirmPanelId(vm.number)"
                               [attr.aria-labelledby]="confirmPanelHeadingId(vm.number)"
                               tabindex="-1"
