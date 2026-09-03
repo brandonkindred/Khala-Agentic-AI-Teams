@@ -31,6 +31,14 @@ class PipelineContext:
           stage runs.
         - ``planning_phase_result``/``plan``/``elicited_stories_text`` are populated
           by the planning stage before the draft stage reads them.
+        - ``selected_title`` has no in-pipeline producer: no stage writes it, so it
+          holds whatever the caller passed at construction (``None`` by default).
+          The draft stage reads it and threads it into the writer/revision inputs;
+          at ``None`` the writer picks its own title, which is what every current
+          entry point gets. Title selection today runs in the *gates* stage
+          (``_run_title_selection``), after the draft is final, and feeds only
+          ``PublishingPack.title_options`` — pinning a title before drafting would
+          require moving that gate ahead of the draft stage.
         - ``draft_result`` is populated by the draft stage before the gates stage
           reads it.
     """
@@ -52,6 +60,7 @@ class PipelineContext:
     planning_phase_result: Optional[PlanningPhaseResult] = None
     plan: Optional[ContentPlan] = None
     elicited_stories_text: Optional[str] = None
+    selected_title: Optional[str] = None
     draft_result: Optional["WriterOutput"] = None
     status: PipelineStatus = "PASS"
 

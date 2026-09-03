@@ -178,6 +178,84 @@ describe('CodingTeamPageComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  describe('loading states render via app-loading-spinner (role="status")', () => {
+    /** Every `[role="status"]` element currently rendered, for locating the one with the expected text. */
+    function statusRegions(): HTMLElement[] {
+      return Array.from(fixture.nativeElement.querySelectorAll('[role="status"]'));
+    }
+
+    it('shows "Checking GitHub integration…" via app-loading-spinner while isLoadingConfig is true', async () => {
+      const configSubject = new Subject<GitHubConfigResponse>();
+      integrationsSpy.getGitHubConfig.mockReturnValue(configSubject.asObservable());
+      await setup();
+      showView('github');
+      expect(component.isLoadingConfig).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('.github-section--loading')).toBeNull();
+      expect(statusRegions().some((el) => el.textContent?.includes('Checking GitHub integration…'))).toBe(true);
+      configSubject.next(CONFIGURED);
+      configSubject.complete();
+      fixture.detectChanges();
+      expect(component.isLoadingConfig).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
+    });
+
+    it('shows "Loading repositories…" via app-loading-spinner while loadingRepos is true', async () => {
+      const reposSubject = new Subject<GitHubRepoItem[]>();
+      integrationsSpy.getGitHubRepos.mockReturnValue(reposSubject.asObservable());
+      await setup();
+      showView('github');
+      expect(component.loadingRepos).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
+      expect(statusRegions().some((el) => el.textContent?.includes('Loading repositories…'))).toBe(true);
+      reposSubject.next([REPO]);
+      reposSubject.complete();
+      fixture.detectChanges();
+      expect(component.loadingRepos).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
+    });
+
+    it('shows "Loading issues…" via app-loading-spinner while loadingIssues is true', async () => {
+      const issuesSubject = new Subject<GitHubIssueItem[]>();
+      integrationsSpy.getGitHubIssues.mockReturnValue(issuesSubject.asObservable());
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      expect(component.loadingIssues).toBe(true);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
+      expect(statusRegions().some((el) => el.textContent?.includes('Loading issues…'))).toBe(true);
+      issuesSubject.next(makeIssues(1));
+      issuesSubject.complete();
+      fixture.detectChanges();
+      expect(component.loadingIssues).toBe(false);
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
+    });
+
+    it('shows "Starting…" via app-loading-spinner for a selected run with no status yet', async () => {
+      await setup();
+      const run = ghRun({ status: 'running' });
+      component.runs = [run];
+      component.runningRuns = [run];
+      component.recentRuns = [];
+      // The template iterates the precomputed view-models, so they must be rebuilt from the run
+      // list via the same private builder the component uses (bracket access, the spec's idiom
+      // for internals — no structural cast to a private method's shape) before toggleRun renders it.
+      component['buildRunVms']();
+      // toggleRun selects the run and (re)starts polling on a timer, so `jobStatus` stays null
+      // until the poller's first (async) tick — the window this "Starting…" branch covers.
+      component.toggleRun(run);
+      fixture.detectChanges();
+      expect(component.jobStatus).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).not.toBeNull();
+      expect(statusRegions().some((el) => el.textContent?.includes('Starting…'))).toBe(true);
+      // Let the poller's first (async) tick land, matching the teardown check the three sibling tests make.
+      await flushAsync();
+      fixture.detectChanges();
+      expect(component.jobStatus).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
+    });
+  });
+
   it('auto-loads the accessible repositories on init when GitHub is configured', async () => {
     await setup();
     expect(integrationsSpy.getGitHubConfig).toHaveBeenCalled();
@@ -1006,6 +1084,46 @@ describe('CodingTeamPageComponent', () => {
       });
       expect(component.dependencyTooltip(met)).toBe('Depends on #3, #5 (all complete)');
       expect(component.openDepRefs(met)).toBe('');
+    });
+  });
+
+  describe('repoRowTooltip', () => {
+    it('composes the description and the issue-count clarification when a description is present', async () => {
+      await setup();
+      const repo: GitHubRepoItem = { ...REPO, description: 'A widget factory.' };
+      expect(component.repoRowTooltip(repo)).toBe(
+        'A widget factory. — Open issues and pull requests reported by GitHub'
+      );
+    });
+
+    it('returns just the issue-count clarification when description is null or empty, with no dangling separator', async () => {
+      await setup();
+      expect(component.repoRowTooltip({ ...REPO, description: null })).toBe(
+        'Open issues and pull requests reported by GitHub'
+      );
+      expect(component.repoRowTooltip({ ...REPO, description: '' })).toBe(
+        'Open issues and pull requests reported by GitHub'
+      );
+      expect(component.repoRowTooltip({ ...REPO, description: '   ' })).toBe(
+        'Open issues and pull requests reported by GitHub'
+      );
+      expect(component.repoRowTooltip({ ...REPO, description: '  Padded widget factory.  ' })).toBe(
+        'Padded widget factory. — Open issues and pull requests reported by GitHub'
+      );
+    });
+  });
+
+  describe('issueRowTooltip', () => {
+    it('returns the title alone when the issue is not in progress', async () => {
+      await setup();
+      expect(component.issueRowTooltip({ title: 'Fix the thing', inProgress: false })).toBe('Fix the thing');
+    });
+
+    it('appends the in-progress clause when the issue is in progress', async () => {
+      await setup();
+      expect(component.issueRowTooltip({ title: 'Fix the thing', inProgress: true })).toBe(
+        'Fix the thing — The coding team is already working on this issue'
+      );
     });
   });
 

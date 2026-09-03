@@ -150,7 +150,17 @@ There is no separate DbC gate inside this per-microtask loop; instead, `DbcComme
 Data and control-flow dependencies among the build/code-review/security/QA
 gates specifically, and which of them are safe to parallelize vs. require a
 redesign, are mapped in
-[`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md).
+[`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md). The finding
+shapes those gates emit — fields, severity vocabularies, defect categories,
+and which findings carry a file path and line number — are catalogued in
+[`docs/GATE_FINDING_INVENTORY.md`](docs/GATE_FINDING_INVENTORY.md). The
+golden-set evaluation harness's corpus case format and closed
+finding-label vocabulary, built on that inventory, are specified in
+[`docs/CORPUS_CASE_FORMAT.md`](docs/CORPUS_CASE_FORMAT.md). The rule for
+deciding when a gate's finding counts as matching one of those labels —
+location resolution, defect-class resolution, line tolerance, and
+deterministic tie-breaking — is specified in
+[`docs/GATE_FINDING_MATCHING_RULE.md`](docs/GATE_FINDING_MATCHING_RULE.md).
 
 ## Plan folder
 

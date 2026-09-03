@@ -59,10 +59,7 @@
 <!-- ────────────────────────────────────────────────────────────────── -->
 @if (activeView === 'github') {
   @if (isLoadingConfig) {
-    <div class="github-section github-section--loading">
-      <mat-spinner diameter="24"></mat-spinner>
-      <span>Checking GitHub integration…</span>
-    </div>
+    <app-loading-spinner [diameter]="24" message="Checking GitHub integration…" />
   } @else if (!githubConfigured) {
     <div class="github-section github-section--unconfigured">
       <mat-icon>info</mat-icon>
@@ -95,10 +92,7 @@
       }
 
       @if (loadingRepos) {
-        <div class="github-section--loading">
-          <mat-spinner diameter="24"></mat-spinner>
-          <span>Loading repositories…</span>
-        </div>
+        <app-loading-spinner [diameter]="24" message="Loading repositories…" />
       }
 
       @if (reposLoaded) {
@@ -148,23 +142,27 @@
           }
           <div class="github-repos-list">
             @for (repo of filteredRepos; track repo.full_name; let i = $index) {
+              <!--
+                No tabindex on the nested name/issues spans below: a focusable descendant of a
+                <button> is invalid per the HTML interactive-content model and would add a second
+                tab stop to every repo row. Both messages are composed into repoRowTooltip() and
+                bound on the button itself instead.
+              -->
               <button
                 class="github-repo-row"
                 type="button"
                 [class.github-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
                 [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
                 [attr.aria-controls]="'repo-issues-' + i"
+                [matTooltip]="repoRowTooltip(repo)"
                 (click)="toggleRepo(repo)"
               >
                 <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
-                <span class="github-repo-row__name" [matTooltip]="repo.description">{{ repo.full_name }}</span>
+                <span class="github-repo-row__name">{{ repo.full_name }}</span>
                 @if (repo.archived) {
                   <span class="github-label-chip">archived</span>
                 }
-                <span
-                  class="github-repo-row__issues"
-                  matTooltip="Open issues and pull requests reported by GitHub"
-                >{{ repo.open_issues_count }} open</span>
+                <span class="github-repo-row__issues">{{ repo.open_issues_count }} open</span>
                 <mat-icon class="github-repo-row__arrow" aria-hidden="true">
                   {{ selectedRepo?.full_name === repo.full_name ? 'expand_less' : 'chevron_right' }}
                 </mat-icon>
@@ -193,10 +191,7 @@
                     </p>
                   }
                   @if (loadingIssues) {
-                    <div class="github-section--loading">
-                      <mat-spinner diameter="20"></mat-spinner>
-                      <span>Loading issues…</span>
-                    </div>
+                    <app-loading-spinner [diameter]="20" message="Loading issues…" />
                   }
                   @if (issuesLoaded) {
                     @if (issues.length === 0) {
@@ -240,21 +235,26 @@
                       } @else {
                       <div class="github-issues-list">
                         @for (vm of pagedIssueVms; track vm.number) {
+                          <!--
+                            No tabindex on the nested title/chip spans below: a focusable
+                            descendant of a <button> is invalid per the HTML interactive-content
+                            model and would add a second tab stop to every issue row. Both
+                            messages are composed into issueRowTooltip() and bound on the button
+                            itself instead.
+                          -->
                           <button
                             class="github-issue-row"
                             type="button"
                             [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
                             [attr.aria-controls]="'confirm-panel-' + vm.number"
+                            [matTooltip]="issueRowTooltip(vm)"
                             (click)="selectIssue(vm.issue)"
                           >
                             <span class="github-issue-row__number">#{{ vm.number }}</span>
-                            <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
+                            <span class="github-issue-row__title">{{ vm.title }}</span>
                             @if (vm.inProgress) {
-                              <span
-                                class="github-label-chip github-label-chip--active"
-                                matTooltip="The coding team is already working on this issue"
-                              >
+                              <span class="github-label-chip github-label-chip--active">
                                 <mat-icon aria-hidden="true">engineering</mat-icon>
                                 In progress
                               </span>
@@ -316,7 +316,7 @@
                                   [disabled]="runningIssue"
                                 >
                                   @if (runningIssue) {
-                                    <mat-spinner diameter="18"></mat-spinner>
+                                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
                                     Starting…
                                   } @else {
                                     <ng-container>
@@ -366,11 +366,14 @@
         <mat-icon aria-hidden="true">engineering</mat-icon>
         Runs
       </h2>
-      <mat-icon
+      <button
+        type="button"
         class="jobs-panel__legend"
         matTooltip="Runs stay here while they work and after they finish. Pick a run to expand its live progress."
         aria-label="About the Runs list"
-      >help_outline</mat-icon>
+      >
+        <mat-icon aria-hidden="true">help_outline</mat-icon>
+      </button>
     </div>
 
     @if (runsError) {
@@ -503,7 +506,13 @@
                 <span class="github-job-panel__label">Tasks</span>
                 <div class="github-job-tasks__list">
                   @for (task of jobStatus.task_graph_snapshot; track task.id) {
-                    <div class="github-task-chip github-task-chip--{{ task.status }}" [matTooltip]="task.title">
+                    <div
+                      class="github-task-chip github-task-chip--{{ task.status }}"
+                      tabindex="0"
+                      role="img"
+                      [attr.aria-label]="task.title + ' — ' + task.status"
+                      [matTooltip]="task.title"
+                    >
                       {{ task.title | slice:0:40 }}
                       <span class="github-task-chip__status">{{ task.status }}</span>
                     </div>
@@ -541,7 +550,7 @@
                   aria-label="Resume the coding-team run"
                 >
                   @if (resumingJob) {
-                    <mat-spinner diameter="18"></mat-spinner>
+                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
                     Resuming…
                   } @else {
                     <ng-container>
@@ -598,7 +607,7 @@
               <div class="run-detail__retry">
                 <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
                   @if (runningIssue) {
-                    <mat-spinner diameter="18"></mat-spinner>
+                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
                     Starting…
                   } @else {
                     <ng-container>
@@ -619,10 +628,7 @@
           <app-inline-banner variant="error" [message]="jobStatusError" />
         </div>
       } @else {
-        <div class="run-detail run-detail--pending">
-          <mat-spinner diameter="18"></mat-spinner>
-          <span>Starting…</span>
-        </div>
+        <app-loading-spinner [diameter]="18" message="Starting…" />
       }
     </ng-template>
   </section>

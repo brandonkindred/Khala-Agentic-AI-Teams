@@ -1,10 +1,12 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { By } from '@angular/platform-browser';
+import { Subject, of } from 'rxjs';
 import type { CodingTeamJobListItem } from '../../models/coding-team.model';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { provideRouter } from '@angular/router';
+import { MatTooltip } from '@angular/material/tooltip';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
@@ -172,6 +174,55 @@ describe('CodingTeamPageComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
+  it('exposes the composed repo description and issue-count tooltip on the row button, with no nested tab stops', async () => {
+    await setup();
+    showView('github');
+    const el: HTMLElement = fixture.nativeElement;
+    const row = el.querySelector('.github-repo-row') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(row.tagName).toBe('BUTTON');
+
+    const rowDebugEl = fixture.debugElement.query(By.css('.github-repo-row'));
+    const tooltip = rowDebugEl.injector.get(MatTooltip);
+    // Pinned to the literal composed string (not component.repoRowTooltip(...)) so this
+    // assertion independently catches a wrongly composed tooltip rather than trivially
+    // agreeing with whatever the method under test currently returns.
+    expect(tooltip.message).toBe('Widget factory — Open issues and pull requests reported by GitHub');
+
+    expect(row.querySelectorAll('[tabindex]').length).toBe(0);
+
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('exposes the composed title and in-progress tooltip on the issue row button, with no nested tab stops', async () => {
+    await setup();
+    showView('github');
+    expandFirstRepo();
+
+    // Mark issue #2 as already in progress (matching REPO's owner/name) so both the
+    // plain-title and in-progress-clause branches of issueRowTooltip() render in the same list.
+    component.activeRunKeys = new Set(['acme/widgets#2']);
+    component['recomputeIssueVms']();
+    fixture.detectChanges();
+
+    const rows = fixture.debugElement.queryAll(By.css('.github-issue-row'));
+    expect(rows.length).toBe(3);
+    rows.forEach((row) => {
+      expect((row.nativeElement as HTMLElement).querySelectorAll('[tabindex]').length).toBe(0);
+    });
+
+    // Pinned to the literal composed strings (not component.issueRowTooltip(...)) so these
+    // assertions independently catch a wrongly composed tooltip rather than trivially
+    // agreeing with whatever the method under test currently returns.
+    expect(rows[0].injector.get(MatTooltip).message).toBe('Issue 1');
+    expect(rows[1].injector.get(MatTooltip).message).toBe(
+      'Issue 2 — The coding team is already working on this issue'
+    );
+
+    const el: HTMLElement = fixture.nativeElement;
+    await expectNoAxeViolations(el);
+  }, 15000);
+
   it('has no axe violations on the Jobs view with no runs', async () => {
     await setup();
     showView('jobs');
@@ -193,6 +244,65 @@ describe('CodingTeamPageComponent a11y', () => {
     openRun(ghRun({ status: 'failed' }), { job_id: 'j-run', status: 'failed' });
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('app-coding-team-monitor')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  // This is a regression guard on the loading markup, not proof of WCAG 4.1.3 compliance —
+  // axe-core has no rule for status-message announcements; see coding-team-page.component.spec.ts
+  // for the role="status" DOM assertions that are the actual proof.
+  it('has no axe violations on the GitHub view while repositories are loading', async () => {
+    const reposSubject = new Subject<GitHubRepoItem[]>();
+    integrationsSpy.getGitHubRepos.mockReturnValue(reposSubject.asObservable());
+    await setup();
+    showView('github');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(component.loadingRepos).toBe(true);
+    expect(el.querySelector('app-loading-spinner')).not.toBeNull();
+    await expectNoAxeViolations(el);
+    reposSubject.next([REPO]);
+    reposSubject.complete();
+  }, 15000);
+
+  // NOTE: MatTooltip's overlay open-on-focus behavior relies on FocusMonitor's
+  // keyboard-origin detection, which is not reliably exercisable under jsdom
+  // (no real focus/paint pipeline). These tests assert the static, DOM-level
+  // preconditions for that behavior — a focusable host element carrying
+  // matTooltip/aria-label — not that the tooltip overlay actually opens.
+  // Tooltip-opens-on-Tab is verified manually in Chrome (see PR description).
+
+  it('renders the Runs-panel legend as a focusable button with a non-empty accessible name', async () => {
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    const legend = el.querySelector('.jobs-panel__legend');
+    expect(legend).not.toBeNull();
+    expect(legend?.tagName).toBe('BUTTON');
+    const accessibleName = (legend?.getAttribute('aria-label') ?? '').trim();
+    expect(accessibleName.length).toBeGreaterThan(0);
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('exposes full, untruncated task titles on task chips for keyboard and AT users', async () => {
+    await setup();
+    const longTitle =
+      'Refactor the authentication middleware to support pluggable providers across every backend service';
+    openRun(ghRun({ status: 'running' }), {
+      job_id: 'j-run',
+      status: 'running',
+      phase: 'coding',
+      task_graph_snapshot: [
+        { id: 't1', title: longTitle, status: 'in_progress' },
+        { id: 't2', title: 'short title', status: 'pending' },
+      ],
+    });
+    const el: HTMLElement = fixture.nativeElement;
+    const chips = el.querySelectorAll<HTMLElement>('.github-task-chip');
+    expect(chips.length).toBe(2);
+    chips.forEach((chip) => {
+      expect(chip.tabIndex).toBe(0);
+      expect(chip.getAttribute('role')).toBe('img');
+    });
+    expect(chips[0].getAttribute('aria-label')).toBe(longTitle + ' — in_progress');
+    expect(chips[0].textContent).not.toContain(longTitle);
     await expectNoAxeViolations(el);
   }, 15000);
 });

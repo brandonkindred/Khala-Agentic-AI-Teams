@@ -68,8 +68,16 @@ def _render_code_section(code: str, diffed: str, *, is_diff: bool) -> str:
     """Render the "## Current Code" section body: full code, or an explained diff.
 
     Preconditions: ``code`` is the current round's full strategy code;
-    ``diffed`` is ``diff_or_full(previous_code, code)``'s result; ``is_diff``
-    is ``True`` iff ``diffed`` is an actual diff (i.e. ``diffed != code``).
+    ``diffed`` is ``diff_or_full(previous_code, code)``'s result. ``is_diff``
+    selects which of the two renderings to produce; it is *not* an assertion
+    about ``diffed``. The caller deliberately renders both candidates for the
+    same ``diffed`` — once with ``is_diff=True`` and once with ``False`` — to
+    compare their lengths and keep the shorter, so neither value is a claim
+    that ``diffed`` is or is not an actual diff. Rendering a ``diffed`` that
+    equals ``code`` under ``is_diff=True`` is therefore well-defined and
+    expected: it wraps the full code in a ``diff`` fence behind the preamble,
+    which is always longer than the plain fenced block and so always loses
+    the caller's comparison.
 
     Postconditions: when ``is_diff`` is ``False``, returns a fenced Python
     code block wrapping ``code`` verbatim — byte-identical to the original

@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agents.blogging.api.dependencies import get_job
+from agents.blogging.api.dependencies import get_job, require_web_search_configured
 from agents.blogging.api.models import (
     BlogJobListItem,
     BlogJobStatusResponse,
@@ -276,15 +276,29 @@ def delete_job(job_id: str) -> DeleteJobResponse:
     description=(
         "Re-dispatch the pipeline for an interrupted job. The pipeline re-runs with "
         "the same inputs and work_dir, leveraging existing artifacts (planning cache, "
-        "draft files) to skip completed work where possible."
+        "draft files) to skip completed work where possible. Rejects with 422 "
+        "web_search_not_configured if OLLAMA_API_KEY is unset or blank (see GET /health)."
     ),
 )
 def resume_blog_job(job_id: str) -> StartPipelineResponse:
-    """Resume a blog job from its last checkpoint."""
+    """Resume a blog job from its last checkpoint.
+
+    Raises:
+        HTTPException(501): when the job store is unavailable -- checked before
+            the web-search precondition, so a broken deployment is reported as
+            unavailable rather than as a configuration error.
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank.
+        HTTPException(404): when the job does not exist.
+        HTTPException(400): when the job is not in a resumable state, or its
+            stored request payload is missing.
+    """
     from agents.blogging.api import main as _main
 
     if _main.get_blog_job is None or _main.update_blog_job is None:
         raise HTTPException(status_code=501, detail="Job store not available")
+
+    require_web_search_configured()
+
     try:
         job = validate_job_for_action(
             _main.get_blog_job(job_id), job_id, RESUMABLE_STATUSES, "resumed"
@@ -327,14 +341,33 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     "/job/{job_id}/restart",
     response_model=StartPipelineResponse,
     summary="Restart a blog pipeline job from scratch",
-    description="Reset the job and re-run the full pipeline with the same inputs.",
+    description=(
+        "Reset the job and re-run the full pipeline with the same inputs. Rejects with "
+        "422 web_search_not_configured if OLLAMA_API_KEY is unset or blank (see GET /health) "
+        "before any research state is staged or reset."
+    ),
 )
 def restart_blog_job(job_id: str) -> StartPipelineResponse:
-    """Restart a blog job from the beginning."""
+    """Restart a blog job from the beginning.
+
+    Raises:
+        HTTPException(501): when the job store is unavailable -- checked before
+            the web-search precondition, so a broken deployment is reported as
+            unavailable rather than as a configuration error.
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank,
+            raised before any research-state staging or job reset.
+        HTTPException(404): when the job does not exist.
+        HTTPException(400): when the job is not in a restartable state, or its
+            stored request payload is missing or no longer valid.
+        HTTPException(500): when staging aside the prior research state fails.
+    """
     from agents.blogging.api import main as _main
 
     if _main.get_blog_job is None or _main.update_blog_job is None:
         raise HTTPException(status_code=501, detail="Job store not available")
+
+    require_web_search_configured()
+
     try:
         job = validate_job_for_action(
             _main.get_blog_job(job_id), job_id, _BLOG_RESTARTABLE, "restarted"

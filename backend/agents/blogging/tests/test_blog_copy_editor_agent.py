@@ -11,7 +11,7 @@ from agents.blogging.blog_copy_editor_agent import (
     FeedbackItem,
 )
 
-from llm_service import DummyLLMClient
+from llm_service import CacheBreakpoint, DummyLLMClient
 
 # Inline style guide passed at agent init so tests do not load the default file.
 _TEST_STYLE_GUIDE = "Clear, conversational prose at ~8th grade. No em dashes."
@@ -397,16 +397,22 @@ def test_write_feedback_to_path_returns_true_on_success(tmp_path: Path) -> None:
     assert json.loads(target.read_text(encoding="utf-8"))["summary"] == "ok"
 
 
-def test_init_includes_brand_spec_in_style_prompt() -> None:
-    """Brand spec content is prepended to the style prompt when provided at init."""
+def test_init_includes_brand_spec_in_system_prompt_content() -> None:
+    """Brand spec and writing style guide content are joined into the cached
+    system-prompt segment at init."""
     agent = BlogCopyEditorAgent(
         llm_client=DummyLLMClient(),
         brand_spec_content="Acme voice: bold and direct.",
         writing_style_guide_content="Use short sentences.",
     )
-    assert "--- BRAND SPEC ---" in agent._style_prompt
-    assert "Acme voice" in agent._style_prompt
-    assert "--- WRITING STYLE GUIDE ---" in agent._style_prompt
+    assert len(agent._system_prompt_content) == 1
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    segment_text = segment.text
+    assert "--- BRAND SPEC ---" in segment_text
+    assert "Acme voice" in segment_text
+    assert "--- WRITING STYLE GUIDE ---" in segment_text
+    assert "Use short sentences." in segment_text
 
 
 def test_build_editor_prompt_includes_optional_context() -> None:
@@ -438,7 +444,6 @@ def test_build_editor_prompt_includes_optional_context() -> None:
             target_word_count=1000,
         ),
         draft,
-        _TEST_STYLE_GUIDE,
     )
     assert "CONTENT PROFILE / LENGTH GUIDANCE" in prompt
     assert "Keep sections tight" in prompt
@@ -460,7 +465,6 @@ def test_build_editor_prompt_without_style_guide() -> None:
     prompt = agent._build_editor_prompt(
         CopyEditorInput(draft=draft, soft_min_words=None, soft_max_words=None),
         draft,
-        "",
     )
     assert "No style guidelines were provided" in prompt
 

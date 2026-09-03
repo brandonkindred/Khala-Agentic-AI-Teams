@@ -94,6 +94,30 @@ def test_full_pipeline_async_501_when_create_blog_job_none(client: TestClient, m
     assert r.status_code == 501
 
 
+def test_full_pipeline_async_501_takes_precedence_over_web_search_422(
+    client: TestClient, monkeypatch
+) -> None:
+    """Job-store unavailability (501) is reported even when the web-search key is also unset."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setattr(_api_main, "create_blog_job", None)
+    r = client.post("/full-pipeline-async", json={"brief": "x"})
+    assert r.status_code == 501
+
+
+def test_full_pipeline_async_422_when_web_search_not_configured(
+    client: TestClient, monkeypatch
+) -> None:
+    """POST /full-pipeline-async rejects before creating a job when OLLAMA_API_KEY is unset."""
+    from agents.blogging.shared import blog_job_store as bjs
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    r = client.post("/full-pipeline-async", json={"brief": "x"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "web_search_not_configured"
+    # Guard fired before create_blog_job -- no job record left behind.
+    assert bjs.list_blog_jobs() == []
+
+
 def test_get_job_status_501(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(_api_main, "get_blog_job", None)
     r = client.get("/job/anything")
