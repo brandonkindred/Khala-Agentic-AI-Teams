@@ -24,7 +24,7 @@ from typing import Callable, List, Optional, Tuple
 from ...execution.bar_safety import BarSafetyAssertion, _ts_le
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
-from ...strategy_lab.spec_dsl import entry_anchored_stop_price, protective_limit_price
+from ...strategy_lab.spec_dsl import protective_limit_price, protective_stop_price
 from ..strategy.contract import (
     Bar,
     Fill,
@@ -1671,7 +1671,7 @@ class FillSimulator:
         # ``sl.entry_price_pct`` set means the preview ``stop_price`` (resolved
         # at entry-emission time off the signal bar's close) may have gapped
         # away from where the entry actually filled — re-derive it from the
-        # real fill price via ``entry_anchored_stop_price``, the single shared
+        # real fill price via ``protective_stop_price``, the single shared
         # source of this geometry (also used by ``rule_compiler._stop_loss_level``
         # and ``resolve_exit_leg_attachments`` — see that helper's docstring),
         # so this resting child and the (still independently active) bar-close
@@ -1681,7 +1681,7 @@ class FillSimulator:
         # preview ``stop_price`` rather than raising if it were ever ``None``.
         resolved_stop_price = sl.stop_price
         if sl.entry_price_pct is not None and entry_fill_price is not None:
-            resolved_stop_price = entry_anchored_stop_price(
+            resolved_stop_price = protective_stop_price(
                 entry_fill_price, sl.entry_price_pct, is_long=req.side == OrderSide.LONG
             )
         is_trailing = sl.trail_offset is not None

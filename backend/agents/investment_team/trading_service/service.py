@@ -70,10 +70,10 @@ from ..strategy_lab.spec_dsl import (
     ScaledTakeProfitRule,
     StopLossRule,
     VolatilityTargetSizing,
-    entry_anchored_stop_price,
     first_side_stop_factor,
     is_bracket_exit,
     protective_limit_price,
+    protective_stop_price,
 )
 from ..strategy_lab_context import is_fractional_asset_class
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
@@ -1710,7 +1710,7 @@ def resolve_exit_leg_attachments(
         # kind here must fail loudly, not be silently treated as a stop leg.
         if leg.kind not in (OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP):
             raise ValueError(f"exit leg #{i} has unsupported kind {leg.kind!r}")
-        stop_price = entry_anchored_stop_price(ref_price, leg.pct, is_long=is_long)
+        stop_price = protective_stop_price(ref_price, leg.pct, is_long=is_long)
         wrong_side = stop_price >= ref_price if is_long else stop_price <= ref_price
         if not math.isfinite(stop_price) or stop_price <= 0 or wrong_side:
             raise ValueError(

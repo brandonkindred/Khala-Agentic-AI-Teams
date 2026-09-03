@@ -41,7 +41,7 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     StopLossRule,
     TakeProfitRule,
-    entry_anchored_stop_price,
+    protective_stop_price,
 )
 from investment_team.trading_service.engine.execution_model import RealisticExecutionModel
 from investment_team.trading_service.engine.fill_simulator import FillSimulator, FillSimulatorConfig
@@ -238,7 +238,7 @@ def test_validate_prices_accepts_in_range_entry_price_pct() -> None:
 
 
 # ---------------------------------------------------------------------------
-# entry_anchored_stop_price: shared geometry helper
+# protective_stop_price: shared geometry helper
 # ---------------------------------------------------------------------------
 
 
@@ -246,11 +246,11 @@ def test_validate_prices_accepts_in_range_entry_price_pct() -> None:
     ("is_long", "expected"),
     [(True, 97.0), (False, 103.0)],
 )
-def test_entry_anchored_stop_price_matches_direction(is_long: bool, expected: float) -> None:
-    assert entry_anchored_stop_price(100.0, 0.03, is_long=is_long) == pytest.approx(expected)
+def test_protective_stop_price_matches_direction(is_long: bool, expected: float) -> None:
+    assert protective_stop_price(100.0, 0.03, is_long=is_long) == pytest.approx(expected)
 
 
-def test_stop_loss_level_delegates_to_entry_anchored_stop_price() -> None:
+def test_stop_loss_level_delegates_to_protective_stop_price() -> None:
     """``rule_compiler._stop_loss_level`` and the shared helper must never
     drift apart — they are the same formula, not two copies of it."""
     rule = StopLossRule(pct=0.05, basis="entry_price")
@@ -270,13 +270,11 @@ def test_stop_loss_level_delegates_to_entry_anchored_stop_price() -> None:
         high_since_entry=200.0,
         low_since_entry=200.0,
     )
-    assert _stop_loss_level(rule, long_pos) == entry_anchored_stop_price(200.0, 0.05, is_long=True)
-    assert _stop_loss_level(rule, short_pos) == entry_anchored_stop_price(
-        200.0, 0.05, is_long=False
-    )
+    assert _stop_loss_level(rule, long_pos) == protective_stop_price(200.0, 0.05, is_long=True)
+    assert _stop_loss_level(rule, short_pos) == protective_stop_price(200.0, 0.05, is_long=False)
 
 
-def test_resolve_resting_stop_loss_attachment_delegates_to_entry_anchored_stop_price() -> None:
+def test_resolve_resting_stop_loss_attachment_delegates_to_protective_stop_price() -> None:
     """``resolve_resting_stop_loss_attachment``'s preview price is the same
     shared-helper formula as the bar-close evaluator's, for both sides."""
     long_attachment = resolve_resting_stop_loss_attachment(
@@ -286,10 +284,10 @@ def test_resolve_resting_stop_loss_attachment_delegates_to_entry_anchored_stop_p
         StopLossRule(pct=0.04, basis="entry_price"), OrderSide.SHORT, 150.0
     )
     assert long_attachment.stop_price == pytest.approx(
-        entry_anchored_stop_price(150.0, 0.04, is_long=True)
+        protective_stop_price(150.0, 0.04, is_long=True)
     )
     assert short_attachment.stop_price == pytest.approx(
-        entry_anchored_stop_price(150.0, 0.04, is_long=False)
+        protective_stop_price(150.0, 0.04, is_long=False)
     )
 
 

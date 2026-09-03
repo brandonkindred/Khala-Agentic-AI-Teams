@@ -703,7 +703,7 @@ def protective_limit_price(stop_price: float, offset: float, *, closing_long: bo
     return stop_price - offset if closing_long else stop_price + offset
 
 
-def entry_anchored_stop_price(ref_price: float, pct: float, *, is_long: bool) -> float:
+def protective_stop_price(ref_price: float, pct: float, *, is_long: bool) -> float:
     """Floor/cap price for a stop anchored at ``pct`` off ``ref_price``.
 
     A long's protective level sits *below* the reference (``ref * (1 - pct)``);

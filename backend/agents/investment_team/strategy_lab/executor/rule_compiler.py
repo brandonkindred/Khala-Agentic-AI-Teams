@@ -44,8 +44,8 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
-    entry_anchored_stop_price,
     protective_limit_price,
+    protective_stop_price,
 )
 from .predicate_evaluator import HistoryView, evaluate_signal_exit_rules
 
@@ -528,7 +528,7 @@ def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     """Resolve the price level at which ``rule`` floors (long) / caps (short)
     the position. Single source of the stop-level *reference selection*
     (entry price vs. the running trailing extreme); the actual floor/cap
-    geometry off that reference is :func:`spec_dsl.entry_anchored_stop_price`,
+    geometry off that reference is :func:`spec_dsl.protective_stop_price`,
     shared with every other consumer that must derive the same level from the
     same reference (see that function's docstring for the full list) so none
     of them can silently drift apart. :func:`stop_loss_triggers` compares the
@@ -550,7 +550,7 @@ def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
         ref = position.high_since_entry if rule.basis == "trailing_high" else position.entry_price
     else:
         ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
-    return entry_anchored_stop_price(ref, rule.pct, is_long=is_long)
+    return protective_stop_price(ref, rule.pct, is_long=is_long)
 
 
 def _kind_of(rule: ExitRule) -> ExitRuleKind:
