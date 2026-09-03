@@ -215,6 +215,18 @@ def test_format_feedback_item_line_with_suggestion() -> None:
     assert line == "2. [low] style: Passive voice\n   Suggestion: Use active voice"
 
 
+def test_format_feedback_item_line_with_location_and_suggestion() -> None:
+    item = _FeedbackItem(
+        severity="medium",
+        category="tone",
+        issue="Too casual",
+        location="paragraph 2",
+        suggestion="Use active voice",
+    )
+    line = tp.format_feedback_item_line(item, 3)
+    assert line == "3. [medium] tone [paragraph 2]: Too casual\n   Suggestion: Use active voice"
+
+
 def test_format_feedback_item_line_rejects_missing_required_field() -> None:
     item = _FeedbackItem(severity="high", category="clarity", issue=None)
     with pytest.raises(ValueError, match="missing required fields"):
