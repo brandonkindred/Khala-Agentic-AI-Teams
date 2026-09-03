@@ -1663,7 +1663,10 @@ class FillSimulator:
         type, not a case this method expects to hit. Used to pre-seed a
         trailing leg's ratchet and, when ``sl.entry_price_pct`` is set, to
         re-anchor the resting child's ``stop_price`` (see
-        :class:`StopAttachment`).
+        :class:`StopAttachment`). ``child_side`` must be the position-closing
+        side opposite ``req.side`` (SHORT child for a LONG parent, LONG child
+        for a SHORT parent) — the stop/limit geometry below is derived from
+        ``req.side``, never from ``child_side``.
         Postconditions: exactly one resting STOP/STOP_LIMIT/TRAILING_STOP
         child is submitted to the order book, tagged with ``oco_group_id``
         and ``parent_order_id=po.order_id``.

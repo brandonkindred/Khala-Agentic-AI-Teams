@@ -455,6 +455,9 @@ def _bar(
     close: float | None = None,
     volume: float = 1_000_000.0,
 ) -> Bar:
+    """Build an OHLC-valid ``Bar`` for AAA; ``high``/``low`` default to
+    brackets around ``open``/``close`` so ``BarSafetyAssertion`` never rejects
+    a bar where only ``close`` was overridden."""
     resolved_close = close if close is not None else open_price
     return Bar(
         symbol="AAA",
@@ -472,6 +475,10 @@ def _bar(
 
 
 def _make_simulator() -> tuple[FillSimulator, OrderBook, Portfolio]:
+    """Build a deterministic ``FillSimulator``/``OrderBook``/``Portfolio`` triple.
+    Zero slippage and costs so fills land exactly at open/stop prices;
+    ``participation_cap`` is sized well above the 2%-fraction position so
+    entries always fully fill."""
     portfolio = Portfolio(initial_capital=10_000_000.0)
     order_book = OrderBook()
     sim = FillSimulator(
