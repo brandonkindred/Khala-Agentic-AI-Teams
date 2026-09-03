@@ -109,6 +109,26 @@ def _log_signal_diagnostic(msg: str, *args: Any) -> None:
         workflow.logger.warning(msg, *args)
 
 
+def _bounded_repr(value: Any, max_chars: int = 64) -> str:
+    """Return ``repr(value)`` truncated to ``max_chars``, for safe logging of
+    unvalidated, client-supplied values (e.g. a ``resume_token``) whose length
+    this module never bounds -- a sender able to deliver a signal could
+    otherwise flood operator logs with an arbitrarily large token on every
+    rejected attempt.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns ``repr(value)`` unchanged if it is at most ``max_chars``
+          long; otherwise returns the first ``max_chars`` characters of that
+          repr followed by a truncation marker. Never raises.
+    """
+    rendered = repr(value)
+    if len(rendered) <= max_chars:
+        return rendered
+    return rendered[:max_chars] + "...(truncated)"
+
+
 #: The private attribute names ``HitlAnswerSignalMixin`` owns. Single source of
 #: truth for both the ``__init__`` composition guard and the attributes it sets
 #: -- keeping one list means a future added attribute can't be added to the
@@ -236,10 +256,25 @@ class HitlAnswerSignalMixin:
                 )
         # Kept as explicit, individually-annotated assignments (rather than a loop
         # over _OWNED_STATE_ATTRS) so each attribute keeps its own type annotation;
-        # the names themselves come from that one shared tuple above.
+        # the names themselves must be kept identical to that shared tuple above.
         self._active_resume_token: Optional[str] = None
         self._submitted_answers: Optional[List[Dict[str, Any]]] = None
         self._buffered_signals: Dict[str, List[Dict[str, Any]]] = {}
+        # Postcondition: the guard above and these assignments cover exactly the
+        # same attribute set -- drift between them would either leave the guard
+        # checking a name that's never set (AttributeError on first signal) or
+        # let an assignment escape the guard entirely (silent state aliasing).
+        # Deterministic and replay-safe; not gated on -O since a stripped assert
+        # would silently drop this exact protection.
+        if set(_OWNED_STATE_ATTRS) != {
+            "_active_resume_token",
+            "_submitted_answers",
+            "_buffered_signals",
+        }:
+            raise RuntimeError(
+                "_OWNED_STATE_ATTRS no longer matches HitlAnswerSignalMixin.__init__'s "
+                "explicit assignments -- update both together."
+            )
 
     @workflow.signal(name=SUBMIT_ANSWERS_SIGNAL)
     def submit_answers(self, payload: Any = None) -> None:
@@ -342,8 +377,8 @@ class HitlAnswerSignalMixin:
                     oldest_token = next(iter(self._buffered_signals))
                     del self._buffered_signals[oldest_token]
                     _log_signal_diagnostic(
-                        "submit_answers: buffer cap reached, evicted oldest buffered resume_token=%r",
-                        oldest_token,
+                        "submit_answers: buffer cap reached, evicted oldest buffered resume_token=%s",
+                        _bounded_repr(oldest_token),
                     )
                 self._buffered_signals.setdefault(resume_token, answers)
             else:
@@ -353,8 +388,8 @@ class HitlAnswerSignalMixin:
             return
         if resume_token != self._active_resume_token:
             _log_signal_diagnostic(
-                "submit_answers rejected: resume_token mismatch (received=%r, active=%r)",
-                resume_token,
+                "submit_answers rejected: resume_token mismatch (received=%s, active=%r)",
+                _bounded_repr(resume_token),
                 self._active_resume_token,
             )
             return

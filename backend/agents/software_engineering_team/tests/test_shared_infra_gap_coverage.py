@@ -261,6 +261,18 @@ class _Workflow(HitlAnswerSignalMixin):
     """Minimal stand-in for a real ``@workflow.defn`` class mixing this in."""
 
 
+@_temporal_signal_module.workflow.defn(name="_GapCoverageWorkflowNoSignal")
+class _WorkflowWithoutSignal:
+    """Module-level (not local) because temporalio's @workflow.run rejects
+    classes defined inside a function; never mixes in HitlAnswerSignalMixin,
+    so it registers no submit_answers signal -- used by the assert helper's
+    negative-path test below."""
+
+    @_temporal_signal_module.workflow.run
+    async def run(self) -> None:
+        return None
+
+
 def _answer(question_id: str = "q1") -> dict:
     return {"question_id": question_id, "selected_option_id": None, "other_text": None}
 
@@ -478,6 +490,27 @@ def test_planning_workflow_registers_submit_answers_signal() -> None:
     from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
 
     assert_workflow_registers_submit_answers(PlanningWorkflow)
+
+
+def test_assert_workflow_registers_submit_answers_rejects_undecorated_class() -> None:
+    """Negative path for the shared helper: a class with no @workflow.defn has
+    no temporalio _Definition at all -- must fail before touching .signals."""
+    from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
+
+    class NotADefn:
+        pass
+
+    with pytest.raises(AssertionError, match="missing the @workflow.defn decorator"):
+        assert_workflow_registers_submit_answers(NotADefn)
+
+
+def test_assert_workflow_registers_submit_answers_rejects_missing_signal() -> None:
+    """Negative path for the shared helper: a @workflow.defn class that never
+    registers submit_answers must fail the signal check, not silently pass."""
+    from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
+
+    with pytest.raises(AssertionError):
+        assert_workflow_registers_submit_answers(_WorkflowWithoutSignal)
 
 
 def test_planning_workflow_submit_answers_accepts_and_rejects() -> None:

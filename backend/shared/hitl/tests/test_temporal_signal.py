@@ -222,6 +222,9 @@ def test_submit_answers_rejects_empty_answers_list() -> None:
 
 
 def test_submit_answers_sets_state_when_pause_active() -> None:
+    """A token-matching submission while a pause is active is applied directly
+    to _submitted_answers, not buffered -- the accept and buffer paths are
+    mutually exclusive."""
     wf = _Workflow()
     wf._active_resume_token = "tok-1"
 
@@ -261,6 +264,9 @@ def test_submit_answers_ignores_mismatched_resume_token() -> None:
 
 
 def test_submit_answers_does_not_buffer_mismatched_token_while_a_pause_is_active() -> None:
+    """A signal for a different pause must be discarded outright while one is
+    active -- buffering it would let a stale token resolve a future pause it
+    was never meant for."""
     wf = _Workflow()
     wf._active_resume_token = "current-token"
 
@@ -290,6 +296,9 @@ def test_submit_answers_ignores_second_submission_for_same_token() -> None:
 
 
 def test_submit_answers_buffers_signal_with_no_active_pause() -> None:
+    """A well-formed signal that arrives before any pause is armed has nothing
+    to apply against yet -- buffer it by resume_token so a pause armed later
+    for that same token can consume it immediately."""
     wf = _Workflow()
 
     wf.submit_answers({"resume_token": "future-tok", "answers": [_answer("q1")]})
@@ -299,6 +308,9 @@ def test_submit_answers_buffers_signal_with_no_active_pause() -> None:
 
 
 def test_submit_answers_drops_early_signal_with_no_usable_resume_token() -> None:
+    """An early-arriving signal with no non-empty resume_token has nothing to
+    key a buffer entry on and must be dropped, not buffered under a
+    placeholder key that could never be claimed by a future pause."""
     wf = _Workflow()
 
     wf.submit_answers({"resume_token": "", "answers": [_answer("q1")]})
@@ -308,6 +320,9 @@ def test_submit_answers_drops_early_signal_with_no_usable_resume_token() -> None
 
 
 def test_submit_answers_early_buffering_first_submission_per_token_wins() -> None:
+    """Two early-arriving signals for the same not-yet-armed token are a
+    double-submit/race in the buffering phase too -- the first one buffered
+    must not be overwritten by a later one for the same token."""
     wf = _Workflow()
     first = [_answer("q1")]
 
