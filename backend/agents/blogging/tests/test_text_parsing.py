@@ -151,6 +151,19 @@ def test_extract_json_array_from_text_skips_unparseable_bracket() -> None:
     assert result == [{"issue": "real payload"}]
 
 
+def test_extract_json_array_from_text_accepts_array_when_any_element_matches() -> None:
+    """An array matches (and is returned whole) if ANY element carries required_keys.
+
+    Pins the "any", not "all", semantics: a real payload can contain
+    individually malformed items alongside valid ones, and the whole array
+    is still accepted and returned as-is (the caller's own per-item
+    validation is expected to skip the non-matching elements).
+    """
+    text = '[{"issue": "ok"}, {"unrelated": 1}]'
+    result = tp.extract_json_array_from_text(text, required_keys=("issue",))
+    assert result == [{"issue": "ok"}, {"unrelated": 1}]
+
+
 # ---------------------------------------------------------------------------
 # looks_like_top_level_json_object
 # ---------------------------------------------------------------------------
@@ -174,6 +187,10 @@ def test_looks_like_top_level_json_object_false_for_non_object_json() -> None:
 
 def test_looks_like_top_level_json_object_false_for_trailing_garbage() -> None:
     assert tp.looks_like_top_level_json_object('{"a": 1} trailing garbage') is False
+
+
+def test_looks_like_top_level_json_object_true_with_surrounding_whitespace() -> None:
+    assert tp.looks_like_top_level_json_object('  \n{"a": 1}\n  ') is True
 
 
 def test_looks_like_top_level_json_object_false_for_malformed_json() -> None:
