@@ -568,11 +568,10 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         through the ``branding_visual_identity`` agent_key tier.
     """
     assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
-    return build_agent(
+    return _build_spec_agent(
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
-        system_prompt=render_agent_prompt(_moodboard_conceptualist_prompt(variant)),
-        structured_output=MoodBoardConcept,
+        prompt=_moodboard_conceptualist_prompt(variant),
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -604,11 +603,10 @@ def make_converge_decider() -> Agent:
         selects a winning candidate. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="converge_decider",
         description="Scores moodboard candidates and selects a winner.",
-        system_prompt=render_agent_prompt(_CONVERGE_DECIDER_PROMPT),
-        structured_output=CreativeRefinementDecision,
+        prompt=_CONVERGE_DECIDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -632,11 +630,10 @@ def make_logo_specifier() -> Agent:
         direction. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="logo_specifier",
         description="Defines logo suite with usage rules.",
-        system_prompt=render_agent_prompt(_LOGO_SPECIFIER_PROMPT),
-        structured_output=LogoSuiteOutput,
+        prompt=_LOGO_SPECIFIER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -661,11 +658,10 @@ def make_color_system_builder() -> Agent:
         rationale for the winning moodboard direction. The agent is
         routed through the ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="color_system_builder",
         description="Builds the brand color palette with psychological rationale.",
-        system_prompt=render_agent_prompt(_COLOR_SYSTEM_BUILDER_PROMPT),
-        structured_output=ColorPaletteSystemOutput,
+        prompt=_COLOR_SYSTEM_BUILDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -690,11 +686,10 @@ def make_typography_builder() -> Agent:
         ``TYPOGRAPHY_SYSTEM_MAX``. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="typography_builder",
         description="Defines the typography system.",
-        system_prompt=render_agent_prompt(_TYPOGRAPHY_BUILDER_PROMPT),
-        structured_output=TypographySystemOutput,
+        prompt=_TYPOGRAPHY_BUILDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -714,11 +709,10 @@ def make_iconography_director() -> Agent:
         moodboard direction. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="iconography_director",
         description="Defines iconography and illustration style.",
-        system_prompt=render_agent_prompt(_ICONOGRAPHY_PROMPT),
-        structured_output=IconographyOutput,
+        prompt=_ICONOGRAPHY_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -739,11 +733,10 @@ def make_photography_video_director() -> Agent:
         is routed through the ``branding_visual_identity`` agent_key
         tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="photography_video_director",
         description="Defines photography direction, video direction, and motion principles.",
-        system_prompt=render_agent_prompt(_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT),
-        structured_output=PhotographyVideoOutput,
+        prompt=_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -767,11 +760,10 @@ def make_voice_tone_builder() -> Agent:
         direction. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="voice_tone_builder",
         description="Defines voice/tone spectrum and language dos/don'ts.",
-        system_prompt=render_agent_prompt(_VOICE_TONE_BUILDER_PROMPT),
-        structured_output=VoiceToneOutput,
+        prompt=_VOICE_TONE_BUILDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -792,11 +784,10 @@ def make_design_system_codifier() -> Agent:
         agent is routed through the ``branding_visual_identity``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
-        system_prompt=render_agent_prompt(_DESIGN_SYSTEM_CODIFIER_PROMPT),
-        structured_output=DesignSystemDefinition,
+        prompt=_DESIGN_SYSTEM_CODIFIER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
