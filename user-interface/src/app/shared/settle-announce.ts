@@ -22,6 +22,7 @@
 export class SettleAnnouncer {
   private previousValue = '';
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
 
   /**
    * Preconditions: `settleMs` is a positive number of milliseconds. `onSettle` is called with the
@@ -47,16 +48,21 @@ export class SettleAnnouncer {
 
   /**
    * Preconditions: none — `nextValue` may be '' or any string.
-   * Postconditions: when `nextValue` is '', any pending settle timer is cleared, the last-seen value
-   * is reset to '' (so the same value reappearing later, e.g. a restarted run with the same
-   * objective, is treated as new rather than remembered across the clear), and `onSettle('')` fires
-   * immediately. When `nextValue` equals the last-seen value, any pending settle timer is left
-   * completely untouched — neither restarted nor cancelled — and neither callback fires. Otherwise
-   * (a differing, non-empty value) any pending settle timer is replaced with a fresh one, `onChange`
-   * fires synchronously if given, and after `settleMs` with no further differing update, `onSettle`
-   * fires with `nextValue` and the timer handle is cleared.
+   * Postconditions: once `dispose()` has been called, this is permanently a no-op — neither
+   * callback fires and no timer is armed, so a call arriving after teardown can never resurrect a
+   * timer against a destroyed view. Otherwise: when `nextValue` is '', any pending settle timer is
+   * cleared, the last-seen value is reset to '' (so the same value reappearing later, e.g. a
+   * restarted run with the same objective, is treated as new rather than remembered across the
+   * clear), and `onSettle('')` fires immediately. When `nextValue` equals the last-seen value, any
+   * pending settle timer is left completely untouched — neither restarted nor cancelled — and
+   * neither callback fires. Otherwise (a differing, non-empty value) any pending settle timer is
+   * replaced with a fresh one, `onChange` fires synchronously if given, and after `settleMs` with no
+   * further differing update, `onSettle` fires with `nextValue` and the timer handle is cleared.
    */
   update(nextValue: string): void {
+    if (this.disposed) {
+      return;
+    }
     if (!nextValue) {
       this.clearTimer();
       this.previousValue = '';
@@ -76,8 +82,10 @@ export class SettleAnnouncer {
   }
 
   /** Preconditions: none. Postconditions: any pending settle timer is cleared and its handle set to
-   *  null, so it can never fire after the owning view/component is destroyed. */
+   *  null. The instance is permanently disposed — every subsequent `update()` call is a no-op — so
+   *  it can never fire, or be re-armed, after the owning view/component is destroyed. */
   dispose(): void {
+    this.disposed = true;
     this.clearTimer();
   }
 

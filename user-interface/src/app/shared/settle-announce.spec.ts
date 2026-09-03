@@ -110,6 +110,16 @@ describe('SettleAnnouncer', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it('fires onChange for every differing update, including while a timer is in flight', () => {
+    vi.useFakeTimers();
+    const onChange = vi.fn();
+    const announcer = new SettleAnnouncer(1500, vi.fn(), onChange);
+    announcer.update('a');
+    announcer.update('b'); // differing while a timer is pending — must fire again, not just once
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenLastCalledWith('b');
+  });
+
   it('dispose clears a pending timer so it can never fire afterward', async () => {
     vi.useFakeTimers();
     const onSettle = vi.fn();
@@ -119,6 +129,22 @@ describe('SettleAnnouncer', () => {
 
     announcer.dispose();
     expect(announcer.isPending).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(onSettle).not.toHaveBeenCalled();
+  });
+
+  it('is permanently inert after dispose — update() never re-arms a timer or fires a callback', async () => {
+    vi.useFakeTimers();
+    const onSettle = vi.fn();
+    const onChange = vi.fn();
+    const announcer = new SettleAnnouncer(1500, onSettle, onChange);
+    announcer.update('a');
+    announcer.dispose();
+
+    announcer.update('b'); // a differing, non-empty value — would normally arm a fresh timer
+    expect(announcer.isPending).toBe(false);
+    expect(onChange).not.toHaveBeenCalledWith('b');
 
     await vi.advanceTimersByTimeAsync(1500);
     expect(onSettle).not.toHaveBeenCalled();

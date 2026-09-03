@@ -25,6 +25,19 @@ describe('CodingTeamMonitorComponent', () => {
     return fixture.nativeElement as HTMLElement;
   }
 
+  /** A running, job 'j1', phase 'coding' status at the given progress — the shape shared by the
+   *  debounce tests below, which otherwise differ only in `progress` and the occasional `agents`
+   *  override. */
+  function runningJob(progress: number, extra: Partial<CodingTeamJobStatus> = {}): CodingTeamJobStatus {
+    return {
+      job_id: 'j1',
+      status: 'running',
+      phase: 'coding',
+      progress,
+      ...extra,
+    } as CodingTeamJobStatus;
+  }
+
   function agent(over: Partial<CodingTeamAgentStatus>): CodingTeamAgentStatus {
     return {
       agent_id: 'a',
@@ -391,12 +404,7 @@ describe('CodingTeamMonitorComponent', () => {
   it('announces the objective and progress in the hidden live region after the settle window', async () => {
     vi.useFakeTimers();
     try {
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 47,
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       const el = fixture.nativeElement as HTMLElement;
       const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
@@ -418,33 +426,18 @@ describe('CodingTeamMonitorComponent', () => {
       const el = fixture.nativeElement as HTMLElement;
       const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
 
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 10,
-      } as CodingTeamJobStatus); // t=0, original deadline would be t=6000
+      fixture.componentRef.setInput('status', runningJob(10)); // t=0, original deadline would be t=6000
       fixture.detectChanges();
       expect(region()?.textContent).toBe('');
 
       await vi.advanceTimersByTimeAsync(2000); // t=2000
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 20,
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput('status', runningJob(20));
       fixture.detectChanges();
       // A differing update mid-settle restarts the window instead of announcing early.
       expect(region()?.textContent).toBe('');
 
       await vi.advanceTimersByTimeAsync(2000); // t=4000: restarts again — new deadline t=10000
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 30,
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput('status', runningJob(30));
       fixture.detectChanges();
       expect(region()?.textContent).toBe('');
 
@@ -469,12 +462,7 @@ describe('CodingTeamMonitorComponent', () => {
   it('leaves the live region text (and node) unchanged when the summary itself is unchanged', async () => {
     vi.useFakeTimers();
     try {
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 47,
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       await vi.advanceTimersByTimeAsync(6000);
       fixture.detectChanges();
@@ -482,13 +470,10 @@ describe('CodingTeamMonitorComponent', () => {
       const region = el.querySelector('.visually-hidden[aria-live="polite"]');
       const before = region?.textContent;
 
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 47,
-        agents: [agent({ agent_id: 'x', display_name: 'X' })],
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput(
+        'status',
+        runningJob(47, { agents: [agent({ agent_id: 'x', display_name: 'X' })] }),
+      );
       fixture.detectChanges();
 
       // An unchanged summary must neither restart nor cancel an in-flight timer — here there is no
@@ -509,21 +494,11 @@ describe('CodingTeamMonitorComponent', () => {
       const el = fixture.nativeElement as HTMLElement;
       const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
 
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 47,
-      } as CodingTeamJobStatus); // t=0, deadline t=6000
+      fixture.componentRef.setInput('status', runningJob(47)); // t=0, deadline t=6000
       fixture.detectChanges();
 
       await vi.advanceTimersByTimeAsync(2000); // t=2000, timer still in flight
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 47, // identical summary
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput('status', runningJob(47)); // identical summary
       fixture.detectChanges();
       // A cancel-on-unchanged regression would clear this to false; a restart-on-unchanged
       // regression would still show true here but push the deadline out to t=8000.
@@ -542,12 +517,7 @@ describe('CodingTeamMonitorComponent', () => {
   it('cancels the summary settle timer on destroy and never announces afterward', async () => {
     vi.useFakeTimers();
     try {
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 47,
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       const region = (fixture.nativeElement as HTMLElement).querySelector(
         '.visually-hidden[aria-live="polite"]',
@@ -571,12 +541,7 @@ describe('CodingTeamMonitorComponent', () => {
   it('clears the announcement immediately (no settle delay) when status is cleared to null', async () => {
     vi.useFakeTimers();
     try {
-      fixture.componentRef.setInput('status', {
-        job_id: 'j1',
-        status: 'running',
-        phase: 'coding',
-        progress: 47,
-      } as CodingTeamJobStatus);
+      fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       await vi.advanceTimersByTimeAsync(6000);
       fixture.detectChanges();
