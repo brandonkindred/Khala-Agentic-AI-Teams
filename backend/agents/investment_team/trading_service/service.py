@@ -1911,6 +1911,14 @@ def resolve_resting_stop_loss_attachment(
     signal bar's close, which can gap away from where the entry actually
     fills — see :class:`StopAttachment`'s ``entry_price_pct`` field for why
     that matters here specifically).
+
+    Raises:
+        ValueError: if ``rule`` is not resting-eligible (via
+            :func:`_stop_loss_rule_to_leg_specs`), or per
+            :func:`resolve_exit_leg_attachments` for an invalid
+            ``ref_price``/``side`` or an unresolvable leg.
+        TypeError: defense-in-depth if the single resolved attachment is
+            not a :class:`StopAttachment` (unreachable for a STOP-kind leg).
     """
     attachments = resolve_exit_leg_attachments(_stop_loss_rule_to_leg_specs(rule), side, ref_price)
     (attachment,) = attachments

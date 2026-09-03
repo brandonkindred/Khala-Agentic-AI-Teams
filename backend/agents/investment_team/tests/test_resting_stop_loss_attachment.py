@@ -223,6 +223,8 @@ def test_validate_prices_rejects_out_of_range_entry_price_pct(bad_pct: float) ->
 
 
 def test_validate_prices_accepts_in_range_entry_price_pct() -> None:
+    """A pct strictly inside (0, 1) passes ``validate_prices`` — the
+    complement of the rejection test."""
     attachment = resolve_resting_stop_loss_attachment(
         StopLossRule(pct=0.03, basis="entry_price"), OrderSide.LONG, 100.0
     )
@@ -247,6 +249,8 @@ def test_validate_prices_accepts_in_range_entry_price_pct() -> None:
     [(True, 97.0), (False, 103.0)],
 )
 def test_protective_stop_price_matches_direction(is_long: bool, expected: float) -> None:
+    """Long stops sit below ref price, short stops above — the shared helper
+    encodes both directions."""
     assert protective_stop_price(100.0, 0.03, is_long=is_long) == pytest.approx(expected)
 
 
@@ -533,3 +537,35 @@ def test_end_to_end_resting_stop_reanchors_to_actual_fill_price_on_gap() -> None
     assert portfolio.positions["AAA"].entry_price == pytest.approx(90.0)
     [child] = order_book.children_of(parent.order_id)
     assert child.request.stop_price == pytest.approx(87.3)
+
+
+def test_end_to_end_resting_stop_short_side_materializes_and_closes_position() -> None:
+    """Short mirror of ``test_end_to_end_resting_stop_only_materializes_after_entry_fill``:
+    for a short, the resting STOP sits above the fill price and is a buy-side
+    trigger — this drives a short entry through FillSimulator/OrderBook end to
+    end to prove that direction isn't inverted anywhere in the materialization
+    or trigger path (the long side alone wouldn't catch that class of bug)."""
+    sim, order_book, portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="short", close=100.0)
+    parent = order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+
+    # Before any bar is processed the entry hasn't filled yet: no resting child.
+    assert order_book.children_of(parent.order_id) == []
+
+    # Bar 2: entry fills at the open; the resting STOP child materializes at 105.
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    assert "AAA" in portfolio.positions
+    children = order_book.children_of(parent.order_id)
+    assert len(children) == 1
+    assert children[0].request.order_type == OrderType.STOP
+    assert children[0].request.stop_price == pytest.approx(105.0)
+
+    # Bar 3: high crosses 105 → the resting STOP fills and closes the position.
+    outcome = sim.process_bar(
+        _bar("2024-01-03", open_price=102.0, high=107.0, low=101.0, close=106.0)
+    )
+    assert len(outcome.closed_trades) == 1
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
