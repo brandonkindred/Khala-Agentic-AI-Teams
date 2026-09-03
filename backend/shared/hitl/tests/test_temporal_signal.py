@@ -16,6 +16,7 @@ first when the mixin's contract changes, then mirror the change there.
 
 from __future__ import annotations
 
+import logging
 import typing
 
 import pytest
@@ -339,6 +340,20 @@ def test_submit_answers_buffering_an_already_present_token_does_not_evict() -> N
     assert wf._buffered_signals["tok-0"] == [_answer("q1")]
 
 
+def test_submit_answers_does_not_raise_if_max_buffered_signals_is_ever_zero(monkeypatch) -> None:
+    """Defensive: if MAX_BUFFERED_SIGNALS were ever 0 (or negative), the eviction
+    guard's len(...) >= MAX_BUFFERED_SIGNALS check would be true against an
+    empty buffer -- next(iter(self._buffered_signals)) must not then raise
+    StopIteration, which would violate the handler's never-raise contract.
+    Unreachable with today's positive constant; pins the hardening."""
+    monkeypatch.setattr(temporal_signal_module, "MAX_BUFFERED_SIGNALS", 0)
+    wf = _Workflow()
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+
+    assert wf._buffered_signals == {"tok-1": [_answer("q1")]}
+
+
 # --------------------------------------------------------------------------
 # replay-safety: payload: Any annotation
 # --------------------------------------------------------------------------
@@ -394,17 +409,19 @@ def test_log_signal_diagnostic_logs_via_workflow_logger_inside_a_workflow(monkey
     assert fake_logger.warnings == [("submit_answers rejected: %r", ("reason",))]
 
 
-def test_log_signal_diagnostic_is_a_silent_no_op_outside_a_workflow(monkeypatch) -> None:
+def test_log_signal_diagnostic_is_a_silent_no_op_outside_a_workflow(monkeypatch, caplog) -> None:
     """The documented contract is a no-op (not a stdlib-logging fallback) when
     workflow.in_workflow() is False -- e.g. every other test in this suite,
     which drives HitlAnswerSignalMixin as a bare object with no Temporal
-    context. Assert the workflow logger is never touched in that case,
-    pinning "no-op" rather than "logs somewhere else" as the real
-    behavior."""
+    context. Asserts both that the workflow logger is never touched AND that
+    nothing lands on the stdlib logging chain either, pinning "no-op" rather
+    than "logs somewhere else" as the actual behavior."""
     fake_logger = _FakeWorkflowLogger()
     monkeypatch.setattr(temporal_signal_module.workflow, "in_workflow", lambda: False)
     monkeypatch.setattr(temporal_signal_module.workflow, "logger", fake_logger)
 
-    temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
+    with caplog.at_level(logging.DEBUG):
+        temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
 
     assert fake_logger.warnings == []
+    assert not caplog.records

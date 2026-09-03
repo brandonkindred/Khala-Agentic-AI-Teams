@@ -316,7 +316,15 @@ class HitlAnswerSignalMixin:
         resume_token = payload.get("resume_token")
         if self._active_resume_token is None:
             if isinstance(resume_token, str) and resume_token:
-                if resume_token not in self._buffered_signals and len(self._buffered_signals) >= MAX_BUFFERED_SIGNALS:
+                # The `and self._buffered_signals` guard keeps `next(iter(...))` below
+                # unreachable on an empty dict even if MAX_BUFFERED_SIGNALS were ever
+                # 0 or negative -- StopIteration here would violate the never-raise
+                # contract. Unreachable with today's positive constant; defensive.
+                if (
+                    resume_token not in self._buffered_signals
+                    and self._buffered_signals
+                    and len(self._buffered_signals) >= MAX_BUFFERED_SIGNALS
+                ):
                     oldest_token = next(iter(self._buffered_signals))
                     del self._buffered_signals[oldest_token]
                     _log_signal_diagnostic(

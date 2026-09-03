@@ -391,17 +391,22 @@ def test_hitl_signal_mixin_logs_diagnostic_inside_a_workflow(monkeypatch) -> Non
     assert fake_logger.warnings == [("submit_answers rejected: %r", ("reason",))]
 
 
-def test_hitl_signal_mixin_diagnostic_is_a_silent_no_op_outside_a_workflow(monkeypatch) -> None:
+def test_hitl_signal_mixin_diagnostic_is_a_silent_no_op_outside_a_workflow(
+    monkeypatch, caplog
+) -> None:
     """Complementary to the in-workflow test above: when workflow.in_workflow()
     is False -- the case every other test in this module exercises implicitly
-    -- the documented contract is a no-op, not a fallback logger."""
+    -- the documented contract is a no-op, not a fallback logger. Checks both
+    the workflow logger and the stdlib logging chain to actually pin "no-op"."""
     fake_logger = _FakeWorkflowLogger()
     monkeypatch.setattr(_temporal_signal_module.workflow, "in_workflow", lambda: False)
     monkeypatch.setattr(_temporal_signal_module.workflow, "logger", fake_logger)
 
-    _temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
+    with caplog.at_level(logging.DEBUG):
+        _temporal_signal_module._log_signal_diagnostic("submit_answers rejected: %r", "reason")
 
     assert fake_logger.warnings == []
+    assert not caplog.records
 
 
 def test_hitl_signal_mixin_ignores_second_submission_for_same_token() -> None:
@@ -431,6 +436,19 @@ def test_hitl_signal_mixin_buffers_and_evicts_past_cap() -> None:
 
     assert len(wf._buffered_signals) == MAX_BUFFERED_SIGNALS
     assert "tok-0" not in wf._buffered_signals
+
+
+def test_hitl_signal_mixin_does_not_raise_if_max_buffered_signals_is_ever_zero(monkeypatch) -> None:
+    """Defensive: if MAX_BUFFERED_SIGNALS were ever 0, the eviction guard's
+    len(...) >= MAX_BUFFERED_SIGNALS check would be true against an empty
+    buffer -- next(iter(self._buffered_signals)) must not then raise
+    StopIteration, violating the never-raise contract."""
+    monkeypatch.setattr(_temporal_signal_module, "MAX_BUFFERED_SIGNALS", 0)
+    wf = _Workflow()
+
+    wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+
+    assert wf._buffered_signals == {"tok-1": [_answer("q1")]}
 
 
 def test_hitl_signal_mixin_drops_early_signal_with_no_usable_resume_token() -> None:
