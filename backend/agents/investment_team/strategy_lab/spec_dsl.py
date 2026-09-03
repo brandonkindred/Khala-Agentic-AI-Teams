@@ -726,8 +726,11 @@ def entry_anchored_stop_price(ref_price: float, pct: float, *, is_long: bool) ->
     Preconditions: ``ref_price`` and ``pct`` are plain floats (no
     finiteness/sign/bound constraint here — callers validate the result
     against their own contract; ``ExitLegSpec``/``_is_resting_stop_loss``
-    bound ``pct`` to ``(0, 1)`` before it reaches here, and the STOP-family
-    branch of ``resolve_exit_leg_attachments`` validates the resolved price
+    bound ``pct`` to ``(0, 1)`` before it reaches here, ``rule_compiler.
+    _stop_loss_level`` passes ``StopLossRule.pct`` bounded to ``(0, 1.0]``
+    (a long at ``pct == 1.0`` resolves to level 0, which never triggers
+    against positive bar prices), and the STOP-family branch of
+    ``resolve_exit_leg_attachments`` validates the resolved price
     afterward).
     Postconditions: returns ``ref_price * (1 - pct)`` when ``is_long``, else
     ``ref_price * (1 + pct)``.

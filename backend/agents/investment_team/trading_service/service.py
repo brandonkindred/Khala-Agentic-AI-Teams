@@ -1914,7 +1914,12 @@ def resolve_resting_stop_loss_attachment(
     """
     attachments = resolve_exit_leg_attachments(_stop_loss_rule_to_leg_specs(rule), side, ref_price)
     (attachment,) = attachments
-    assert isinstance(attachment, StopAttachment)
+    # Explicit raise (not assert) so this stays enforced under python -O, matching
+    # this file's stated posture — unreachable in practice since a STOP-kind leg
+    # always resolves to a StopAttachment and the tuple-unpack above already
+    # raises on any length mismatch.
+    if not isinstance(attachment, StopAttachment):
+        raise TypeError(f"expected StopAttachment for STOP leg, got {attachment!r}")
     attachment.entry_price_pct = rule.pct
     return attachment
 
