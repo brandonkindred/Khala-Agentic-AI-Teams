@@ -869,14 +869,29 @@ class _TakeProfitFireResult(NamedTuple):
     """The winning candidate's outcome once its fill fully closes the position.
 
     ``raw_price`` is the qty-weighted average across every partial fill plus
-    this closing fill — UNROUNDED; the caller applies :func:`_round_price`
-    exactly once, matching the one-rounding-pass discipline
-    :func:`entry_price_basis`/:func:`resolve_stop_loss_exit` already use.
+    this closing fill — UNROUNDED. ``terminal_price`` is the FINAL closing
+    slice's own unrounded price (identical to ``raw_price`` for a single-slice
+    close, since there is nothing to blend). The two are deliberately kept
+    separate: production's ``FillSimulator._fill_exit`` derives the rounding
+    bucket (4dp below $10, else 2dp) from the terminal slice's own
+    ``reference_price``, THEN rounds the blended ``weighted_avg_exit_price``
+    with that bucket (``fill_simulator.py``'s terminal-close branch:
+    ``dp = 4 if ref_price < 10 else 2`` from the terminal slice, then
+    ``round(pos.weighted_avg_exit_bid_price, dp)``) — never re-deriving the
+    bucket from the blended value itself. A ladder whose rung prices straddle
+    the $10 bucket boundary would otherwise round at the wrong precision (the
+    same "bucket comes from a DIFFERENT price than the one being rounded"
+    pattern :func:`entry_price_basis` already documents for its own anchor).
+    The caller applies the rounding in that same two-step order — bucket from
+    ``terminal_price``, round ``raw_price`` — exactly once, matching the
+    one-rounding-pass discipline :func:`entry_price_basis`/
+    :func:`resolve_stop_loss_exit` already use.
     """
 
     exit_rule_index: int
     exit_rule_kind: Literal["take_profit", "scaled_take_profit"]
     raw_price: float
+    terminal_price: float
     level_index: Optional[int]
 
 
@@ -987,6 +1002,13 @@ class _RestingTakeProfitFamily:
             _LadderCursor(rule_index=idx, rule=rule, next_rung=0)
             for idx, rule in scaled_take_profit_rules(self._rules)
         ]
+        # Keyed lookup for step()'s winner -> cursor resolution, built once
+        # rather than a linear scan per bar. Its keys are exactly the
+        # scaled_take_profit_rules(self._rules) indices, the same set
+        # evaluate_exit_rules_for_position draws its "scaled_take_profit"
+        # rule_kind classification from — see step()'s own comment for the
+        # invariant this relies on.
+        self._ladder_by_index = {ladder.rule_index: ladder for ladder in self._ladders}
         self._original_qty = 1.0
         self._remaining_qty = 1.0
         self._fills: List[Tuple[float, float]] = []
@@ -1061,11 +1083,19 @@ class _RestingTakeProfitFamily:
             level = rule.levels[winner.level_index]
             pct = level.pct
             qty = min(winner.qty_fraction * self._original_qty, self._remaining_qty)
-            ladder = next(
-                candidate
-                for candidate in self._ladders
-                if candidate.rule_index == winner.rule_index
-            )
+            # Invariant this relies on: every intent evaluate_exit_rules_for_position
+            # classifies as "scaled_take_profit" has a matching cursor in
+            # self._ladder_by_index, since both derive from the SAME
+            # scaled_take_profit_rules(self._rules) filtering. Guarded
+            # explicitly (rather than left as a bare lookup raising an opaque
+            # KeyError) so a future change that breaks this invariant fails
+            # loudly, matching this module's Design-by-Contract style.
+            ladder = self._ladder_by_index.get(winner.rule_index)
+            if ladder is None:  # pragma: no cover - invariant, not a reachable state
+                raise AssertionError(
+                    f"scaled_take_profit intent for rule_index {winner.rule_index!r} "
+                    "has no matching ladder cursor"
+                )
 
         price = _take_profit_target(self._anchor, pct, self._side)
         self._fills.append((qty, price))
@@ -1082,6 +1112,7 @@ class _RestingTakeProfitFamily:
             exit_rule_index=winner.rule_index,
             exit_rule_kind=winner.rule_kind,
             raw_price=weighted_price,
+            terminal_price=price,
             level_index=winner.level_index,
         )
 
@@ -1153,7 +1184,14 @@ def resolve_take_profit_family_exit(
             entry_bar=entry.entry_bar,
             exit_bar=exit_bar,
             exit_date=bar.timestamp[:10],
-            exit_price=_round_price(fired.raw_price),
+            # Bucket from the TERMINAL slice's own price, round the BLENDED
+            # average with it — production's order of operations
+            # (fill_simulator.py's terminal-close branch derives dp from the
+            # terminal slice's reference_price, then rounds the weighted
+            # average with that dp), never re-derived from the blended value
+            # itself. See _TakeProfitFireResult's docstring for the full
+            # argument and production line references.
+            exit_price=round(fired.raw_price, _decimals_for(fired.terminal_price)),
             exit_rule_kind=fired.exit_rule_kind,
             exit_rule_index=fired.exit_rule_index,
             level_index=fired.level_index,

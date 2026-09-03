@@ -940,6 +940,27 @@ def test_fill_qty_rel_tol_is_a_local_constant_not_imported_from_order_book():
     assert not any("order_book" in name for name in import_module_names)
 
 
+def test_fill_qty_rel_tol_value_matches_production_source():
+    """Guards against silent drift: the local mirror's VALUE, not just its
+    provenance (the test above), must still match production's constant.
+    Reads ``order_book.py`` as TEXT rather than importing it, so this stays
+    inside the module's own forbidden-import boundary while still failing
+    loudly if a future production change moves the tolerance and this
+    reference simulator's close semantics silently diverge from it."""
+    import re
+    from pathlib import Path
+
+    from investment_team.strategy_lab.executor.reference_exits import _FILL_QTY_REL_TOL
+
+    order_book_path = (
+        Path(__file__).resolve().parents[1] / "trading_service" / "engine" / "order_book.py"
+    )
+    source = order_book_path.read_text()
+    match = re.search(r"^FILL_QTY_REL_TOL\s*=\s*([0-9eE.+-]+)", source, re.MULTILINE)
+    assert match, "FILL_QTY_REL_TOL definition not found in order_book.py"
+    assert float(match.group(1)) == _FILL_QTY_REL_TOL
+
+
 # ---------------------------------------------------------------------------
 # take_profit_rules / scaled_take_profit_rules — filtering helpers
 # ---------------------------------------------------------------------------
@@ -1135,6 +1156,31 @@ def test_ladder_that_sums_to_exactly_one_fully_closes_with_the_last_rungs_level_
     got = _resolve_tp([rule], bars)
     assert (got.exit_bar, got.level_index) == (4, 2)
     assert got.exit_price == pytest.approx(106.9)  # 0.2*102 + 0.3*105 + 0.5*110
+
+
+def test_ladder_rounding_bucket_comes_from_the_terminal_rung_not_the_blended_average():
+    """The rung prices straddle the $10 bucket boundary: the blended average
+    (9.675) is itself under $10, but the FINAL closing rung (11.7) is not.
+    Production derives the rounding bucket from the terminal slice's own
+    price, then rounds the blended average with it — so the correct result
+    is 9.68 (2dp, from the terminal rung), not 9.675 (4dp, from the blend
+    itself, which is what a bucket-from-the-blended-value bug would produce).
+    """
+    rule = ScaledTakeProfitRule(
+        levels=[
+            TakeProfitLevel(pct=0.05, qty_fraction=0.9),  # target 9.45
+            TakeProfitLevel(pct=0.30, qty_fraction=0.1),  # target 11.7 (terminal, >= $10)
+        ]
+    )
+    bars = [
+        _flat(9.0),
+        _flat(9.0),  # 1: entry, anchor 9.0
+        _bar(9.1, 9.5, 9.0, 9.4),  # 2: rung 0 (9.45) fires, qty 0.9
+        _bar(9.4, 11.8, 9.3, 11.5),  # 3: rung 1 (11.7) fires, qty 0.1 -> closes
+    ]
+    got = _resolve_tp([rule], bars)
+    assert got.exit_bar == 3
+    assert got.exit_price == 9.68  # NOT 9.675 (4dp bucket from the blended value)
 
 
 def test_ladder_that_sums_to_less_than_one_leaves_a_residual_open_and_emits_no_record():
@@ -1456,13 +1502,21 @@ def test_take_profit_replay_passes_slippage_through_to_the_anchor():
 
 
 def test_take_profit_replay_does_not_mutate_its_inputs():
+    """Deep-copies the snapshot rather than shallow-copying it: a shallow
+    ``list(...)``/``{k: list(v) ...}`` snapshot still shares the same bar/rule
+    OBJECTS with the live input, so an in-place field mutation (e.g.
+    ``bar.high = ...``) would move both the input and its "snapshot" together
+    and this test would falsely report no mutation. A deep copy is
+    independent of the input, so it actually catches that case."""
+    import copy
+
     spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
     bars = {"AAA": [_flat(101.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]}
-    exit_rules_before = list(spec.exit_rules)
-    bars_before = {k: list(v) for k, v in bars.items()}
+    exit_rules_before = copy.deepcopy(spec.exit_rules)
+    bars_before = copy.deepcopy(bars)
     replay_take_profit_family_exits(spec, bars)
-    assert list(spec.exit_rules) == exit_rules_before
-    assert {k: list(v) for k, v in bars.items()} == bars_before
+    assert spec.exit_rules == exit_rules_before
+    assert bars == bars_before
 
 
 def test_take_profit_replay_is_deterministic():
