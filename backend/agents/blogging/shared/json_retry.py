@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, Union
 
 from strands import Agent
 from strands.types.exceptions import EventLoopException
@@ -178,7 +178,7 @@ def _unwrap_event_loop_exception(exc: Exception) -> Exception:
 
 def run_json_gate(
     model: Any,
-    system_prompt: str,
+    system_prompt: Union[str, List[Any]],
     prompt: str,
     *,
     strict_json_suffix: str = _DEFAULT_STRICT_JSON_SUFFIX,
@@ -209,7 +209,9 @@ def run_json_gate(
 
     Preconditions:
         - ``model`` is a usable LLM client/config accepted by ``strands.Agent``.
-        - ``system_prompt`` and ``prompt`` are strings; ``prompt`` is non-empty.
+        - ``system_prompt`` is a plain string, or a Strands system-content-block
+          list (e.g. from ``build_system_prompt_with_content``) when a caller
+          needs to attach a cacheable segment; ``prompt`` is a non-empty string.
         - ``max_attempts >= 1``.
     Postconditions:
         - Returns a ``dict`` on a successful parse or via whichever of

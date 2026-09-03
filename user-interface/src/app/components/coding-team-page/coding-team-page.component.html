@@ -142,23 +142,27 @@
           }
           <div class="github-repos-list">
             @for (repo of filteredRepos; track repo.full_name; let i = $index) {
+              <!--
+                No tabindex on the nested name/issues spans below: a focusable descendant of a
+                <button> is invalid per the HTML interactive-content model and would add a second
+                tab stop to every repo row. Both messages are composed into repoRowTooltip() and
+                bound on the button itself instead.
+              -->
               <button
                 class="github-repo-row"
                 type="button"
                 [class.github-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
                 [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
                 [attr.aria-controls]="'repo-issues-' + i"
+                [matTooltip]="repoRowTooltip(repo)"
                 (click)="toggleRepo(repo)"
               >
                 <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
-                <span class="github-repo-row__name" [matTooltip]="repo.description">{{ repo.full_name }}</span>
+                <span class="github-repo-row__name">{{ repo.full_name }}</span>
                 @if (repo.archived) {
                   <span class="github-label-chip">archived</span>
                 }
-                <span
-                  class="github-repo-row__issues"
-                  matTooltip="Open issues and pull requests reported by GitHub"
-                >{{ repo.open_issues_count }} open</span>
+                <span class="github-repo-row__issues">{{ repo.open_issues_count }} open</span>
                 <mat-icon class="github-repo-row__arrow" aria-hidden="true">
                   {{ selectedRepo?.full_name === repo.full_name ? 'expand_less' : 'chevron_right' }}
                 </mat-icon>
@@ -231,21 +235,26 @@
                       } @else {
                       <div class="github-issues-list">
                         @for (vm of pagedIssueVms; track vm.number) {
+                          <!--
+                            No tabindex on the nested title/chip spans below: a focusable
+                            descendant of a <button> is invalid per the HTML interactive-content
+                            model and would add a second tab stop to every issue row. Both
+                            messages are composed into issueRowTooltip() and bound on the button
+                            itself instead.
+                          -->
                           <button
                             class="github-issue-row"
                             type="button"
                             [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
                             [attr.aria-controls]="'confirm-panel-' + vm.number"
+                            [matTooltip]="issueRowTooltip(vm)"
                             (click)="selectIssue(vm.issue)"
                           >
                             <span class="github-issue-row__number">#{{ vm.number }}</span>
-                            <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
+                            <span class="github-issue-row__title">{{ vm.title }}</span>
                             @if (vm.inProgress) {
-                              <span
-                                class="github-label-chip github-label-chip--active"
-                                matTooltip="The coding team is already working on this issue"
-                              >
+                              <span class="github-label-chip github-label-chip--active">
                                 <mat-icon aria-hidden="true">engineering</mat-icon>
                                 In progress
                               </span>

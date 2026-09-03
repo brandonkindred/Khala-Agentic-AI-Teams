@@ -315,6 +315,13 @@ The reviewer will reject specs whose prose makes claims the rules cannot test. *
 - Separate `entry_rules` are evaluated as **OR**: the engine enters as soon as the FIRST listed rule fires. Adding a second entry rule does NOT tighten the condition — it broadens it.
 - So "long when ADX > 25 **AND** close > SMA200" is **one** entry rule with `"when": {"kind": "all_of", "of": [ADX>25, close>SMA200]}` — NOT two separate `entry_rules` (which would enter on `ADX > 25 OR close > SMA200`, a looser strategy than your prose).
 
+**`entry_rules` list order is priority order (authoritative).** When more than one entry rule is listed, the engine returns the FIRST one whose `when` fires at a bar and ignores the rest — this is intentional first-match-wins priority, not a bug, and it applies across `long`/`short` rules alike (a `long` rule listed first shadows a `short` rule listed after it on any bar where both would fire). The practical consequence: if a later rule would only ever fire on bars where an earlier rule ALSO fires, that later rule is dead weight — it can never actually be selected, no matter how it's worded. When you author multiple `entry_rules`, make sure each one can independently win on at least some bars, or resolve the overlap:
+1. **Fold the conditions together** into the earlier rule's `all_of` / `any_of` tree if you meant them as one combined thesis, or
+2. **Reorder** so the rule you intend as higher-priority is listed first, or
+3. **Loosen or otherwise change** the later rule's predicate so it can fire on bars the earlier rule doesn't cover, if you meant it as a genuine independent fallback.
+
+The strategy-lab's reachability tooling checks fired-rule coverage against the actual fetched data and reports a rule that is always shadowed this way as a distinct finding from a rule that never fires at all — so don't rely on an overlap like this passing unnoticed.
+
 **Win rate is driven by entry selectivity — a confirmation-stacked setup (trend filter ∧ pullback ∧ volume confirmation) is exactly how expert traders raise their hit rate. Encode the full conjunction; do NOT discard confirmations to fit a single predicate.** Three correct ways to resolve a mismatch:
 
 1. **Encode the multi-confirmation trigger as one `all_of` entry rule** (the preferred resolution). Every condition you name in the prose becomes a structured predicate inside the tree, so the rule tests exactly what the prose claims and the spec stays compilable (`requires_custom_code: false`). This is the win-rate lever — reach for it rather than dropping legs.

@@ -284,6 +284,20 @@ def test_run_json_gate_success_on_first_attempt(monkeypatch):
     assert factory.agents[0].system_prompt == "a system prompt"
 
 
+def test_run_json_gate_passes_content_block_list_system_prompt_through(monkeypatch):
+    """A Strands content-block list (e.g. from build_system_prompt_with_content, carrying
+    a cacheable brand/style segment) reaches Agent construction verbatim, not just a bare
+    string — pins the widened Union[str, List[Any]] contract against a future refactor
+    (e.g. a str(...) coercion or non-string-block filter) that would silently break every
+    cacheable-segment caller."""
+    factory = _FakeStrandsAgentFactory(['{"ok": true}'])
+    monkeypatch.setattr(json_retry_module, "Agent", factory)
+    segments = [{"text": "persona text"}, {"cachePoint": {"type": "default"}}]
+    data = run_json_gate("model", segments, "prompt")
+    assert data == {"ok": True}
+    assert factory.agents[0].system_prompt is segments
+
+
 def test_run_json_gate_retry_then_success_reuses_same_agent(monkeypatch):
     """A JSON-parse retry (default fresh_agent_per_attempt=False) reuses one Agent instance."""
     factory = _FakeStrandsAgentFactory(["not json", '{"ok": true}'])

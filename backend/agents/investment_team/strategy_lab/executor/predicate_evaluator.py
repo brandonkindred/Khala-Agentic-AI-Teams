@@ -244,6 +244,57 @@ def evaluate_entry_rules(
 
     Pre: ``rules`` is the spec's ``entry_rules`` list.
     Post: returns ``(rule, original_index)`` or ``None``.
+
+    Entry-rule priority semantics (authoritative decision):
+        ``rules`` list order IS the spec's priority order — rule 0 has the
+        highest priority, rule 1 the next, and so on. First-match-wins
+        (returning the first ``satisfied`` rule and ignoring the rest) is
+        **intentional**, not an incidental consequence of this loop's
+        implementation: it is the one disambiguation model authors are taught
+        (see ``prompts/design_system.md``, "Hypothesis <-> predicates must
+        agree") and it costs no evaluator complexity or determinism risk. The
+        defect this decision fixes is not the semantics themselves but their
+        former silence — a later rule shadowed by an earlier one produced no
+        signal that it was structurally unreachable.
+
+        ``side_filter`` is optional, and the current sole caller
+        (``executor/reference_entries.py``'s ``replay_entries``) does not pass
+        it — so in practice priority is applied across ALL rules regardless of
+        ``side``: a ``long`` rule listed before a ``short`` rule shadows it on
+        any bar where both fire. A caller that does pass ``side_filter`` only
+        ever sees rules of that one side, so priority is scoped to that subset
+        for that call.
+
+    Structurally starved (the concept the reachability-probe extension in
+    Step 2 of issue #7486 must detect, distinct from "dead"):
+        Fix a spec + fetched market-data window (the same data-dependent frame
+        :class:`~..quality_gates.predicate_reachability.PredicateReachabilityProbe`
+        already evaluates against). For entry-rule index ``j``, let ``S_j`` be
+        the set of (symbol, bar) pairs, post-warmup, where rule ``j``'s
+        predicate tree (``evaluate_tree(rule.when, view, i)``) evaluates to
+        ``"satisfied"``.
+
+        * **dead** (existing probe concept, unchanged) — ``S_j`` is empty:
+          the rule never fires under any ordering.
+        * **structurally starved** (new) — ``S_j`` is non-empty, but
+          ``S_j ⊆ union(S_i for i < j)``: every bar where rule ``j`` would
+          fire, some earlier rule already does, so this loop can never
+          actually return ``j`` — ``evaluate_entry_rules`` always picks the
+          earlier rule first. Note this must be checked against the UNION of
+          every earlier rule's firing set, not a pairwise superset check
+          against a single earlier rule: several earlier rules can jointly
+          cover ``S_j`` (fully starving rule ``j``) even when none of them
+          individually is a superset of it.
+        * **reachable** — ``S_j \\ union(S_i for i < j)`` is non-empty: there
+          is at least one bar where rule ``j`` fires and no earlier rule does,
+          so it CAN be the value this loop returns.
+
+        Like "dead"/"reachable", "structurally starved" is a per-dataset,
+        data-dependent verdict — the same spec can be starved on one fetched
+        window and reachable on another — so a probe built against this
+        definition should share the existing ``_MIN_EVALUATED_BARS``
+        "judged" abstention gate rather than treating starvation as a
+        universal, data-independent property of the spec.
     """
     for idx, rule in enumerate(rules):
         if not isinstance(rule, EntryRule):

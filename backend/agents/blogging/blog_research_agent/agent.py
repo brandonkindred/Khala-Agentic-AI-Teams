@@ -29,8 +29,7 @@ from .models import (  # noqa: E402
 )
 from .prompts import (  # noqa: E402
     BRIEF_PARSING_PROMPT,
-    DOC_RELEVANCE_SCORING_PROMPT,
-    DOC_SUMMARIZATION_PROMPT,
+    DOC_SCORE_AND_SUMMARIZE_PROMPT,
     FINAL_SYNTHESIS_PROMPT,
     QUERY_GENERATION_PROMPT,
     SIMILAR_TOPICS_PROMPT,
@@ -520,59 +519,139 @@ class ResearchAgent(_BlogAgentBase):
         logger.info("Fetched %s documents", len(documents))
         return documents
 
-    def _score_one_document(
+    def _evaluate_one_document(
         self,
         doc: SourceDocument,
         brief_input: ResearchBriefInput,
-    ) -> Tuple[SourceDocument, float, float, float, str]:
-        """Score a single document for relevance, authority, accuracy, and type. Used by _score_documents."""
+    ) -> Tuple[SourceDocument, float, float, float, str, ResearchReference]:
+        """
+        Score and summarize a single document in one LLM round-trip.
+
+        Compacts the document text once and issues a single _call_json call
+        against DOC_SCORE_AND_SUMMARIZE_PROMPT, parsing all six response keys
+        (relevance_score, authority_score, accuracy_score, type, summary,
+        key_points) from that one response. Replaces the former
+        _score_one_document / _summarize_one_document pair, which each
+        compacted the same document text under different content_description
+        labels (defeating compact_text's (model, max_chars,
+        content_description, content-hash) memoization) and each issued
+        their own _call_json call.
+
+        Preconditions:
+            - doc is a valid SourceDocument (doc.content may be "").
+            - brief_input is a valid ResearchBriefInput.
+        Postconditions:
+            - Returns (doc, relevance, authority, accuracy, type_label, reference).
+            - relevance, authority, accuracy are each clamped to [0.0, 1.0].
+            - If the combined LLM call raises a non-cancellation exception,
+              relevance defaults to 0.0 and authority/accuracy default to 0.5
+              (the same defensive defaults used below for a non-numeric field
+              in an otherwise successful response), type_label is None, and
+              summary/key_points degrade to an excerpt built from doc.content
+              - the document still yields a usable (default) score rather
+              than the failure propagating.
+            - If the call succeeds but its summary is missing or empty, only
+              that half degrades to the same excerpt fallback; the scores
+              and type parsed from that same successful response are kept
+              as-is.
+            - A CancelledError (optionally wrapped in EventLoopException) is
+              re-raised via _is_cancellation rather than degraded by either
+              fallback above.
+            - reference is a ResearchReference built from doc plus the
+              values above (content=doc.content.strip() or None, recency=None).
+        """
         # Budget: use 1.0 chars/token (safe for web content which tokenizes poorly).
         ctx_tokens = 16384  # Default context budget for safety
         max_content_chars = max(4000, ctx_tokens - 6000)  # 1 char ≈ 1 token for safety
+        # Single content_description (previously "document for scoring" and
+        # "document for summarization" were two different labels for the same
+        # text, so compact_text's memoization never hit and the document was
+        # compacted twice; one label here means one compaction).
         doc_content = compact_text(
-            doc.content or "", max_content_chars, self._model, "document for scoring"
+            doc.content or "",
+            max_content_chars,
+            self._model,
+            "document for scoring and summarization",
         )
         # Hard safety net: if compaction returned something still over budget, truncate.
         if len(doc_content) > max_content_chars:
             doc_content = doc_content[:max_content_chars]
-        prompt = (
-            DOC_RELEVANCE_SCORING_PROMPT
-            + "\n\n"
-            + (
-                f"Brief:\n{brief_input.brief}\n\n"
-                f"Document title: {doc.title or ''}\n"
-                f"Document content:\n{doc_content}\n"
-            )
+
+        prompt = DOC_SCORE_AND_SUMMARIZE_PROMPT + "\n\n" + f"Brief:\n{brief_input.brief}\n"
+        if brief_input.audience:
+            prompt += f"Audience: {brief_input.audience}\n"
+        if brief_input.tone_or_purpose:
+            prompt += f"Tone/Purpose: {brief_input.tone_or_purpose}\n"
+        prompt += (
+            f"\nDocument title: {doc.title or ''}\n"
+            f"Document URL: {doc.url}\n"
+            f"Document content:\n{doc_content}\n"
         )
-        data = self._call_json(prompt)
-        rel = data.get("relevance_score")
-        auth = data.get("authority_score")
-        acc = data.get("accuracy_score")
-        if not isinstance(
-            rel, (int, float)
-        ):  # pragma: no cover - defensive guard against non-numeric LLM responses; covered by integration tests.
-            rel = 0.0
-        if not isinstance(
-            auth, (int, float)
-        ):  # pragma: no cover - defensive guard against non-numeric LLM responses; covered by integration tests.
-            auth = 0.5
-        if not isinstance(
-            acc, (int, float)
-        ):  # pragma: no cover - defensive guard against non-numeric LLM responses; covered by integration tests.
-            acc = 0.5
-        relevance = max(0.0, min(1.0, float(rel)))
-        authority = max(0.0, min(1.0, float(auth)))
-        accuracy = max(0.0, min(1.0, float(acc)))
-        type_label = data.get("type") or None
+
+        def _excerpt_fallback() -> str:
+            raw = (doc.content or "").strip().replace("\n", " ")
+            return (raw[:500] if len(raw) > 500 else raw) or f"(Source: {doc.title or doc.url})"
+
+        try:
+            data = self._call_json(prompt)
+        except Exception as e:  # pragma: no cover - excerpt-fallback path triggers only when the combined score+summarize LLM call raises; covered by integration tests with a flaky model.
+            if _is_cancellation(e):
+                raise
+            logger.warning(
+                "Score+summarize LLM call failed for %s (%s); using default scores and excerpt fallback so research can continue.",
+                doc.url,
+                type(e).__name__,
+            )
+            relevance, authority, accuracy, type_label = 0.0, 0.5, 0.5, None
+            summary, key_points = _excerpt_fallback(), []
+        else:
+            rel = data.get("relevance_score")
+            auth = data.get("authority_score")
+            acc = data.get("accuracy_score")
+            if not isinstance(
+                rel, (int, float)
+            ):  # pragma: no cover - defensive guard against non-numeric LLM responses; covered by integration tests.
+                rel = 0.0
+            if not isinstance(
+                auth, (int, float)
+            ):  # pragma: no cover - defensive guard against non-numeric LLM responses; covered by integration tests.
+                auth = 0.5
+            if not isinstance(
+                acc, (int, float)
+            ):  # pragma: no cover - defensive guard against non-numeric LLM responses; covered by integration tests.
+                acc = 0.5
+            relevance = max(0.0, min(1.0, float(rel)))
+            authority = max(0.0, min(1.0, float(auth)))
+            accuracy = max(0.0, min(1.0, float(acc)))
+            type_label = data.get("type") or None
+            summary = data.get("summary") or ""
+            key_points = data.get("key_points") or []
+            if not summary:  # pragma: no cover - unusable-summary-half fallback within an otherwise successful response; covered by integration tests.
+                summary = _excerpt_fallback()
+
         logger.debug(
-            "Scored doc: title=%s, relevance=%s, authority=%s, accuracy=%s, type=%s",
+            "Evaluated doc: title=%s, relevance=%s, authority=%s, accuracy=%s, type=%s",
             doc.title,
             relevance,
             authority,
             accuracy,
             type_label,
         )
-        return (doc, relevance, authority, accuracy, type_label)
+
+        reference = ResearchReference(
+            title=doc.title or str(doc.url),
+            url=doc.url,
+            domain=doc.domain,
+            summary=summary,
+            content=doc.content.strip() or None,
+            key_points=key_points,
+            type=type_label,
+            recency=None,
+            relevance_score=relevance,
+            authority_score=authority,
+            accuracy_score=accuracy,
+        )
+        return (doc, relevance, authority, accuracy, type_label, reference)
 
     def _score_documents(
         self,
@@ -600,12 +679,15 @@ class ResearchAgent(_BlogAgentBase):
         # attribution/request-id contextvars propagate into the scoring workers
         # (raw threads don't copy them; see llm_service.attribution).
         # skip_none=False keeps one result per document positionally, exactly as
-        # the previous list comprehension did — safe because _score_one_document
-        # always returns a tuple (never None; a failing LLM call raises rather
-        # than returning None), so the sort below never sees a None element.
+        # the previous list comprehension did — safe because _evaluate_one_document
+        # always returns a tuple (never None; it degrades to default scores on a
+        # non-cancellation failure instead of raising), so the sort below never
+        # sees a None element. Only the first five elements (the score tuple) are
+        # kept here; the ResearchReference _evaluate_one_document also builds is
+        # discarded and rebuilt by _summarize_documents for the top-ranked subset.
         scored = parallel_map(
             documents,
-            lambda doc: self._score_one_document(doc, brief_input),
+            lambda doc: self._evaluate_one_document(doc, brief_input)[:5],
             max_workers=_DOC_PARALLEL_WORKERS,
             skip_none=False,
         )
@@ -615,57 +697,40 @@ class ResearchAgent(_BlogAgentBase):
         logger.info("Scored %s documents", len(scored))
         return scored
 
-    def _summarize_one_document(
+    def _reference_for_scored_item(
         self,
         item: Tuple[SourceDocument, float, float, float, str],
         brief_input: ResearchBriefInput,
     ) -> ResearchReference:
-        """Summarize a single document into a ResearchReference. Used by _summarize_documents."""
+        """
+        Build the ResearchReference for an already-scored document.
+
+        Re-runs _evaluate_one_document to get a fresh summary/key_points, but
+        keeps item's own scores/type as the source of truth rather than the
+        fresh call's - item may have come from a resumed scored_docs
+        checkpoint (including the legacy 3-tuple format reconstructed in
+        run()), so its values must not be silently overwritten by a second,
+        independent LLM call's scores.
+
+        Preconditions:
+            - item is a (doc, relevance, authority, accuracy, type_label) tuple.
+            - brief_input is a valid ResearchBriefInput.
+        Postconditions:
+            - Returns a ResearchReference whose relevance_score, authority_score,
+              accuracy_score, and type equal item's relevance, authority,
+              accuracy, and type_label respectively, and whose
+              title/url/domain/summary/key_points/content come from a fresh
+              _evaluate_one_document(item[0], brief_input) call.
+        """
         doc, relevance, authority, accuracy, type_label = item
-        ctx_tokens = 16384  # Default context budget for safety
-        max_content_chars = max(4000, ctx_tokens - 6000)  # 1 char ≈ 1 token for safety
-        doc_content = compact_text(
-            doc.content or "", max_content_chars, self._model, "document for summarization"
-        )
-        if len(doc_content) > max_content_chars:
-            doc_content = doc_content[:max_content_chars]
-        prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (f"Brief:\n{brief_input.brief}\n")
-        if brief_input.audience:
-            prompt += f"Audience: {brief_input.audience}\n"
-        if brief_input.tone_or_purpose:
-            prompt += f"Tone/Purpose: {brief_input.tone_or_purpose}\n"
-        prompt += (
-            f"\nDocument title: {doc.title or ''}\n"
-            f"Document URL: {doc.url}\n"
-            f"Document content:\n{doc_content}\n"
-        )
-        try:
-            data = self._call_json(prompt)
-            summary = data.get("summary") or ""
-            key_points = data.get("key_points") or []
-        except Exception as e:  # pragma: no cover - excerpt-fallback path triggers only when the LLM raises mid-summarization; covered by integration tests with a flaky model.
-            if _is_cancellation(e):
-                raise
-            logger.warning(
-                "Summarization LLM failed for %s (%s); using excerpt fallback so research can continue.",
-                doc.url,
-                type(e).__name__,
-            )
-            raw = (doc.content or "").strip().replace("\n", " ")
-            summary = (raw[:500] if len(raw) > 500 else raw) or f"(Source: {doc.title or doc.url})"
-            key_points = []
-        return ResearchReference(
-            title=doc.title or str(doc.url),
-            url=doc.url,
-            domain=doc.domain,
-            summary=summary,
-            content=doc.content.strip() or None,
-            key_points=key_points,
-            type=type_label,
-            recency=None,
-            relevance_score=relevance,
-            authority_score=authority,
-            accuracy_score=accuracy,
+        _, _, _, _, _, reference = self._evaluate_one_document(doc, brief_input)
+        return reference.model_copy(
+            update={
+                "relevance_score": relevance,
+                "authority_score": authority,
+                "accuracy_score": accuracy,
+                "type": type_label,
+            }
         )
 
     def _summarize_documents(
@@ -690,12 +755,12 @@ class ResearchAgent(_BlogAgentBase):
         # attribution/request-id contextvars propagate into the summarizing
         # workers (raw threads don't copy them; see llm_service.attribution).
         # skip_none=False keeps one result per item positionally, as the previous
-        # list comprehension did — safe because _summarize_one_document always
-        # returns a ResearchReference (its except path falls back to an excerpt,
-        # never None).
+        # list comprehension did — safe because _reference_for_scored_item always
+        # returns a ResearchReference (its except path, inside
+        # _evaluate_one_document, falls back to an excerpt, never None).
         references = parallel_map(
             items,
-            lambda item: self._summarize_one_document(item, brief_input),
+            lambda item: self._reference_for_scored_item(item, brief_input),
             max_workers=_DOC_PARALLEL_WORKERS,
             skip_none=False,
         )
