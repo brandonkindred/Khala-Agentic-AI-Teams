@@ -420,6 +420,8 @@ def test_get_tracer_and_get_meter_return_sdk_objects_when_available() -> None:
 
 
 class _RecordingProvider:
+    """Provider double that records how many times shutdown() is invoked."""
+
     def __init__(self) -> None:
         self.shutdown_calls = 0
 
@@ -428,6 +430,8 @@ class _RecordingProvider:
 
 
 class _FailingProvider:
+    """Provider double whose shutdown() raises, simulating an already-closed exporter."""
+
     def __init__(self) -> None:
         self.shutdown_calls = 0
 

@@ -11,7 +11,10 @@
 #   * test-backend's software_engineering matrix entry — the neutral packages
 #     extracted from software_engineering_team (command_runner, repo_context,
 #     llm_recovery, dev_models, git, hitl, run_thread_registry), which the SE
-#     suite exercises rather than tests of their own.
+#     suite exercises as dependencies. command_runner, repo_context,
+#     llm_recovery and dev_models have no test suite of their own; git, hitl
+#     and run_thread_registry do, run separately below, and simply union with
+#     this data file at combine time.
 #   * test-shared-packages — every shared package whose tests live under
 #     backend/shared/<pkg>/tests/, plus the loose modules covered by
 #     backend/shared/tests/.

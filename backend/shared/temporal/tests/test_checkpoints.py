@@ -198,6 +198,11 @@ def test_wait_for_input_records_the_prompt_while_waiting(
     assert waiting["prompt"] == "Pick a title"
     assert waiting["since"]
 
+    job = client.get_job("job-1")
+    assert job is not None
+    assert job["waiting_for"] == {}
+    assert job["status"] == "running"
+
 
 def test_wait_for_input_polls_until_the_value_arrives(
     client: FakeJobServiceClient, monkeypatch: pytest.MonkeyPatch
@@ -216,6 +221,11 @@ def test_wait_for_input_polls_until_the_value_arrives(
 
     assert result == "Arrived late"
     assert sleeps == [0.25, 0.25]
+
+    job = client.get_job("job-1")
+    assert job is not None
+    assert job["waiting_for"] == {}
+    assert job["status"] == "running"
 
 
 def test_wait_for_input_times_out(client: FakeJobServiceClient, monkeypatch: pytest.MonkeyPatch) -> None:
