@@ -1098,7 +1098,7 @@ describe('CodingTeamPageComponent', () => {
 
     it('returns just the issue-count clarification when description is null or empty, with no dangling separator', async () => {
       await setup();
-      expect(component.repoRowTooltip({ ...REPO, description: null as unknown as string })).toBe(
+      expect(component.repoRowTooltip({ ...REPO, description: null })).toBe(
         'Open issues and pull requests reported by GitHub'
       );
       expect(component.repoRowTooltip({ ...REPO, description: '' })).toBe(

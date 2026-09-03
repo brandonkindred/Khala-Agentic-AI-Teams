@@ -184,7 +184,10 @@ describe('CodingTeamPageComponent a11y', () => {
 
     const rowDebugEl = fixture.debugElement.query(By.css('.github-repo-row'));
     const tooltip = rowDebugEl.injector.get(MatTooltip);
-    expect(tooltip.message).toBe(component.repoRowTooltip(component.repos[0]));
+    // Pinned to the literal composed string (not component.repoRowTooltip(...)) so this
+    // assertion independently catches a wrongly composed tooltip rather than trivially
+    // agreeing with whatever the method under test currently returns.
+    expect(tooltip.message).toBe('Widget factory — Open issues and pull requests reported by GitHub');
 
     expect(row.querySelectorAll('[tabindex]').length).toBe(0);
 
