@@ -451,6 +451,22 @@ def test_cooccurrence_counts_pure_function_hand_built() -> None:
     assert _cooccurrence_counts(later_statuses, earlier_statuses) == (3, 2, 1)
 
 
+def test_cooccurrence_counts_pure_function_excludes_earlier_side_warmup() -> None:
+    # Same pure function, but pinning the OTHER side of the warmup contract:
+    # a bar where the EARLIER rule is warmup (not the later one) must also be
+    # excluded from `evaluated`, not silently counted as an independent fire.
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _cooccurrence_counts,
+    )
+
+    later_statuses = ["satisfied", "satisfied", "satisfied"]
+    earlier_statuses = ["warmup", "satisfied", "miss"]
+    # Bar 0 excluded (earlier is warmup there). Of the remaining 2: later
+    # fires at both (evaluated=2, later_fires=2); of those, only bar 2 has
+    # the earlier rule not satisfied (later_independent_fires=1).
+    assert _cooccurrence_counts(later_statuses, earlier_statuses) == (2, 2, 1)
+
+
 def test_sweep_statuses_matches_sweep_aggregate() -> None:
     # Guards the _sweep refactor: its (evaluated, fires) counts must still
     # match what _sweep_statuses's raw per-bar sequence implies.

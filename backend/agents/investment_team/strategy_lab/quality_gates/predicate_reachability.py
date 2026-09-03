@@ -45,6 +45,19 @@ GATE = "predicate_reachability_probe"
 _MIN_EVALUATED_BARS = 20
 
 
+def _entry_rules(spec: Any) -> List[EntryRule]:
+    """Entry rules of ``spec`` in authored order — the probe's index space.
+
+    Preconditions: ``spec`` is a ``StrategySpec`` (or any object exposing an
+    ``entry_rules`` attribute).
+    Postconditions: returns every ``EntryRule`` in ``spec.entry_rules``, in
+    order, skipping any non-``EntryRule`` element; ``[]`` when ``spec`` has no
+    ``entry_rules`` attribute or it is falsy. Shared by :meth:`probe` and
+    :meth:`probe_pairs` so both index into the SAME filtered list.
+    """
+    return [r for r in (getattr(spec, "entry_rules", None) or []) if isinstance(r, EntryRule)]
+
+
 def _build_views(market_data: Any) -> List[PandasHistoryView]:
     """Build one PandasHistoryView per symbol with usable bars.
 
@@ -188,7 +201,7 @@ def _sweep(node: Any, views: List[PandasHistoryView]) -> tuple[int, int]:
     this cost is paid at most once per distinct entry-rule set — not once per
     refinement round.
     """
-    assert node is not None, "node must be a PredicateTree"
+    assert node is not None, "node must be non-None"
     assert isinstance(views, list), "views must be a list of PandasHistoryView"
     statuses = _sweep_statuses(node, views)
     evaluated = sum(1 for s in statuses if s != "warmup")
@@ -206,7 +219,7 @@ def _sweep_statuses(node: Any, views: List[PandasHistoryView]) -> List[EvalStatu
     order as any other call given the SAME ``views`` list, so two such calls'
     results are positionally alignable per bar. Deterministic; no I/O.
     """
-    assert node is not None, "node must be a PredicateTree"
+    assert node is not None, "node must be non-None"
     assert isinstance(views, list), "views must be a list of PandasHistoryView"
     return [evaluate_tree(node, view, i).status for view in views for i in range(view.length())]
 
@@ -265,9 +278,7 @@ class PredicateReachabilityProbe(GateResultsMixin):
         at most once per (symbol, indicator).
         """
         assert spec is not None, "spec must be a StrategySpec"
-        entry_rules = [
-            r for r in (getattr(spec, "entry_rules", None) or []) if isinstance(r, EntryRule)
-        ]
+        entry_rules = _entry_rules(spec)
         if not entry_rules or not market_data:
             return []
         views = _build_views(market_data)
@@ -315,9 +326,7 @@ class PredicateReachabilityProbe(GateResultsMixin):
         later step.
         """
         assert spec is not None, "spec must be a StrategySpec"
-        entry_rules = [
-            r for r in (getattr(spec, "entry_rules", None) or []) if isinstance(r, EntryRule)
-        ]
+        entry_rules = _entry_rules(spec)
         if len(entry_rules) < 2 or not market_data:
             return []
         views = _build_views(market_data)
