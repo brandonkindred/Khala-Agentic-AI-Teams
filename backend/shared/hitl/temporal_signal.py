@@ -199,28 +199,33 @@ class HitlAnswerSignalMixin:
           :func:`_validate_answer_batch`) — but ``is not None`` remains the
           contractually correct test, not an accident of today's validation
           choice.
-        - ``__init__``'s composition guard (below) only detects a conflicting
-          signal mixin that ran *earlier* in the MRO: it raises when this
-          mixin's state attributes already exist, which only happens if a
-          same-named sibling (e.g. ``PlanningAnswerSignalMixin``) already set
-          them. If ``HitlAnswerSignalMixin`` is listed *first* in a class's
-          bases instead, this ``__init__`` runs first, passes the guard, and
-          a later sibling's ``__init__`` would silently overwrite this
-          mixin's state with no error raised. The guard is therefore a
-          best-effort backstop for one base order, not a substitute for the
-          module docstring's blanket "do not compose with
-          ``PlanningAnswerSignalMixin``" rule, which applies regardless of
-          base order.
+        - ``__init__``'s composition guard (below) calls ``super().__init__()``
+          *before* checking for existing state, so a conflicting sibling
+          later in the MRO runs *inside* that ``super().__init__()`` call and
+          already has its attributes set by the time the guard executes —
+          the guard therefore raises regardless of whether
+          ``HitlAnswerSignalMixin`` is listed first or after such a sibling
+          in a class's bases, as long as that sibling assigns its state
+          within its own ``__init__``. The one residual gap: a sibling listed
+          *before* this mixin whose ``__init__`` assigns its state *after*
+          its own ``super().__init__()`` call returns — those assignments
+          land after this guard has already passed. The module docstring's
+          blanket "do not compose with ``PlanningAnswerSignalMixin``" rule
+          remains the authoritative constraint; the guard is a loud backstop
+          for the far more common ordering, not a substitute for it.
     """
 
     def __init__(self) -> None:
         super().__init__()
         # Guards the module docstring's "do not compose with PlanningAnswerSignalMixin"
         # warning: that mixin owns the identical attribute names and also chains
-        # super().__init__(), so if it already ran (earlier in this MRO), silently
-        # overwriting its state here would alias its signal contract onto this one.
+        # super().__init__(), so a conflicting sibling anywhere in the MRO that ran
+        # inside the super().__init__() call above (i.e. assigned its state within
+        # its own __init__) already has its attributes set by now; silently
+        # overwriting them here would alias its signal contract onto this one.
         # Failing loudly at construction time turns that into a deterministic,
-        # replay-safe error instead of runtime state corruption.
+        # replay-safe error instead of runtime state corruption. See the class
+        # docstring's Invariants for the one base-order combination this misses.
         for _attr in _OWNED_STATE_ATTRS:
             if hasattr(self, _attr):
                 raise TypeError(

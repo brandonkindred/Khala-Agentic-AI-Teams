@@ -90,6 +90,8 @@ def test_signal_name_is_submit_answers() -> None:
 
 
 def test_submit_answers_ignores_non_dict_payload() -> None:
+    """A non-dict payload (str, list, None, ...) must be dropped, never applied
+    or buffered -- fail closed on any shape the validator cannot interpret."""
     wf = _Workflow()
     wf._active_resume_token = "tok-1"
 
@@ -115,6 +117,8 @@ def test_submit_answers_tolerates_zero_argument_delivery() -> None:
 
 
 def test_submit_answers_ignores_non_list_answers() -> None:
+    """An 'answers' value that is not a list must reject the batch rather than
+    be iterated or coerced."""
     wf = _Workflow()
     wf._active_resume_token = "tok-1"
 
@@ -124,6 +128,8 @@ def test_submit_answers_ignores_non_list_answers() -> None:
 
 
 def test_submit_answers_ignores_payload_missing_answers_key() -> None:
+    """A payload without the 'answers' key has nothing to validate -- drop it
+    rather than treat absence as an empty, acceptable batch."""
     wf = _Workflow()
     wf._active_resume_token = "tok-1"
 
@@ -150,6 +156,8 @@ def test_submit_answers_rejects_whole_batch_on_one_malformed_answer_entry() -> N
 
 
 def test_submit_answers_rejects_non_dict_answer_entry() -> None:
+    """A non-dict entry inside 'answers' cannot be unpacked into
+    AnswerSubmission -- reject the whole batch before any entry is applied."""
     wf = _Workflow()
     wf._active_resume_token = "tok-1"
 
