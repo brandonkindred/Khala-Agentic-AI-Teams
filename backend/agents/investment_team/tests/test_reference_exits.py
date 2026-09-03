@@ -677,14 +677,28 @@ def test_replay_passes_slippage_through_to_the_anchor():
     assert replay_stop_loss_exits(spec, bars, entry_slippage_bps=200.0)[0].exit_price == 96.9
 
 
-def test_replay_does_not_mutate_its_inputs():
-    spec = _spec(exit_rules=[StopLossRule(pct=0.05)], entry_side="short")
-    bars = {"AAA": [_flat(101.0), _flat(100.0), _bar(99.0, 106.0, 99.0, 105.0)]}
+@pytest.mark.parametrize(
+    ("exit_rules", "case"),
+    [
+        ([StopLossRule(pct=0.05)], "authored stop, nothing injected"),
+        ([], "no short stop, so the safety stop IS injected"),
+    ],
+    ids=["authored_stop", "injected_safety_stop"],
+)
+def test_replay_does_not_mutate_its_inputs(exit_rules, case):
+    """Both branches of the injection, since only one of them appends.
+
+    The injecting branch is where mutation is actually plausible — it is the
+    only path that grows a rule list — so checking only the authored-stop spec
+    would leave the risky case unverified.
+    """
+    spec = _spec(exit_rules=exit_rules, entry_side="short")
+    bars = {"AAA": [_flat(101.0), _flat(100.0), _bar(99.0, 210.0, 99.0, 205.0)]}
     exit_rules_before = list(spec.exit_rules)
     bars_before = {k: list(v) for k, v in bars.items()}
     replay_stop_loss_exits(spec, bars)
-    assert list(spec.exit_rules) == exit_rules_before
-    assert {k: list(v) for k, v in bars.items()} == bars_before
+    assert list(spec.exit_rules) == exit_rules_before, case
+    assert {k: list(v) for k, v in bars.items()} == bars_before, case
 
 
 def test_replay_is_deterministic():

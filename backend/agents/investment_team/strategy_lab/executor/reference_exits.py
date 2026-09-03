@@ -16,9 +16,8 @@ functions deliberately do not cover — is resting-order FILL mechanics: which
 bar the order fills on, at what price, gap handling, the trailing watermark's
 own bar-by-bar ratchet, and the stop-limit arm/latch.
 
-Modeled behavior is the design doc's TARGET resting-order behavior, not what
-the engine ships today
---------------------------------------------------------------------------
+Target behavior, not shipped behavior
+-------------------------------------
 Today a ``style="market"`` stop is detected at bar close by the live exit
 dispatcher and closed at the NEXT bar's open. The resting-order migration that
 replaces that is still in flight. This module models the post-migration
@@ -446,7 +445,7 @@ class _RestingStopLoss:
         """
         position = self._position()
         if rule.style == "limit":
-            _stop_price, limit_price = stop_limit_prices(rule, position)
+            limit_price = stop_limit_prices(rule, position).limit_price
             if idx not in self._armed:
                 if not stop_loss_triggers(rule, position, _snapshot(bar)):
                     return None
