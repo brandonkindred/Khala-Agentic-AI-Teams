@@ -343,7 +343,13 @@ class _ParallelBatchModel:
     def update_config(self, **overrides: Any) -> None:
         return None
 
-    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+    async def stream(
+        self,
+        messages: Any,
+        tool_specs: Optional[List[Any]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
+    ):
         if _sees_budget_directive(system_prompt):
             for event in _text_events("done"):
                 yield event
@@ -413,7 +419,13 @@ def test_cap_of_one_executes_exactly_one_tool_call() -> None:
 class _TruncatedFinalTurnModel(_StatelessModel):
     """Asks for a tool, then hits the token limit on the tool-free final turn."""
 
-    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+    async def stream(
+        self,
+        messages: Any,
+        tool_specs: Optional[List[Any]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
+    ):
         if not _sees_budget_directive(system_prompt):
             for event in _tool_use_events("call_0", "read_file", {"path": "app/main.py"}):
                 yield event
@@ -445,7 +457,13 @@ class _DeltaAnnouncedToolUseModel(_StatelessModel):
     this shape that slipped past the cap would restore the infinite loop.
     """
 
-    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+    async def stream(
+        self,
+        messages: Any,
+        tool_specs: Optional[List[Any]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
+    ):
         yield {"messageStart": {"role": "assistant"}}
         yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
         yield {
@@ -525,13 +543,25 @@ def test_default_hard_cap_exceeds_advisory_tool_budget() -> None:
     """
     from software_engineering_team.code_review_agent import false_positive_filter
 
+    # Reading the private name is deliberate, not an oversight to "fix" by
+    # inlining 40: five sibling test modules already import
+    # _MAX_TOTAL_TOOL_CALLS the same way, so promoting it here would either
+    # rename across all of them or leave two public names for one constant.
+    # A hardcoded 40 is the one thing that must not happen -- it would keep
+    # passing after the advisory budget moved, which is the whole point.
     assert DEFAULT_AGENT_TOOL_CALL_CAP > false_positive_filter._MAX_TOTAL_TOOL_CALLS
 
 
 class _TextAndToolUseInOneBlockModel(_StatelessModel):
     """Puts real text and a tool use in a single content block."""
 
-    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+    async def stream(
+        self,
+        messages: Any,
+        tool_specs: Optional[List[Any]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
+    ):
         yield {"messageStart": {"role": "assistant"}}
         yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
         yield {
@@ -578,7 +608,13 @@ def test_drop_state_is_scoped_to_the_block_that_opened_it() -> None:
     """Another block's stop must neither end the drop nor be swallowed by it."""
 
     class _InterleavedModel(_StatelessModel):
-        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        async def stream(
+            self,
+            messages: Any,
+            tool_specs: Optional[List[Any]] = None,
+            system_prompt: Optional[str] = None,
+            **kwargs: Any,
+        ):
             yield {"messageStart": {"role": "assistant"}}
             # Over-cap tool use opens block 0 and is dropped...
             yield {
@@ -749,7 +785,13 @@ def test_an_unrelated_blocks_stop_does_not_discard_another_blocks_text() -> None
     """
 
     class _InterleavedTextAndToolUse(_StatelessModel):
-        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        async def stream(
+            self,
+            messages: Any,
+            tool_specs: Optional[List[Any]] = None,
+            system_prompt: Optional[str] = None,
+            **kwargs: Any,
+        ):
             yield {"messageStart": {"role": "assistant"}}
             yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
             yield {
@@ -794,7 +836,13 @@ def test_a_new_block_can_announce_a_tool_use_without_an_intervening_stop() -> No
     """
 
     class _NoStopBetweenBlocks(_StatelessModel):
-        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        async def stream(
+            self,
+            messages: Any,
+            tool_specs: Optional[List[Any]] = None,
+            system_prompt: Optional[str] = None,
+            **kwargs: Any,
+        ):
             yield {"messageStart": {"role": "assistant"}}
             yield {
                 "contentBlockStart": {
@@ -851,7 +899,13 @@ def test_a_forwarded_block_start_keeps_its_stop_even_when_its_tool_use_is_droppe
     """
 
     class _PlainStartThenOverCapToolDelta(_StatelessModel):
-        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):
+        async def stream(
+            self,
+            messages: Any,
+            tool_specs: Optional[List[Any]] = None,
+            system_prompt: Optional[str] = None,
+            **kwargs: Any,
+        ):
             yield {"messageStart": {"role": "assistant"}}
             # A plain start (no toolUse) — forwarded, so Strands opens a block.
             yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
