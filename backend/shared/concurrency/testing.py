@@ -94,6 +94,8 @@ class ConcurrentFirstCallHarness(Generic[_T]):
             window, not a guarantee, so setting it too low weakens (without
             invalidating) the race this harness exists to exercise.
         """
+        assert wait_timeout >= 0, f"wait_timeout must be non-negative, got {wait_timeout}"
+        assert settle >= 0, f"settle must be non-negative, got {settle}"
         self.build_count = 0
         self._build_count_lock = threading.Lock()
         self._started = threading.Event()
@@ -117,7 +119,9 @@ class ConcurrentFirstCallHarness(Generic[_T]):
         with self._build_count_lock:
             self.build_count += 1
         self._started.set()
-        assert self._release.wait(timeout=self._wait_timeout), "test setup deadlocked waiting for release"
+        assert self._release.wait(timeout=self._wait_timeout), (
+            "release was never signaled — run() failed or timed out before self._release.set()"
+        )
         return build()
 
     def run(self, thread_count: int, call: Callable[[], None]) -> None:
@@ -131,9 +135,23 @@ class ConcurrentFirstCallHarness(Generic[_T]):
         Postconditions:
             See the class Postconditions: every started thread is joined and
             confirmed finished before this call returns, or ``AssertionError`` names
-            the ones still alive.
+            the ones still alive. If any thread's ``call`` raised an exception that
+            escaped it, the first such exception (in thread-start order) is
+            re-raised on the calling thread after the join/still-alive checks, with
+            its original type and traceback — a crashed worker surfaces as itself
+            rather than as a downstream assertion elsewhere in the caller.
         """
         assert thread_count >= 1, f"thread_count must be >= 1, got {thread_count}"
+        exceptions: list[BaseException] = []
+        exceptions_lock = threading.Lock()
+
+        def _target() -> None:
+            try:
+                call()
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller below
+                with exceptions_lock:
+                    exceptions.append(exc)
+
         # Daemon so a thread that's genuinely stuck (the deadlock this harness exists
         # to catch) can never block interpreter exit after the assertion below has
         # already reported the failure — the join-and-confirm loop is what actually
@@ -141,7 +159,7 @@ class ConcurrentFirstCallHarness(Generic[_T]):
         # wedging the process. Named so the still-alive assertion below identifies
         # which logical worker hung, instead of an unhelpful default "Thread-17".
         threads = [
-            threading.Thread(target=call, name=f"concurrent-first-call-{i}", daemon=True)
+            threading.Thread(target=_target, name=f"concurrent-first-call-{i}", daemon=True)
             for i in range(thread_count)
         ]
         threads[0].start()
@@ -156,3 +174,5 @@ class ConcurrentFirstCallHarness(Generic[_T]):
             t.join(timeout=self._wait_timeout)
         still_alive: list[str] = [t.name for t in threads if t.is_alive()]
         assert not still_alive, f"threads still alive after join (possible deadlock): {still_alive}"
+        if exceptions:
+            raise exceptions[0]

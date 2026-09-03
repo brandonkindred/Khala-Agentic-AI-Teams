@@ -140,8 +140,13 @@ def test_keyed_lazy_registry_distinct_keys_construct_concurrently_without_blocki
                 "key 'b' construction blocked on key 'a's in-flight build"
             )
         finally:
+            # Join, but don't assert here: in the exact failure this test targets
+            # (keys wrongly serialized), thread_b is still blocked and this join
+            # times out too — asserting inside this finally would let a generic
+            # "did not finish" message override the more informative b_done
+            # assertion above as the primary reported failure.
             thread_b.join(timeout=_WAIT_TIMEOUT)
-            assert not thread_b.is_alive(), "thread_b did not finish"
+        assert not thread_b.is_alive(), "thread_b did not finish"
     finally:
         # Always release key 'a's factory and join it, even if an assertion above
         # failed — otherwise thread_a stays blocked on release_a.wait() for up to
