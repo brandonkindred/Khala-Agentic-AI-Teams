@@ -748,42 +748,46 @@ def test_build_spec_agent_builds_agent_from_structured_output_spec(
     assert captured["agent_key"] == "branding"
 
 
-# Phase 1 (Strategic Core) factories migrated to ``_build_spec_agent`` by this
-# story. Stories 3-6 of the epic extend this tuple as later phases migrate,
-# rather than adding a new AST-walking test each time.
-_PHASE1_BUILD_SPEC_AGENT_FACTORY_NAMES: tuple[str, ...] = (
+# Schema-derived factories migrated to ``_build_spec_agent`` so far: Phase 1
+# (Strategic Core, all six) plus Phase 2's one schema-derived factory
+# (Storyteller — the other five Phase 2 specialists are hand-written
+# ``fields=``-based and out of scope for this migration). Stories 4-6 of the
+# epic extend this tuple as later phases migrate, rather than adding a new
+# AST-walking test each time.
+_BUILD_SPEC_AGENT_FACTORY_NAMES: tuple[str, ...] = (
     "make_discovery_auditor",
     "make_purpose_vision_writer",
     "make_values_articulator",
     "make_audience_segmenter",
     "make_differentiation_mapper",
     "make_positioning_synthesizer",
+    "make_storyteller",
 )
 
 
-def test_phase1_factories_build_via_build_spec_agent() -> None:
-    """Phase 1 factories call ``_build_spec_agent``, never hand-rolled ``build_agent``.
+def test_factories_build_via_build_spec_agent() -> None:
+    """Migrated factories call ``_build_spec_agent``, never hand-rolled ``build_agent``.
 
     Preconditions:
         ``branding_team.agents.__file__`` points at a readable Python source
-        file defining every name in ``_PHASE1_BUILD_SPEC_AGENT_FACTORY_NAMES``
-        as a module-level function.
+        file defining every name in ``_BUILD_SPEC_AGENT_FACTORY_NAMES`` as a
+        module-level function.
     Postconditions:
         Each named function's body contains at least one ``_build_spec_agent``
         call and no ``build_agent`` call. Guards against a future edit
-        quietly reverting a migrated Phase 1 factory back onto the
-        hand-rolled ``build_agent(..., structured_output=X, ...)`` path,
-        which the existing prompt/schema/agent_key tests would not catch
-        since they assert on observable behavior, not call shape.
+        quietly reverting a migrated factory back onto the hand-rolled
+        ``build_agent(..., structured_output=X, ...)`` path, which the
+        existing prompt/schema/agent_key tests would not catch since they
+        assert on observable behavior, not call shape.
     """
     source_path = Path(branding_agents.__file__).resolve()
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     factory_defs = {
         node.name: node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name in _PHASE1_BUILD_SPEC_AGENT_FACTORY_NAMES
+        if isinstance(node, ast.FunctionDef) and node.name in _BUILD_SPEC_AGENT_FACTORY_NAMES
     }
-    assert set(factory_defs) == set(_PHASE1_BUILD_SPEC_AGENT_FACTORY_NAMES)
+    assert set(factory_defs) == set(_BUILD_SPEC_AGENT_FACTORY_NAMES)
     for name, func_node in factory_defs.items():
         called_names = {
             _call_func_name(call.func) for call in ast.walk(func_node) if isinstance(call, ast.Call)
