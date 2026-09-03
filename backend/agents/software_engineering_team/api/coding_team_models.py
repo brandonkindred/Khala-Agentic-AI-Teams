@@ -350,10 +350,22 @@ class AddressCommentsResponse(BaseModel):
     will work through."""
 
     job_id: str
-    pr_number: int
+    pr_number: int = Field(
+        gt=0,
+        description=(
+            "The pull request the job was started for. Bounded gt=0 for symmetry with "
+            "AddressCommentsRequest.pr_number: a response that echoed a number which "
+            "could never name a pull request would be a server bug worth surfacing."
+        ),
+    )
     pr_url: str
     unresolved_comment_count: int = Field(
-        description="Number of unresolved review comments the job will address."
+        ge=0,
+        description=(
+            "Number of unresolved review comments the job will address. Bounded ge=0 "
+            "(not gt=0): zero is a legitimate outcome -- a PR whose every thread is "
+            "already resolved -- while a negative count is never meaningful."
+        ),
     )
     status: str = "pending"
     message: str = "Addressing unresolved comments. Poll GET /status/{job_id} for progress."

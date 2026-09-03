@@ -2202,17 +2202,18 @@ describe('CodingTeamPageComponent', () => {
       integrationsSpy.addressPrComments.mockReturnValue(new Subject());
       await setup();
       openPullsForRepo();
-      const btn: HTMLButtonElement = fixture.nativeElement.querySelector('.pull-row__actions button');
-      expect(btn.disabled).toBe(false);
+      const btn: HTMLButtonElement | null = fixture.nativeElement.querySelector('.pull-row__actions button');
+      expect(btn).toBeTruthy();
+      expect(btn!.disabled).toBe(false);
 
-      btn.click();
+      btn!.click();
       fixture.detectChanges();
 
       // The template binds [disabled]="isAddressingPr(pr)", so the native button is
       // actually disabled — a second click cannot re-submit the same PR.
-      expect(btn.disabled).toBe(true);
-      expect(btn.textContent).toContain('Starting…');
-      btn.click();
+      expect(btn!.disabled).toBe(true);
+      expect(btn!.textContent).toContain('Starting…');
+      btn!.click();
       expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
     });
 
@@ -2229,6 +2230,44 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       openPullsForRepo();
       expect(fixture.nativeElement.querySelector('.pulls-panel__empty')).not.toBeNull();
+    });
+
+    it('does not re-fetch on every tab switch when the repo has no open PRs', async () => {
+      // The auto-load guard keys off `pullsLoaded`, not `pulls.length`: a repo whose
+      // open-PR list is legitimately empty is still LOADED, so leaving and re-entering
+      // the tab must not re-issue the request.
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([]));
+      await setup();
+      openPullsForRepo();
+      expect(component.pulls).toEqual([]);
+      expect(component.pullsLoaded).toBe(true);
+      const loadedCalls = integrationsSpy.getGitHubPullRequests.mock.calls.length;
+
+      showView('jobs');
+      showView('pulls');
+      showView('jobs');
+      showView('pulls');
+      expect(integrationsSpy.getGitHubPullRequests.mock.calls.length).toBe(loadedCalls);
+    });
+
+    it('retries the auto-load on a later tab switch when the first load failed', async () => {
+      // The flag must not suppress a RETRY: `loadPulls` sets `pullsLoaded` only on
+      // success, so a failed load leaves the guard open and re-entering the tab
+      // tries again. This is what keeps the `pullsLoaded` guard from stranding a
+      // repo on a transient error with no way back short of a manual Refresh.
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
+      await setup();
+      openPullsForRepo();
+      expect(component.pullError).toBe('boom');
+      expect(component.pullsLoaded).toBe(false);
+      const failedCalls = integrationsSpy.getGitHubPullRequests.mock.calls.length;
+
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      showView('jobs');
+      showView('pulls');
+      expect(integrationsSpy.getGitHubPullRequests.mock.calls.length).toBe(failedCalls + 1);
+      expect(component.pulls.length).toBe(1);
+      expect(component.pullsLoaded).toBe(true);
     });
 
     it('surfaces a load error in an inline banner', async () => {

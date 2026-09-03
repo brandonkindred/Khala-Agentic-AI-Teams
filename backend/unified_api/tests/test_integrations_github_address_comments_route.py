@@ -96,13 +96,22 @@ _OK = {
 
 @patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "enabled": False})
 def test_400_when_disabled(mock_cfg):
-    assert client.post(_URL, json={}).status_code == 400
+    # Pin the detail, not just the status: this route has TWO distinct 400s
+    # (integration disabled, PAT missing) and a bare status check would pass if
+    # the wrong one fired -- which would send an operator to reconfigure the
+    # wrong setting.
+    resp = client.post(_URL, json={})
+    assert resp.status_code == 400
+    assert "not enabled" in resp.json()["detail"]
 
 
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_400_when_pat_missing(mock_cfg, mock_cred):
-    assert client.post(_URL, json={}).status_code == 400
+    # The other of this route's two 400s -- see test_400_when_disabled.
+    resp = client.post(_URL, json={})
+    assert resp.status_code == 400
+    assert "PAT not configured" in resp.json()["detail"]
 
 
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))

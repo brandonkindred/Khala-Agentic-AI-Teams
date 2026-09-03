@@ -1127,15 +1127,26 @@ class TestGitHubNameValidation:
         "bad", [" ", "", "acme/widgets", "../etc", "%2e%2e", "-leading-dash", "x" * 101]
     )
     def test_malformed_owner_is_rejected(self, bad: str) -> None:
+        # Named failure, not a bare `pytest.raises` inside the loop: five models
+        # share this body, and a bare raises-context reports only "DID NOT RAISE"
+        # without saying WHICH model let the value through -- the one fact needed
+        # to find the missing constraint.
         for model, extras in self._models():
-            with pytest.raises(ValidationError):
+            try:
                 model(owner=bad, repo="widgets", **extras)
+            except ValidationError:
+                continue
+            pytest.fail(f"{model.__name__} accepted malformed owner {bad!r}")
 
     @pytest.mark.parametrize("bad", [" ", "", "acme/widgets", "..", "x" * 101])
     def test_malformed_repo_is_rejected(self, bad: str) -> None:
+        # Same reasoning as test_malformed_owner_is_rejected: name the model.
         for model, extras in self._models():
-            with pytest.raises(ValidationError):
+            try:
                 model(owner="acme", repo=bad, **extras)
+            except ValidationError:
+                continue
+            pytest.fail(f"{model.__name__} accepted malformed repo {bad!r}")
 
     @pytest.mark.parametrize("good", ["acme", "Acme-Corp", "a.b_c-d", "0day"])
     def test_well_formed_names_are_accepted(self, good: str) -> None:

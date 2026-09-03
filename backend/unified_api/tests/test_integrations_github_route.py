@@ -81,7 +81,11 @@ class _FakeAsyncClient:
     than indexing the tuple structure directly. ``get`` branches on the URL:
     a URL ending in ``/checkout/running`` is the admission pre-check, answered
     with ``checkout_running_job_id`` (``None`` by default, i.e. nothing
-    running) and its URL/params recorded in ``checkout_checks``; every OTHER
+    running) and its URL/params recorded in ``checkout_checks`` -- unless
+    ``checkout_running_malformed=True``, which instead answers 200 with a body
+    that omits ``running_job_id`` entirely, the shape
+    ``test_run_issue_502_on_malformed_admission_precheck`` needs to drive the
+    route's fail-closed branch; every OTHER
     ``get`` is treated as the ``_assert_pat_can_reach_repo`` reachability
     probe — answered with ``repo_access_status`` (200 by default, i.e.
     "reachable") so routes that don't exercise that gate are unaffected —
@@ -778,12 +782,21 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
     # is redirected).
     with (
         patch(f"{_M}.httpx.AsyncClient", return_value=fake),
-        patch(f"{_M}.clone_lock_path", return_value=tmp_path / "issue-7.clone.lock"),
+        patch(
+            f"{_M}.clone_lock_path", return_value=tmp_path / "issue-7.clone.lock"
+        ) as mock_lock_path,
     ):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 200
     payload = fake.last_payload()
     assert payload["repo_path"] == "/cache/github_workspaces/acme/widget/issue-7"
+    # The route-level lock must be taken on the RESOLVED per-issue checkout, not
+    # on the repo-level path: the lock is what serializes this route against
+    # address-comments on the same checkout, and a lock keyed off the wrong path
+    # would still let both routes run while looking correct here. Redirecting
+    # clone_lock_path's RETURN value (so the lock file lands somewhere writable)
+    # leaves its ARGUMENT free to assert on.
+    mock_lock_path.assert_called_once_with("/cache/github_workspaces/acme/widget/issue-7")
     assert payload["cleanup_checkout_on_success"] is True
     # The clone target must be the per-issue folder, not the repo-level path, and
     # an auto-derived checkout is platform-owned (so it takes the sibling lock).
@@ -1055,8 +1068,18 @@ def test_resolve_repo_path_uses_se_workspace_dir_with_pr(monkeypatch):
     assert path == "/work/acme_widget/pr-9"
 
 
-def test_resolve_repo_path_operator_override_returned_verbatim_for_pr():
-    """An operator-pinned repo_path is returned verbatim, never per-PR-namespaced."""
+def test_resolve_repo_path_operator_override_returned_verbatim_for_pr(monkeypatch):
+    """An operator-pinned repo_path is returned verbatim, never per-PR-namespaced.
+
+    Every workspace-root env var is SET (not merely cleared, as the sibling
+    auto-derivation tests do) to a value that would produce a visibly different
+    path: that makes this hermetic against the ambient environment AND turns it
+    into a precedence test -- the override must beat all three roots, not merely
+    win by default when none of them is configured.
+    """
+    monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
+    monkeypatch.setenv("WORKSPACE_ROOT", "/workspace")
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
     cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
     assert _resolve_repo_path(cfg, "acme", "widget", pr_number=42) == "/srv/checkout"
 

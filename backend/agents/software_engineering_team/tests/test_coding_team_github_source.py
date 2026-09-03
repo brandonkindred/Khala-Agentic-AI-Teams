@@ -3517,7 +3517,7 @@ class TestEphemeralCheckoutCleanup:
     def test_ephemeral_path_gate_logs_the_swallowed_oserror(
         self, tmp_path, monkeypatch, caplog
     ) -> None:
-        """A filesystem read failure in the content gate returns None AND logs.
+        """A filesystem read failure in the content gate returns False AND logs.
 
         Without the log an operator cannot tell an ordinary refusal ("this is
         not a platform-owned per-issue/per-PR checkout") from an environmental

@@ -197,7 +197,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.loadOutOfScopeIssues();
     }
     // Auto-load open PRs when switching to the Pull Requests tab with a repo selected.
-    if (view === 'pulls' && this.selectedRepo && this.pulls.length === 0 && !this.loadingPulls) {
+    // Gated on `pullsLoaded`, NOT on `pulls.length === 0`: a repo with no open PRs
+    // is a successful load that legitimately leaves the array empty, and a
+    // length-based guard would re-fetch it on every single tab switch. The flag
+    // still permits a retry after a failure — `loadPulls` sets it only on success
+    // — and `selectRepo` clears it so a repo switch always re-fetches.
+    if (view === 'pulls' && this.selectedRepo && !this.pullsLoaded && !this.loadingPulls) {
       this.loadPulls();
     }
   }
@@ -627,7 +632,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // (so turning it off for one repo doesn't silently unfilter every other repo).
     this.labelFilterActive = true;
     // PR-tab state is repo-scoped too: clear it so switching repos re-fetches the new repo's
-    // open PRs (the Pull Requests tab auto-loads when `pulls` is empty). The in-flight guard
+    // open PRs (the Pull Requests tab auto-loads while `pullsLoaded` is false). The in-flight guard
     // set is not cleared — a job already being started for the previous repo's PR must still
     // clear its own key when its request settles.
     this.pulls = [];

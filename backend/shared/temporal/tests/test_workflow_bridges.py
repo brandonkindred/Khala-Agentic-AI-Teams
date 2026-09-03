@@ -310,6 +310,33 @@ def test_execute_requires_non_empty_ids():
         runner.execute_workflow_sync(object(), workflow_id="wid", task_queue="")
 
 
+@pytest.mark.parametrize("bad_timeout", [0, 0.0, -1, -0.5])
+def test_execute_rejects_non_positive_timeout(bad_timeout):
+    """A non-positive ``execute_timeout_s`` is rejected BEFORE any dispatch.
+
+    This is not merely tidiness about an unused wait budget: under
+    ``reattach_on_timeout=True`` the same value becomes
+    ``_reattach_and_wait_sync``'s poll window, where every
+    ``future.result(timeout=<=0)`` expires immediately and the helper's
+    ``while True`` loop spins as a tight busy loop -- burning a CPU and
+    emitting one INFO line per iteration -- for the workflow's whole remaining
+    lifetime. Asserting up front is what keeps that unreachable.
+
+    The assert must precede the client wait (like the id/task-queue asserts
+    above), so this needs no worker: reaching the client would instead raise
+    ``RuntimeError`` after the ready timeout, which ``pytest.raises`` would
+    report as a failure rather than pass.
+    """
+    with pytest.raises(AssertionError, match="execute_timeout_s"):
+        runner.execute_workflow_sync(
+            object(),
+            workflow_id="wid",
+            task_queue="q",
+            execute_timeout_s=bad_timeout,
+            reattach_on_timeout=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # execute_workflow_sync — reattach_on_timeout
 # ---------------------------------------------------------------------------

@@ -851,7 +851,17 @@ def _format_existing_issues(
 
     Postconditions:
         - Returns a Markdown block covering at most ``max_issues`` of ``issues``
-          (in the order given), each issue's body truncated to at most
+          (in the order given -- this function does not re-order, and ``Issue``
+          carries no ``created_at``/``updated_at`` field it could sort on, so
+          WHICH issues survive the cap is entirely the caller's ordering. Both
+          production callers pass the snapshot from
+          :meth:`GitHubClient.list_open_issues`, which sends no ``sort``
+          parameter and therefore inherits GitHub's ``GET /issues`` default of
+          newest-created-first; the ``itertools.islice`` snapshot cap and then
+          this cap both take a PREFIX of that, so the model compares against
+          the ``max_issues`` most recently OPENED issues. A caller that hands
+          over some other ordering silently changes which issues duplicate
+          detection can see), each issue's body truncated to at most
           :data:`_PROMPT_BODY_TRUNCATE_CHARS` characters PLUS a trailing
           ``"..."`` marker (so the embedded body is bounded by
           ``_PROMPT_BODY_TRUNCATE_CHARS + 3``, not by the constant alone) to
@@ -929,8 +939,12 @@ def find_similar_open_issue_via_llm(proposal: dict[str, Any], open_issues: list[
           error) degrades to ``None`` — "create a new issue" is the safe
           default, since a duplicate issue is recoverable and a lost finding is
           not.
-        - Costs exactly one LLM call per invocation when ``open_issues`` is
-          non-empty, and zero when it is empty.
+        - Costs at most one LLM call per invocation: exactly one when
+          ``open_issues`` is non-empty AND an LLM is configured, and zero when
+          ``open_issues`` is empty or the LLM is not configured (that failure
+          is raised by ``generate_structured`` before any provider round-trip
+          and is caught by the degrade-to-``None`` handler above, so it costs
+          no call).
         - Every value interpolated into the prompt -- the proposal's own fields
           AND each existing issue's title/body (see
           :func:`_format_existing_issues`) -- is passed through

@@ -125,6 +125,21 @@ def _is_token_key(key: Any) -> bool:
           a match. That errs toward detecting more, which is the safe direction
           for a guard whose job is to keep credentials out of a permanent
           Temporal event history.
+
+    Limitations (deliberate, and the reason this is a defence-in-depth screen
+    rather than the sole control): the match is on the KEY NAME only, so it
+    catches neither a credential stored under an innocuous key (``{"header":
+    "Bearer ghp_..."}``) nor a spelling absent from
+    :data:`_TOKEN_KEY_MARKERS` (``pwd``, ``auth``, ``bearer``,
+    ``access_key``). Those spellings are NOT added because the markers are
+    matched as substrings against real dispatch payloads: ``auth`` alone would
+    reject any legitimate ``author``/``authored_by`` key, and the list is kept
+    to spellings that cannot collide with the fixed ``github``/
+    ``CodingTeamPlanInput`` field names enumerated where it is defined. The
+    real guarantee is structural -- activities resolve credentials
+    activity-side from the job row or ``GITHUB_TOKEN`` and callers never put
+    one on these dicts -- and this screen exists to make an accidental
+    regression loud, not to sanitize hostile input.
     """
     lowered = str(key).lower()
     return any(marker in lowered for marker in _TOKEN_KEY_MARKERS)
@@ -269,6 +284,55 @@ def _build_workflow_payload(
     return payload
 
 
+def _prepare_workflow_args(
+    job_id: str,
+    repo_path: str,
+    plan_input: Optional[Dict[str, Any]],
+    github: Optional[Dict[str, Any]],
+    *,
+    caller: str,
+    github_required: bool,
+) -> tuple[Dict[str, Any], str]:
+    """Validate a dispatch's arguments and build its Temporal payload + workflow id.
+
+    Both dispatchers ran the identical validate-then-build prologue --
+    :func:`_validate_common_args`, :func:`_validate_github_arg`,
+    :func:`_validate_plan_input_arg`, :func:`_build_workflow_payload`,
+    :func:`_workflow_id` -- differing only in ``caller`` and whether ``github``
+    is required. Keeping one copy means a new validation rule cannot be added
+    to the start path and forgotten on the execute path (or vice versa), which
+    for the credential screen would be a silent leak on whichever path was
+    missed.
+
+    Preconditions:
+        - ``caller`` is the calling dispatcher's name, interpolated verbatim
+          into every message the validators raise.
+        - ``github_required`` is True for a dispatcher that must always receive
+          a non-empty ``github`` dict, False for one for which it is optional.
+
+    Postconditions:
+        - Returns ``(payload, workflow_id)`` once every validator passes: the
+          payload :func:`_build_workflow_payload` builds for these arguments,
+          and ``coding_team-<job_id>``.
+        - Runs the validators in the same order both dispatchers used, so the
+          FIRST violation a caller sees is unchanged by this extraction.
+        - Performs no I/O and starts nothing -- a caller that raises here has
+          not touched Temporal.
+
+    Raises:
+        ValueError: any of the three validators rejects its argument (empty
+            ``job_id``/``repo_path``; a ``github`` that is required-but-absent,
+            truthy-but-not-a-dict, or carries a credential-named key; a
+            ``plan_input`` that is non-``None``-but-not-a-dict or carries a
+            credential-named key) -- see those functions for the exact
+            contracts.
+    """
+    _validate_common_args(job_id, repo_path, caller=caller)
+    _validate_github_arg(github, caller=caller, required=github_required)
+    _validate_plan_input_arg(plan_input, caller=caller)
+    return _build_workflow_payload(job_id, repo_path, plan_input, github), _workflow_id(job_id)
+
+
 def start_coding_team_workflow(
     job_id: str,
     repo_path: str,
@@ -306,11 +370,14 @@ def start_coding_team_workflow(
         RuntimeError: the worker's Temporal client never becomes available
             within the wait window.
     """
-    _validate_common_args(job_id, repo_path, caller="start_coding_team_workflow")
-    _validate_github_arg(github, caller="start_coding_team_workflow", required=False)
-    _validate_plan_input_arg(plan_input, caller="start_coding_team_workflow")
-    payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
-    workflow_id = _workflow_id(job_id)
+    payload, workflow_id = _prepare_workflow_args(
+        job_id,
+        repo_path,
+        plan_input,
+        github,
+        caller="start_coding_team_workflow",
+        github_required=False,
+    )
     start_workflow_sync(
         CodingTeamWorkflow.run,
         payload,
@@ -379,11 +446,14 @@ def execute_coding_team_workflow(
             worker must be prepared for these, not just the two explicit
             raises above.
     """
-    _validate_common_args(job_id, repo_path, caller="execute_coding_team_workflow")
-    _validate_github_arg(github, caller="execute_coding_team_workflow", required=True)
-    _validate_plan_input_arg(plan_input, caller="execute_coding_team_workflow")
-    payload = _build_workflow_payload(job_id, repo_path, plan_input, github)
-    workflow_id = _workflow_id(job_id)
+    payload, workflow_id = _prepare_workflow_args(
+        job_id,
+        repo_path,
+        plan_input,
+        github,
+        caller="execute_coding_team_workflow",
+        github_required=True,
+    )
     logger.info(
         "Executing CodingTeamWorkflow id=%s (timeout_s=%s)",
         workflow_id,

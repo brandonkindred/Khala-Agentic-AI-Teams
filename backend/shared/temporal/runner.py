@@ -173,6 +173,15 @@ def execute_workflow_sync(
 
     Preconditions:
         - ``workflow_id`` and ``task_queue`` are non-empty.
+        - ``execute_timeout_s`` is strictly positive. It is not merely the
+          initial wait window: under ``reattach_on_timeout=True`` it is REUSED
+          verbatim as :func:`_reattach_and_wait_sync`'s poll window, so a zero
+          or negative value makes every one of that helper's
+          ``future.result(timeout=...)`` calls expire instantly and its
+          ``while True`` loop spin as a tight busy loop, logging once per
+          iteration for the workflow's entire remaining lifetime. Asserted
+          rather than clamped: a non-positive wait budget is a caller bug, and
+          silently substituting a default would hide it.
         - ``workflow_id`` is unique per invocation (callers mint a fresh id, e.g. a
           uuid). Execute-and-wait does not reuse ids for idempotency the way
           :func:`run_team_job` does, so a duplicate *live* id would raise
@@ -240,6 +249,7 @@ def execute_workflow_sync(
     """
     assert workflow_id, "workflow_id must be non-empty"
     assert task_queue, "task_queue must be non-empty"
+    assert execute_timeout_s > 0, "execute_timeout_s must be positive"
     client, loop = _await_client(client_ready_timeout_s)
     coro = client.execute_workflow(
         workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
@@ -280,6 +290,11 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
     can never duplicate the workflow's work.
 
     Preconditions:
+        - ``poll_timeout_s`` is strictly positive — the ``while True`` loop
+          below re-polls on exactly this window, so a non-positive value turns
+          it into a tight busy loop. :func:`execute_workflow_sync` guarantees
+          this by asserting its own ``execute_timeout_s``, which it passes
+          through here unchanged.
         - ``workflow_id`` names the workflow the caller started before the
           timed-out wait, on ``client``'s namespace — with ONE documented
           exception its only caller knowingly hits: if the wait timeout

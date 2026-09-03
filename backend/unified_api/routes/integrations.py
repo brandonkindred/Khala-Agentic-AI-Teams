@@ -2930,7 +2930,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           fetch against a PR-remediation job's live working tree. The
           admission pre-check, clone/fetch, and forward all run under ONE
           exclusive lock on the checkout (:func:`clone_lock_path`), same
-          pattern and same lock file `address_github_pr_comments` uses, so
+          pattern and same lock file :func:`address_github_pr_comments` uses, so
           the two routes correctly serialize against each other too. For an
           operator-pinned ``repo_path`` this serialization is best-effort
           only: if the lock cannot be acquired, the request proceeds without
@@ -3030,6 +3030,22 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             )
             if clone_err:
                 logger.warning("github run-issue: repository preparation failed: %s", clone_err)
+                # 502, deliberately, even though the `except OSError` handler
+                # below maps superficially similar repo-preparation failures to
+                # 500. The two are different kinds of event. `clone_err` is a
+                # RETURN VALUE: `_ensure_repo_clone` anticipated this failure,
+                # scrubbed it and reported it cleanly, and every cause it
+                # reports this way (a clone/fetch that git itself rejected, a
+                # timeout reaching the remote, a checkout pointing at a
+                # different origin) is an upstream/dependency outcome rather
+                # than a fault in this service -- so it is not a 500, and it is
+                # not the retryable-local-serialization case that owns 503. An
+                # OSError ESCAPING that function is the opposite: an
+                # unanticipated failure of this host (missing git binary,
+                # unwritable path, full disk), which is genuinely ours and
+                # correctly a 500. `address_github_pr_comments` maps its own
+                # `clone_err` to 502 on the same reasoning, so the two routes
+                # agree.
                 raise HTTPException(status_code=502, detail=clone_err)
 
             payload: dict[str, Any] = {
@@ -3066,7 +3082,10 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         # either. The forward itself contributes nothing here: it goes through
         # `_forward_to_coding_team`, which is httpx-based and converts every
         # `httpx.HTTPError` (none of which subclasses OSError) into an
-        # HTTPException before it can reach this handler.
+        # HTTPException before it can reach this handler. Note the deliberate
+        # asymmetry with the 502 above: that path handles a failure
+        # `_ensure_repo_clone` RETURNED (anticipated, upstream), this one a
+        # failure that ESCAPED it (unanticipated, ours).
         raise HTTPException(
             status_code=500,
             detail=f"github run-issue failed while preparing {owner}/{repo}: {e}",

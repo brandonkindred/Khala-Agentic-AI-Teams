@@ -4,7 +4,6 @@ and previously untested (see the module's own docstring contracts)."""
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import pytest
@@ -81,12 +80,12 @@ def _stub_token(monkeypatch: pytest.MonkeyPatch, api: Any) -> None:
     """
     monkeypatch.setattr(api, "get_job", lambda job_id, cache_dir=None: {"job_id": job_id})
     monkeypatch.setenv("GITHUB_TOKEN", "env-pat")
+    # `monkeypatch.delenv` IS the guard, and it is unconditional -- so there is
+    # deliberately no assertion here. Re-reading the key back after deleting it
+    # could only ever confirm what delenv just did (it cannot fail), which would
+    # read as a check on the ambient environment while testing nothing at all.
+    # The ambient key, if any, is restored when monkeypatch unwinds.
     monkeypatch.delenv("INTEGRATION_ENCRYPTION_KEY", raising=False)
-    # Assert the DELETION, not the setenv: re-reading back the value setenv just
-    # wrote cannot fail, whereas the key's absence genuinely varies -- it is the
-    # ambient-environment leak these tests are guarding against, and a key
-    # present here would silently route them down the encrypted-token branch.
-    assert "INTEGRATION_ENCRYPTION_KEY" not in os.environ
 
 
 class TestGithubPrPublishActivityValidation:

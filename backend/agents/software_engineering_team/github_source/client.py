@@ -385,6 +385,37 @@ def redact_secret(text: str, secret: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+_DIAGNOSTIC_PREVIEW_CHARS = 500
+
+
+def _preview(value: Any, limit: int = _DIAGNOSTIC_PREVIEW_CHARS) -> str:
+    """Bound an arbitrary payload fragment for safe interpolation into a diagnostic.
+
+    Degrade diagnostics in :meth:`GitHubClient._iter_review_thread_nodes` describe
+    a malformed GraphQL payload, and a malformed payload is exactly the case where
+    ``repr()`` has no useful bound: a response body of any size, or a review-comment
+    node carrying a user-authored comment body, would otherwise be copied verbatim
+    into a WARNING log line (non-strict mode) or an exception message (strict mode).
+    Both are unbounded and, for comment bodies, needlessly reproduce repository text
+    written by third parties. Truncating keeps the diagnostic's discriminating
+    prefix -- the type and shape of what arrived -- without either cost.
+
+    Preconditions:
+        - ``limit`` is a positive int.
+    Postconditions:
+        - Returns ``repr(value)`` when it is at most ``limit`` characters, otherwise
+          its first ``limit`` characters followed by a ``"... (truncated, N chars)"``
+          marker naming the full repr length, so a reader can tell a genuinely short
+          payload from a clipped one.
+        - Pure; never raises for a value whose ``repr()`` succeeds.
+    """
+    assert limit > 0, "limit must be positive"
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... (truncated, {len(text)} chars)"
+
+
 def _issue_from_payload(payload: dict[str, Any]) -> Issue:
     return Issue(
         number=int(payload["number"]),
@@ -1323,7 +1354,7 @@ class GitHubClient(_GitHubHttpMixin):
             }
             payload = self._execute_graphql(query, variables)
             if not isinstance(payload, dict):
-                _unavailable(f"non-object GraphQL response: {payload!r}")
+                _unavailable(f"non-object GraphQL response: {_preview(payload)}")
                 return
             if payload.get("errors"):
                 _unavailable(f"GraphQL errors: {payload['errors']}")
@@ -1338,7 +1369,7 @@ class GitHubClient(_GitHubHttpMixin):
             if not isinstance(review_threads, dict) or not isinstance(
                 review_threads.get("nodes"), list
             ):
-                _unavailable(f"invalid reviewThreads payload: {review_threads!r}")
+                _unavailable(f"invalid reviewThreads payload: {_preview(review_threads)}")
                 return
             for node in review_threads["nodes"]:
                 seen += 1
@@ -1353,7 +1384,7 @@ class GitHubClient(_GitHubHttpMixin):
                     return
                 if not isinstance(node, dict):
                     _unavailable(
-                        f"invalid review-thread node: {node!r}; a non-strict caller "
+                        f"invalid review-thread node: {_preview(node)}; a non-strict caller "
                         "would skip it"
                     )
                     continue
@@ -1395,7 +1426,7 @@ class GitHubClient(_GitHubHttpMixin):
                     # already avoids by skipping, so this matches it.
                     _unavailable(
                         f"invalid review-thread comments payload (thread {thread_id!r}): "
-                        f"{comments!r}; a non-strict caller would skip the thread"
+                        f"{_preview(comments)}; a non-strict caller would skip the thread"
                     )
                     continue
                 # Per-thread comment pagination is checked in BOTH modes: a
@@ -1455,7 +1486,7 @@ class GitHubClient(_GitHubHttpMixin):
                         _unavailable(
                             "review comment has a missing or invalid databaseId "
                             f"(expected non-bool int, got {database_id!r}; comment "
-                            f"{comment!r}, thread {thread_id!r})"
+                            f"{_preview(comment)}, thread {thread_id!r})"
                         )
                         continue
                     comment_ids_list.append(database_id)
@@ -1596,7 +1627,20 @@ class GitHubClient(_GitHubHttpMixin):
             for thread_id, is_resolved, comment_ids in self._iter_review_thread_nodes(
                 owner, repo, number, query=_REVIEW_THREADS_FULL_QUERY, strict=True
             ):
-                assert thread_id is not None  # guaranteed by strict=True
+                if not thread_id:
+                    # Fail closed EXPLICITLY rather than via `assert`: strict=True
+                    # already makes the generator raise for a missing or invalid
+                    # id, so this is unreachable in practice -- but an assert is
+                    # stripped under `python -O`, and there the fallthrough would
+                    # build a ReviewThread with a falsy id that a caller would
+                    # then try to resolve. The fail-closed contract this method
+                    # advertises must not depend on assertions being enabled.
+                    raise ReviewThreadsUnavailableError(
+                        owner,
+                        repo,
+                        number,
+                        "review-thread node yielded without an id despite strict=True",
+                    )
                 threads.append(
                     ReviewThread(id=thread_id, is_resolved=is_resolved, comment_ids=comment_ids)
                 )
@@ -1668,6 +1712,13 @@ class GitHubClient(_GitHubHttpMixin):
               ``payload.get("errors")`` or unwrap ``payload["data"]`` — each
               call site keeps its own distinct failure semantics (fail-closed
               vs. degrade-and-log) for those.
+            - JSON decoding is NOT wrapped: a 2xx response whose body is not
+              valid JSON raises ``requests.exceptions.JSONDecodeError`` (a
+              ``ValueError`` subclass) straight out of ``response.json()``, not
+              ``GitHubAPIError``. Callers that must not let a malformed body
+              escape as an unexpected ``ValueError`` catch broadly —
+              :meth:`list_review_threads` does exactly that and re-raises it as
+              :class:`ReviewThreadsUnavailableError`.
         """
         response = self._check(
             self._request("POST", "/graphql", json={"query": query, "variables": variables})
