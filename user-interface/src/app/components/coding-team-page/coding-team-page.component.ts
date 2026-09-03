@@ -760,10 +760,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Postconditions: `selectedIssue` is cleared, unmounting `.github-confirm-panel` (including the
    *   Cancel button that currently holds focus) on the next change-detection pass; once the row
    *   has re-rendered, focus returns to that issue's `.github-issue-row` button so it never drops
-   *   to `<body>`. Known limitation: if the issue search filter has removed that row from the
-   *   list by the time the deferred callback runs, no row is found and focus is left wherever the
-   *   browser put it (typically `<body>`, its default when the focused element unmounts) — this
-   *   edge case has no defined fallback target yet.
+   *   to `<body>`. If the issue search filter has removed that row from the list by the time the
+   *   deferred callback runs, focus falls back to `.github-issues-list` (still never `<body>`).
    */
   cancelSelection(): void {
     const issueNumber = this.selectedIssue?.number ?? null;
@@ -786,6 +784,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Id for the confirm panel's heading, referenced by the panel's `aria-labelledby`. */
   confirmPanelHeadingId(issueNumber: number): string {
     return `confirm-panel-heading-${this.selectedRepo?.full_name ?? ''}-${issueNumber}`;
+  }
+
+  /**
+   * Repo-scoped key for a row's `data-issue-number` attribute, matching `confirmPanelId`'s
+   * repo-scoping rationale: a bare issue number is only unique within a repo.
+   */
+  issueRowKey(issueNumber: number): string {
+    return `${this.selectedRepo?.full_name ?? ''}#${issueNumber}`;
   }
 
   /** Clear any pending focus-move timer, e.g. before scheduling a new one or on destroy. */
@@ -815,9 +821,16 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * After the confirm panel for `issueNumber` unmounts, move focus back to its row's button
    * (found via `data-issue-number`, which — unlike `aria-controls` — stays on the row regardless
    * of selection state, since `aria-controls` is removed the same tick `selectedIssue` clears).
+   * Falls back to `.github-issues-list` when the row isn't found (e.g. filtered out by the issue
+   * search), so focus never drops to `<body>` even in that edge case.
    */
   private moveFocusToIssueRow(issueNumber: number): void {
-    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[data-issue-number="${issueNumber}"]`));
+    const key = this.issueRowKey(issueNumber);
+    this.scheduleFocusMove(
+      (root) =>
+        root.querySelector<HTMLElement>(`[data-issue-number="${key}"]`) ??
+        root.querySelector<HTMLElement>('.github-issues-list'),
+    );
   }
 
   /** True when the issue is blocked by, or depends on, one or more other issues. */

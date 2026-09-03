@@ -233,7 +233,7 @@
                           </button>
                         </div>
                       } @else {
-                      <div class="github-issues-list">
+                      <div class="github-issues-list" tabindex="-1">
                         @for (vm of pagedIssueVms; track vm.number) {
                           <!--
                             No tabindex on the nested title/chip spans below: a focusable
@@ -248,7 +248,7 @@
                             [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
                             [attr.aria-controls]="selectedIssue?.number === vm.number ? confirmPanelId(vm.number) : null"
-                            [attr.data-issue-number]="vm.number"
+                            [attr.data-issue-number]="issueRowKey(vm.number)"
                             [matTooltip]="issueRowTooltip(vm)"
                             (click)="selectIssue(vm.issue)"
                           >

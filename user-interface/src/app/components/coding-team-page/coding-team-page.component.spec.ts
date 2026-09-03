@@ -2239,7 +2239,7 @@ describe('CodingTeamPageComponent', () => {
       expect(component['focusTimer']).toBeNull();
     });
 
-    it('cancelSelection degrades gracefully when the originating row has been filtered out', async () => {
+    it('cancelSelection falls back to the issue list when the originating row has been filtered out', async () => {
       vi.useFakeTimers();
       try {
         await setup();
@@ -2258,16 +2258,17 @@ describe('CodingTeamPageComponent', () => {
         component.onIssueSearchChange();
         fixture.detectChanges();
         const el: HTMLElement = fixture.nativeElement;
-        expect(el.querySelector('[data-issue-number="1"]')).toBeNull();
+        expect(el.querySelector(`[data-issue-number="${component.issueRowKey(issue.number)}"]`)).toBeNull();
 
-        // No defined fallback exists yet for this edge case (documented as a known limitation
-        // in cancelSelection()) — this pins that it degrades gracefully rather than throwing.
+        // The row lookup can't find its target, so focus falls back to .github-issues-list
+        // rather than dropping to <body> — this pins that fallback, not just a non-throw.
         expect(() => component.cancelSelection()).not.toThrow();
         fixture.detectChanges();
         await vi.advanceTimersByTimeAsync(0);
         fixture.detectChanges();
 
         expect(el.querySelector('.github-confirm-panel')).toBeNull();
+        expect(document.activeElement).toBe(el.querySelector('.github-issues-list'));
       } finally {
         vi.useRealTimers();
       }
