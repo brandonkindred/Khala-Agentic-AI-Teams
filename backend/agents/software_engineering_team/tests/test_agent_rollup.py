@@ -111,6 +111,7 @@ def _row(
     cache_creation_tokens: int = 0,
     latency_ms: float = 0.0,
 ) -> dict:
+    """Build one se_agent_traces-shaped row; keyword-only defaults let each test override only the fields under test."""
     return {
         "agent_key": agent_key,
         "phase": phase,
@@ -125,9 +126,9 @@ def _row(
 
 def test_window_days_must_be_positive() -> None:
     """compute_from_traces rejects a non-positive window_days."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="window_days"):
         compute_from_traces([], window_days=0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="window_days"):
         compute_from_traces([], window_days=-1.0)
 
 

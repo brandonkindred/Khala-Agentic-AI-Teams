@@ -10,8 +10,9 @@ module.
 
 - ``by_agent`` — one :class:`CallRollup` per ``agent_key``, ignoring phase.
 - ``by_phase`` — one :class:`CallRollup` per ``phase``, ignoring agent_key.
-- ``by_agent_phase`` — ``by_agent_phase[agent_key][phase]``, the full cross product.
-  A nested ``dict[str, dict[str, CallRollup]]`` is used rather than a tuple key
+- ``by_agent_phase`` — ``by_agent_phase[agent_key][phase]``, one entry per distinct
+  (agent_key, phase) pair observed; combinations that never co-occur are absent, not
+  an empty ``CallRollup``. A nested ``dict[str, dict[str, CallRollup]]`` is used rather than a tuple key
   (breaks ``asdict()``/JSON serialization) or a composite string key like
   ``"agent::phase"`` (risks delimiter collisions with real identifiers). Nesting is
   a direct extension of ``dora.py``'s existing ``dict[str, ...]`` idiom and stays
@@ -222,10 +223,13 @@ def _rollup_for_group(rows: list[dict[str, Any]]) -> CallRollup:
 def compute_from_traces(rows: list[dict[str, Any]], window_days: float) -> AgentRollupMetrics:
     """Compute the per-``agent_key``/per-``phase`` rollup from a list of trace rows.
 
-    A pure function over already-fetched ``se_agent_traces``-shaped row dicts, with no
-    database dependency — mirroring :func:`dora.compute_from_events`. ``window_days``
-    is not used to filter rows (callers are expected to have already scoped ``rows`` to
-    the window); it is only carried onto the returned :class:`AgentRollupMetrics`.
+    A pure computation over already-fetched ``se_agent_traces``-shaped row dicts — it
+    does not mutate ``rows`` and has no database dependency, mirroring
+    :func:`dora.compute_from_events`. The sole non-deterministic output is
+    ``computed_at``, stamped from the UTC wall clock at call time; every other field is
+    a deterministic function of ``rows`` and ``window_days``. ``window_days`` is not
+    used to filter rows (callers are expected to have already scoped ``rows`` to the
+    window); it is only carried onto the returned :class:`AgentRollupMetrics`.
 
     Preconditions:
         - ``window_days > 0``.
@@ -237,9 +241,10 @@ def compute_from_traces(rows: list[dict[str, Any]], window_days: float) -> Agent
           ``rows`` list, returning an ``AgentRollupMetrics`` with empty
           ``by_agent``/``by_phase``/``by_agent_phase`` dicts instead.
         - ``by_agent`` has one entry per distinct ``agent_key`` seen in ``rows``;
-          ``by_phase`` one per distinct ``phase``; ``by_agent_phase`` is the nested
-          ``agent_key`` → ``phase`` → :class:`CallRollup` cross product — no group is
-          dropped, including the ``""`` group.
+          ``by_phase`` one per distinct ``phase``; ``by_agent_phase`` has one entry per
+          distinct (agent_key, phase) pair seen — combinations that never co-occur are
+          absent, not an empty ``CallRollup``. No observed group is dropped, including
+          the ``""`` group.
         - Keys within each of the three dicts (and within each inner ``by_agent_phase``
           dict) are sorted ascending, so the result is deterministic for a fixed row
           *set* regardless of input row order — not just for a fixed row sequence.
