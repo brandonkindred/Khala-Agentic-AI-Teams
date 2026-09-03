@@ -107,13 +107,26 @@ def test_keyed_lazy_registry_distinct_keys_construct_concurrently_without_blocki
 
     results: dict[str, str] = {}
     b_done = threading.Event()
+    thread_errors: list[BaseException] = []
+    thread_errors_lock = threading.Lock()
 
     def _build_a() -> None:
-        results["a"] = registry.get_or_create("a", factory_a)
+        try:
+            results["a"] = registry.get_or_create("a", factory_a)
+        except BaseException as exc:  # noqa: BLE001 - surfaced via thread_errors below
+            with thread_errors_lock:
+                thread_errors.append(exc)
 
     def _build_b() -> None:
-        results["b"] = registry.get_or_create("b", lambda: "b-value")
-        b_done.set()
+        try:
+            results["b"] = registry.get_or_create("b", lambda: "b-value")
+        except BaseException as exc:  # noqa: BLE001 - surfaced via thread_errors below
+            with thread_errors_lock:
+                thread_errors.append(exc)
+        finally:
+            # Set even on failure so a crashed _build_b reports its real exception
+            # via thread_errors below instead of a misattributed "blocked" message.
+            b_done.set()
 
     thread_a = threading.Thread(target=_build_a, daemon=True)
     thread_a.start()
@@ -137,6 +150,11 @@ def test_keyed_lazy_registry_distinct_keys_construct_concurrently_without_blocki
         release_a.set()
         thread_a.join(timeout=_WAIT_TIMEOUT)
     assert not thread_a.is_alive(), "thread_a did not finish"
+
+    # Worker-thread exceptions never propagate on their own: assert on them here so
+    # a genuine failure (e.g. factory_a's own guard assert firing) surfaces as
+    # itself rather than as a KeyError or a misattributed "blocked" message below.
+    assert not thread_errors, f"worker thread(s) failed: {thread_errors!r}"
 
     assert results["b"] == "b-value"
     assert results["a"] == "a-value"

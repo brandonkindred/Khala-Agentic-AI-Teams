@@ -78,6 +78,22 @@ class ConcurrentFirstCallHarness(Generic[_T]):
     """
 
     def __init__(self, *, wait_timeout: float = 5.0, settle: float = 0.1) -> None:
+        """Configure this harness's timeouts.
+
+        Preconditions:
+            ``wait_timeout`` and ``settle`` are non-negative seconds.
+
+        Postconditions:
+            ``wait_timeout`` bounds every internal wait this instance performs —
+            the release handshake in :meth:`hold_open`, the started handshake and
+            every per-thread join in :meth:`run` — each raising ``AssertionError``
+            rather than hanging forever if it elapses; raise it for a slow CI
+            runner. ``settle`` is the grace period :meth:`run` sleeps after
+            starting the secondary threads and before releasing the first build,
+            giving them a chance to reach and queue behind it; it is a best-effort
+            window, not a guarantee, so setting it too low weakens (without
+            invalidating) the race this harness exists to exercise.
+        """
         self.build_count = 0
         self._build_count_lock = threading.Lock()
         self._started = threading.Event()
