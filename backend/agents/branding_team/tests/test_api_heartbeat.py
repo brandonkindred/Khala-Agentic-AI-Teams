@@ -12,8 +12,12 @@ from __future__ import annotations
 import contextlib
 import threading
 
+from branding_team.api import background as background_mod
 from branding_team.api import main as api_main
+from branding_team.models import BrandPhase, HumanReview
 from branding_team.shared import job_store
+from branding_team.tests.conftest import make_mission
+from branding_team.tests.test_orchestrator import _full_strategic_core
 
 
 class _RecordingJobManager:
@@ -98,3 +102,68 @@ def test_run_branding_core_runs_without_job_manager(monkeypatch) -> None:
     _call_run_core()
 
     assert completed.get("status") == job_store.JOB_STATUS_COMPLETED
+
+
+def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) -> None:
+    """A cancel detected between phases stops the thread-mode job from issuing
+    any further phase, symmetric to
+    test_temporal_unit.py::test_workflow_cancel_between_phases_skips_finalize.
+
+    Exercises the real should_continue gate (BrandingTeamOrchestrator.run /
+    _run_phases_with_cache, story #7837) through the real background-path
+    wiring (_run_branding_core -> _job_not_cancelled, story #7849) -- only
+    run_single_phase (the LLM/agent boundary) is faked, not the orchestrator
+    itself.
+    """
+    monkeypatch.setattr(api_main, "_job_manager", None)
+
+    class _CancelState:
+        def __init__(self) -> None:
+            self.is_cancelled_calls = 0
+            self.cancelled = False
+
+    state = _CancelState()
+
+    def _fake_is_job_cancelled(job_id: str) -> bool:
+        state.is_cancelled_calls += 1
+        # Not cancelled for the check before strategic_core; cancelled from
+        # the check before narrative_messaging on -- mirrors
+        # _drive_workflow(cancel_after=1) in test_temporal_unit.py.
+        if state.is_cancelled_calls > 1:
+            state.cancelled = True
+        return state.cancelled
+
+    monkeypatch.setattr(background_mod, "is_job_cancelled", _fake_is_job_cancelled)
+
+    job_store_calls: list[dict] = []
+
+    def _fake_update_if_not_cancelled(job_id, **kw):
+        if state.cancelled:
+            return False
+        job_store_calls.append(kw)
+        return True
+
+    monkeypatch.setattr(job_store, "update_job_if_not_cancelled", _fake_update_if_not_cancelled)
+
+    phases_run: list[str] = []
+
+    def _fake_run_single_phase(mission, phase, prior_outputs=None):
+        phases_run.append(phase.value)
+        return _full_strategic_core(), False
+
+    monkeypatch.setattr(api_main.orchestrator, "run_single_phase", _fake_run_single_phase)
+
+    api_main._run_branding_core(
+        job_id="job-cancel-mid-run",
+        mission=make_mission(),
+        human_review=HumanReview(approved=True),
+        brand_checks=[],
+        client_id=None,
+        brand_id=None,
+        include_market_research=False,
+        include_design_assets=False,
+        target_phase=None,
+    )
+
+    assert phases_run == [BrandPhase.STRATEGIC_CORE.value]
+    assert job_store_calls == [{"status": job_store.JOB_STATUS_RUNNING}]
