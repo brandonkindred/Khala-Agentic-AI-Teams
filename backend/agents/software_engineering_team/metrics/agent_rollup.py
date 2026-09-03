@@ -51,9 +51,11 @@ own sample set is empty (e.g. the ratio's denominator is 0 — no prompt-side to
 processed at all). A ``0.0`` ratio, by contrast, means calls existed, tokens were
 processed, and genuinely none were served from cache.
 
-**Latency percentiles** — ``latency_ms_median`` follows :func:`dora._median`'s
-pure-Python, no-numpy, "empty sample → ``None``" convention. ``latency_ms_p95`` is
-this repo's first percentile precedent (no existing convention to match), defined by
+**Latency percentiles** — ``latency_ms_median`` and ``latency_ms_p95`` are computed by
+:func:`_stats.median`/:func:`_stats.p95`, the pure-Python, no-numpy helpers shared with
+:mod:`dora` (which uses ``median`` for its own lead-time/MTTR medians) so the two
+modules can't drift on "empty sample → ``None``" or percentile semantics.
+``latency_ms_p95`` follows this repo's first percentile precedent, defined by
 nearest-rank on the sorted sample ``ordered`` of length ``n > 0``::
 
     rank = max(1, min(n, ceil(0.95 * n)))
@@ -72,6 +74,9 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+from software_engineering_team.metrics._stats import median as _median
+from software_engineering_team.metrics._stats import p95 as _p95
 
 
 @dataclass
@@ -128,51 +133,6 @@ class AgentRollupMetrics:
         return asdict(self)
 
 
-def _median(values: list[float]) -> Optional[float]:
-    """Median of ``values``; ``None`` for an empty list.
-
-    Duplicates :func:`dora._median`'s algorithm rather than importing it — that helper
-    is module-private, and this module stays self-contained like ``dora.py`` is.
-
-    Preconditions:
-        - Every element of ``values`` is finite (no NaN/inf).
-    Postconditions:
-        - Returns ``None`` iff ``values`` is empty.
-        - Otherwise returns the sorted-list midpoint, averaging the two middle
-          elements when ``len(values)`` is even.
-    """
-    if not values:
-        return None
-    ordered = sorted(values)
-    n = len(ordered)
-    mid = n // 2
-    if n % 2 == 1:
-        return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2.0
-
-
-def _p95(values: list[float]) -> Optional[float]:
-    """95th percentile of ``values`` by nearest-rank; ``None`` for an empty list.
-
-    Implements this module's documented convention: no interpolation between
-    neighboring ranks.
-
-    Preconditions:
-        - Every element of ``values`` is finite (no NaN/inf).
-    Postconditions:
-        - Returns ``None`` iff ``values`` is empty.
-        - Otherwise returns ``sorted(values)[rank - 1]`` where
-          ``rank = max(1, min(n, ceil(0.95 * n)))`` and ``n = len(values)`` — the single
-          sample at ``n == 1``, the larger of two at ``n == 2``.
-    """
-    if not values:
-        return None
-    ordered = sorted(values)
-    n = len(ordered)
-    rank = max(1, min(n, math.ceil(0.95 * n)))
-    return ordered[rank - 1]
-
-
 def _rollup_for_group(rows: list[dict[str, Any]]) -> CallRollup:
     """Aggregate one grouping bucket's rows into a :class:`CallRollup`.
 
@@ -186,9 +146,13 @@ def _rollup_for_group(rows: list[dict[str, Any]]) -> CallRollup:
         - ``cache_read_ratio`` is ``None`` iff the summed cache-read + cache-creation +
           input tokens are all zero; otherwise it is the ratio defined in the module
           docstring, rounded to 4 decimal places, in ``[0, 1]``.
-        - ``latency_ms_median``/``latency_ms_p95`` follow :func:`_median`/:func:`_p95`.
+        - ``latency_ms_median``/``latency_ms_p95`` follow :func:`_stats.median`/
+          :func:`_stats.p95`.
+        - ``total_cost_usd`` is order-independent (``math.fsum``, not repeated
+          float addition), so the sum is exact regardless of row order, not just
+          approximately so under ``round``.
     """
-    total_cost = 0.0
+    costs: list[float] = []
     total_input = 0
     total_output = 0
     total_cache_read = 0
@@ -196,7 +160,7 @@ def _rollup_for_group(rows: list[dict[str, Any]]) -> CallRollup:
     latencies: list[float] = []
 
     for row in rows:
-        total_cost += float(row.get("cost_usd") or 0.0)
+        costs.append(float(row.get("cost_usd") or 0.0))
         total_input += int(row.get("input_tokens") or 0)
         total_output += int(row.get("output_tokens") or 0)
         total_cache_read += int(row.get("cache_read_tokens") or 0)
@@ -208,7 +172,7 @@ def _rollup_for_group(rows: list[dict[str, Any]]) -> CallRollup:
 
     return CallRollup(
         call_count=len(rows),
-        total_cost_usd=round(total_cost, 6),
+        total_cost_usd=round(math.fsum(costs), 6),
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         total_cache_read_tokens=total_cache_read,
