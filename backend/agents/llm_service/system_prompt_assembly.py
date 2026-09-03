@@ -48,13 +48,16 @@ def build_system_prompt_with_content(
     Preconditions:
         ``system_prompt`` is non-empty (enforced — raises ``ValueError``
         otherwise). ``system_prompt_content`` is ``None``, ``[]``, or a
-        non-empty list of system-content segments.
+        non-empty list of system-content segments (enforced — a non-``None``,
+        non-``list`` value, e.g. a bare string, raises ``TypeError``).
     Postconditions:
         Returns ``system_prompt`` unchanged when ``system_prompt_content`` is
         falsy; otherwise returns a list ``[{"text": system_prompt}, *normalized]``.
     """
     if not system_prompt:
         raise ValueError("system_prompt must be non-empty")
+    if system_prompt_content is not None and not isinstance(system_prompt_content, list):
+        raise TypeError("system_prompt_content must be a list of system-content segments or None")
     if not system_prompt_content:
         return system_prompt
     normalized = [{"text": seg} if isinstance(seg, str) else seg for seg in system_prompt_content]

@@ -18,6 +18,13 @@ def test_rejects_empty_persona_without_content() -> None:
         build_system_prompt_with_content("", None)
 
 
+def test_rejects_non_list_content() -> None:
+    """A bare string passed where a list is expected must raise loudly, not
+    silently explode into one {"text": char} block per character."""
+    with pytest.raises(TypeError, match="system_prompt_content"):
+        build_system_prompt_with_content("persona text", "extra context")
+
+
 def test_returns_str_when_no_content() -> None:
     result = build_system_prompt_with_content("persona text", None)
     assert result == "persona text"

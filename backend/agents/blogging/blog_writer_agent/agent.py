@@ -430,6 +430,10 @@ class BlogWriterAgent(_BlogAgentBase):
         Preconditions:
             - ``prompt`` is a non-empty string (enforced by ``_call_agent`` via
               ``_call_json_raw``).
+            - ``system_prompt``, if falsy, falls back to ``WRITING_SYSTEM_PROMPT``
+              (via ``_call_json_raw``). Accepts a plain persona string or a
+              Strands system-content-block list (e.g. from
+              ``build_system_prompt_with_content``).
         Postconditions:
             - Returns a parsed JSON **object** (``dict``). Non-dict JSON values
               raise ``LLMJsonParseError``.
