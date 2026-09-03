@@ -67,6 +67,11 @@ def _make_ctx(monkeypatch, *, plan_content_side_effect):
     from agents.blogging.agent_implementations.pipeline import planning_stage
 
     monkeypatch.setattr(planning_stage, "_wait_for_hitl", lambda *_a, **_kw: False)
+    # These tests use a job_id that was never created in the real job store, so the
+    # unmocked title-selection wait would busy-loop forever (is_waiting_for_title_selection
+    # returns False immediately for a missing job, but so does the "selected_title found"
+    # check, with no sleep in between) — not the behavior under test here.
+    monkeypatch.setattr(planning_stage, "_run_title_selection", lambda *_a, **_kw: None)
 
     import agents.blogging.shared.blog_job_store as blog_job_store
 
@@ -239,6 +244,7 @@ def test_replan_refreshes_claims_and_preserves_research_digest(monkeypatch, tmp_
     from agents.blogging.agent_implementations.pipeline import planning_stage
 
     monkeypatch.setattr(planning_stage, "_wait_for_hitl", lambda *_a, **_kw: False)
+    monkeypatch.setattr(planning_stage, "_run_title_selection", lambda *_a, **_kw: None)
 
     import agents.blogging.shared.blog_job_store as blog_job_store
 
