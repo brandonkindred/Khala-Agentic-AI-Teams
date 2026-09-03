@@ -25,12 +25,17 @@ from software_engineering_team.code_review_agent.tool_call_budget import (
 
 
 class _StatelessModel:
-    """Scaffolding every stream double in this file needs and none of them vary.
+    """Scaffolding shared by the STATELESS stream doubles in this file.
 
     Strands reads ``stateful`` off the model it is handed and calls
     ``get_config``/``update_config`` on it, so a double omitting them fails for
     a reason unrelated to the scenario under test. Subclasses override only
     ``stream`` -- the part that actually encodes the scenario.
+
+    ``_AlwaysToolCallsModel`` deliberately does NOT inherit this: its config is
+    genuinely stateful (it carries ``response_format``, ``update_config``
+    mutates it, and ``clone`` merges it), so inheriting these no-op accessors
+    would break the scenario it exists to drive.
     """
 
     stateful = False

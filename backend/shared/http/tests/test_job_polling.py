@@ -355,8 +355,15 @@ def test_poll_rejects_a_non_exception_passthrough_entry():
 def test_poll_rejects_a_bare_class_passed_as_passthrough_exceptions():
     """The parameter is a tuple of types, not a single class.
 
-    The precondition rejects a bare class before polling starts, so the mistake
-    surfaces at the call site rather than at the except clause mid-poll.
+    Unlike the list and bad-element cases, a bare class would actually WORK at
+    ``except passthrough_exceptions:`` -- a single exception class is a valid
+    except operand -- so there is no mid-poll failure to prevent here. The
+    precondition exists to enforce the declared tuple contract: rejected at the
+    call site with a message naming the parameter, instead of being silently
+    accepted, or tripping an element-only check with an unrelated
+    ``'type' object is not iterable``. (The shipped assert checks
+    ``isinstance(..., tuple)`` first and short-circuits, so it never iterates
+    the class.)
     """
     with pytest.raises(AssertionError, match="passthrough_exceptions"):
         poll_until_terminal(
