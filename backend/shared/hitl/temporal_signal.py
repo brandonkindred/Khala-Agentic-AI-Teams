@@ -121,9 +121,14 @@ def _bounded_repr(value: Any, max_chars: int = 64) -> str:
     Postconditions:
         - Returns ``repr(value)`` unchanged if it is at most ``max_chars``
           long; otherwise returns the first ``max_chars`` characters of that
-          repr followed by a truncation marker. Never raises.
+          repr followed by a truncation marker. Never raises, even if
+          ``value.__repr__`` itself raises (``value`` is arbitrary,
+          unvalidated signal-payload data of type ``Any``).
     """
-    rendered = repr(value)
+    try:
+        rendered = repr(value)
+    except Exception:
+        return "<unrepresentable>"
     if len(rendered) <= max_chars:
         return rendered
     return rendered[:max_chars] + "...(truncated)"
@@ -260,10 +265,15 @@ class HitlAnswerSignalMixin:
         self._active_resume_token: Optional[str] = None
         self._submitted_answers: Optional[List[Dict[str, Any]]] = None
         self._buffered_signals: Dict[str, List[Dict[str, Any]]] = {}
-        # Postcondition: the guard above and these assignments cover exactly the
-        # same attribute set -- drift between them would either leave the guard
-        # checking a name that's never set (AttributeError on first signal) or
-        # let an assignment escape the guard entirely (silent state aliasing).
+        # Pins _OWNED_STATE_ATTRS to the three names the assignments above set,
+        # so guard-side drift (a name added to the tuple with no matching
+        # assignment) fails loudly here instead of as an AttributeError on the
+        # first delivered signal. This does NOT observe the assignment
+        # statements themselves: a future `self._new_attr = ...` added above
+        # without updating both this literal and the tuple would pass this
+        # check and silently escape the composition guard (assignment-side
+        # drift) -- when adding an owned attribute, update the assignments,
+        # _OWNED_STATE_ATTRS, and this literal together.
         # Deterministic and replay-safe; not gated on -O since a stripped assert
         # would silently drop this exact protection.
         if set(_OWNED_STATE_ATTRS) != {

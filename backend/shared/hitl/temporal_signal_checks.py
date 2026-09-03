@@ -11,11 +11,31 @@ drift on a temporalio upgrade.
 
 from __future__ import annotations
 
-from typing import Type
+from typing import Any, Type
 
 from temporalio import workflow
 
 from shared.hitl.temporal_signal import SUBMIT_ANSWERS_SIGNAL
+
+
+def get_workflow_definition(workflow_cls: Type) -> Any:
+    """Return the temporalio ``_Definition`` for a ``@workflow.defn`` class,
+    or ``None`` if it isn't one.
+
+    Centralizes the private ``temporalio.workflow._Definition``/``from_class``
+    touchpoint in one place -- callers that need definition-level details
+    beyond what :func:`assert_workflow_registers_submit_answers` checks (e.g.
+    ``defn.name``, ``defn.run_fn``) should go through this accessor rather
+    than importing ``temporalio.workflow`` and calling the private API
+    directly, so a temporalio upgrade only needs reconciling here.
+
+    Preconditions:
+        - ``workflow_cls`` is a class, decorated or not with ``@workflow.defn``.
+    Postconditions:
+        - Returns the class's ``_Definition`` if decorated, else ``None``.
+          Never raises for a well-formed class argument.
+    """
+    return workflow._Definition.from_class(workflow_cls)
 
 
 def assert_workflow_registers_submit_answers(workflow_cls: Type) -> None:
@@ -29,14 +49,21 @@ def assert_workflow_registers_submit_answers(workflow_cls: Type) -> None:
           or if the signal registered under :data:`SUBMIT_ANSWERS_SIGNAL` is
           missing or not literally named ``"submit_answers"`` (pinning the
           literal, not just the constant, so a changed constant value would
-          fail this assertion instead of silently passing).
+          fail this assertion instead of silently passing). The
+          missing-signal case's message names ``"submit_answers"``
+          explicitly, so a caller asserting on the failure message can
+          distinguish it from an unrelated assertion failure inside this
+          helper.
 
-    Uses ``temporalio.workflow._Definition``, a private introspection API --
-    the only practical way to assert signal registration without standing up
-    a worker. Re-verify this helper on temporalio upgrades.
+    Uses ``temporalio.workflow._Definition`` via :func:`get_workflow_definition`,
+    a private introspection API -- the only practical way to assert signal
+    registration without standing up a worker. Re-verify this helper on
+    temporalio upgrades.
     """
-    defn = workflow._Definition.from_class(workflow_cls)
+    defn = get_workflow_definition(workflow_cls)
     assert defn is not None, f"{workflow_cls.__name__} is missing the @workflow.defn decorator"
     assert SUBMIT_ANSWERS_SIGNAL == "submit_answers"
-    assert SUBMIT_ANSWERS_SIGNAL in defn.signals
+    assert SUBMIT_ANSWERS_SIGNAL in defn.signals, (
+        f"{workflow_cls.__name__} does not register the 'submit_answers' signal"
+    )
     assert defn.signals[SUBMIT_ANSWERS_SIGNAL].name == "submit_answers"

@@ -98,6 +98,7 @@ def test_submit_answers_ignores_non_dict_payload() -> None:
     wf.submit_answers("not-a-dict")
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_tolerates_zero_argument_delivery() -> None:
@@ -125,6 +126,7 @@ def test_submit_answers_ignores_non_list_answers() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": "nope"})
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_ignores_payload_missing_answers_key() -> None:
@@ -136,6 +138,7 @@ def test_submit_answers_ignores_payload_missing_answers_key() -> None:
     wf.submit_answers({"resume_token": "tok-1"})
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_rejects_whole_batch_on_one_malformed_answer_entry() -> None:
@@ -153,6 +156,7 @@ def test_submit_answers_rejects_whole_batch_on_one_malformed_answer_entry() -> N
     )
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_rejects_non_dict_answer_entry() -> None:
@@ -164,6 +168,7 @@ def test_submit_answers_rejects_non_dict_answer_entry() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": ["not-a-dict"]})
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_rejects_malformed_batch_with_no_active_pause() -> None:
@@ -188,6 +193,7 @@ def test_submit_answers_rejects_answer_entry_with_non_string_keys() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [{1: "x", "question_id": "q1"}]})
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_rejects_answer_entry_with_unrecognized_key() -> None:
@@ -202,6 +208,7 @@ def test_submit_answers_rejects_answer_entry_with_unrecognized_key() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [{"question_id": "q1", "other_txt": "typo"}]})
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_submit_answers_rejects_empty_answers_list() -> None:
@@ -214,6 +221,7 @@ def test_submit_answers_rejects_empty_answers_list() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": []})
 
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 # --------------------------------------------------------------------------

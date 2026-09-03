@@ -327,6 +327,7 @@ def test_hitl_signal_mixin_rejects_malformed_answer_batch() -> None:
 
     wf.submit_answers({"resume_token": "tok-1", "answers": ["not-a-dict"]})
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
     wf.submit_answers(
         {
@@ -335,12 +336,15 @@ def test_hitl_signal_mixin_rejects_malformed_answer_batch() -> None:
         }
     )
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
     wf.submit_answers({"resume_token": "tok-1", "answers": []})
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
     wf.submit_answers({"resume_token": "tok-1", "answers": [{1: "x", "question_id": "q1"}]})
     assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
 
 
 def test_hitl_signal_mixin_accepts_matching_signal() -> None:
@@ -486,6 +490,9 @@ def test_planning_workflow_registers_submit_answers_signal() -> None:
     # in planning_team/tests/test_temporal_workflow_signal.py calls the same
     # helper, so there is one implementation instead of two hand-maintained
     # copies of the temporalio private-API specifics.
+    # Imported locally (here and below) rather than at module level so this
+    # file's other tests don't pay for importing planning_team/temporalio
+    # when only exercising the standalone mixin.
     from planning_team.temporal.workflows import PlanningWorkflow
     from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
 
