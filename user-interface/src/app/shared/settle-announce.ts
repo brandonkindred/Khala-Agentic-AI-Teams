@@ -99,7 +99,7 @@ export class SettleAnnouncer {
   }
 
   private clearTimer(): void {
-    if (this.timer) {
+    if (this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
     }

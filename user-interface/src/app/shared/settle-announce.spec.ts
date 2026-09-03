@@ -200,4 +200,32 @@ describe('SettleAnnouncer', () => {
     expect(() => announcer.dispose()).not.toThrow();
     expect(announcer.isPending).toBe(false);
   });
+
+  it("fires onSettle('') again on a repeated clear even when already empty and idle", () => {
+    // Intentional asymmetry vs. the non-empty unchanged-value no-op above: pinned so a future
+    // refactor doesn't silently "fix" this into a no-op, which would break a consumer relying on
+    // a forced re-clear.
+    const onSettle = vi.fn();
+    const announcer = new SettleAnnouncer(1500, onSettle);
+    announcer.update('');
+    announcer.update('');
+    expect(onSettle).toHaveBeenCalledTimes(2);
+    expect(onSettle).toHaveBeenNthCalledWith(2, '');
+  });
+
+  it('propagates an onChange exception but leaves timer state consistent for retry', async () => {
+    vi.useFakeTimers();
+    const onSettle = vi.fn();
+    const announcer = new SettleAnnouncer(1500, onSettle, () => {
+      throw new Error('boom');
+    });
+
+    expect(() => announcer.update('a')).toThrow('boom');
+    expect(announcer.isPending).toBe(true); // timer still armed for 'a'
+
+    // A retry with the same value is a no-op; the original timer still settles 'a'.
+    expect(() => announcer.update('a')).not.toThrow();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(onSettle).toHaveBeenCalledExactlyOnceWith('a');
+  });
 });
