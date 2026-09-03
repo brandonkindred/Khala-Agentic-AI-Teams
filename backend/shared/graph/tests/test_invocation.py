@@ -268,3 +268,9 @@ def test_parse_json_model_propagates_undecodable_json() -> None:
     """Both failure modes are ValueErrors: JSONDecodeError and pydantic's ValidationError."""
     with pytest.raises(ValueError):
         _parse_json_model("{not json at all}", _Model)
+
+
+def test_parse_json_model_propagates_schema_validation_failures() -> None:
+    """The sibling failure mode: valid JSON that fails the model's own field validation."""
+    with pytest.raises(ValueError):
+        _parse_json_model('{"score": "not-a-number"}', _Model)

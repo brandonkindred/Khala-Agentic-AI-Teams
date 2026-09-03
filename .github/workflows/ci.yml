@@ -905,9 +905,13 @@ jobs:
     name: Test – shared infra packages (coverage combine)
     runs-on: ubuntu-latest
     # always(): still run the shared gate when an UNRELATED matrix entry (e.g.
-    # blogging) fails. A genuine failure in either producer leaves its artifact
-    # absent, so the download below fails and this job goes red — the correct
-    # signal.
+    # blogging) fails. A genuine failure in a producer leaves its artifact
+    # absent: if both producers fail, or the failed one is the sole artifact
+    # source, the download below fails and this job goes red. If only one
+    # producer fails while the other succeeds, the surviving artifact still
+    # matches the download pattern, so this job can go green while reporting
+    # just that producer's data — the red signal in that case is the failed
+    # producer job itself, not this one.
     needs:
       - changes
       - test-backend

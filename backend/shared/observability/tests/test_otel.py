@@ -304,6 +304,9 @@ def test_build_metric_exporter_selects_the_grpc_transport(monkeypatch) -> None:
     try:
         assert isinstance(exporter, OTLPMetricExporter)
     finally:
+        # Only shut down a real exporter — calling .shutdown() unconditionally
+        # here would, on assertion failure, raise from inside the finally block
+        # and replace the AssertionError as the reported failure.
         if isinstance(exporter, OTLPMetricExporter):
             exporter.shutdown()
 
@@ -621,8 +624,8 @@ def _make_discarding_metric_exporter() -> Any:
         def force_flush(self, timeout_millis: float = 10_000) -> bool:
             return True
 
-        def shutdown(self, timeout_millis: float = 30_000, **kwargs: Any) -> None:
-            return None
+        def shutdown(self, timeout_millis: float = 30_000, **kwargs: Any) -> bool:
+            return True
 
     return _DiscardingMetricExporter()
 
