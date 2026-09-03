@@ -45,6 +45,7 @@ from ..spec_dsl import (
     StopLossRule,
     TakeProfitRule,
     protective_limit_price,
+    protective_stop_price,
 )
 from .predicate_evaluator import HistoryView, evaluate_signal_exit_rules
 
@@ -523,12 +524,17 @@ def _next_scaled_rung(
 
 def stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     """Resolve the price level at which ``rule`` floors (long) / caps (short)
-    the position. Single source of the stop-level geometry: :func:`stop_loss_triggers`
-    compares the bar against this level, :func:`stop_limit_prices` rests a
-    STOP_LIMIT off it, and the reference-ledger exit replay derives its fill
-    price from it — so the trigger decision, the resting limit, and the modeled
-    fill can never disagree. Public for that last caller, which lives outside
-    this module and must not re-derive the formula.
+    the position. Single source of the stop-level *reference selection*
+    (entry price vs. the running trailing extreme); the actual floor/cap
+    geometry off that reference is :func:`spec_dsl.protective_stop_price`,
+    shared with every other consumer that must derive the same level from the
+    same reference (see that function's docstring for the full list) so none
+    of them can silently drift apart. :func:`stop_loss_triggers` compares the
+    bar against this level, :func:`stop_limit_prices` rests a STOP_LIMIT off
+    it, and the reference-ledger exit replay derives its fill price from it —
+    so the trigger decision, the resting limit, and the modeled fill can never
+    disagree. Public for that last caller, which lives outside this module and
+    must not re-derive the formula.
 
     Preconditions: ``rule`` is side-compatible with ``position`` — the basis can
     fire for this side. ``stop_loss_triggers`` enforces this by returning early
@@ -540,12 +546,12 @@ def stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     trailing basis it floors off the running high (long) / caps off the running
     low (short).
     """
-    pct = rule.pct
-    if position.side == "long":
+    is_long = position.side == "long"
+    if is_long:
         ref = position.high_since_entry if rule.basis == "trailing_high" else position.entry_price
-        return ref * (1.0 - pct)
-    ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
-    return ref * (1.0 + pct)
+    else:
+        ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
+    return protective_stop_price(ref, rule.pct, is_long=is_long)
 
 
 class StopLimitPrices(NamedTuple):
