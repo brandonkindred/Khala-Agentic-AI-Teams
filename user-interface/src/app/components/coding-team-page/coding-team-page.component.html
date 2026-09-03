@@ -421,12 +421,22 @@
 
     <!-- Shared run row (bound to a precomputed view-model) used by both lists. Clicking toggles its detail. -->
     <ng-template #runRow let-vm>
+      <!--
+        No tabindex on the nested detail span below: a focusable descendant of a
+        <button> is invalid per the HTML interactive-content model and would add a
+        second tab stop to every run row. The tooltip is bound on the button itself
+        instead, using vm.detail directly (coalesced to '' only to satisfy
+        MatTooltip's non-nullable input type) — MatTooltip already treats an empty
+        message as "no tooltip", so the existing @if guard below is only needed to
+        keep the visible span out of the DOM when there's nothing to show.
+      -->
       <button
         class="coding-run-item"
         type="button"
         [class.selected]="selectedRunId === vm.run.job_id"
         [attr.aria-expanded]="selectedRunId === vm.run.job_id"
         [attr.aria-controls]="'run-detail-' + vm.run.job_id"
+        [matTooltip]="vm.detail ?? ''"
         (click)="toggleRun(vm.run)"
       >
         <div class="coding-run-item__top">
@@ -439,7 +449,7 @@
           <mat-icon class="coding-run-item__chevron" aria-hidden="true">{{ selectedRunId === vm.run.job_id ? 'expand_less' : 'expand_more' }}</mat-icon>
         </div>
         @if (vm.detail) {
-          <span class="coding-run-item__detail" [matTooltip]="vm.detail">
+          <span class="coding-run-item__detail">
             {{ vm.detail }}
           </span>
         }
