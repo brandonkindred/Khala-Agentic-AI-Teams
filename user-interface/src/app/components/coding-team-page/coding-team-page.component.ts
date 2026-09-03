@@ -793,13 +793,19 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  /**
+   * Supersede any pending focus move with a new one, deferred until the next render tick.
+   * `find` resolves the target element within this component's host once rendered.
+   */
+  private scheduleFocusMove(find: (root: HTMLElement) => HTMLElement | null): void {
+    this.clearFocusTimer();
+    this.focusTimer = deferFocus(this.host.nativeElement, find);
+  }
+
   /** After the confirm panel for `issueNumber` renders, move focus into it. */
   private moveFocusToConfirmPanel(issueNumber: number): void {
-    this.clearFocusTimer();
     const id = this.confirmPanelId(issueNumber);
-    this.focusTimer = deferFocus(this.host.nativeElement, (root) =>
-      root.querySelector<HTMLElement>(`[id="${id}"]`),
-    );
+    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[id="${id}"]`));
   }
 
   /**
@@ -808,11 +814,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * full names can't contain `"`, so interpolating the id into this attribute selector is safe.
    */
   private moveFocusToIssueRow(issueNumber: number): void {
-    this.clearFocusTimer();
     const id = this.confirmPanelId(issueNumber);
-    this.focusTimer = deferFocus(this.host.nativeElement, (root) =>
-      root.querySelector<HTMLElement>(`[aria-controls="${id}"]`),
-    );
+    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[aria-controls="${id}"]`));
   }
 
   /** True when the issue is blocked by, or depends on, one or more other issues. */
