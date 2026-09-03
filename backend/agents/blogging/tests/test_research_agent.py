@@ -638,10 +638,12 @@ def test_evaluate_documents_calls_evaluate_one_document_once_per_doc(monkeypatch
     from llm_service import DummyLLMClient
 
     a = ResearchAgent(llm_client=DummyLLMClient())
-    call_count = {"n": 0}
+    calls: list = []
 
     def fake_evaluate_one(self, doc, brief_input):
-        call_count["n"] += 1
+        # list.append is atomic under the GIL, unlike a dict/int += counter,
+        # so this stays race-free across the fan-out's worker threads.
+        calls.append(doc)
         ref = ResearchReference(
             title=doc.title, url=doc.url, domain=doc.domain, summary="s", key_points=[]
         )
@@ -654,6 +656,6 @@ def test_evaluate_documents_calls_evaluate_one_document_once_per_doc(monkeypatch
         docs, ResearchBriefInput(brief="x", max_results=2)
     )
 
-    assert call_count["n"] == 5
+    assert len(calls) == 5
     assert len(scored_docs) == 5
     assert len(references) == 2

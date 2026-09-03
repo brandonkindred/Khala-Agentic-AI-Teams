@@ -224,9 +224,10 @@ class ResearchAgent(_BlogAgentBase):
             _report("Scoring documents for relevance...", 0.50)
             # scored_docs/references: "is not None" for the same reason as documents
             # above. Both must already be checkpointed to skip recomputation - a
-            # checkpoint with scored_docs but not yet references (only possible from
-            # a pre-merge checkpoint resumed after this deploy) recomputes both via
-            # one fresh _evaluate_documents call rather than reusing scored_docs alone.
+            # checkpoint with scored_docs but not yet references (from a pre-merge
+            # checkpoint resumed after this deploy, or a crash/write failure between
+            # the two save_checkpoint calls below) recomputes both via one fresh
+            # _evaluate_documents call rather than reusing scored_docs alone.
             if (
                 cached_state
                 and cached_state.scored_docs is not None
