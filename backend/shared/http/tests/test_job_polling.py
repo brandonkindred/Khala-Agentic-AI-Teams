@@ -341,6 +341,41 @@ def test_poll_rejects_non_positive_total_timeout():
         poll_until_terminal(lambda: {"status": "completed"}, total_timeout=0)
 
 
+def test_poll_rejects_a_non_exception_passthrough_entry():
+    """A bad entry would otherwise surface as a TypeError chained onto whatever
+    on_poll actually raised, mid-poll and far from the call site — the failure
+    mode the file's other preconditions use asserts to avoid."""
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=(str,),  # type: ignore[arg-type]
+        )
+
+
+def test_poll_rejects_a_bare_class_passed_as_passthrough_exceptions():
+    """The parameter is a tuple of types, not a single class.
+
+    The precondition rejects a bare class before polling starts, so the mistake
+    surfaces at the call site rather than at the except clause mid-poll.
+    """
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=_PauseSignal,  # type: ignore[arg-type]
+        )
+
+
+def test_poll_rejects_a_list_of_exception_types():
+    """A LIST of real exception types is the input an element-only check lets
+    through — and the only one that still reaches ``except passthrough_exceptions:``,
+    where it raises TypeError chained onto whatever on_poll actually threw."""
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=[_PauseSignal],  # type: ignore[arg-type]
+        )
+
+
 def test_default_terminal_statuses_include_completed_failed_cancelled():
     assert DEFAULT_TERMINAL_STATUSES == frozenset({"completed", "failed", "cancelled"})
 
@@ -829,38 +864,3 @@ async def test_async_post_json_returns_none_when_client_closed_mid_flight():
     client.post = AsyncMock(side_effect=RuntimeError("Cannot send a request, as the client has been closed."))
     with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
         assert await async_post_json("http://x/run", {}) is None
-
-
-def test_poll_rejects_a_non_exception_passthrough_entry():
-    """A bad entry would otherwise surface as a TypeError chained onto whatever
-    on_poll actually raised, mid-poll and far from the call site — the failure
-    mode the file's other preconditions use asserts to avoid."""
-    with pytest.raises(AssertionError, match="passthrough_exceptions"):
-        poll_until_terminal(
-            lambda: {"status": "running"},
-            passthrough_exceptions=(str,),  # type: ignore[arg-type]
-        )
-
-
-def test_poll_rejects_a_bare_class_passed_as_passthrough_exceptions():
-    """The parameter is a tuple of types, not a single class.
-
-    The precondition rejects a bare class before polling starts, so the mistake
-    surfaces at the call site rather than at the except clause mid-poll.
-    """
-    with pytest.raises(AssertionError, match="passthrough_exceptions"):
-        poll_until_terminal(
-            lambda: {"status": "running"},
-            passthrough_exceptions=_PauseSignal,  # type: ignore[arg-type]
-        )
-
-
-def test_poll_rejects_a_list_of_exception_types():
-    """A LIST of real exception types is the input an element-only check lets
-    through — and the only one that still reaches ``except passthrough_exceptions:``,
-    where it raises TypeError chained onto whatever on_poll actually threw."""
-    with pytest.raises(AssertionError, match="passthrough_exceptions"):
-        poll_until_terminal(
-            lambda: {"status": "running"},
-            passthrough_exceptions=[_PauseSignal],  # type: ignore[arg-type]
-        )

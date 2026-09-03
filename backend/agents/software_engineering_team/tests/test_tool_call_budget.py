@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -315,33 +316,53 @@ def test_run_agent_via_reasoning_terminates_against_a_looping_model(
 
     model = _AlwaysToolCallsModel(final_text="Everything checks out.")
 
-    result = run_agent_via_reasoning(
-        model=model,
-        reasoning_prompt="Review this",
-        reasoning_system_prompt="Prose reviewer",
-        formatting_instructions='Return {"verdict": str}',
-        parse=lambda raw: json.loads(raw),
-        tools=[read_file],
-    )
+    # Bounded on purpose. This test's subject IS termination, so a regression
+    # (a refactor dropping the ToolCallBudgetModel wrapper, say) makes its
+    # failure mode the bug itself: it never returns, and the suite stalls to
+    # the job timeout with nothing naming the cap. pytest-timeout is not a
+    # dependency here, so `@pytest.mark.timeout` would be an unknown marker and
+    # silently do nothing -- worse than no guard, since it reads as protected.
+    # A daemon thread is the bound: a ThreadPoolExecutor worker is non-daemon,
+    # so a wedged run would be joined at interpreter exit and hang anyway.
+    box: Dict[str, Any] = {}
 
+    def _run() -> None:
+        try:
+            box["result"] = run_agent_via_reasoning(
+                model=model,
+                reasoning_prompt="Review this",
+                reasoning_system_prompt="Prose reviewer",
+                formatting_instructions='Return {"verdict": str}',
+                parse=lambda raw: json.loads(raw),
+                tools=[read_file],
+            )
+        except BaseException as exc:  # re-raised on the main thread below
+            box["error"] = exc
+
+    runner = threading.Thread(target=_run, daemon=True)
+    runner.start()
+    runner.join(timeout=60)
+    assert not runner.is_alive(), (
+        "run_agent_via_reasoning did not terminate within 60s against an "
+        "always-tool-calling model: the ToolCallBudgetModel cap is not being "
+        f"applied (CODE_REVIEW_AGENT_TOOL_CALL_CAP=3, {len(calls)} tool calls so far)"
+    )
+    # Without this the thread's exception is swallowed and the missing key
+    # surfaces as a bare KeyError, naming nothing.
+    if "error" in box:
+        raise box["error"]
+
+    result = box["result"]
     assert result == {"verdict": "kept"}
     # Exactly the cap's worth of tool calls, then one final tool-free turn.
     assert len(calls) == 3
 
 
-class _ParallelBatchModel:
+class _ParallelBatchModel(_StatelessModel):
     """Emits several `toolUse` blocks in one assistant turn (a parallel batch)."""
-
-    stateful = False
 
     def __init__(self, batch_size: int) -> None:
         self._batch_size = batch_size
-
-    def get_config(self) -> Dict[str, Any]:
-        return {}
-
-    def update_config(self, **overrides: Any) -> None:
-        return None
 
     async def stream(
         self,

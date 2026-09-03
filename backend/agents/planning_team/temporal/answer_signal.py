@@ -208,6 +208,12 @@ def build_temporal_planning_answer_callback(
           skipped rather than raising ``AttributeError`` out of a resumed activity,
           and matching requires ``question_id`` to be a ``str`` so an unhashable one
           never crashes the set-membership test.
+        - At most ONE answer is returned per question. That list is validated as a
+          list, so it can carry the same ``question_id`` twice, and nothing
+          downstream catches it: the product-analysis route compares sets of ids,
+          so a duplicate satisfies both its required-coverage and unknown-id
+          checks and is then stored verbatim. The first entry per id wins, in
+          ``submitted_answers`` order.
     """
     assert isinstance(resume_token, str) and resume_token, (
         "build_temporal_planning_answer_callback requires a non-empty resume_token"
@@ -238,14 +244,23 @@ def build_temporal_planning_answer_callback(
     def _resolved_cb(questions: list) -> list:
         askable = [q for q in questions if isinstance(q, dict) and isinstance(q.get("id"), str)]
         question_ids = {q["id"] for q in askable}
-        matched = [
-            a
-            for a in resolved
-            if isinstance(a, dict)
-            and isinstance(a.get("question_id"), str)
-            and a["question_id"] in question_ids
-        ]
-        answered_ids = {a["question_id"] for a in matched}
+        # First-wins dedup, not a plain filter: a signal's ``answers`` is
+        # validated as a list, not a list of distinct answers, so two entries
+        # can carry the same question_id. Nothing downstream rejects that --
+        # the product-analysis route compares SETS of ids, so duplicates pass
+        # its required/unknown checks and are stored verbatim -- which leaves
+        # which answer actually applies decided by iteration order.
+        matched_by_id: Dict[str, Dict[str, Any]] = {}
+        for a in resolved:
+            if (
+                isinstance(a, dict)
+                and isinstance(a.get("question_id"), str)
+                and a["question_id"] in question_ids
+                and a["question_id"] not in matched_by_id
+            ):
+                matched_by_id[a["question_id"]] = a
+        matched = list(matched_by_id.values())
+        answered_ids = set(matched_by_id)
         missing = [q for q in askable if q["id"] not in answered_ids]
         if not missing:
             return matched

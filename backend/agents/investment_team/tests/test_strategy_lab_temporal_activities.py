@@ -4155,7 +4155,9 @@ def test_activities_list_contains_every_activity():
     assert act.publish_run_event_activity in act.ACTIVITIES
 
 
-def test_probe_only_resume_failure_logs_info_without_a_traceback(caplog) -> None:
+def test_probe_only_resume_failure_logs_info_without_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A probe that fails to reconstruct has not lost anything.
 
     ADR-012 already supplied the resume state; the probe only re-derives whether
@@ -4190,7 +4192,9 @@ def test_probe_only_resume_failure_logs_info_without_a_traceback(caplog) -> None
     )
 
 
-def test_non_probe_resume_failure_still_logs_warning_with_a_traceback(caplog) -> None:
+def test_non_probe_resume_failure_still_logs_warning_with_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The other side of the same branch: a real cross-attempt resume that fails
     to reconstruct HAS lost its resume, so it keeps the warning and the
     traceback. Without this, the probe-path test alone would pass against an

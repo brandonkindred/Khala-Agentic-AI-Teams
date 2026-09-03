@@ -731,3 +731,25 @@ def test_default_answer_ignores_an_out_of_range_int_confidence() -> None:
     )
 
     assert result[0]["selected_option_id"] == "opt-real"
+
+
+def test_callback_returns_at_most_one_answer_per_question() -> None:
+    """A signal's ``answers`` is validated as a list, not a list of DISTINCT
+    answers, so the same question_id can arrive twice.
+
+    Nothing downstream catches it: the product-analysis route compares sets of
+    ids, so a duplicate satisfies both its required-coverage and unknown-id
+    checks, and the batch is then stored verbatim -- leaving which answer
+    actually applies decided by iteration order. First entry wins here.
+    """
+    cb = build_temporal_planning_answer_callback(
+        "job-dup:tok1",
+        submitted_answers=[
+            {"question_id": "q1", "selected_option_id": "first"},
+            {"question_id": "q1", "selected_option_id": "second"},
+        ],
+    )
+
+    answers = cb([{"id": "q1", "options": [{"id": "first"}, {"id": "second"}]}])
+
+    assert answers == [{"question_id": "q1", "selected_option_id": "first"}]
