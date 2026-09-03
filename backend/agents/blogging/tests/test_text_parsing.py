@@ -203,6 +203,8 @@ def test_looks_like_top_level_json_object_false_for_malformed_json() -> None:
 
 
 class _FeedbackItem:
+    """Duck-typed stand-in for a feedback item; every field defaults to None."""
+
     def __init__(self, severity=None, category=None, issue=None, location=None, suggestion=None):
         self.severity = severity
         self.category = category
