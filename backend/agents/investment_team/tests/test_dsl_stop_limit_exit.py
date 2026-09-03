@@ -23,10 +23,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict
 
+import pytest
+
 from investment_team.strategy_lab.executor.rule_compiler import (
     BarSnapshot,
     PositionState,
     evaluate_exit_rules,
+    stop_limit_prices,
 )
 from investment_team.strategy_lab.spec_dsl import StopLossRule, TakeProfitRule
 from investment_team.trading_service.engine.order_book import OrderBook
@@ -202,9 +205,7 @@ def test_market_style_intent_has_no_stop_price():
 
 
 def test_emits_stop_limit_close_for_long_position():
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)])
     tracker, portfolio, order_book = _long_setup()
     bar = _bar(low=95)  # trips the 98 floor
     result = TradingServiceResult()
@@ -234,9 +235,7 @@ def test_emits_stop_limit_close_for_long_position():
 
 
 def test_emits_stop_limit_close_for_short_position():
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)])
     tracker, portfolio, order_book = _short_setup()
     bar = _bar(high=105)  # trips the 102 ceiling
     result = TradingServiceResult()
@@ -260,9 +259,7 @@ def test_emits_stop_limit_close_for_short_position():
 
 
 def test_emission_event_records_stop_limit_order_type():
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)])
     tracker, portfolio, order_book = _long_setup()
     result = TradingServiceResult()
     pending: list[OrderRequest] = []
@@ -289,9 +286,7 @@ def test_emission_event_records_stop_limit_order_type():
 
 
 def test_does_not_re_emit_while_engine_stop_limit_rests():
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)])
     tracker, portfolio, order_book = _long_setup()
     result = TradingServiceResult()
 
@@ -462,9 +457,7 @@ def _resting_take_profit(order_book) -> object:
 
 
 def test_limit_style_binds_competing_resting_orders():
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)])
     tracker, portfolio, order_book = _long_setup()
     result = TradingServiceResult()
 
@@ -551,9 +544,7 @@ def test_market_style_cancels_entry_continuation():
 
 
 def test_limit_style_does_not_cancel_entry_continuation():
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)])
     tracker, portfolio, order_book = _long_setup()
     result = TradingServiceResult()
     _partial_entry_continuation(order_book)
@@ -579,9 +570,7 @@ def test_limit_style_oversizes_close_to_cover_entry_continuation():
     fills before the stop-limit, the close still covers the grown position
     (_fill_exit clips to live qty), so no residual exposure is stranded.
     """
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)])
     tracker, portfolio, order_book = _long_setup()
     result = TradingServiceResult()
     _partial_entry_continuation(order_book)  # 40-share remainder still working
@@ -623,3 +612,100 @@ def test_market_style_does_not_oversize_for_entry_continuation():
     req = _engine_orders(pending)[0]
     assert req.qty == 100.0
     assert "o1" not in order_book  # continuation cancelled
+
+
+# ---------------------------------------------------------------------------
+# stop_limit_prices — the shared geometry helper's own boundary
+# ---------------------------------------------------------------------------
+
+
+def _limit_position(side: str = "long") -> PositionState:
+    """A minimal long/short position anchored at 100 with unextended watermarks
+    (``high_since_entry == low_since_entry == entry_price``), so a trailing
+    basis would resolve the same level a fixed one does and every price below
+    is attributable to the offset alone."""
+    return PositionState(
+        symbol="AAA",
+        side=side,
+        qty=1.0,
+        entry_price=100.0,
+        high_since_entry=100.0,
+        low_since_entry=100.0,
+    )
+
+
+def test_stop_limit_prices_returns_a_named_pair():
+    """Named so a call site cannot silently transpose two same-typed floats."""
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
+    prices = stop_limit_prices(rule, _limit_position())
+
+    assert prices.stop_price == 95.0
+    assert prices.limit_price == pytest.approx(93.1)
+    # Still a tuple, so existing positional unpacking keeps working.
+    assert tuple(prices) == (prices.stop_price, prices.limit_price)
+
+
+def test_stop_limit_prices_puts_a_shorts_limit_above_its_stop():
+    """The short side's geometry, pinned at the helper's own boundary rather
+    than only through the dispatcher: closing a short buys back, so its stop
+    caps ABOVE the entry and the protective limit sits above that stop again —
+    the opposite sign from the long case. A helper that returned the long
+    arithmetic for both sides would still produce plausible positive prices,
+    so the sign is what has to be asserted, not merely the magnitude."""
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
+    prices = stop_limit_prices(rule, _limit_position("short"))
+
+    assert prices.stop_price == 105.0
+    assert prices.limit_price == pytest.approx(107.1)
+    assert prices.limit_price > prices.stop_price > 100.0
+
+
+def test_stop_limit_prices_rejects_a_market_style_rule():
+    """The helper re-asserts what StopLossRule's validator enforces, so a future
+    loosening there cannot silently widen this helper's contract."""
+    with pytest.raises(ValueError, match="style='limit'"):
+        stop_limit_prices(StopLossRule(pct=0.05), _limit_position())
+
+
+def test_stop_limit_prices_rejects_a_trailing_basis():
+    """A trailing basis re-prices every bar, which a static resting limit cannot
+    represent. Constructed past the validator to reach the helper's own guard."""
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
+    object.__setattr__(rule, "basis", "trailing_high")
+
+    with pytest.raises(ValueError, match="basis='entry_price'"):
+        stop_limit_prices(rule, _limit_position())
+
+
+def test_stop_limit_prices_rejects_a_missing_limit_offset():
+    """Pins the helper's own limit_offset_pct guard, reached past the validator
+    via ``object.__setattr__``, so a future validator loosening cannot silently
+    let the helper price a limit-style rule with no protective offset."""
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
+    object.__setattr__(rule, "limit_offset_pct", None)
+
+    with pytest.raises(ValueError, match="limit_offset_pct"):
+        stop_limit_prices(rule, _limit_position())
+
+
+@pytest.mark.parametrize(
+    ("offset", "degenerate"),
+    [
+        (0.0, "limit rests ON the stop, so it is not protective at all"),
+        (1.0, "limit rests at zero"),
+        (1.5, "limit rests through zero, i.e. negative"),
+    ],
+    ids=["zero", "one", "above_one"],
+)
+def test_stop_limit_prices_rejects_an_offset_outside_the_open_unit_interval(offset, degenerate):
+    """The range is what makes the returned limit protective, so it is guarded
+    here and not left to the validator alone. Without it each case below prices
+    silently: at 100 with a 5% stop the limit would come back 95.0, 0.0 and
+    -47.5 respectively — all well-formed floats, none of them a usable resting
+    limit."""
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.02)
+    object.__setattr__(rule, "limit_offset_pct", offset)
+
+    with pytest.raises(ValueError, match=r"limit_offset_pct must be in \(0, 1\)") as excinfo:
+        stop_limit_prices(rule, _limit_position())
+    assert repr(offset) in str(excinfo.value), degenerate

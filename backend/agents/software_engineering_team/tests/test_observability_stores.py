@@ -9,6 +9,7 @@ import pytest
 
 from software_engineering_team.shared import learnings_store, se_events, trace_store
 
+from ._observability_test_doubles import _FIELDS
 from ._observability_test_doubles import TraceCallRecord as _Rec
 
 # --- se_events -------------------------------------------------------------
@@ -257,6 +258,40 @@ def test_trace_retention_days_env(monkeypatch) -> None:
     assert trace_store._retention_days() == 30.0  # bad value → default
 
 
+def test_prune_traces_noop(monkeypatch) -> None:
+    """prune_traces is a safe no-op without Postgres configured — proven by
+    absence of a real connection attempt, not just the return value.
+
+    prune_traces() swallows any failure and also returns 0 for that case, so
+    a return-value-only assertion can't tell "the POSTGRES_HOST gate
+    correctly short-circuited before pg_cursor opened a connection" apart
+    from "the gate broke, a connection was attempted and failed, and the
+    failure got swallowed" — the second is exactly the regression this test
+    exists to catch. Recording the attempt in a list (rather than asserting
+    inside the patched get_conn) is required, not stylistic: prune_traces's
+    own `except Exception: return 0` would otherwise swallow an assertion
+    raised from inside get_conn too, same as any other exception, and this
+    test would pass either way.
+    """
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("SE_TRACE_RETENTION_DAYS", raising=False)
+
+    from shared.postgres import client as pg_client
+
+    connection_attempts = []
+
+    def _record_and_fail(*args, **kwargs):
+        connection_attempts.append((args, kwargs))
+        raise RuntimeError("prune_traces must not reach get_conn without POSTGRES_HOST")
+
+    monkeypatch.setattr(pg_client, "get_conn", _record_and_fail)
+
+    assert trace_store.prune_traces(0) == 0
+    assert trace_store.prune_traces(30) == 0
+    assert trace_store.prune_traces() == 0  # uses SE_TRACE_RETENTION_DAYS default
+    assert connection_attempts == [], "prune_traces attempted a DB connection without POSTGRES_HOST"
+
+
 # --- trace_store cache-token persistence (single-row + batch, no live Postgres) --------
 
 
@@ -464,6 +499,85 @@ def test_insert_sql_pins_cache_column_positions() -> None:
     assert len(columns) == trace_store._INSERT_SQL.count("%s")
     assert columns[_CACHE_READ_IDX] == "cache_read_tokens"
     assert columns[_CACHE_CREATION_IDX] == "cache_creation_tokens"
+
+
+def test_trace_call_record_fields_reach_record_to_row() -> None:
+    """Every _FIELDS entry the shared test double whitelists is actually read
+    by _record_to_row, at the position _record_to_row's own docstring says it
+    occupies.
+
+    _FIELDS guards one drift direction already (an override for a name
+    _record_to_row never reads raises AttributeError at construction time).
+    This guards the other: a field _record_to_row stops reading — dropped,
+    renamed, or reordered — leaves _FIELDS still silently accepting overrides
+    for it, which then vanish into an unused attribute with nothing else in
+    this suite noticing, since every other trace test uses realistic (often
+    zero/default-shaped) values rather than values chosen to be distinguishable
+    by position.
+    """
+    overrides = {
+        "team": "sentinel-team",
+        "agent_key": "sentinel-agent_key",
+        "job_id": "sentinel-job_id",
+        "task_id": "sentinel-task_id",
+        "phase": "sentinel-phase",
+        "model": "sentinel-model",
+        "prompt_tokens": 101,
+        "completion_tokens": 102,
+        "total_tokens": 103,
+        "cache_read_tokens": 104,
+        "cache_creation_tokens": 105,
+        "cost_usd": 1.5,
+        "latency_ms": 106,
+        "status": "sentinel-status",
+        "outcome": "sentinel-outcome",
+        "objective": "sentinel-objective",
+        "request_id": "sentinel-request_id",
+    }
+    # timestamp is deliberately excluded and checked separately below:
+    # _record_to_row derives a UTC datetime from it rather than passing it
+    # through unchanged, so it isn't a same-value round trip like every other
+    # field here. If this assertion fails, _FIELDS gained or lost a field
+    # that `overrides` (and the row comparison below) needs updating for too.
+    assert set(overrides) | {"timestamp"} == _FIELDS
+
+    row = trace_store._record_to_row(_Rec(**overrides))
+
+    # Position order per _record_to_row's own docstring / _INSERT_SQL's
+    # column list; row[0] (ts) is skipped since timestamp isn't a passthrough.
+    assert row[1:] == (
+        overrides["team"],
+        overrides["agent_key"],
+        overrides["job_id"],
+        overrides["task_id"],
+        overrides["phase"],
+        overrides["model"],
+        overrides["prompt_tokens"],
+        overrides["completion_tokens"],
+        overrides["total_tokens"],
+        overrides["cache_read_tokens"],
+        overrides["cache_creation_tokens"],
+        overrides["cost_usd"],
+        overrides["latency_ms"],
+        overrides["status"],
+        overrides["outcome"],
+        overrides["objective"],
+        overrides["request_id"],
+    )
+
+
+def test_trace_call_record_rejects_unknown_override() -> None:
+    """An override key that isn't in _FIELDS raises AttributeError with the
+    documented message, rather than silently creating an unused attribute or
+    raising some other exception type — the behavior the class docstring's
+    Preconditions promise but that no other test in this suite exercises,
+    since every other _Rec(...) call here passes only valid overrides."""
+    with pytest.raises(AttributeError, match="Unknown TraceCallRecord attribute: 'prompt_toknes'"):
+        _Rec(prompt_toknes=1)  # deliberately misspelled
+
+    # A valid override, including an optional cache field, still applies normally.
+    rec = _Rec(cache_read_tokens=7)
+    assert rec.cache_read_tokens == 7
 
 
 def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:

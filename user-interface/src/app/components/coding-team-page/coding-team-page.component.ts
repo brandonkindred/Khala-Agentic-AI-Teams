@@ -754,6 +754,38 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Composed tooltip for a repo row button: the repo's description (when present) plus a
+   * clarification that GitHub's open-issue count includes pull requests.
+   *
+   * Preconditions: `repo` is a loaded GitHub repo item; `repo.description` may be null,
+   *   undefined, or an empty/whitespace-only string.
+   * Postconditions: returns `"<description> — Open issues and pull requests reported by
+   *   GitHub"` when `repo.description` is non-empty after trimming; otherwise returns
+   *   `"Open issues and pull requests reported by GitHub"` alone, with no leading separator
+   *   or empty clause. The returned string is always non-empty. Pure — no side effects.
+   */
+  repoRowTooltip(repo: GitHubRepoItem): string {
+    const clarification = 'Open issues and pull requests reported by GitHub';
+    const description = repo.description?.trim();
+    return description ? `${description} — ${clarification}` : clarification;
+  }
+
+  /**
+   * Composed tooltip for an issue row button: the issue title, plus a clause noting the coding
+   * team is already working the issue when it is in progress.
+   *
+   * Preconditions: `vm.title` is the issue's full (untruncated) title and is non-empty (GitHub
+   *   issue titles cannot be blank).
+   * Postconditions: returns `vm.title` alone when `vm.inProgress` is false; otherwise returns
+   *   `"<title> — The coding team is already working on this issue"`. The returned string is
+   *   always non-empty. Pure — no side effects.
+   */
+  issueRowTooltip(vm: { title: string; inProgress: boolean }): string {
+    const clause = 'The coding team is already working on this issue';
+    return vm.inProgress ? `${vm.title} — ${clause}` : vm.title;
+  }
+
+  /**
    * Rebuild the Running/Recent run-row view-models from the current `runningRuns`/`recentRuns`.
    *
    * Preconditions: `runningRuns`/`recentRuns` reflect the snapshot being rendered.

@@ -52,7 +52,10 @@ def run_draft_stage(
 
     Preconditions:
         - The planning stage populated ``ctx.plan``/``ctx.planning_phase_result``/
-          ``ctx.elicited_stories_text``.
+          ``ctx.elicited_stories_text``. ``ctx.selected_title`` is also read, but
+          no stage produces it — it is caller-seeded and ``None`` in every current
+          entry point, which leaves the writer free to choose its own title (see
+          ``PipelineContext``'s invariants).
         - The human-in-the-loop steps (story-placeholder filling and the interactive
           draft-review loop with uncertainty questions / author feedback / guideline
           updates) require a job store: they run only when BOTH ``ctx.job_id`` and
@@ -115,6 +118,7 @@ def run_draft_stage(
     planning_phase_result = ctx.planning_phase_result
     plan = ctx.plan
     elicited_stories_text = ctx.elicited_stories_text
+    selected_title = ctx.selected_title
     _update = _make_update(job_updater)
 
     # Load allowed_claims.json (written by the planning stage via
@@ -167,7 +171,7 @@ def run_draft_stage(
                     tone_or_purpose=brief.tone_or_purpose,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
-                    selected_title=None,
+                    selected_title=selected_title,
                     elicited_stories=elicited_stories_text or None,
                     allowed_claims=allowed_claims,
                 )
@@ -225,7 +229,7 @@ def run_draft_stage(
                         tone_or_purpose=brief.tone_or_purpose,
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
-                        selected_title=None,
+                        selected_title=selected_title,
                         allowed_claims=allowed_claims,
                     ),
                     work_dir=work_dir,
@@ -318,7 +322,7 @@ def run_draft_stage(
                                 content_plan_text=content_plan_text,
                                 audience=brief.audience,
                                 tone_or_purpose=brief.tone_or_purpose,
-                                selected_title=None,
+                                selected_title=selected_title,
                                 elicited_stories=elicited_stories_text or None,
                                 allowed_claims=allowed_claims,
                                 target_word_count=length_policy.target_word_count,
@@ -421,7 +425,7 @@ def run_draft_stage(
                         content_plan_text=content_plan_text,
                         audience=brief.audience,
                         tone_or_purpose=brief.tone_or_purpose,
-                        selected_title=None,
+                        selected_title=selected_title,
                         elicited_stories=elicited_stories_text or None,
                         allowed_claims=allowed_claims,
                         target_word_count=length_policy.target_word_count,
@@ -620,7 +624,7 @@ def run_draft_stage(
                             content_plan_text=content_plan_text,
                             audience=brief.audience,
                             tone_or_purpose=brief.tone_or_purpose,
-                            selected_title=None,
+                            selected_title=selected_title,
                             elicited_stories=elicited_stories_text or None,
                             allowed_claims=allowed_claims,
                             target_word_count=length_policy.target_word_count,
@@ -654,7 +658,7 @@ def run_draft_stage(
                     tone_or_purpose=brief.tone_or_purpose,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
-                    selected_title=None,
+                    selected_title=selected_title,
                     elicited_stories=elicited_stories_text or None,
                     allowed_claims=allowed_claims,
                 )

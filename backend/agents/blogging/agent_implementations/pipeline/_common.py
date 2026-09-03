@@ -1017,6 +1017,13 @@ def _fill_story_placeholders(
           since ``draft_input_kwargs`` then goes unused.
     Postconditions:
         - Returns ``(updated_draft_result, updated_elicited_stories_text)``.
+        - When placeholders exist, the collected narratives and skip
+          instructions are applied via a single
+          ``draft_agent.revise_from_user_feedback`` call — one targeted
+          revision, not a full re-draft — costing one LLM call (plus that
+          call's own internal retries on transient failures), in place of
+          the prior full-regeneration-plus-self-review path's two to four
+          LLM calls.
         - When no placeholders exist, returns a ``WriterOutput`` wrapping the
           original ``draft_text`` and the unchanged ``elicited_stories_text``.
         - If the post-story revision call raises a non-cancellation
