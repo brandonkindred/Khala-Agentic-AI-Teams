@@ -1,8 +1,8 @@
 """Single-threaded correctness tests for :class:`LazySingleton`.
 
-Concurrent-first-call proof is tracked separately (the dedicated
-thread-safety test suite covering both ``LazySingleton`` and
-``KeyedLazyRegistry``); this module covers the single-threaded contract:
+The concurrent-first-call proof lives in ``test_lazy_thread_safety.py``, the
+dedicated thread-safety suite covering both ``LazySingleton`` and
+``KeyedLazyRegistry``; this module covers the single-threaded contract:
 build-once, return-same-object, and raise-and-retry on a failing factory.
 """
 
