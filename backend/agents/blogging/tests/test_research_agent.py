@@ -632,6 +632,8 @@ def test_evaluate_documents_calls_evaluate_one_document_once_per_doc(monkeypatch
     and the capped references) must not cost a second _evaluate_one_document call
     - the whole point of merging _score_documents/_summarize_documents into one
     fan-out is that each document is evaluated exactly once."""
+    from collections import Counter
+
     from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.models import ResearchBriefInput, ResearchReference
 
@@ -656,6 +658,9 @@ def test_evaluate_documents_calls_evaluate_one_document_once_per_doc(monkeypatch
         docs, ResearchBriefInput(brief="x", max_results=2)
     )
 
+    # Total count alone would miss a defect that double-evaluates one document
+    # while skipping another (still 5 calls); compare per-document identity too.
+    assert Counter(id(d) for d in calls) == Counter(id(d) for d in docs)
     assert len(calls) == 5
     assert len(scored_docs) == 5
     assert len(references) == 2
