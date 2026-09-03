@@ -41,7 +41,11 @@ MARKERS: dict[str, type[Exception]] = {"JobNotFound": JobNotFound, "Conflict": C
 
 
 def _chain(*nodes: BaseException) -> BaseException:
-    """Link *nodes* outermost-first via ``__cause__`` and return the head."""
+    """Link *nodes* outermost-first via ``__cause__`` and return the head.
+
+    Preconditions:
+        * ``nodes`` is non-empty (the head is ``nodes[0]``).
+    """
     for outer, inner in zip(nodes, nodes[1:]):
         outer.__cause__ = inner
     return nodes[0]
@@ -72,6 +76,20 @@ def test_context_links_are_followed_when_no_cause_is_set() -> None:
 
     with pytest.raises(Conflict, match="already claimed"):
         translate_workflow_failure(head, MARKERS)
+
+
+def test_an_unmatched_cause_chain_shadows_a_matching_context() -> None:
+    """Per-node ``__cause__ or __context__`` means a set __cause__ wins outright.
+
+    The walk never falls back to a node's own ``__context__`` once that node
+    has a ``__cause__`` at all, matched or not — so a marker sitting only on
+    ``__context__`` here is never reached, and the call returns normally.
+    """
+    head = PlainError("workflow failed")
+    head.__cause__ = PlainError("activity failed")
+    head.__context__ = MarkedError("Conflict", "already claimed")
+
+    assert translate_workflow_failure(head, MARKERS) is None
 
 
 def test_str_is_used_when_the_node_carries_no_message() -> None:
