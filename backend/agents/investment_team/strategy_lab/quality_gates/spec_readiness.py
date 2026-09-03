@@ -928,6 +928,36 @@ class SpecReadinessGate(GateResultsMixin):
     # Rule 5: Sizing realisable.
     # ------------------------------------------------------------------
     def _check_sizing_realisable(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        """Verify the spec's sizing rule can actually be filled at runtime.
+
+        Covers all three sizing kinds (``fixed_fraction``, ``fixed_notional``,
+        ``volatility_target``): per-symbol price validity and whole-lot
+        fillability, plus a worst-case-concurrency check — the largest
+        ``risk_limits.max_open_positions`` positions (capped by the target
+        universe size) filling simultaneously, slippage-inflated — against
+        ``initial_capital``. ``volatility_target``'s worst-case notional is
+        bounded by the ``risk_limits.max_position_pct`` clamp alone (not an
+        assumed ATR floor — see the ``elif`` branch below for why no such
+        floor is provably safe), so it is only a partial realisability
+        check: it says nothing about whether the declared
+        ``target_annual_vol`` itself is plausible.
+
+        Preconditions: ``ctx.spec`` is a :class:`StrategySpec`.
+        Postconditions: returns an iterable (concretely a tuple) of
+        :class:`QualityGateResult`. A single critical when the sizing rule
+        cannot be filled at all (broken/non-positive price data, an
+        unsupported or unresolvable asset class/universe, a sub-lot target on
+        a whole-lot class) or when the worst-case concurrent notional would
+        exceed ``initial_capital``; otherwise empty for ``fixed_fraction`` /
+        ``fixed_notional``, or a single informational warning for
+        ``volatility_target`` (its actual deployed size depends on realised
+        volatility, unknowable here) — plus, for any kind, a warning instead
+        of a critical when every target symbol's price sample is
+        persistently unavailable on a fractional (crypto/forex) asset class.
+        Returns empty when ``ctx.config`` (the backtest config carrying
+        ``initial_capital``) is ``None``, since no notional can be sized
+        against it.
+        """
         assert isinstance(ctx.spec, StrategySpec)
         config = ctx.config
         if config is None:
@@ -954,22 +984,6 @@ class SpecReadinessGate(GateResultsMixin):
             )
 
         kind = getattr(ctx.spec.sizing, "kind", None)
-
-        # Volatility-target sizing depends on realised volatility, which we
-        # cannot estimate at design time. Emit a warning so the operator
-        # notices that Rule 5 abstained — a silent skip would let an
-        # implausibly low ``target_annual_vol`` (e.g. 0.001) bypass the
-        # implementability check entirely.
-        if kind == "volatility_target":
-            tav = getattr(ctx.spec.sizing, "target_annual_vol", None)
-            return (
-                self._warning(
-                    "Sizing realisability: volatility_target sizing requires "
-                    "realised vol and cannot be evaluated at readiness time. "
-                    f"Confirm target_annual_vol={tav!r} is sensible "
-                    "(typical range: 0.05–0.30)."
-                ),
-            )
 
         # Resolve the universe to size against. ``_default_universe_for`` now
         # raises on unknown asset classes (previously it silently fell back to
@@ -999,36 +1013,123 @@ class SpecReadinessGate(GateResultsMixin):
         assert capital > 0, "initial_capital must be strictly positive"
         enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
+        # ``StrategySpec.max_concurrent_positions`` is a declared upper bound
+        # on intent, but no runtime code reads it (``run_backtest`` never
+        # passes the spec object into ``TradingService``) — so it cannot be
+        # used to bound worst-case exposure without risking a false pass on a
+        # spec that omits it (default 1) yet runs on a multi-symbol universe.
+        # The runtime's actual worst-case concurrency is structural: the
+        # engine dispatcher never pyramids a symbol that already has an open
+        # position (``FillSimulator``/entry dispatcher), so at most one
+        # position per symbol can ever be open, and ``RiskFilter.can_enter``
+        # additionally caps total open positions at
+        # ``risk_limits.max_open_positions`` (default 10). Worst case is
+        # therefore ``min(len(symbols), max_open_positions)``.
+        worst_case_concurrent = min(len(symbols), ctx.spec.risk_limits.max_open_positions)
 
-        # Notional is symbol-independent for both supported kinds, so resolve
-        # it once. fixed_notional with notional_usd > initial_capital can
-        # never produce a fillable order — the fill engine rejects with
-        # ``insufficient_capital`` the moment ``portfolio.capital < notional``
-        # (see ``fill_simulator.py``). fixed_fraction is bounded by
-        # ``fraction <= 1.0`` in the DSL so it cannot trip this branch.
-        if kind == "fixed_fraction":
-            notional = capital * float(ctx.spec.sizing.fraction)
-        elif kind == "fixed_notional":
+        # Likewise, the runtime has no margin facility: ``Portfolio.open``/
+        # ``extend`` deduct the full order notional from cash, and the fill
+        # simulator rejects any order whose notional exceeds available cash
+        # with ``insufficient_capital`` regardless of
+        # ``risk_limits.max_gross_leverage`` — leverage only gates whether
+        # ``RiskFilter.can_enter`` allows the order, it never funds beyond
+        # cash. So a configured leverage above 1.0 cannot expand what's
+        # fundable, but a leverage below 1.0 does tighten what the risk
+        # filter would actually allow through.
+        cash_bound_multiplier = min(1.0, float(ctx.spec.risk_limits.max_gross_leverage))
+
+        # The fill simulator deducts cash at the *slipped* fill price
+        # (``entry_price = ref_price * (1 + slippage_bps/10_000)`` for a long
+        # entry — see ``_slippage_multipliers``/``_fill_entry`` and
+        # ``Position.position_value``), not the reference-price notional this
+        # check otherwise sizes against. A worst-case sum computed from
+        # reference-price notionals alone can land exactly at
+        # ``fundable_capital`` and still have its last concurrent entry
+        # rejected with ``insufficient_capital`` once slippage is applied, so
+        # inflate the worst-case notional by the configured slippage before
+        # comparing.
+        slippage_multiplier = 1.0 + (float(config.slippage_bps) / 10_000.0)
+        # Display form of the configured slippage, read directly from
+        # ``config.slippage_bps`` rather than reverse-derived from
+        # ``slippage_multiplier`` (a ``/ 10_000`` then ``* 10_000`` round
+        # trip accumulates float error that can shift the ``.1f``-rounded
+        # value by 0.1bps from what was actually configured, e.g.
+        # slippage_bps=0.15 round-tripping to display as "0.2"). Shared by
+        # every sizing kind's critical message below so a future wording
+        # change is a one-line edit instead of a multi-template drift risk.
+        slippage_bps_display = float(config.slippage_bps)
+        # Whether the display value is worth mentioning at all: guards
+        # against the *rounded* value, not the raw one, since a small enough
+        # positive slippage_bps still rounds to "0.0" at the messages'
+        # one-decimal precision — computed once and shared by every sizing
+        # kind's slippage clause below, so a future precision change can't
+        # fix this in one message template and miss another.
+        slippage_bps_is_displayable = round(slippage_bps_display, 1) > 0
+        slippage_note = (
+            f", inflated {slippage_bps_display:.1f}bps for configured slippage"
+            if worst_case_concurrent > 1 and slippage_bps_is_displayable
+            else ""
+        )
+
+        # Notional is symbol-independent for all three supported kinds, so
+        # resolve it once.
+        is_fixed_fraction = kind == "fixed_fraction"
+        is_fixed_notional = kind == "fixed_notional"
+        # ``is_vol_target`` does double duty: it selects the notional
+        # derivation branch immediately below, AND (at the end of this
+        # function) gates the informational plausibility warning appended
+        # when no critical fires — the check can't confirm the *actual*
+        # deployed vol is sensible, only that the worst-case bound fits.
+        is_vol_target = kind == "volatility_target"
+        if is_fixed_fraction:
+            fraction = float(ctx.spec.sizing.fraction)
+            notional = capital * fraction
+        elif is_fixed_notional:
             notional = float(ctx.spec.sizing.notional_usd)
-            if notional > capital:
-                return (
-                    self._critical(
-                        f"Sizing realisability: fixed_notional ${notional:.0f} "
-                        f"exceeds initial_capital ${capital:.0f}; the first "
-                        "order would be rejected with insufficient_capital."
-                    ),
-                )
+        elif is_vol_target:
+            # Volatility-target sizing depends on realised volatility, which
+            # we cannot know exactly at design time. Unlike the two static
+            # sizing kinds above, that doesn't let Rule 5 abstain entirely:
+            # ``target_annual_vol`` still cannot be turned into a provable
+            # worst-case bound via an assumed ATR floor, though — the engine's sizing formula
+            # (``raw_qty = equity * target_annual_vol / (close * atr_val)`` in
+            # ``_compute_qty``) accepts ANY positive ``atr_val`` with no
+            # enforced minimum — a smaller realised ATR than any floor we
+            # assume here yields a LARGER deployed notional, so an
+            # ATR-floor-derived estimate can silently underestimate the true
+            # worst case (a false pass on a spec that can genuinely
+            # overcommit). The one bound the engine DOES unconditionally
+            # enforce, regardless of ATR, is the ``max_position_pct`` clamp
+            # every ``volatility_target`` order is capped to before it's
+            # placed (``_compute_qty``'s ``_cap_position`` path /
+            # ``_cap_qty_to_position``) — so that clamp alone is the only
+            # value provably safe to size the worst case against. Changing
+            # the dispatcher's runtime sizing to itself enforce an ATR floor
+            # is a separate, larger change and out of scope here.
+            notional = capital * float(ctx.spec.risk_limits.max_position_pct) / 100.0
         else:
             # Unknown sizing kind — covered by spec_dsl validation, but be
             # defensive: nothing further to evaluate.
             return ()
 
-        # Per-symbol price defense. The qty>=1 lot-size check below only
-        # matters for whole-lot classes (stocks/futures/commodities); forex
-        # and crypto accept fractional quantities, so for them threshold==0
-        # and the qty check never fires. But the price *sample* still carries
-        # two signals that apply to every asset class, so the loop runs for
-        # all of them rather than short-circuiting fractional classes:
+        # Per-symbol price defense, plus (for whole-lot classes) each
+        # symbol's runtime-realizable notional at the ``notional`` target.
+        # The fill engine floors whole-lot orders to a whole number of
+        # shares (``_floor_or_skip_whole_share``), so the cash a symbol
+        # actually consumes can be materially less than the raw target once
+        # ``notional`` no longer divides evenly by that symbol's price —
+        # sizing the worst-case-overcommit check below against the raw,
+        # unfloored target would false-critical a spec the runtime can
+        # actually fund. Fractional classes (crypto/forex) submit the
+        # fractional qty as-is, so realizable == notional for them, with no
+        # flooring adjustment.
+        #
+        # The qty>=1 lot-size check below only matters for whole-lot classes
+        # (stocks/futures/commodities); forex and crypto accept fractional
+        # quantities, so for them threshold==0 and the qty check never
+        # fires. But the price *sample* still carries two signals that apply
+        # to every asset class, so the loop runs for all of them rather than
+        # short-circuiting fractional classes:
         #   * a finite price <= 0 means a broken provider (a 0.0 parsed from a
         #     rate-limit body, a negative sentinel), not a market gap — fail
         #     closed regardless of asset class;
@@ -1036,9 +1137,12 @@ class SpecReadinessGate(GateResultsMixin):
         #     (qty<1) → critical, but for fractional classes it is treated as a
         #     possibly-transient gap: tolerated when any symbol still has a
         #     finite sample, and downgraded to a warning (never a hard fail)
-        #     when it affects every symbol.
+        #     when it affects every symbol. A symbol with no price sample
+        #     can't be floored, so its realizable notional is conservatively
+        #     left un-floored (the raw target) rather than assumed fundable.
         saw_finite_price = False
         nan_symbols: list[str] = []
+        realizable_notionals: list[float] = []
         for sym in symbols:
             try:
                 price = float(self._market_sample_provider(sym, ctx.spec.asset_class))
@@ -1064,6 +1168,9 @@ class SpecReadinessGate(GateResultsMixin):
                             f"with capital ${capital:.0f}."
                         ),
                     )
+                realizable_notionals.append(
+                    math.floor(qty) * price if enforce_whole_lot else notional
+                )
             elif enforce_whole_lot:
                 # Whole-lot classes genuinely need a price to size a fillable
                 # order; a missing sample is unfillable → fail closed.
@@ -1076,12 +1183,149 @@ class SpecReadinessGate(GateResultsMixin):
                 # Fractional class with a non-finite sample — defer the verdict
                 # until we know whether any symbol resolved to a finite price.
                 nan_symbols.append(sym)
+                realizable_notionals.append(notional)
+
+        # Worst case across concurrency: the ``worst_case_concurrent``
+        # symbols whose runtime-realizable notional (after whole-lot
+        # flooring, where applicable) is largest, filling simultaneously.
+        # Slippage only matters here — a single order's allow/reject
+        # decision in ``_fill_entry`` compares the unslipped reference
+        # notional against capital, so it's unaffected — because multiple
+        # concurrent entries each deduct their *slipped* (inflated) cost
+        # from the same shared capital pool, so the aggregate actually
+        # drawn down can exceed a sum computed from reference prices alone.
+        realizable_notionals.sort(reverse=True)
+        worst_case_notional = sum(realizable_notionals[:worst_case_concurrent])
+        effective_worst_case_notional = (
+            worst_case_notional * slippage_multiplier
+            if worst_case_concurrent > 1
+            else worst_case_notional
+        )
+        fundable_capital = capital * cash_bound_multiplier
+        if effective_worst_case_notional > fundable_capital:
+            # ``fixed_fraction`` and ``volatility_target`` both report the
+            # overcommit as a multiple of equity, differing only in the
+            # lead-in clause naming what's being sized — share one tail so a
+            # future wording change is a single edit instead of two
+            # independently-maintained templates drifting apart.
+            # ``fixed_notional`` reports in absolute dollars against a
+            # different closing clause, so it isn't forced into this shape.
+            if is_fixed_fraction or is_vol_target:
+                worst_case_fraction = effective_worst_case_notional / capital
+                worst_case_tail = (
+                    f"× worst-case concurrency {worst_case_concurrent} (min of "
+                    f"{len(symbols)} target symbol(s) and risk_limits."
+                    f"max_open_positions "
+                    f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
+                    f"whole-lot share flooring where applicable{slippage_note}) = "
+                    f"{worst_case_fraction:.2f}x equity would exceed the cash-bound "
+                    f"ceiling {cash_bound_multiplier:.2f}x (initial_capital "
+                    f"${capital:.0f}) if all concurrent positions filled "
+                    "simultaneously."
+                )
+                if is_fixed_fraction:
+                    return (
+                        self._critical(
+                            f"Sizing realisability: fixed_fraction {fraction:.4f} {worst_case_tail}"
+                        ),
+                    )
+                # ``worst_case_tail`` opens with a bare "×", so it needs a
+                # numeric left operand immediately before it (mirroring
+                # ``fixed_fraction``'s "{fraction:.4f} ×") rather than
+                # trailing the explanatory clause directly — otherwise the
+                # multiplication reads as dangling, with the reader unable
+                # to tell what quantity the concurrency count multiplies.
+                max_position_fraction = float(ctx.spec.risk_limits.max_position_pct) / 100.0
+                return (
+                    self._critical(
+                        "Sizing realisability: volatility_target worst-case notional, "
+                        f"bounded by the engine's unconditional risk_limits."
+                        f"max_position_pct {ctx.spec.risk_limits.max_position_pct:.2f}% "
+                        "clamp (the only provably safe bound — target_annual_vol has no "
+                        "enforced ATR floor, so a low realised ATR can deploy up to this "
+                        f"clamp regardless of target_annual_vol) {max_position_fraction:.4f} "
+                        f"{worst_case_tail}"
+                    ),
+                )
+            # fixed_notional
+            if worst_case_concurrent > 1:
+                slippage_clause = (
+                    f" and {slippage_bps_display:.1f}bps configured slippage"
+                    if slippage_bps_is_displayable
+                    else ""
+                )
+                return (
+                    self._critical(
+                        f"Sizing realisability: fixed_notional ${notional:.0f} × "
+                        f"worst-case concurrency {worst_case_concurrent} (min of "
+                        f"{len(symbols)} target symbol(s) and risk_limits."
+                        f"max_open_positions "
+                        f"{ctx.spec.risk_limits.max_open_positions}, accounting for "
+                        f"whole-lot share flooring{slippage_clause}) = "
+                        f"${effective_worst_case_notional:.0f}, which "
+                        f"exceeds the cash-bound fundable capital "
+                        f"${fundable_capital:.0f} if all concurrent positions filled "
+                        "simultaneously."
+                    ),
+                )
+            if notional > capital:
+                return (
+                    self._critical(
+                        f"Sizing realisability: fixed_notional ${notional:.0f} "
+                        f"exceeds initial_capital ${capital:.0f}; the first order "
+                        "would be rejected with insufficient_capital."
+                    ),
+                )
+            # notional <= capital but > fundable_capital: only reachable
+            # when max_gross_leverage < 1.0 tightens the cash-bound
+            # ceiling below initial_capital. The fill engine's cash
+            # check would pass here — the actual rejection comes from
+            # RiskFilter.can_enter's leverage-ratio gate, which runs
+            # before the cash check, so name that gate rather than
+            # ``insufficient_capital``.
+            return (
+                self._critical(
+                    f"Sizing realisability: fixed_notional ${notional:.0f} exceeds "
+                    f"the cash-bound fundable capital ${fundable_capital:.0f} "
+                    f"(risk_limits.max_gross_leverage {cash_bound_multiplier:.2f}x of "
+                    f"initial_capital ${capital:.0f}); the first order would be "
+                    "rejected by the gross-leverage risk gate."
+                ),
+            )
+
+        # The worst-case concurrency bound fits (or was never checkable due to
+        # missing price data below), but volatility_target's *actual* deployed
+        # size still depends on realised vol, which cannot be known at
+        # readiness time — surface a warning so the operator notices the
+        # plausibility of target_annual_vol itself was never confirmed, only
+        # that the conservative worst-case bound is fundable. Built as its own
+        # tuple (not an early return) so it can be appended to, rather than
+        # masked by, the NaN-price warning below when both apply.
+        vol_target_warning = (
+            (
+                self._warning(
+                    "Sizing realisability: volatility_target sizing requires "
+                    "realised vol and cannot be evaluated exactly at readiness "
+                    f"time. Confirm target_annual_vol={ctx.spec.sizing.target_annual_vol!r} "
+                    "is sensible (typical range: 0.05–0.30); the worst-case "
+                    "concurrency bound (risk_limits.max_position_pct, the only "
+                    "provably safe ceiling given target_annual_vol has no enforced "
+                    "ATR floor) fits within initial_capital."
+                ),
+            )
+            if is_vol_target
+            else ()
+        )
 
         # Only fractional asset classes reach here with unresolved NaN samples.
         # A NaN that affected *every* symbol (no finite sample anywhere) is a
         # persistently broken provider, but fractional sizing stays
         # implementable once data returns, so warn rather than fail closed. A
         # NaN alongside a finite sample is a transient gap and is ignored.
+        # Appends (rather than replaces) the vol-target plausibility warning
+        # above — a broken price provider says nothing about whether
+        # target_annual_vol is itself sensible, so returning only one would
+        # silently drop the other's guidance.
         if nan_symbols and not saw_finite_price:
             return (
                 self._warning(
@@ -1089,8 +1333,9 @@ class SpecReadinessGate(GateResultsMixin):
                     f"({ctx.spec.asset_class}); market-data provider may be down. Proceeding "
                     "since fractional sizing stays implementable once data returns."
                 ),
-            )
-        return ()
+            ) + vol_target_warning
+
+        return vol_target_warning
 
     # ------------------------------------------------------------------
     # Rule 6: Hypothesis–rule consistency.
@@ -1266,7 +1511,9 @@ class SpecReadinessGate(GateResultsMixin):
         # express the notional as a fraction, so it is skipped without config.
         # ``volatility_target`` is dynamic (depends on realised vol), so the
         # deployed fraction is unknown at design time and stays ``None`` —
-        # consistent with Rule 5 abstaining on the same kind.
+        # Rule 5 validates volatility_target's worst-case-concurrency
+        # invariant, but that says nothing about the deployed fraction this
+        # check needs, so this Check A stays skipped for it too.
         pos_fraction: Optional[float] = None
         if kind == "fixed_fraction":
             pos_fraction = float(ctx.spec.sizing.fraction)

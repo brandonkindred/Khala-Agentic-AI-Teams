@@ -60,6 +60,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Tuple, TypeVar, Union
@@ -873,6 +874,40 @@ def _security_review_step(
         )
 
 
+def _dispatch_review_thunks(thunks: List[Callable[[], Any]], *, llm: LLMClient) -> List[Any]:
+    """Run zero-arg thunks sequentially, unless ``llm`` allows concurrent fan-out.
+
+    The single source of the "how" for every review fan-out in this module
+    (code-review/QA/security steps via ``_run_review_steps``, tool agents via
+    ``_run_tool_agents_review``) — each caller supplies its own thunks and
+    decides what to do with the results; this only decides sequential vs.
+    concurrent dispatch.
+
+    Preconditions:
+        - No thunk raises: ``parallel_map`` fast-fails (cancels the round's
+          other pending thunks and re-raises) on the first worker exception,
+          so each caller must contain its own thunks' failures (see
+          ``_code_review_step``/``_qa_review_step``/``_security_review_step``
+          and ``_run_tool_agents_review``'s per-agent ``try``).
+    Postconditions:
+        - Sequential (``[t() for t in thunks]``, in order) when
+          ``_review_steps_run_sequentially(llm)`` is true (scripted
+          ``DummyLLMClient`` doubles use a shared non-thread-safe response
+          index) or ``len(thunks) <= 1``.
+        - Otherwise concurrent via ``shared.concurrency.parallel_map``,
+          bounded to ``len(thunks)`` workers, order preserved, ``None``
+          results kept (``skip_none=False``).
+    """
+    if _review_steps_run_sequentially(llm) or len(thunks) <= 1:
+        return [t() for t in thunks]
+    # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
+    # parallel_map import — keeps the module import light for callers that never hit the
+    # concurrent branch (e.g. every DummyLLMClient-backed test).
+    from shared.concurrency import parallel_map  # noqa: PLC0415
+
+    return parallel_map(thunks, lambda fn: fn(), max_workers=len(thunks), skip_none=False)
+
+
 def _run_review_steps(
     step_fns: List[Callable[[], _ReviewStepResult]], *, llm: LLMClient
 ) -> _ReviewStepResult:
@@ -888,17 +923,7 @@ def _run_review_steps(
           which step's underlying call actually completed first, plus the first non-``None``
           ``raw_issue_count`` among those steps (the CR LLM fallback).
     """
-    if _review_steps_run_sequentially(llm) or len(step_fns) <= 1:
-        results = [step() for step in step_fns]
-    else:
-        # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
-        # parallel_map import — keeps the module import light for callers that never hit the
-        # concurrent branch (e.g. every DummyLLMClient-backed test).
-        from shared.concurrency import parallel_map
-
-        results = parallel_map(
-            step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False
-        )
+    results = _dispatch_review_thunks(step_fns, llm=llm)
     issues = [issue for step_result in results for issue in step_result.issues]
     raw_issue_count = next(
         (
@@ -968,6 +993,7 @@ def _run_tool_agents_review(
     failure_context: str = "",
     language: str = "",
     tool_agent_cache: Optional[AgentReviewCache] = None,
+    llm: LLMClient,
 ) -> None:
     """Run each wired tool agent's ``review`` and fold its output into issues.
 
@@ -1006,13 +1032,50 @@ def _run_tool_agents_review(
           output fails to fold, e.g. a malformed/``None`` result) is logged
           and skipped (never aborts the review) -- folding a cache hit is
           contained by the same ``try`` as a live call. Mutates ``issues`` in
-          place. A live call's result is folded into ``issues`` *before* being
-          stored in ``tool_agent_cache`` as a single-element list (``[out]``),
-          matching ``AgentReviewCache.get``/``put``'s existing ``List[Any]``
-          shape so it can be reused unmodified, so an output that fails to
-          fold is never cached -- it is retried as a live call next time,
-          mirroring ``AgentReviewCache``'s existing "failed piece is not
-          cached" behavior for the QA/security steps.
+          place, extending it with each agent's folded output in
+          ``tool_agents`` iteration order (see Invariants) once every agent has
+          run -- not incrementally as each agent completes. A live call's
+          result is folded *before* being stored in ``tool_agent_cache`` as a
+          single-element list (``[out]``), matching ``AgentReviewCache.get``/
+          ``put``'s existing ``List[Any]`` shape so it can be reused
+          unmodified, so an output that fails to fold is never cached -- it is
+          retried as a live call next time, mirroring ``AgentReviewCache``'s
+          existing "failed piece is not cached" behavior for the QA/security
+          steps.
+
+    Invariants:
+        - Concurrency contract (mirrors ``_run_review_steps``): tool agents'
+          ``review()`` calls and cache I/O are dispatched concurrently via
+          ``_dispatch_review_thunks`` unless ``_review_steps_run_sequentially(llm)``
+          is true (scripted ``DummyLLMClient`` doubles use a shared
+          non-thread-safe response index) or there is at most one wired agent.
+          Each agent folds its own output into a *local* list, not the shared
+          ``issues`` directly; this function then extends ``issues`` with those
+          local lists in ``tool_agents`` iteration order (``parallel_map``'s
+          default ``preserve_order=True``), regardless of which agent's call
+          actually finished first -- so ``issues`` ends up in the same
+          deterministic order as the pre-concurrency sequential loop, which
+          matters because a downstream same-key dedup
+          (``shared/phases/review_cycle.py:_dedup_issues``) keeps only the
+          first occurrence of a given ``(file_path, description)``. One
+          agent's failure (a raising ``review()`` call, or a cache hit whose
+          stored output fails to fold) never drops another agent's result,
+          since each agent's cache read/call/fold/cache-write sequence is
+          independently wrapped in its own ``try`` inside the dispatched unit
+          of work. Every agent whose ``build_runner`` is set (it runs a real
+          external command against ``repo_path`` in ``review()`` -- e.g. the
+          build specialist, the linter) keeps its own individual dispatched
+          unit -- so its result still lands in its own correct position when
+          folded, even with a non-``build_runner`` agent interleaved between
+          two such agents in ``tool_agents`` -- but a chain of events makes
+          each wait for the previous one to finish before it starts: so,
+          unlike the fully-concurrent LLM-only agents, no two ``build_runner``
+          agents ever run at the same time as each other *and* they always
+          run in the same relative order as the pre-concurrency sequential
+          loop (e.g. build always finishes before lint starts, matching the
+          wired frontend roster's ``BUILD_SPECIALIST`` before ``LINTER``
+          order). Agents without ``build_runner`` are unaffected and run
+          fully concurrently, including alongside any ``build_runner`` agent.
     """
     if not tool_agents:
         return
@@ -1039,22 +1102,32 @@ def _run_tool_agents_review(
         phase_inp_kwargs["language"] = language
 
     phase_inp = config.tool_phase_input_factory(**phase_inp_kwargs)
-    for kind, agent in tool_agents.items():
-        if not hasattr(agent, "review"):
-            continue
+
+    def _review_one(kind: Any, agent: Any) -> Optional[List[ReviewIssue]]:
+        """Run one tool agent's cache-read/review()/fold/cache-write sequence.
+
+        Postconditions: never raises -- every failure in that sequence is caught,
+        logged, and reported as ``None`` (meaning "this agent failed, fold
+        nothing"). A non-``None`` return is a list (possibly empty) of this
+        agent's folded issues, ready for the caller to extend ``issues`` with.
+        This never-raises guarantee is what makes it safe to run as a dispatched
+        thunk (see ``_dispatch_review_thunks``) or from inside
+        ``_review_command_agents_in_order``'s sequential loop.
+        """
         cache_key = None
         if tool_agent_cache is not None and microtask is not None:
             cache_key = _tool_agent_cache_key(
                 kind.value, current_files, task.title or "", task_description, microtask.id
             )
+        local_issues: List[ReviewIssue] = []
         try:
             if cache_key is not None:
                 cached = tool_agent_cache.get(cache_key)
                 if cached is not None:
-                    _fold_tool_agent_output(config, issues, kind, cached[0])
-                    continue
+                    _fold_tool_agent_output(config, local_issues, kind, cached[0])
+                    return local_issues
             out = agent.review(phase_inp)
-            _fold_tool_agent_output(config, issues, kind, out)
+            _fold_tool_agent_output(config, local_issues, kind, out)
             if cache_key is not None:
                 tool_agent_cache.put(cache_key, [out])
         except Exception as exc:
@@ -1065,6 +1138,67 @@ def _run_tool_agents_review(
                 failure_context,
                 exc,
             )
+            return None
+        return local_issues
+
+    # Agents whose `build_runner` is set execute a real external command against
+    # `repo_path` in review() (see BaseReviewToolAgent._build_review) -- e.g. the
+    # frontend build specialist's build and the linter's `npx eslint .`. Before
+    # concurrent dispatch these ran one at a time, in `tool_agents` order (the old
+    # sequential loop), so they never touched the working tree at the same moment and
+    # always ran in a fixed relative order (build before lint, so lint never observes a
+    # partial/mid-build tree). A plain mutex would give mutual exclusion but not that
+    # ordering (acquisition order isn't FIFO), and clumping every such agent into one
+    # composite dispatch unit would preserve their relative order but lose their
+    # *positions* relative to any non-command agent interleaved between them in
+    # `tool_agents` -- e.g. command, llm-only, command would fold as
+    # command, command, llm-only instead of the original order. So instead each
+    # `build_runner` agent keeps its own individual thunk, in its own original
+    # position, and a chain of events makes command agent N wait for command agent
+    # N-1 to finish before it starts: still never overlapping, still in relative
+    # order, but each one's result lands in its own correct slot when folded below.
+    kind_agent_pairs = [
+        (kind, agent) for kind, agent in tool_agents.items() if hasattr(agent, "review")
+    ]
+    command_kinds_in_order = [
+        kind for kind, agent in kind_agent_pairs if getattr(agent, "build_runner", None) is not None
+    ]
+    command_order = {kind: i for i, kind in enumerate(command_kinds_in_order)}
+    command_done_events = [threading.Event() for _ in command_kinds_in_order]
+
+    def _review_command_agent_in_turn(kind: Any, agent: Any) -> Optional[List[ReviewIssue]]:
+        my_turn = command_order[kind]
+        if my_turn > 0:
+            command_done_events[my_turn - 1].wait()
+        try:
+            return _review_one(kind, agent)
+        finally:
+            command_done_events[my_turn].set()
+
+    thunks: List[Callable[[], Optional[List[ReviewIssue]]]] = [
+        (
+            (lambda kind=kind, agent=agent: _review_command_agent_in_turn(kind, agent))
+            if kind in command_order
+            else (lambda kind=kind, agent=agent: _review_one(kind, agent))
+        )
+        for kind, agent in kind_agent_pairs
+    ]
+
+    # Each thunk is fully self-contained (its own try/except, cache read/write, and
+    # local-list fold -- see _review_one/_review_command_agent_in_turn above), so they
+    # can be fanned out via the same dispatch policy _run_review_steps uses for the
+    # code-review/QA/security steps (see _dispatch_review_thunks). Folding into the
+    # shared `issues` list happens below, back on this thread, in `thunks` order (which
+    # mirrors `tool_agents` iteration order) -- not each thunk's actual completion order
+    # -- so which agent's output "wins" a same-key dedup downstream
+    # (shared/phases/review_cycle.py:_dedup_issues keeps only the first occurrence of a
+    # given (file_path, description)) stays deterministic, exactly as it was under the
+    # old sequential loop.
+    if not thunks:
+        return
+    for result in _dispatch_review_thunks(thunks, llm=llm):
+        if result is not None:
+            issues.extend(result)
 
 
 def run_review(
@@ -1099,6 +1233,11 @@ def run_review(
           unaffected.
         - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
           (defaults True).
+        - ``llm`` is forwarded to both the step fan-out (``_run_review_steps``)
+          and the tool-agent fan-out (``_run_tool_agents_review``), where it
+          selects sequential vs. concurrent dispatch via
+          ``_dispatch_review_thunks`` -- a scripted test-double client (see
+          ``_review_steps_run_sequentially``) forces both fan-outs sequential.
         - ``old_contents`` is forwarded to the code-review step only (see
           ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
           caller-supplied base" -- the code-review step then auto-resolves a base from
@@ -1209,6 +1348,7 @@ def run_review(
         current_files=execution_result.files,
         tool_repo_path=str(repo_path),
         language=language,
+        llm=llm,
     )
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]
@@ -1270,6 +1410,11 @@ def run_microtask_review(
           ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
         - ``tool_agent_cache``, when given, is forwarded to the tool-agent fan-out
           step only — see ``_run_tool_agents_review``.
+        - ``llm`` is forwarded to both the step fan-out (``_run_review_steps``)
+          and the tool-agent fan-out (``_run_tool_agents_review``), where it
+          selects sequential vs. concurrent dispatch via
+          ``_dispatch_review_thunks`` — a scripted test-double client (see
+          ``_review_steps_run_sequentially``) forces both fan-outs sequential.
         - ``old_contents`` is forwarded to the code-review step only (see
           ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
           caller-supplied base" -- the code-review step then auto-resolves a base from
@@ -1410,6 +1555,7 @@ def run_microtask_review(
         failure_context=f" for microtask {microtask_id}",
         language=language,
         tool_agent_cache=tool_agent_cache,
+        llm=llm,
     )
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]

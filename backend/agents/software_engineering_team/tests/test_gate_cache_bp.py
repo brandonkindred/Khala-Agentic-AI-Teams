@@ -292,8 +292,10 @@ def test_security_gate_keeps_file_context_in_user_prompt() -> None:
     run_single_shot_review path ultimately calls LLMClient.complete_json,
     whose Claude/Ollama/RunPod/Dummy implementations don't consume a
     system_prompt_content kwarg, so nothing is available to elevate it to."""
-    from security_agent.agent import CybersecurityExpertAgent, _build_security_file_context_prefix
+    from security_agent.agent import CybersecurityExpertAgent
     from security_agent.models import SecurityInput
+
+    from software_engineering_team.shared.review_prompt_utils import build_file_context_prefix
 
     input_data = SecurityInput(
         code="import os\nos.system('ls')",
@@ -311,8 +313,8 @@ def test_security_gate_keeps_file_context_in_user_prompt() -> None:
     # supported system_prompt_content channel for this call path).
     assert "review command runner" in user_prompt
 
-    # The file-context prefix helper returns the expected parts
-    prefix_parts = _build_security_file_context_prefix(input_data)
+    # The shared file-context prefix helper returns the expected parts
+    prefix_parts = build_file_context_prefix(input_data.language, input_data.code)
     assert any("os.system('ls')" in part for part in prefix_parts)
 
 

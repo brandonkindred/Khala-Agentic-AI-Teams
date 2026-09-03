@@ -21,9 +21,19 @@ floor/ceiling unless a row states otherwise. Per-row notes call out only the cas
 > `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError`.
 
 ### OLLAMA_API_KEY
-Used only by the operator "browse Ollama models" utility (`GET /api/llm-config/ollama-models`) to
-authenticate a listing against Ollama Cloud. It does **not** authenticate agent requests — a provider
-entry uses its own stored key.
+Used by the operator "browse Ollama models" utility (`GET /api/llm-config/ollama-models`) to
+authenticate a listing against Ollama Cloud. It does **not** authenticate LLM inference requests — a
+provider entry uses its own stored key for that.
+
+It **is**, however, the required bearer token for Ollama's `web_search` API
+(`https://ollama.com/api/web_search`), which several teams' research/trend tools call directly and
+without any fallback provider. If it's unset, those tools fail outright (not a transient error — it
+won't be retried). Required wherever web search is used:
+- `backend/agents/blogging/blog_research_agent/tools/web_search.py`
+- `backend/agents/job_matching_team/tools/web_search.py`
+- `backend/agents/personal_assistant_team/tools/web_search.py`
+- `backend/agents/software_engineering_team/architect_agents/tools/web_search.py`
+- `backend/agents/social_media_marketing_team/trend_discovery_agent.py`
 
 ### LLM_PROVIDER
 `dummy` selects the no-LLM test/dev harness (a hard override that pre-empts the provider list). Any other
@@ -491,14 +501,16 @@ in-process accumulator is the fast path; the job-store `cost_usd` is the durable
 figure.
 
 ### SE_TRACE_TO_POSTGRES
-When truthy (`true`/`1`/`yes`; default off), each SE-attributed LLM call is also
-persisted as a row in `se_agent_traces` — the substrate the metrics endpoint
-reads for per-job and total spend, so cost metrics work even without an OTLP
-collector. No-op when Postgres is disabled. Traces are written off the LLM call
-path: the observer enqueues into a bounded in-memory buffer and a background
-heartbeat drains it via batched `executemany` (see `SE_TRACE_FLUSH_INTERVAL_S`
-and `SE_TRACE_BUFFER_MAX`); a final drain runs at shutdown before the Postgres
-pool closes, so no row is lost on a clean shutdown.
+Default **on**: each SE-attributed LLM call is persisted as a row in
+`se_agent_traces` — the substrate the metrics endpoint reads for per-job and
+total spend, so cost metrics work even without an OTLP collector. Set to an
+explicit falsy value (`false`/`0`/`no`/`off`) to opt out. No-op either way when
+Postgres is disabled (`POSTGRES_HOST` unset), so no-database dev and `pytest`
+runs are unaffected. Traces are written off the LLM call path: the observer
+enqueues into a bounded in-memory buffer and a background heartbeat drains it
+via batched `executemany` (see `SE_TRACE_FLUSH_INTERVAL_S` and
+`SE_TRACE_BUFFER_MAX`); a final drain runs at shutdown before the Postgres pool
+closes, so no row is lost on a clean shutdown.
 
 ### SE_TRACE_FLUSH_INTERVAL_S
 Seconds between background drains of the in-memory trace buffer to
@@ -516,13 +528,31 @@ once per burst — bounded memory, never blocks the caller.
 Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`
 (default `30`; garbage → `30`, negatives clamped to `0`).
 
+### SE_TRACE_PRUNE_INTERVAL_S
+Seconds between background prune sweeps that enforce `SE_TRACE_RETENTION_DAYS`
+via `trace_store.prune_traces` (default `21600` = 6 hours; garbage → `21600`).
+Registration floors the resolved value at `60s` regardless of why it's low —
+including a deliberately configured value under 60, silently, with no warning
+— so the sweep never busy-loops. Mirrors `SE_TRACE_FLUSH_INTERVAL_S`'s pattern
+at a much slower cadence; retention is day-granularity, so tighter buys nothing.
+A sweep also runs immediately at startup (the heartbeat beats first), so a
+restart never waits a full interval for its first prune — relevant when that
+first sweep has a large stale-row backlog to delete. Pruning only applies
+when traces are stored in Postgres (`POSTGRES_HOST` set); it runs regardless
+of `SE_TRACE_TO_POSTGRES` so rows written while tracing was enabled are still
+pruned. When `POSTGRES_HOST` is not set, `SE_TRACE_PRUNE_INTERVAL_S` has no
+observable effect.
+
 ### SE_LEARNINGS_TOPN
 Number of past-sprint learnings injected into the Tech Lead's Design prompt
 (default `5`, clamped to `[0, 50]`; `0` disables injection; garbage → `5`).
 
 ### SE_LEARNINGS_RETENTION_DAYS
 Retention window (by `last_seen`) for `se_learnings` rows used by
-`learnings_store.prune_learnings` (default `365`).
+`learnings_store.prune_learnings` (default `365`). Unlike `se_agent_traces`
+(see `SE_TRACE_PRUNE_INTERVAL_S` above), nothing currently schedules
+`prune_learnings` — this window is defined but not yet enforced
+automatically; wiring it up the same way is tracked separately.
 
 ---
 

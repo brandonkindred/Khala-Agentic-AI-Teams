@@ -1014,14 +1014,18 @@ def test_coerce_critique_keeps_defect_that_only_mentions_drawdown(description: s
 )
 def test_sizing_owned_by_gate(kind: object, owned: bool) -> None:
     """Only the static sizing kinds the deterministic gate fully validates are
-    'owned'. volatility_target (gate abstains) and unknown/missing kinds are not."""
+    'owned'. volatility_target (gate only partially owns it — worst-case
+    concurrency, not target_annual_vol plausibility) and unknown/missing kinds
+    are not."""
     assert _sizing_owned_by_gate(kind) is owned
 
 
 def test_coerce_critique_volatility_sizing_objection_keeps_blocking() -> None:
     """When the spec's sizing kind is NOT gate-owned (volatility_target), a
-    sizing objection must keep blocking — the deterministic gate abstains on it,
-    so the reviewer's plausibility critique is the only substantive check."""
+    sizing objection must keep blocking — the deterministic gate only
+    partially owns it (worst-case concurrency, not target_annual_vol
+    plausibility), so the reviewer's plausibility critique remains the only
+    check of the latter."""
     parsed = {
         "ready": False,
         "rationale": "implausible vol target",
@@ -1048,7 +1052,7 @@ def test_design_review_run_keeps_volatility_target_sizing_objection(
 ) -> None:
     """End-to-end: a volatility_target spec whose reviewer flags an implausible
     target keeps the verdict not-ready — ``run`` resolves ``sizing_owned`` from
-    the spec's sizing kind, so the gate-abstained objection is not demoted."""
+    the spec's sizing kind, so the not-gate-owned objection is not demoted."""
     spec = _spec().model_copy(update={"sizing": VolatilityTargetSizing(target_annual_vol=0.001)})
     payload = json.dumps(
         {

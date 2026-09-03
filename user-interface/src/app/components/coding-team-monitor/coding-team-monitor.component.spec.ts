@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { CodingTeamMonitorComponent } from './coding-team-monitor.component';
+import { CodingTeamMonitorComponent, codingTeamStatusSummary } from './coding-team-monitor.component';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
 
 describe('CodingTeamMonitorComponent', () => {
@@ -372,9 +372,60 @@ describe('CodingTeamMonitorComponent', () => {
     expect(el.querySelectorAll('.ct-agent').length).toBe(2);
   });
 
-  it('exposes the monitor as a polite live region for assistive technology', async () => {
+  it('does not mark the monitor panel itself as a live region', async () => {
     const monitor = (await render({ job_id: 'j1', status: 'running' })).querySelector('.ct-monitor');
-    expect(monitor?.getAttribute('role')).toBe('status');
-    expect(monitor?.getAttribute('aria-live')).toBe('polite');
+    expect(monitor?.hasAttribute('role')).toBe(false);
+    expect(monitor?.hasAttribute('aria-live')).toBe(false);
+  });
+
+  // --- Hidden live-region summary ------------------------------------------------
+
+  it('mounts an empty hidden live region before any status arrives', async () => {
+    const el = await render(null);
+    const region = el.querySelector('.visually-hidden[aria-live="polite"]');
+    expect(region).not.toBeNull();
+    expect(region?.textContent).toBe('');
+  });
+
+  it('announces the objective and progress in the hidden live region', async () => {
+    const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
+    const region = el.querySelector('.visually-hidden[aria-live="polite"]');
+    expect(region?.textContent).toContain('Implementing the task graph');
+    expect(region?.textContent).toContain('47% complete');
+  });
+
+  it('leaves the live region text (and node) unchanged when the summary itself is unchanged', async () => {
+    const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
+    const region = el.querySelector('.visually-hidden[aria-live="polite"]');
+    const before = region?.textContent;
+    await render({
+      job_id: 'j1',
+      status: 'running',
+      phase: 'coding',
+      progress: 47,
+      agents: [agent({ agent_id: 'x', display_name: 'X' })],
+    });
+    const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
+    expect(regionAfter).toBe(region);
+    expect(regionAfter?.textContent).toBe(before);
+  });
+});
+
+describe('codingTeamStatusSummary', () => {
+  it('combines the objective and progress percent', () => {
+    expect(codingTeamStatusSummary('Implementing the task graph', 47)).toBe(
+      'Implementing the task graph — 47% complete',
+    );
+  });
+
+  it('omits the progress clause when progress is indeterminate', () => {
+    expect(codingTeamStatusSummary('Building the task graph', null)).toBe('Building the task graph');
+  });
+
+  it('truncates a long objective with an ellipsis and stays within the bound', () => {
+    const longObjective = 'x'.repeat(300);
+    const result = codingTeamStatusSummary(longObjective, null);
+    expect(result.length).toBe(61); // 60 chars + ellipsis
+    expect(result.endsWith('…')).toBe(true);
   });
 });

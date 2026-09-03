@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pytest
 
 from software_engineering_team.shared import learnings_store, se_events, trace_store
+
+from ._observability_test_doubles import _FIELDS
+from ._observability_test_doubles import TraceCallRecord as _Rec
 
 # --- se_events -------------------------------------------------------------
 
@@ -135,26 +139,65 @@ def test_learnings_retention_days_env(monkeypatch) -> None:
 
 # --- trace_store -----------------------------------------------------------
 
+# Positions of the two cache-token columns in ``_INSERT_SQL`` / the tuple
+# ``_record_to_row`` builds. Every cache-token assertion in this module reads
+# through these (via :func:`_cache_tokens`) rather than slicing by literal, so a
+# column reorder is a one-line change here — and
+# ``test_insert_sql_pins_cache_column_positions`` fails loudly if these drift
+# from what the statement actually declares.
+_CACHE_READ_IDX = 10
+_CACHE_CREATION_IDX = 11
+
+
+def _cache_tokens(row) -> tuple:
+    """The ``(cache_read_tokens, cache_creation_tokens)`` pair read from ``row``.
+
+    Preconditions:
+        ``row`` is a positional row tuple in ``_INSERT_SQL`` column order — one
+        built by ``trace_store._record_to_row``, or the params of a recorded
+        INSERT.
+    Postconditions:
+        Returns the two cache-token values at the pinned indices, in
+        (read, creation) order. Indexes each column independently, so the pair
+        does not assume the two columns stay adjacent.
+    """
+    return (row[_CACHE_READ_IDX], row[_CACHE_CREATION_IDX])
+
 
 def test_trace_enabled_env(monkeypatch) -> None:
-    """_trace_enabled defaults to False and follows the SE_TRACE_TO_POSTGRES flag."""
+    """_trace_enabled defaults to True (unset) and follows explicit SE_TRACE_TO_POSTGRES overrides."""
     monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
-    assert trace_store._trace_enabled() is False
+    assert trace_store._trace_enabled() is True
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     assert trace_store._trace_enabled() is True
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "no")
     assert trace_store._trace_enabled() is False
 
 
-def test_write_trace_disabled_by_default() -> None:
-    """write_trace returns False when tracing is disabled by default."""
+class _TraceRec:
+    """Minimal write_trace-shaped stub shared by the tests below."""
 
-    class _Rec:
-        timestamp = 0.0
-        team = "software_engineering"
-        job_id = "j"
+    timestamp = 0.0
+    team = "software_engineering"
+    job_id = "j"
 
-    assert trace_store.write_trace(_Rec()) is False
+
+def test_write_trace_noop_without_postgres_when_enabled_by_default(monkeypatch) -> None:
+    """write_trace returns False when Postgres is unconfigured, even though the sink is
+    enabled by default (unset SE_TRACE_TO_POSTGRES) — pg_cursor yields no cursor."""
+    monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
+    monkeypatch.delenv(
+        "POSTGRES_HOST", raising=False
+    )  # force the documented "Postgres disabled" no-op path
+
+    assert trace_store.write_trace(_TraceRec()) is False
+
+
+def test_write_trace_disabled_explicitly(monkeypatch) -> None:
+    """write_trace returns False when the sink is explicitly opted out."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "false")
+
+    assert trace_store.write_trace(_TraceRec()) is False
 
 
 def test_fetch_cost_empty_without_postgres() -> None:
@@ -169,13 +212,40 @@ def test_trace_observer_ignores_non_se(monkeypatch) -> None:
 
     trace_flusher._reset_for_test()
 
-    class _Rec:
-        team = "blogging"
-        job_id = "j"
-
-    trace_flusher._trace_observer(_Rec())
+    trace_flusher._trace_observer(_Rec(team="blogging"))
     assert trace_flusher._buffer_size() == 0  # other team → not enqueued
     trace_flusher._reset_for_test()
+
+
+def test_record_to_row_cache_tokens() -> None:
+    """_record_to_row carries cache_read/cache_creation tokens, defaulting to 0 not NULL."""
+
+    class _RecWithRead:
+        timestamp = 0.0
+        team = "software_engineering"
+        job_id = "j"
+        cache_read_tokens = 42
+        cache_creation_tokens = 0
+
+    class _RecWithCreation:
+        timestamp = 0.0
+        team = "software_engineering"
+        job_id = "j"
+        cache_read_tokens = 0
+        cache_creation_tokens = 17
+
+    class _RecWithNeither:
+        timestamp = 0.0
+        team = "software_engineering"
+        job_id = "j"
+
+    row_read = trace_store._record_to_row(_RecWithRead())
+    row_creation = trace_store._record_to_row(_RecWithCreation())
+    row_neither = trace_store._record_to_row(_RecWithNeither())
+
+    assert _cache_tokens(row_read) == (42, 0)
+    assert _cache_tokens(row_creation) == (0, 17)
+    assert _cache_tokens(row_neither) == (0, 0)  # missing attrs -> 0, never NULL
 
 
 def test_trace_retention_days_env(monkeypatch) -> None:
@@ -186,3 +256,409 @@ def test_trace_retention_days_env(monkeypatch) -> None:
     assert trace_store._retention_days() == 7.0
     monkeypatch.setenv("SE_TRACE_RETENTION_DAYS", "garbage")
     assert trace_store._retention_days() == 30.0  # bad value → default
+
+
+def test_prune_traces_noop(monkeypatch) -> None:
+    """prune_traces is a safe no-op without Postgres configured — proven by
+    absence of a real connection attempt, not just the return value.
+
+    prune_traces() swallows any failure and also returns 0 for that case, so
+    a return-value-only assertion can't tell "the POSTGRES_HOST gate
+    correctly short-circuited before pg_cursor opened a connection" apart
+    from "the gate broke, a connection was attempted and failed, and the
+    failure got swallowed" — the second is exactly the regression this test
+    exists to catch. Recording the attempt in a list (rather than asserting
+    inside the patched get_conn) is required, not stylistic: prune_traces's
+    own `except Exception: return 0` would otherwise swallow an assertion
+    raised from inside get_conn too, same as any other exception, and this
+    test would pass either way.
+    """
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("SE_TRACE_RETENTION_DAYS", raising=False)
+
+    from shared.postgres import client as pg_client
+
+    connection_attempts = []
+
+    def _record_and_fail(*args, **kwargs):
+        connection_attempts.append((args, kwargs))
+        raise RuntimeError("prune_traces must not reach get_conn without POSTGRES_HOST")
+
+    monkeypatch.setattr(pg_client, "get_conn", _record_and_fail)
+
+    assert trace_store.prune_traces(0) == 0
+    assert trace_store.prune_traces(30) == 0
+    assert trace_store.prune_traces() == 0  # uses SE_TRACE_RETENTION_DAYS default
+    assert connection_attempts == [], "prune_traces attempted a DB connection without POSTGRES_HOST"
+
+
+# --- trace_store cache-token persistence (single-row + batch, no live Postgres) --------
+
+
+class _FakeCursorContractViolation(BaseException):
+    """Raised when a statement/row pair would be rejected by real psycopg.
+
+    Deliberately derives from ``BaseException``, not ``Exception``: both write
+    paths wrap their cursor work in ``except Exception`` (DEBUG log, no raise),
+    so an ``Exception`` raised by the fake would be swallowed by the code under
+    test and resurface as an opaque ``IndexError`` on ``cursor.executed[0]``.
+    Deriving from ``BaseException`` lets the violation propagate to pytest with
+    its own message intact.
+    """
+
+
+class _FakeCursor:
+    """Records every execute/executemany call; no live Postgres involved.
+
+    Mirrors psycopg's arity check: a statement whose ``%s`` count does not match
+    the row width is a hard error, not a silently-recorded call. Without this the
+    fake would happily accept a row that real psycopg rejects, and since both
+    write paths swallow exceptions (DEBUG log, no raise) the drift would surface
+    only as silently-dropped trace rows in production.
+
+    Prior art: ``llm_service/tests/test_usage_store.py`` carries a near-identical
+    recording cursor + ``pg_cursor``-patching fixture. The shared scaffold in
+    ``shared.postgres.fake`` does not cover this need — it is dispatch-table
+    style, patches ``get_conn`` rather than ``pg_cursor``, and offers neither
+    call recording nor raise injection — which is why both suites hand-roll a
+    spy. The two copies have already drifted (that one supports ``fetchone``/
+    ``fetchall``, this one adds the arity check above) — the next one to touch
+    either should converge them rather than let a third copy appear, into
+    either ``shared.postgres.testing`` (alongside the re-exported fake scaffold)
+    or an agents-pythonpath module following the ``llm_client_fakes.py``
+    precedent, whichever keeps cross-team imports out of another team's
+    private ``tests/`` package.
+    """
+
+    def __init__(self, raise_on_execute: bool = False) -> None:
+        """Construct an empty recording cursor.
+
+        Preconditions:
+            None.
+        Postconditions:
+            ``self.executed`` is an empty list. ``self._raise`` is
+            ``raise_on_execute`` — when true, every subsequent ``execute``/
+            ``executemany`` call raises ``RuntimeError`` instead of recording.
+        """
+        self.executed: list[tuple] = []
+        self._raise = raise_on_execute
+
+    @staticmethod
+    def _check_arity(sql: str, params, expected: int) -> None:
+        """Reject a ``params``/row whose length does not match ``sql``'s own ``%s`` count.
+
+        Preconditions:
+            ``expected`` is ``sql.count("%s")``, computed once by the caller — passed
+            in rather than recomputed here so a caller iterating many rows against
+            the same ``sql`` (``executemany``) does the ``str.count`` scan once.
+        Postconditions:
+            Returns ``None`` when ``len(params or ())`` equals ``expected``.
+        Raises:
+            ``_FakeCursorContractViolation`` — deliberately a ``BaseException``, not an
+            ``Exception`` — when the lengths differ, naming both counts.
+        """
+        actual = len(params or ())
+        if expected != actual:
+            raise _FakeCursorContractViolation(f"SQL expects {expected} params, row has {actual}")
+
+    def execute(self, sql: str, params=None) -> None:
+        """Record one ``(sql, params)`` call, or raise if ``raise_on_execute`` is set.
+
+        Preconditions:
+            ``params`` is ``None`` or a sequence whose length matches ``sql``'s ``%s``
+            placeholder count.
+        Postconditions:
+            When not configured to raise, appends ``(sql, params)`` to ``self.executed``
+            and returns ``None``.
+        Raises:
+            ``RuntimeError`` when ``raise_on_execute`` was set at construction, before
+            any arity check or recording. ``_FakeCursorContractViolation`` when
+            ``params``'s length does not match ``sql``'s placeholder count.
+        """
+        if self._raise:
+            raise RuntimeError("boom")
+        self._check_arity(sql, params, sql.count("%s"))
+        self.executed.append((sql, params))
+
+    def executemany(self, sql: str, seq) -> None:
+        """Record one ``(sql, rows)`` call for a batch, or raise if ``raise_on_execute`` is set.
+
+        Preconditions:
+            Every row in ``seq`` is a sequence whose length matches ``sql``'s ``%s``
+            placeholder count.
+        Postconditions:
+            When not configured to raise, appends ``(sql, list(seq))`` to
+            ``self.executed`` and returns ``None``. ``sql.count("%s")`` is computed
+            once and reused across every row in ``seq``, since it is invariant for a
+            single call.
+        Raises:
+            ``RuntimeError`` when ``raise_on_execute`` was set at construction, before
+            any row is checked or recorded. ``_FakeCursorContractViolation`` on the
+            first row whose length does not match ``sql``'s placeholder count.
+        """
+        if self._raise:
+            raise RuntimeError("boom")
+        expected = sql.count("%s")
+        rows = list(seq)
+        for row in rows:
+            self._check_arity(sql, row, expected)
+        self.executed.append((sql, rows))
+
+
+@pytest.fixture
+def _fake_cursor(monkeypatch):
+    """Enable tracing and swap trace_store.pg_cursor for a recording FakeCursor.
+
+    Preconditions:
+        ``monkeypatch`` is the pytest fixture — the substitution it installs is
+        undone automatically at test teardown.
+    Postconditions:
+        ``SE_TRACE_TO_POSTGRES`` is set for the duration of the test, and
+        ``trace_store.pg_cursor`` is replaced. Returns a factory: call it with no
+        args for the default (non-raising) cursor, or ``raise_on_execute=True``
+        for a cursor that raises on ``execute``/``executemany`` instead of
+        recording (for the never-raise-on-DB-failure path). Each call to the
+        factory installs a fresh cursor and re-patches ``pg_cursor`` to yield it.
+    """
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
+
+    def _make(raise_on_execute: bool = False) -> _FakeCursor:
+        """Install a fresh ``_FakeCursor`` as ``trace_store.pg_cursor`` and return it.
+
+        Preconditions:
+            None beyond the enclosing fixture's.
+        Postconditions:
+            ``trace_store.pg_cursor`` is patched to a context manager matching the
+            real ``pg_cursor(*, dict_rows=False, database=None)`` signature that
+            yields the returned cursor. Calling it again replaces the patch with a
+            new cursor — the two do not share call history.
+        """
+        cursor = _FakeCursor(raise_on_execute)
+
+        @contextmanager
+        def _pg_cursor(*, dict_rows: bool = False, database=None):
+            """Stand-in for ``shared.postgres.pg_cursor``; yields the fake cursor.
+
+            Preconditions:
+                Signature must track the real ``pg_cursor`` — a keyword-only
+                ``dict_rows`` and ``database``, both with matching defaults — so
+                this fake stays a valid substitute if the real one's callers change
+                how they invoke it.
+            Postconditions:
+                Yields ``cursor`` unconditionally; both parameters are accepted but
+                unused, since the fake never distinguishes row-factory mode.
+            """
+            yield cursor
+
+        monkeypatch.setattr(trace_store, "pg_cursor", _pg_cursor)
+        return cursor
+
+    return _make
+
+
+def _insert_columns() -> list[str]:
+    """The column names of ``_INSERT_SQL``, in statement order.
+
+    Preconditions:
+        ``_INSERT_SQL`` is a single ``INSERT INTO <table> (<cols>) VALUES (...)``
+        statement whose first parenthesised group is the column list.
+    Postconditions:
+        Returns the column names, stripped, in the order the statement declares
+        them — the order Postgres binds positional params to.
+    """
+    columns = trace_store._INSERT_SQL.split("(", 1)[1].split(")", 1)[0]
+    return [c.strip() for c in columns.split(",")]
+
+
+def test_insert_sql_placeholder_count_matches_row_width() -> None:
+    """``_INSERT_SQL``'s ``%s`` count must equal the tuple width ``_record_to_row`` builds.
+
+    Adding a column to the statement without a matching value (or vice versa) makes
+    every real INSERT fail — and because both write paths swallow exceptions, that
+    failure is invisible: trace rows are silently dropped and the cost endpoint
+    reports zero. This pins the two halves of the contract against each other
+    directly, so drift fails here with a legible message rather than as a
+    swallowed error inside a write-path test.
+    """
+    assert trace_store._INSERT_SQL.count("%s") == len(trace_store._record_to_row(_Rec()))
+
+
+def test_insert_sql_pins_cache_column_positions() -> None:
+    """The cache columns must sit at the positions the value assertions index.
+
+    Every other test reads cache tokens by *position* (``_CACHE_READ_IDX`` /
+    ``_CACHE_CREATION_IDX``, via :func:`_cache_tokens`) and checks only that the
+    column names appear somewhere in the statement. That pair of assertions cannot
+    see a reordering: swapping ``cache_read_tokens`` and ``cache_creation_tokens``
+    in the column list leaves the params where they are, so Postgres would write
+    each value into the other column while the value assertions stay green. This
+    test is the sole tie between those index constants and the statement's own
+    column list — it is what makes reading by index safe everywhere else.
+    """
+    columns = _insert_columns()
+    assert len(columns) == trace_store._INSERT_SQL.count("%s")
+    assert columns[_CACHE_READ_IDX] == "cache_read_tokens"
+    assert columns[_CACHE_CREATION_IDX] == "cache_creation_tokens"
+
+
+def test_trace_call_record_fields_reach_record_to_row() -> None:
+    """Every _FIELDS entry the shared test double whitelists is actually read
+    by _record_to_row, at the position _record_to_row's own docstring says it
+    occupies.
+
+    _FIELDS guards one drift direction already (an override for a name
+    _record_to_row never reads raises AttributeError at construction time).
+    This guards the other: a field _record_to_row stops reading — dropped,
+    renamed, or reordered — leaves _FIELDS still silently accepting overrides
+    for it, which then vanish into an unused attribute with nothing else in
+    this suite noticing, since every other trace test uses realistic (often
+    zero/default-shaped) values rather than values chosen to be distinguishable
+    by position.
+    """
+    overrides = {
+        "team": "sentinel-team",
+        "agent_key": "sentinel-agent_key",
+        "job_id": "sentinel-job_id",
+        "task_id": "sentinel-task_id",
+        "phase": "sentinel-phase",
+        "model": "sentinel-model",
+        "prompt_tokens": 101,
+        "completion_tokens": 102,
+        "total_tokens": 103,
+        "cache_read_tokens": 104,
+        "cache_creation_tokens": 105,
+        "cost_usd": 1.5,
+        "latency_ms": 106,
+        "status": "sentinel-status",
+        "outcome": "sentinel-outcome",
+        "objective": "sentinel-objective",
+        "request_id": "sentinel-request_id",
+    }
+    # timestamp is deliberately excluded and checked separately below:
+    # _record_to_row derives a UTC datetime from it rather than passing it
+    # through unchanged, so it isn't a same-value round trip like every other
+    # field here. If this assertion fails, _FIELDS gained or lost a field
+    # that `overrides` (and the row comparison below) needs updating for too.
+    assert set(overrides) | {"timestamp"} == _FIELDS
+
+    row = trace_store._record_to_row(_Rec(**overrides))
+
+    # Position order per _record_to_row's own docstring / _INSERT_SQL's
+    # column list; row[0] (ts) is skipped since timestamp isn't a passthrough.
+    assert row[1:] == (
+        overrides["team"],
+        overrides["agent_key"],
+        overrides["job_id"],
+        overrides["task_id"],
+        overrides["phase"],
+        overrides["model"],
+        overrides["prompt_tokens"],
+        overrides["completion_tokens"],
+        overrides["total_tokens"],
+        overrides["cache_read_tokens"],
+        overrides["cache_creation_tokens"],
+        overrides["cost_usd"],
+        overrides["latency_ms"],
+        overrides["status"],
+        overrides["outcome"],
+        overrides["objective"],
+        overrides["request_id"],
+    )
+
+
+def test_trace_call_record_rejects_unknown_override() -> None:
+    """An override key that isn't in _FIELDS raises AttributeError with the
+    documented message, rather than silently creating an unused attribute or
+    raising some other exception type — the behavior the class docstring's
+    Preconditions promise but that no other test in this suite exercises,
+    since every other _Rec(...) call here passes only valid overrides."""
+    with pytest.raises(AttributeError, match="Unknown TraceCallRecord attribute: 'prompt_toknes'"):
+        _Rec(prompt_toknes=1)  # deliberately misspelled
+
+    # A valid override, including an optional cache field, still applies normally.
+    rec = _Rec(cache_read_tokens=7)
+    assert rec.cache_read_tokens == 7
+
+
+def test_write_trace_persists_cache_read_tokens(_fake_cursor) -> None:
+    """write_trace (single-row path) carries cache_read_tokens through to the INSERT params."""
+    cursor = _fake_cursor()
+    assert trace_store.write_trace(_Rec(cache_read_tokens=42, cache_creation_tokens=0)) is True
+    sql, params = cursor.executed[0]
+    assert "cache_read_tokens" in sql
+    assert "cache_creation_tokens" in sql
+    assert _cache_tokens(params) == (42, 0)
+
+
+def test_write_trace_persists_cache_creation_tokens(_fake_cursor) -> None:
+    """write_trace (single-row path) carries cache_creation_tokens through to the INSERT params."""
+    cursor = _fake_cursor()
+    assert trace_store.write_trace(_Rec(cache_read_tokens=0, cache_creation_tokens=17)) is True
+    sql, params = cursor.executed[0]
+    assert "cache_creation_tokens" in sql
+    assert _cache_tokens(params) == (0, 17)
+
+
+def test_write_trace_writes_zero_for_no_cache_usage(_fake_cursor) -> None:
+    """A record reporting neither cache reads nor creation writes 0 for both, never NULL."""
+    cursor = _fake_cursor()
+    assert trace_store.write_trace(_Rec(cache_read_tokens=0, cache_creation_tokens=0)) is True
+    _, params = cursor.executed[0]
+    assert _cache_tokens(params) == (0, 0)
+
+
+def test_write_trace_never_raises_on_missing_cache_fields(_fake_cursor) -> None:
+    """The never-raise contract holds even when the record has no cache attrs at all."""
+    cursor = _fake_cursor()
+    assert trace_store.write_trace(_Rec()) is True
+    _, params = cursor.executed[0]
+    assert _cache_tokens(params) == (0, 0)
+
+
+def test_write_rows_persists_cache_read_tokens_batch(_fake_cursor) -> None:
+    """write_rows (batch path) carries cache_read_tokens through identically to write_trace."""
+    cursor = _fake_cursor()
+    row = trace_store._record_to_row(_Rec(cache_read_tokens=42, cache_creation_tokens=0))
+    assert trace_store.write_rows([row]) == 1
+    sql, rows = cursor.executed[0]
+    assert "cache_read_tokens" in sql
+    assert "cache_creation_tokens" in sql
+    assert _cache_tokens(rows[0]) == (42, 0)
+
+
+def test_write_rows_persists_cache_creation_tokens_batch(_fake_cursor) -> None:
+    """write_rows (batch path) carries cache_creation_tokens through identically to write_trace."""
+    cursor = _fake_cursor()
+    row = trace_store._record_to_row(_Rec(cache_read_tokens=0, cache_creation_tokens=17))
+    assert trace_store.write_rows([row]) == 1
+    sql, rows = cursor.executed[0]
+    assert "cache_creation_tokens" in sql
+    assert _cache_tokens(rows[0]) == (0, 17)
+
+
+def test_write_rows_writes_zero_for_no_cache_usage_batch(_fake_cursor) -> None:
+    """write_rows (batch path) writes 0/0 for a record reporting neither, never NULL."""
+    cursor = _fake_cursor()
+    row = trace_store._record_to_row(_Rec())
+    assert trace_store.write_rows([row]) == 1
+    _, rows = cursor.executed[0]
+    assert _cache_tokens(rows[0]) == (0, 0)
+
+
+def test_write_trace_never_raises_on_cursor_failure(_fake_cursor) -> None:
+    """A DB failure on the single-row path degrades to False, never raises.
+
+    The return value is the whole contract here: dropping ``write_trace``'s
+    ``except Exception`` guard lets the cursor's error propagate, which fails this
+    test outright, and a write that somehow succeeded would return True. (Real
+    atomicity is Postgres's, not something this in-memory double can attest to.)
+    """
+    _fake_cursor(raise_on_execute=True)
+    assert trace_store.write_trace(_Rec(cache_read_tokens=5, cache_creation_tokens=0)) is False
+
+
+def test_write_rows_never_raises_on_cursor_failure(_fake_cursor) -> None:
+    """A DB failure on the batch path degrades to 0, never raises (mirrors write_trace)."""
+    _fake_cursor(raise_on_execute=True)
+    row = trace_store._record_to_row(_Rec(cache_read_tokens=5, cache_creation_tokens=0))
+    assert trace_store.write_rows([row]) == 0

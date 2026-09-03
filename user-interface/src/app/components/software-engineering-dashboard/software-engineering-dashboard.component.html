@@ -36,28 +36,30 @@
 <!-- New Project — creation form                                            -->
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 @if (activeView === 'new-project') {
-  <app-team-assistant-chat
-    [teamApiUrl]="'/api/software-engineering/assistant'"
-    [teamName]="'Software Engineering'"
-    [teamDescription]="'Describe your project and the team will build it'"
-    [fields]="[
-      {key: 'spec', label: 'Project specification', placeholder: 'Describe what you want built', required: true},
-      {key: 'tech_stack', label: 'Tech stack', placeholder: 'Preferred languages or frameworks'},
-      {key: 'constraints', label: 'Constraints', placeholder: 'Deadlines, NFRs, or limitations'}
-    ]"
-    (workflowLaunched)="onWorkflowLaunched($event)"
-  />
+  <section class="new-project-view" tabindex="-1" aria-label="New project">
+    <app-team-assistant-chat
+      [teamApiUrl]="'/api/software-engineering/assistant'"
+      [teamName]="'Software Engineering'"
+      [teamDescription]="'Describe your project and the team will build it'"
+      [fields]="[
+        {key: 'spec', label: 'Project specification', placeholder: 'Describe what you want built', required: true},
+        {key: 'tech_stack', label: 'Tech stack', placeholder: 'Preferred languages or frameworks'},
+        {key: 'constraints', label: 'Constraints', placeholder: 'Deadlines, NFRs, or limitations'}
+      ]"
+      (workflowLaunched)="onWorkflowLaunched($event)"
+    />
+  </section>
 }
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <!-- Jobs List — browse all SE jobs                                         -->
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 @if (activeView === 'jobs') {
-  <div class="jobs-list-view">
+  <section class="jobs-list-view" tabindex="-1" aria-label="Jobs">
 
     @if (runningJobs.length) {
       <div class="jobs-list-section">
-        <h3 class="list-section-title">Running</h3>
+        <h2 class="list-section-title">Running</h2>
         <div class="jobs-list">
           @for (job of runningJobs; track job.job_id) {
             <a class="job-item" [routerLink]="['/jobs', job.job_id]">
@@ -75,7 +77,7 @@
 
     @if (completedJobs.length) {
       <div class="jobs-list-section">
-        <h3 class="list-section-title">Completed</h3>
+        <h2 class="list-section-title">Completed</h2>
         <div class="jobs-list">
           @for (job of completedJobs; track job.job_id) {
             <a class="job-item" [routerLink]="['/jobs', job.job_id]">
@@ -99,6 +101,6 @@
         </button>
       </div>
     }
-  </div>
+  </section>
 }
 </app-dashboard-shell>

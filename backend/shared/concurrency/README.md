@@ -221,3 +221,110 @@ with file_locks.lock(physical_lock_keys):
 - A key's lock is never removed once created — this manager is meant to be
   constructed once and reused for an entire run (the same lifetime as the
   `all_files` dict it is intended to guard), not created per call.
+
+## `LazySingleton`
+
+A single-slot "build at most once, even under concurrent first access"
+primitive, consolidating the hand-rolled double-checked-locking idiom
+duplicated across `branding_team/store.py::get_default_store`,
+`branding_team/api/main.py::_get_assistant_agent`, and
+`shared/coro_runner.py`'s worker-pool singleton.
+
+```python
+from shared.concurrency import LazySingleton
+
+_store: LazySingleton[BrandingStore] = LazySingleton()  # module-scope, one per value
+
+def get_default_store() -> BrandingStore:
+    return _store.get_or_create(BrandingStore)
+```
+
+- `get_or_create(factory)` — returns the constructed value, calling
+  `factory()` to build it on the first call to succeed; every other call,
+  concurrent or not, returns that exact same object without invoking its own
+  `factory`.
+- A raising `factory` propagates the exception to that caller and leaves the
+  instance unconstructed, so the next call retries — this is what lets
+  `_get_assistant_agent`'s existing "raise `HTTPException`, retry on the next
+  request" contract carry over unchanged.
+- A `factory` that also needs a one-time side effect (e.g. `atexit`
+  registration) is just a closure — `get_or_create` doesn't care what
+  `factory` does beyond returning the value.
+- `None` is reserved as the "not yet constructed" sentinel, so `factory` must
+  never return `None` — the same assumption the hand-rolled call sites above
+  already made. Enforced: a `None`-returning `factory` raises `ValueError`
+  immediately rather than silently caching `None` and re-running `factory`
+  on every later call.
+- `factory` must not call `get_or_create` on the same instance, directly or
+  transitively — the internal lock isn't reentrant and is held for the
+  duration of `factory`, so re-entry deadlocks the calling thread.
+
+## `KeyedLazyRegistry`
+
+The dict-keyed sibling of `LazySingleton`: one lazily-built value *per key*,
+consolidating the hand-rolled dict-plus-lock double-checked-locking idiom
+duplicated across `branding_team/api/conversation.py::_get_or_create_phase_cache`,
+`branding_team/api/main.py::_get_brand_cache`, and
+`llm_service/rate_limiter.py::_get_team_semaphore`.
+
+```python
+from shared.concurrency import KeyedLazyRegistry
+
+_phase_caches: KeyedLazyRegistry[str, PhaseOutputCache] = KeyedLazyRegistry()
+
+def _get_or_create_phase_cache(conversation_id: str) -> PhaseOutputCache:
+    return _phase_caches.get_or_create(conversation_id, PhaseOutputCache)
+
+# A value needing constructor arguments is just a closure. Held as an instance
+# attribute here, since the value depends on per-instance configuration:
+class TeamSemaphorePool:
+    def __init__(self, per_team_limit: int) -> None:
+        self.per_team_limit = per_team_limit
+        self._team_semaphores: KeyedLazyRegistry[str, threading.BoundedSemaphore] = (
+            KeyedLazyRegistry()
+        )
+
+    def _get_team_semaphore(self, team: str) -> threading.BoundedSemaphore:
+        return self._team_semaphores.get_or_create(
+            team, lambda: threading.BoundedSemaphore(self.per_team_limit)
+        )
+```
+
+- `get_or_create(key, factory)` — returns that key's value, calling `factory()`
+  to build it on the first call for the key to succeed; every other call for
+  that key, concurrent or not, returns that exact same object without invoking
+  its own `factory`.
+- **Distinct keys never block each other's construction.** This is the one
+  behavioural difference from the call sites above, which funnel every key
+  through a single shared lock: there, a slow `factory` for one key stalls first
+  construction for every other key. Here each key has its own lock, delegated to
+  `KeyedLockManager`, and no lock is held across another key's `factory`.
+- Raise-and-retry is per key: a raising `factory` propagates to that caller and
+  leaves *that key* unbuilt, so the next call for it retries — while every other
+  key's value, and its retryability, is untouched. "Build exactly once" is a
+  claim about *successful* construction; concurrent callers for a key whose
+  `factory` always raises each get their own turn, serialized.
+- `None` is the per-key "not built yet" sentinel, so `factory` must never return
+  `None` — the same rule, and the same `ValueError`, as `LazySingleton`. The
+  error message names the offending key.
+- Re-entrancy is rejected loudly rather than hanging: a `factory` that calls
+  `get_or_create` for the key it is building raises `RuntimeError`, and so does
+  one that reaches for a key this registry saw *earlier and that is not yet
+  built* — whether its own factory previously raised, or it is still being built
+  right now on another thread (the inherited `KeyedLockManager` lock ordering,
+  which is what forecloses an A-builds-B/B-builds-A cycle). Note the in-flight
+  case raises rather than waiting for the other thread's build to finish. Nesting
+  into a key that is brand new, or one that is already built, is always fine:
+  the first is assigned a higher order, and the second returns on the unlocked
+  fast path without touching its lock. For that remaining narrow case, whether a
+  nesting is permitted depends on first-sight order, so it can be accepted in
+  one process and refused in another — build keyed values from independent
+  factories, not from each other.
+- Neither values nor per-key locks are ever evicted, so memory grows with the
+  number of distinct keys ever seen — the same accepted tradeoff as
+  `KeyedLockManager`, and the same one the never-evicted caches this is meant to
+  hold already make. A registry that needs eviction wants a bounded/LRU
+  structure, not this.
+- Reach for `KeyedLockManager` instead when you want to hold a key's lock across
+  *your own* critical section, or lock several keys at once; reach for this when
+  you want keyed state built once and handed back.

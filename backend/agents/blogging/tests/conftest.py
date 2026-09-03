@@ -287,6 +287,23 @@ _BLOG_JOB_HELPERS = (
 
 
 @pytest.fixture(autouse=True)
+def default_web_search_configured(monkeypatch) -> None:
+    """Default ``OLLAMA_API_KEY`` to set for every test in this package.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - ``OLLAMA_API_KEY`` is set to a dummy value so pipeline entry points that
+          call ``is_web_search_configured()`` (see ``api/routers/pipeline.py``)
+          take their configured-happy-path branch by default; monkeypatch restores
+          the prior environment on teardown. A test exercising the unconfigured
+          path (e.g. ``test_web_search_missing_api_key``) overrides this with its
+          own ``monkeypatch.delenv("OLLAMA_API_KEY", ...)`` call.
+    """
+    monkeypatch.setenv("OLLAMA_API_KEY", "test-ollama-key")
+
+
+@pytest.fixture(autouse=True)
 def patched_blog_client(monkeypatch, fake_job_client) -> Any:
     """Back ``shared.blog_job_store`` with the in-memory fake for every test in this package.
 

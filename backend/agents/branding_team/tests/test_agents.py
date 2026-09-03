@@ -65,7 +65,7 @@ from branding_team.models import (
     IconographyOutput,
     OwnershipOutput,
 )
-from branding_team.prompt_spec import AgentPromptSpec
+from branding_team.prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 from branding_team.tests.conftest import make_mission
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
@@ -683,6 +683,117 @@ def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
             f"got {ast.unparse(system_prompt)}"
         )
     assert build_agent_calls > 0
+
+
+def test_build_spec_agent_rejects_fields_based_prompt() -> None:
+    """``_build_spec_agent`` requires a structured_output-based prompt spec.
+
+    Preconditions:
+        None (test only).
+    Postconditions:
+        Calling ``_build_spec_agent`` with a ``fields=``-based
+        ``AgentPromptSpec`` (``structured_output is None``) raises
+        ``AssertionError``.
+    """
+    fields_prompt = AgentPromptSpec(
+        opening="You are a Test Agent.",
+        fields=(PromptFieldSpec("thing", "a thing"),),
+    )
+    with pytest.raises(AssertionError, match="requires prompt.structured_output"):
+        branding_agents._build_spec_agent(
+            name="test_agent",
+            description="test",
+            prompt=fields_prompt,
+            agent_key="branding",
+        )
+
+
+def test_build_spec_agent_builds_agent_from_structured_output_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_build_spec_agent`` builds an Agent from a structured_output-based prompt spec.
+
+    Preconditions:
+        None (test only).
+    Postconditions:
+        The returned ``Agent`` carries the given ``name`` and renders
+        ``system_prompt`` from ``prompt`` via ``render_agent_prompt``. The
+        underlying ``build_agent`` call receives ``prompt.structured_output``,
+        ``description``, and ``agent_key`` unchanged (``agent_key`` and the
+        bound structured-output model aren't exposed back on the ``Agent``
+        instance, so this spies on ``build_agent`` to pin the full contract).
+    """
+    spec_prompt = AgentPromptSpec(
+        opening="You are a Test Agent.",
+        structured_output=BrandDiscoveryAudit,
+    )
+    captured: dict[str, object] = {}
+    real_build_agent = branding_agents.build_agent
+
+    def spy_build_agent(**kwargs: object) -> Agent:
+        captured.update(kwargs)
+        return real_build_agent(**kwargs)
+
+    monkeypatch.setattr(branding_agents, "build_agent", spy_build_agent)
+    agent = branding_agents._build_spec_agent(
+        name="test_agent",
+        description="test description",
+        prompt=spec_prompt,
+        agent_key="branding",
+    )
+    assert agent.name == "test_agent"
+    assert agent.system_prompt == render_agent_prompt(spec_prompt)
+    assert captured["structured_output"] is BrandDiscoveryAudit
+    assert captured["description"] == "test description"
+    assert captured["agent_key"] == "branding"
+
+
+# Schema-derived factories migrated to ``_build_spec_agent`` so far: Phase 1
+# (Strategic Core, all six) plus Phase 2's one schema-derived factory
+# (Storyteller — the other five Phase 2 specialists are hand-written
+# ``fields=``-based and out of scope for this migration). Stories 4-6 of the
+# epic extend this tuple as later phases migrate, rather than adding a new
+# AST-walking test each time.
+_BUILD_SPEC_AGENT_FACTORY_NAMES: tuple[str, ...] = (
+    "make_discovery_auditor",
+    "make_purpose_vision_writer",
+    "make_values_articulator",
+    "make_audience_segmenter",
+    "make_differentiation_mapper",
+    "make_positioning_synthesizer",
+    "make_storyteller",
+)
+
+
+def test_factories_build_via_build_spec_agent() -> None:
+    """Migrated factories call ``_build_spec_agent``, never hand-rolled ``build_agent``.
+
+    Preconditions:
+        ``branding_team.agents.__file__`` points at a readable Python source
+        file defining every name in ``_BUILD_SPEC_AGENT_FACTORY_NAMES`` as a
+        module-level function.
+    Postconditions:
+        Each named function's body contains at least one ``_build_spec_agent``
+        call and no ``build_agent`` call. Guards against a future edit
+        quietly reverting a migrated factory back onto the hand-rolled
+        ``build_agent(..., structured_output=X, ...)`` path, which the
+        existing prompt/schema/agent_key tests would not catch since they
+        assert on observable behavior, not call shape.
+    """
+    source_path = Path(branding_agents.__file__).resolve()
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    factory_defs = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name in _BUILD_SPEC_AGENT_FACTORY_NAMES
+    }
+    assert set(factory_defs) == set(_BUILD_SPEC_AGENT_FACTORY_NAMES)
+    for name, func_node in factory_defs.items():
+        called_names = {
+            _call_func_name(call.func) for call in ast.walk(func_node) if isinstance(call, ast.Call)
+        }
+        assert "_build_spec_agent" in called_names, f"{name} should call _build_spec_agent"
+        assert "build_agent" not in called_names, f"{name} should not call build_agent directly"
 
 
 # ---------------------------------------------------------------------------

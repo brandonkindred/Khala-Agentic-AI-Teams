@@ -646,8 +646,8 @@ Per-agent config travels in the manifest `CognitionSpec` block (`agent_platform/
 
 The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`. In-process platform code lives beside those teams, not inside them:
 
-- **Platform** — `backend/agents/agent_platform/` (registry, console, sandbox, Studio). Shared cognitive substrate is `backend/agents/agent_cognition/`. Cross-cutting infra is `backend/shared/` (`shared.postgres`, `shared.temporal`, `shared.agent_invoke`).
-- **Infra (not platform)** — Docker/environment provisioning stays in `backend/agents/agent_team_studio/agent_provisioning_team/`.
+- **Platform** — `backend/agents/agent_platform/` (registry, console, sandbox, Studio). The Agent Studio Runner sandbox (`sandbox/`) provisions its own per-agent ephemeral Docker Compose stack — Postgres/Temporal/Prometheus/Grafana — keyed and warm-reused by `agent_id` until idle reaping or explicit teardown. Shared cognitive substrate is `backend/agents/agent_cognition/`. Cross-cutting infra is `backend/shared/` (`shared.postgres`, `shared.temporal`, `shared.agent_invoke`).
+- **Infra (not platform)** — agent-environment provisioning tool agents (e.g. `docker_provisioner.py`, `postgres_provisioner.py`), used by the agentic-team provisioning flow, live in `backend/agents/agent_team_studio/agent_provisioning_team/`.
 - **Domain apps** — `backend/agents/agent_team_studio/agentic_team_provisioning/` and `backend/agents/agent_team_studio/user_agent_founder/` consume the platform; they are not members of it.
 
 ```mermaid

@@ -6,6 +6,7 @@ import {
 import { AgentConsoleApiService } from './agent-console-api.service';
 import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
 import { environment } from '../../environments/environment';
+import { DiffRequest } from '../models/agent-history.model';
 
 describe('AgentConsoleApiService', () => {
   let service: AgentConsoleApiService;
@@ -212,9 +213,14 @@ describe('AgentConsoleApiService', () => {
   // ----------------------------------------------------------
 
   it('posts diff', () => {
-    service.diff({ left: { a: 1 }, right: { a: 2 } } as never).subscribe();
+    const body: DiffRequest = {
+      left: { kind: 'inline', data: { a: 1 } },
+      right: { kind: 'inline', data: { a: 2 } },
+    };
+    service.diff(body).subscribe();
     const req = httpMock.expectOne(`${baseUrl}/diff`);
     expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual(body);
     req.flush({});
   });
 });

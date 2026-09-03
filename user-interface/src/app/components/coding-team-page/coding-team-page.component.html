@@ -63,10 +63,7 @@
 <!-- ────────────────────────────────────────────────────────────────── -->
 @if (activeView === 'github') {
   @if (isLoadingConfig) {
-    <div class="github-section github-section--loading">
-      <mat-spinner diameter="24"></mat-spinner>
-      <span>Checking GitHub integration…</span>
-    </div>
+    <app-loading-spinner [diameter]="24" message="Checking GitHub integration…" />
   } @else if (!githubConfigured) {
     <div class="github-section github-section--unconfigured">
       <mat-icon aria-hidden="true">info</mat-icon>
@@ -99,10 +96,7 @@
       }
 
       @if (loadingRepos) {
-        <div class="github-section--loading">
-          <mat-spinner diameter="24"></mat-spinner>
-          <span>Loading repositories…</span>
-        </div>
+        <app-loading-spinner [diameter]="24" message="Loading repositories…" />
       }
 
       @if (reposLoaded) {
@@ -197,10 +191,7 @@
                     </p>
                   }
                   @if (loadingIssues) {
-                    <div class="github-section--loading">
-                      <mat-spinner diameter="20"></mat-spinner>
-                      <span>Loading issues…</span>
-                    </div>
+                    <app-loading-spinner [diameter]="20" message="Loading issues…" />
                   }
                   @if (issuesLoaded) {
                     @if (issues.length === 0) {
@@ -320,7 +311,7 @@
                                   [disabled]="runningIssue"
                                 >
                                   @if (runningIssue) {
-                                    <mat-spinner diameter="18"></mat-spinner>
+                                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
                                     Starting…
                                   } @else {
                                     <ng-container>
@@ -481,11 +472,14 @@
         <mat-icon aria-hidden="true">engineering</mat-icon>
         Runs
       </h2>
-      <mat-icon
+      <button
+        type="button"
         class="jobs-panel__legend"
         matTooltip="Runs stay here while they work and after they finish. Pick a run to expand its live progress."
         aria-label="About the Runs list"
-      >help_outline</mat-icon>
+      >
+        <mat-icon aria-hidden="true">help_outline</mat-icon>
+      </button>
     </div>
 
     @if (runsError) {
@@ -618,7 +612,13 @@
                 <span class="github-job-panel__label">Tasks</span>
                 <div class="github-job-tasks__list">
                   @for (task of jobStatus.task_graph_snapshot; track task.id) {
-                    <div class="github-task-chip github-task-chip--{{ task.status }}" [matTooltip]="task.title">
+                    <div
+                      class="github-task-chip github-task-chip--{{ task.status }}"
+                      tabindex="0"
+                      role="img"
+                      [attr.aria-label]="task.title + ' — ' + task.status"
+                      [matTooltip]="task.title"
+                    >
                       {{ task.title | slice:0:40 }}
                       <span class="github-task-chip__status">{{ task.status }}</span>
                     </div>
@@ -656,7 +656,7 @@
                   aria-label="Resume the coding-team run"
                 >
                   @if (resumingJob) {
-                    <mat-spinner diameter="18"></mat-spinner>
+                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
                     Resuming…
                   } @else {
                     <ng-container>
@@ -713,7 +713,7 @@
               <div class="run-detail__retry">
                 <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
                   @if (runningIssue) {
-                    <mat-spinner diameter="18"></mat-spinner>
+                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
                     Starting…
                   } @else {
                     <ng-container>
@@ -734,10 +734,7 @@
           <app-inline-banner variant="error" [message]="jobStatusError" />
         </div>
       } @else {
-        <div class="run-detail run-detail--pending">
-          <mat-spinner diameter="18"></mat-spinner>
-          <span>Starting…</span>
-        </div>
+        <app-loading-spinner [diameter]="18" message="Starting…" />
       }
     </ng-template>
   </section>

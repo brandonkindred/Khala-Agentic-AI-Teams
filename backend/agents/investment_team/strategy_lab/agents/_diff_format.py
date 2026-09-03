@@ -1,17 +1,20 @@
-"""Compact code/spec-diff formatting for round-over-round strategy refinement.
+"""Compact code-diff formatting for round-over-round strategy refinement.
 
 Lets ``refinement.py`` (see ``RefinementAgent.run``) resend only the delta
 between refinement rounds instead of the full strategy code every round,
 falling back to the full text on the first round or a near-total rewrite.
-``diff_spec_or_full`` provides the analogous fallback-to-full-text behavior
-for the design-review spec JSON (dict-shaped) rather than code (string-shaped).
+
+There is no dict/spec analogue here on purpose: ``DesignAgent.revise()``
+always sends the full spec JSON rather than diffing it, since (unlike the
+code diffed here) the spec is the authoritative object the model must fully
+reconstruct with no downstream cross-check against the true prior spec. See
+``design.py``'s ``_render_spec_section`` and
+``SPEC_RECONSTRUCTION_FIDELITY.md`` for the full rationale.
 """
 
 from __future__ import annotations
 
 import difflib
-import json
-from typing import Any
 
 
 def diff_or_full(previous_code: str | None, current_code: str) -> str:
@@ -22,11 +25,23 @@ def diff_or_full(previous_code: str | None, current_code: str) -> str:
     exists) or a string (the previous round's strategy code).
 
     Postconditions: returns a unified-diff-style string (``difflib.unified_diff``,
-    no timestamps) when ``previous_code`` is not ``None`` and that diff is
-    strictly shorter, in characters, than ``current_code`` itself. Otherwise
-    returns ``current_code`` unchanged — this covers both the no-previous-round
-    case and a near-total-rewrite whose diff would be as large as or larger
-    than just resending the full text. Never mutates either input.
+    no timestamps) when ``previous_code`` is not ``None``, that diff is
+    non-empty, and it is strictly shorter, in characters, than ``current_code``
+    itself. Otherwise returns ``current_code`` unchanged — this covers the
+    no-previous-round case, a near-total-rewrite whose diff would be as large as
+    or larger than just resending the full text, and the no-op case below.
+    Never mutates either input.
+
+    An *empty* diff (``previous_code == current_code``, so ``unified_diff``
+    yields nothing) is deliberately excluded from the "diff is shorter" branch
+    even though ``len("") < len(current_code)`` holds for any non-empty code.
+    Returning it would render the caller's diff section as an explanatory
+    preamble wrapping an empty fence — carrying no code at all — and because
+    that section is far shorter than the full text, the caller's own
+    shorter-section-wins comparison (``RefinementAgent.run``) would then
+    *select* it, sending the model "reconstruct the current file from context"
+    with nothing to reconstruct from. Falling back to the full text keeps a
+    no-op round byte-identical to a first round.
     """
     if previous_code is None:
         return current_code
@@ -41,171 +56,10 @@ def diff_or_full(previous_code: str | None, current_code: str) -> str:
         )
     )
 
-    if len(diff) < len(current_code):
+    if diff and len(diff) < len(current_code):
         return diff
 
     return current_code
 
 
-def _leaf_lines(kind: str, path: str, value: Any) -> list[str]:
-    """Render ``kind`` (``"added"`` or ``"removed"``) lines for ``value`` at ``path``.
-
-    Preconditions: ``kind`` is ``"added"`` or ``"removed"``; ``path`` is the
-    dotted key-path of ``value``.
-
-    Postconditions: returns one line per leaf value reachable from ``value``
-    — recursing into nested dicts so every leaf's own value is included in
-    the output — rather than a single line naming only the top-level key.
-    A non-dict ``value`` yields exactly one line carrying its value. An empty
-    dict yields exactly one line of the form ``"{kind}: {path}: {}"`` (it has
-    no leaf values to enumerate). Never mutates ``value``.
-    """
-    if isinstance(value, dict):
-        if not value:
-            return [f"{kind}: {path}: {{}}"]
-        lines: list[str] = []
-        for sub_key in sorted(value):
-            lines.extend(_leaf_lines(kind, f"{path}.{sub_key}", value[sub_key]))
-        return lines
-
-    return [f"{kind}: {path}: {value!r}"]
-
-
-def _values_differ(prev_value: Any, curr_value: Any) -> bool:
-    """Report whether two JSON values differ, honoring JSON type distinctions at every level.
-
-    Preconditions: ``prev_value`` and ``curr_value`` are JSON-serializable
-    values (not both dicts at the top level — dicts are recursed into by
-    :func:`_walk_dict_diff`, keeping key-level paths, before reaching this
-    check; a dict nested inside a list is compared here instead, since a
-    list element has no dotted-path key of its own).
-
-    Postconditions: returns ``True`` whenever the values would serialize to
-    different JSON representations, at any depth. Plain ``!=`` treats
-    ``True == 1``, ``1 == 1.0``, and ``-0.0 == 0.0`` as equal — including
-    when they appear as list elements, since list equality delegates
-    elementwise to ``==`` — which would silently hide a JSON-representation
-    change. This instead compares types at every level: mismatched
-    top-level types differ immediately; matching lists are compared
-    elementwise (differing lengths differ, then each pair is compared
-    recursively via this same function); matching dicts are compared
-    key-by-key (differing key sets differ, then each shared key's value is
-    compared recursively); any other matching type is compared by its
-    canonical JSON encoding (``json.dumps``) rather than ``!=``, so a signed-
-    zero change (``-0.0`` vs ``0.0``) is caught even though ``==`` would
-    call them equal. Never mutates either input.
-    """
-    if type(prev_value) is not type(curr_value):
-        return True
-    if isinstance(prev_value, list):
-        if len(prev_value) != len(curr_value):
-            return True
-        return any(
-            _values_differ(prev_item, curr_item)
-            for prev_item, curr_item in zip(prev_value, curr_value)
-        )
-    if isinstance(prev_value, dict):
-        if set(prev_value) != set(curr_value):
-            return True
-        return any(_values_differ(prev_value[key], curr_value[key]) for key in prev_value)
-    return json.dumps(prev_value) != json.dumps(curr_value)
-
-
-def _walk_dict_diff(previous: dict[str, Any], current: dict[str, Any], path: str) -> list[str]:
-    """Recursively collect ``added``/``removed``/``changed`` lines for two dicts.
-
-    Preconditions: ``previous`` and ``current`` are dicts; ``path`` is the
-    dotted key-path prefix accumulated from enclosing dict levels (``""`` at
-    the top level). No key anywhere in ``previous`` or ``current`` (at any
-    nesting level) contains a ``.`` or a newline — the rendered path joins
-    keys with ``.`` and lines are newline-separated, so a key containing
-    either would collide with that encoding and could make two distinct
-    diffs render identically. This holds for this module's actual caller,
-    :func:`diff_spec_or_full`, whose dicts come from a Pydantic model's
-    ``model_dump()`` and so have Python-identifier keys; a caller passing
-    dicts with keys of unconstrained shape violates this precondition.
-
-    Postconditions: returns a list of human-readable lines, one per leaf-level
-    difference, each prefixed with ``added:``, ``removed:``, or ``changed:``,
-    the dotted path to the differing key, and (for ``added``/``removed``, via
-    :func:`_leaf_lines`, and for ``changed``) the differing value(s) — so the
-    result carries enough information to reconstruct the changed leaves
-    without needing the full JSON. A nested dict present under the same key
-    on both sides is recursed into rather than reported as a single
-    ``changed`` line, so only genuine leaf differences are listed — *unless*
-    one side of that shared key is ``{}`` and the other is not, in which case
-    recursing would emit the same per-leaf ``added:``/``removed:`` lines as
-    the key being wholly absent from that side (there is no dotted-path leaf
-    to name the empty container itself), losing whether the key still exists
-    as ``{}`` or is gone entirely; that case is reported instead as one
-    ``changed: {key_path}: {} -> ...`` (or ``... -> {}``) line, distinct from
-    both the recursed leaf lines and from :func:`_leaf_lines`'s
-    ``added:``/``removed:`` output for a wholly absent key. Returns an empty
-    list when ``previous == current``. Never mutates either input.
-    """
-    lines: list[str] = []
-    all_keys = sorted(set(previous) | set(current))
-
-    for key in all_keys:
-        key_path = f"{path}.{key}" if path else key
-
-        if key not in previous:
-            lines.extend(_leaf_lines("added", key_path, current[key]))
-            continue
-        if key not in current:
-            lines.extend(_leaf_lines("removed", key_path, previous[key]))
-            continue
-
-        prev_value = previous[key]
-        curr_value = current[key]
-        if isinstance(prev_value, dict) and isinstance(curr_value, dict):
-            if not prev_value and not curr_value:
-                continue
-            if not curr_value:
-                lines.append(f"changed: {key_path}: {prev_value!r} -> {{}}")
-            elif not prev_value:
-                lines.append(f"changed: {key_path}: {{}} -> {curr_value!r}")
-            else:
-                lines.extend(_walk_dict_diff(prev_value, curr_value, key_path))
-        elif _values_differ(prev_value, curr_value):
-            lines.append(f"changed: {key_path}: {prev_value!r} -> {curr_value!r}")
-
-    return lines
-
-
-def diff_spec_or_full(previous_spec: dict[str, Any] | None, current_spec: dict[str, Any]) -> str:
-    """Render a compact added/removed/changed-keys diff between two spec dicts, or the full JSON.
-
-    Preconditions: ``current_spec`` is a JSON-serializable dict (the current
-    round's strategy spec); ``previous_spec`` is either ``None`` (no prior
-    round exists) or a JSON-serializable dict (the previous round's spec).
-    No key anywhere in either dict, at any nesting level, contains a ``.``
-    or a newline (see :func:`_walk_dict_diff`) — true for a Pydantic
-    ``model_dump()``, the expected source of both dicts, whose keys are
-    Python identifiers.
-
-    Postconditions: returns a structural diff string (one ``added:``/
-    ``removed:``/``changed:`` line per differing key, recursing into nested
-    dicts, dotted-path keys for nesting) when ``previous_spec`` is not
-    ``None`` and that diff is strictly shorter, in characters, than
-    ``current_spec`` rendered as pretty-printed JSON. Otherwise returns
-    ``current_spec`` rendered as pretty-printed JSON
-    (``json.dumps(current_spec, indent=2, sort_keys=True)``) unchanged —
-    this covers both the no-previous-round case and a near-total-rewrite
-    whose diff would be as large as or larger than just resending the full
-    JSON. Never mutates either input.
-    """
-    full_json = json.dumps(current_spec, indent=2, sort_keys=True)
-
-    if previous_spec is None:
-        return full_json
-
-    diff = "\n".join(_walk_dict_diff(previous_spec, current_spec, ""))
-
-    if len(diff) < len(full_json):
-        return diff
-
-    return full_json
-
-
-__all__ = ["diff_or_full", "diff_spec_or_full"]
+__all__ = ["diff_or_full"]

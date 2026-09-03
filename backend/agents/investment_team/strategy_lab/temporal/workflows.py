@@ -317,12 +317,21 @@ class StrategyLabCycleWorkflow:
         publishing simply disabled).
     Postconditions:
         Returns ``{"record": StrategyLabRecord dump, "convergence_tracker_state":
-        <updated dto wire dict>}`` on a terminal record, mirroring ``run_cycle``'s
-        return plus the batch-level tracker state the parent batch workflow
-        merges, or ``{"kind": "skipped", "convergence_tracker_state": ...}``
-        when the attempt activity reported no market data available (no
-        ``"record"`` key in that case — the parent workflow branches on
-        ``result.get("kind") == "skipped"``).
+        <updated dto wire dict>, "resume_stage_determinations": [...]}`` on a
+        terminal record, mirroring ``run_cycle``'s return plus the batch-level
+        tracker state the parent batch workflow merges, or ``{"kind":
+        "skipped", "convergence_tracker_state": ...,
+        "resume_stage_determinations": [...]}`` when the attempt activity
+        reported no market data available (no ``"record"`` key in that case —
+        the parent workflow branches on ``result.get("kind") == "skipped"``).
+
+        ``resume_stage_determinations`` is present on EVERY terminal return:
+        a list with one entry per completed re-entry, in order, each the
+        ``PipelineStage`` value that re-entry's attempt could have resumed
+        from (per ``determine_resume_stage``) or ``None`` when no usable
+        checkpoint was captured. It is ``[]`` on a cycle that never re-entered.
+        Surfaced for Temporal/thread-mode parity assertions; the parent batch
+        workflow does not read it.
     Invariants:
         Exactly one ``run_design_attempt_activity`` call happens per design
         attempt; the LLM-call budget, gate-result accumulation, and tracker
@@ -362,6 +371,26 @@ class StrategyLabCycleWorkflow:
         # than sending a malformed event, so this is safe to leave None.
         cycle_index = cycle_input.get("cycle_index")
         generation = int(cycle_input.get("generation", _DEFAULT_FENCING_GENERATION))
+        # This cycle's own opaque per-cycle correlation id, matching the value
+        # ``run_design_attempt_activity`` stamps onto every checkpoint it
+        # captures (``activities._infer_cycle_scope_from_activity_context``
+        # returns the activity's ``workflow_id``, which for an activity
+        # dispatched from here IS this workflow's id). Resolved once, up
+        # front, so the re-entry block below can filter checkpoints by an
+        # identity it knows independently -- the same discipline thread mode
+        # follows with its own ``checkpoint_scope``. ``workflow.info()`` is
+        # deterministic and replay-safe, but raises outside a live Temporal
+        # runtime, which the mocked-``execute_activity`` unit-test harness for
+        # this workflow doesn't provide; the fallback reconstructs the id the
+        # parent batch workflow starts this child under
+        # (``f"{run_id}-c{cycle_index}"``, the sole start site). A replayed
+        # pre-``cycle_index`` input outside a runtime yields a scope matching
+        # no checkpoint, which fails open to "no usable checkpoint" (one
+        # unnecessary re-run of a converged phase, never a wrong resume).
+        try:
+            cycle_scope = workflow.info().workflow_id
+        except Exception:  # noqa: BLE001 -- no live runtime; see above
+            cycle_scope = f"{run_id}-c{cycle_index}"
         # Per-batch cache key threaded from the parent batch workflow; forwarded
         # verbatim to run_design_attempt_activity so the worker can resolve the
         # one shared BatchIndicatorCache for this batch (when the flag is on).
@@ -497,6 +526,7 @@ class StrategyLabCycleWorkflow:
                 return {
                     "kind": "skipped",
                     "convergence_tracker_state": tracker_state,
+                    "resume_stage_determinations": resume_stage_determinations,
                 }
 
             # ``reentry``: the attempt raised SpecImplementabilityError.
@@ -511,17 +541,7 @@ class StrategyLabCycleWorkflow:
             # ``find_latest_checkpoint_for_attempt``/``determine_resume_stage``
             # are pure functions (no I/O, no wall-clock/env reads) -- safe to
             # call directly in workflow code, exactly like
-            # ``gather_convergence_directives`` above. ``cycle_scope`` is read
-            # off the checkpoints themselves (every checkpoint in this list was
-            # captured by -- and so already carries the identity of -- the one
-            # activity invocation that just produced ``outcome``) rather than
-            # via ``workflow.info().workflow_id``: that call requires a live
-            # Temporal workflow runtime and raises outside one, which the
-            # mocked-``execute_activity`` unit-test harness for this workflow
-            # doesn't provide. When ``attempt_checkpoints`` is empty the
-            # placeholder value is never consulted -- there is nothing to
-            # filter, so ``find_latest_checkpoint_for_attempt`` returns
-            # ``None`` regardless of what's passed for ``cycle_scope``.
+            # ``gather_convergence_directives`` above.
             #
             # Imported here, not at module top: ``checkpoints.py`` imports
             # ``investment_team.models``, whose transitive graph
@@ -539,13 +559,33 @@ class StrategyLabCycleWorkflow:
                 resolve_cross_attempt_resume,
             )
 
-            attempt_checkpoints = [
-                parse_checkpoint(raw) for raw in outcome.get("pipeline_checkpoints", [])
-            ]
+            # Fail OPEN on an undeserializable checkpoint, matching
+            # ``load_design_attempt_checkpoint``'s documented read-side
+            # contract and thread mode's own "discard an unusable checkpoint"
+            # branch. The checkpoint models are ``extra="forbid"``, so a
+            # payload minted by a differently-shaped worker (a schema change
+            # deployed mid-batch, or an older payload replayed out of
+            # history) makes ``parse_checkpoint`` raise -- and an exception
+            # escaping here fails the *workflow task*, which Temporal then
+            # retries forever, wedging this cycle and stalling its parent
+            # batch. That is a catastrophic outcome for a value that is
+            # purely observational: the parsed checkpoints only feed
+            # ``resume_stage_determinations`` and an optimization (skipping
+            # already-converged Phase 1 work), so the worst case of dropping
+            # one is a full re-run of a phase, never a correctness violation.
+            # Skipping the individual bad payload rather than the whole list
+            # keeps a partially-upgraded batch resuming off the checkpoints
+            # this worker *can* read.
+            attempt_checkpoints = []
+            for raw in outcome.get("pipeline_checkpoints", []):
+                try:
+                    attempt_checkpoints.append(parse_checkpoint(raw))
+                except Exception:  # noqa: BLE001 -- fail open, see above
+                    continue
             resume_checkpoint = find_latest_checkpoint_for_attempt(
                 attempt_checkpoints,
                 run_id=run_id,
-                cycle_scope=attempt_checkpoints[0].cycle_scope if attempt_checkpoints else "",
+                cycle_scope=cycle_scope,
                 design_attempt=design_attempt,
                 generation=generation,
             )

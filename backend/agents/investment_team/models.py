@@ -354,15 +354,19 @@ class StrategySpec(BaseModel):
     # Defaults to 1 so every existing spec/caller that omits this field keeps
     # today's implicit one-position-per-symbol behavior exactly — this is a
     # hard backward-compatibility requirement, not just a convenience default.
-    # This field is purely declarative for now: nothing reads it yet, so its
-    # value has no effect on current runtime behavior. The runtime's actual
-    # (and only) concurrency gate today is ``risk_limits.max_open_positions``
-    # (default 10, RiskFilter.can_enter) — this field does NOT derive from or
-    # reconcile with that default; doing so would silently change the
-    # effective default for every spec that omits both fields. Reconciling
-    # the two into a single source of truth is deferred to the follow-up
-    # readiness/sizing validation step, which is where the field gets an
-    # actual consumer.
+    # This field is purely declarative: no runtime code reads it —
+    # ``run_backtest`` never passes the ``StrategySpec`` object into
+    # ``TradingService``, so this value has no effect on backtest or live
+    # execution. spec_readiness's sizing-realizability check (Rule 5) does
+    # NOT use this field either, for the same reason: sizing against a
+    # declared-but-unenforced bound risks a false pass on a spec that omits
+    # it (default 1) yet runs on a multi-symbol universe. Instead Rule 5
+    # derives worst-case concurrency from what the engine actually enforces
+    # today — at most one open position per symbol (the entry dispatcher
+    # never pyramids) capped by ``risk_limits.max_open_positions`` — i.e.
+    # ``min(len(target_symbols_or_default_universe), risk_limits.
+    # max_open_positions)``. Wiring this field into the runtime (and then
+    # into Rule 5's worst-case math) is left to follow-up work.
     max_concurrent_positions: int = Field(
         default=1,
         ge=1,
@@ -371,11 +375,11 @@ class StrategySpec(BaseModel):
             "Maximum number of positions this spec may hold open "
             "concurrently across target_symbols. Defaults to 1, preserving "
             "today's implicit one-position-per-symbol behavior for any spec "
-            "that omits it. Not yet consumed by any readiness check or the "
-            "trading engine — today's actual runtime concurrency gate is "
-            "``risk_limits.max_open_positions`` (default 10, via "
-            "``RiskFilter.can_enter``); reconciling the two is deferred to "
-            "follow-up work."
+            "that omits it. Purely declarative: no runtime code reads it, "
+            "and spec_readiness's sizing-realizability check sizes against "
+            "the engine's actual enforced concurrency (one position per "
+            "symbol, capped by risk_limits.max_open_positions) rather than "
+            "this field."
         ),
     )
     # Phase 3: risk_limits is validated at spec construction time.  Dicts
@@ -790,6 +794,10 @@ OrderLifecycleEventType = Literal[
     # max_position_pct). Recorded so a zero-trade run is explainable rather than a
     # silent no-emit; carries no order (it never reached the order book).
     "risk_capped_skip",
+    # An entry-signal evaluation skipped because the symbol already has an open
+    # position. Recorded so a zero/sparse-trade run is explainable as
+    # concurrency-limited rather than a dead entry predicate; carries no order.
+    "already_in_position_skip",
     # A stop-limit order that triggered (stop level crossed) but gapped through
     # its limit price, so it could not fill this bar and stays resting with the
     # position open — the intended, defining risk of a stop-limit order.
@@ -869,6 +877,10 @@ class BacktestExecutionDiagnostics(BaseModel):
     # max_position_pct). Drives the ``ALL_ENTRIES_RISK_CAPPED`` zero-trade category
     # so a run suppressed by risk sizing is not mis-triaged as a dead entry predicate.
     risk_capped_entries: int = Field(default=0, ge=0)
+    # Entry-signal evaluations skipped because the symbol already had an open
+    # position. Distinguishes a concurrency-limited zero/sparse-trade run from
+    # one where the entry predicate simply never matched.
+    already_in_position_skips: int = Field(default=0, ge=0)
     entries_filled: int = Field(default=0, ge=0)
     exits_emitted: int = Field(default=0, ge=0)
     closed_trades: int = Field(default=0, ge=0)

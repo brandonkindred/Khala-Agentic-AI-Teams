@@ -145,12 +145,22 @@ These are the gates run by the default v2 execution path (`codegen_team`, for bo
 Build verification (lint + build) is a single CI-owned gate that runs once, before
 Code Review; the Code Review phase itself does not re-run lint or build checks.
 
-There is no separate DbC gate inside this per-microtask loop; `DbcCommentsAgent` has no production caller anywhere in the pipeline today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
+There is no separate DbC gate inside this per-microtask loop; instead, `DbcCommentsAgent` runs as a self-review step immediately before Documentation (`_run_dbc_self_review` in `shared/phases/dbc_phase.py`), wired via both stacks' `GATE_CONFIG.run_dbc_self_review` and gated by `enable_dbc_comments` (default `True`), so it runs on every V2 backend/frontend microtask today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
 
 Data and control-flow dependencies among the build/code-review/security/QA
 gates specifically, and which of them are safe to parallelize vs. require a
 redesign, are mapped in
-[`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md).
+[`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md). The finding
+shapes those gates emit — fields, severity vocabularies, defect categories,
+and which findings carry a file path and line number — are catalogued in
+[`docs/GATE_FINDING_INVENTORY.md`](docs/GATE_FINDING_INVENTORY.md). The
+golden-set evaluation harness's corpus case format and closed
+finding-label vocabulary, built on that inventory, are specified in
+[`docs/CORPUS_CASE_FORMAT.md`](docs/CORPUS_CASE_FORMAT.md). The rule for
+deciding when a gate's finding counts as matching one of those labels —
+location resolution, defect-class resolution, line tolerance, and
+deterministic tie-breaking — is specified in
+[`docs/GATE_FINDING_MATCHING_RULE.md`](docs/GATE_FINDING_MATCHING_RULE.md).
 
 ## Plan folder
 

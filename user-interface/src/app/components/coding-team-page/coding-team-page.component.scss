@@ -53,8 +53,8 @@
 .github-section {
   margin: 0;
 
-  // Inline status banners shown when GitHub is loading/unconfigured — not cards.
-  &--loading,
+  // Inline status banner shown when GitHub is unconfigured — not a card. (The loading
+  // state uses the shared `app-loading-spinner`, which brings its own layout.)
   &--unconfigured {
     display: flex;
     align-items: center;
@@ -386,11 +386,24 @@
   }
 
   &__legend {
-    color: var(--kh-text-tertiary);
-    cursor: help;
-    font-size: 1.1rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: 1.1rem;
     height: 1.1rem;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    background: none;
+    color: var(--kh-text-tertiary);
+    cursor: help;
+    line-height: 0;
+
+    mat-icon {
+      font-size: 1.1rem;
+      width: 1.1rem;
+      height: 1.1rem;
+    }
   }
 
   &__empty {
@@ -495,14 +508,6 @@
   border-radius: var(--kh-radius-md);
   background: var(--kh-surface-1);
   box-shadow: inset 3px 0 0 var(--kh-accent);
-
-  &--pending {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: var(--kh-text-tertiary);
-    box-shadow: none;
-  }
 
   &__header {
     display: flex;

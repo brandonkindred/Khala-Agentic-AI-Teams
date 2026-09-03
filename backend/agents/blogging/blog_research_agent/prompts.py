@@ -75,6 +75,30 @@ Return JSON with keys:
 Do not include the full original text in the response."""
 
 
+# Composes DOC_RELEVANCE_SCORING_PROMPT and DOC_SUMMARIZATION_PROMPT by
+# reference (not copy) so the merged prompt cannot drift from either source.
+DOC_SCORE_AND_SUMMARIZE_PROMPT = (
+    "You are an expert assistant that both scores and summarizes a single "
+    "web document for a research brief, in one pass.\n\n"
+    "Perform both of the following tasks against the same brief and document.\n\n"
+    "## Scoring\n\n"
+    + DOC_RELEVANCE_SCORING_PROMPT
+    + "\n\n## Summarization\n\n"
+    + DOC_SUMMARIZATION_PROMPT
+    + "\n\n## Response shape\n\n"
+    + (
+        "Return a single JSON object only (no markdown, no code fence) that "
+        "carries all six keys from both tasks above:\n"
+        "- relevance_score: float between 0 and 1\n"
+        "- authority_score: float between 0 and 1\n"
+        "- accuracy_score: float between 0 and 1\n"
+        "- type: string\n"
+        "- summary: string\n"
+        "- key_points: list of strings"
+    )
+)
+
+
 FINAL_SYNTHESIS_PROMPT = """You are an expert senior research analyst.
 
 You will receive:
