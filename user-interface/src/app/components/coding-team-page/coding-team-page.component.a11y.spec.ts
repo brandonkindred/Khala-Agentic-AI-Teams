@@ -1,10 +1,12 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { Subject, of } from 'rxjs';
 import type { CodingTeamJobListItem } from '../../models/coding-team.model';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { provideRouter } from '@angular/router';
+import { MatTooltip } from '@angular/material/tooltip';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
@@ -198,6 +200,26 @@ describe('CodingTeamPageComponent a11y', () => {
     showView('pulls');
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelectorAll('.pull-row').length).toBe(1);
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('exposes the composed repo description and issue-count tooltip on the row button, with no nested tab stops', async () => {
+    await setup();
+    showView('github');
+    const el: HTMLElement = fixture.nativeElement;
+    const row = el.querySelector('.github-repo-row') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(row.tagName).toBe('BUTTON');
+
+    const rowDebugEl = fixture.debugElement.query(By.css('.github-repo-row'));
+    const tooltip = rowDebugEl.injector.get(MatTooltip);
+    // Pinned to the literal composed string (not component.repoRowTooltip(...)) so this
+    // assertion independently catches a wrongly composed tooltip rather than trivially
+    // agreeing with whatever the method under test currently returns.
+    expect(tooltip.message).toBe('Widget factory — Open issues and pull requests reported by GitHub');
+
+    expect(row.querySelectorAll('[tabindex]').length).toBe(0);
+
     await expectNoAxeViolations(el);
   }, 15000);
 

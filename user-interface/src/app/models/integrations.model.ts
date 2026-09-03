@@ -157,7 +157,7 @@ export interface GitHubRepoItem {
   private: boolean;
   archived: boolean;
   html_url: string;
-  description: string;
+  description: string | null;
   default_branch: string;
   /** GitHub's count includes open PRs — an at-a-glance hint, not the exact issue total. */
   open_issues_count: number;

@@ -73,8 +73,10 @@ def test_research_agent_run_happy_path(monkeypatch) -> None:
     # JSON responses by step:
     # 1. parse_brief
     # 2. generate_queries
-    # 3. score_one_document × N (per fetched doc)
-    # 4. summarize_one_document × N
+    # 3. _evaluate_one_document via _score_documents (per fetched doc)
+    # 4. _evaluate_one_document via _summarize_documents (re-evaluates the
+    #    same top-N doc; the two-phase score-then-summarize fan-out still
+    #    costs two calls per top-N doc — collapsing that is a follow-up)
     # 5. synthesize_overview
     a = _make_agent(
         monkeypatch,
@@ -83,15 +85,24 @@ def test_research_agent_run_happy_path(monkeypatch) -> None:
             {"topic": "AI", "angle": "intro", "constraints": "short"},
             # 2. generate_queries returns one query
             {"queries": [{"query_text": "what is AI", "intent": "overview"}]},
-            # 3. score_one_document
+            # 3. _evaluate_one_document (scoring pass)
             {
                 "relevance_score": 0.9,
                 "authority_score": 0.8,
                 "accuracy_score": 0.7,
                 "type": "primary",
+                "summary": "About AI.",
+                "key_points": ["fact 1"],
             },
-            # 4. summarize_one_document
-            {"summary": "About AI.", "key_points": ["fact 1"]},
+            # 4. _evaluate_one_document (summarizing pass)
+            {
+                "relevance_score": 0.9,
+                "authority_score": 0.8,
+                "accuracy_score": 0.7,
+                "type": "primary",
+                "summary": "About AI.",
+                "key_points": ["fact 1"],
+            },
             # 5. synthesize_overview
             {"analysis": "AI is interesting.", "outline": ["a", "b"]},
         ],
@@ -570,9 +581,10 @@ def _doc(n: int):
     )
 
 
-def test_summarize_one_document_cancellation_propagates(monkeypatch) -> None:
-    """A Temporal cancellation during per-document summarization must propagate
-    rather than being swallowed by the excerpt-fallback except block."""
+def test_evaluate_one_document_cancellation_propagates(monkeypatch) -> None:
+    """A Temporal cancellation during the combined per-document score+summarize
+    call must propagate rather than being swallowed by the default-score/
+    excerpt-fallback except block."""
     from agents.blogging.blog_research_agent.agent import ResearchAgent
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
     from strands.types.exceptions import EventLoopException
@@ -589,9 +601,7 @@ def test_summarize_one_document_cancellation_propagates(monkeypatch) -> None:
     )
 
     with pytest.raises(EventLoopException):
-        a._summarize_one_document(
-            (_doc(0), 1.0, 1.0, 1.0, "blog"), ResearchBriefInput(brief="x", max_results=5)
-        )
+        a._evaluate_one_document(_doc(0), ResearchBriefInput(brief="x", max_results=5))
 
 
 def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> None:
@@ -599,7 +609,7 @@ def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> Non
     caller's context so LLM attribution / request-id reach the worker threads
     (raw ThreadPoolExecutor submission used to drop them)."""
     from agents.blogging.blog_research_agent.agent import ResearchAgent
-    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput, ResearchReference
 
     from llm_service import (
         DummyLLMClient,
@@ -612,11 +622,14 @@ def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> Non
     a = ResearchAgent(llm_client=DummyLLMClient())
     seen: list[tuple[str, str]] = []
 
-    def fake_score_one(self, doc, brief_input):
+    def fake_evaluate_one(self, doc, brief_input):
         seen.append((current_attribution().team, current_request_id()))
-        return (doc, 1.0, 1.0, 1.0, "blog")
+        ref = ResearchReference(
+            title=doc.title, url=doc.url, domain=doc.domain, summary="s", key_points=[]
+        )
+        return (doc, 1.0, 1.0, 1.0, "blog", ref)
 
-    monkeypatch.setattr(ResearchAgent, "_score_one_document", fake_score_one)
+    monkeypatch.setattr(ResearchAgent, "_evaluate_one_document", fake_evaluate_one)
 
     docs = [_doc(0), _doc(1), _doc(2)]
     with llm_attribution(team="blogging"), bind_request_id("req-score-123"):
@@ -641,14 +654,14 @@ def test_summarize_documents_propagates_attribution_into_workers(monkeypatch) ->
     a = ResearchAgent(llm_client=DummyLLMClient())
     seen: list[tuple[str, str]] = []
 
-    def fake_summarize_one(self, item, brief_input):
+    def fake_evaluate_one(self, doc, brief_input):
         seen.append((current_attribution().team, current_request_id()))
-        doc = item[0]
-        return ResearchReference(
+        ref = ResearchReference(
             title=doc.title, url=doc.url, domain=doc.domain, summary="s", key_points=[]
         )
+        return (doc, 1.0, 1.0, 1.0, "blog", ref)
 
-    monkeypatch.setattr(ResearchAgent, "_summarize_one_document", fake_summarize_one)
+    monkeypatch.setattr(ResearchAgent, "_evaluate_one_document", fake_evaluate_one)
 
     scored = [(_doc(i), 1.0, 1.0, 1.0, "blog") for i in range(3)]
     with llm_attribution(team="blogging"), bind_request_id("req-sum-456"):

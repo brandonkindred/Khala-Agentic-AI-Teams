@@ -1113,6 +1113,32 @@ describe('CodingTeamPageComponent', () => {
     });
   });
 
+  describe('repoRowTooltip', () => {
+    it('composes the description and the issue-count clarification when a description is present', async () => {
+      await setup();
+      const repo: GitHubRepoItem = { ...REPO, description: 'A widget factory.' };
+      expect(component.repoRowTooltip(repo)).toBe(
+        'A widget factory. — Open issues and pull requests reported by GitHub'
+      );
+    });
+
+    it('returns just the issue-count clarification when description is null or empty, with no dangling separator', async () => {
+      await setup();
+      expect(component.repoRowTooltip({ ...REPO, description: null })).toBe(
+        'Open issues and pull requests reported by GitHub'
+      );
+      expect(component.repoRowTooltip({ ...REPO, description: '' })).toBe(
+        'Open issues and pull requests reported by GitHub'
+      );
+      expect(component.repoRowTooltip({ ...REPO, description: '   ' })).toBe(
+        'Open issues and pull requests reported by GitHub'
+      );
+      expect(component.repoRowTooltip({ ...REPO, description: '  Padded widget factory.  ' })).toBe(
+        'Padded widget factory. — Open issues and pull requests reported by GitHub'
+      );
+    });
+  });
+
   describe('dependency indicator rendering', () => {
     it('renders a blocked indicator with the open-dependency count', async () => {
       integrationsSpy.getGitHubIssues.mockReturnValue(
