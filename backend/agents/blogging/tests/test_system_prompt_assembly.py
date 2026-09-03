@@ -79,6 +79,18 @@ def test_headed_whitespace_only_texts_return_none() -> None:
     assert build_headed_blogging_system_prompt_content("   \n", "\t  ") is None
 
 
+def test_headed_mixed_blank_and_whitespace_one_side() -> None:
+    result = build_headed_blogging_system_prompt_content("brand spec text", "   \n")
+
+    assert result == [CacheBreakpoint("--- BRAND SPEC ---\nbrand spec text")]
+
+
+def test_headed_mixed_whitespace_and_blank_other_side() -> None:
+    result = build_headed_blogging_system_prompt_content("   \n", "writing guideline text")
+
+    assert result == [CacheBreakpoint("--- WRITING STYLE GUIDE ---\nwriting guideline text")]
+
+
 def test_with_content_returns_persona_unchanged_when_content_is_none() -> None:
     assert build_system_prompt_with_content("You are a helpful writer.", None) == (
         "You are a helpful writer."

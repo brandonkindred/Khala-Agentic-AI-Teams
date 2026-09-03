@@ -172,7 +172,7 @@ def build_revise_all_items_prompt(
     The brand spec and writing style guide are not embedded here: the caller
     delivers them via a cacheable ``Agent(system_prompt=...)`` segment (see
     ``BlogWriterAgent._writing_system_prompt_with_content``) instead, so this
-    prompt carries only the content plan, feedback, and draft.
+    prompt never carries brand-spec or style-guide text.
 
     Preconditions:
         - ``llm`` is the ``LLMClient`` passed to ``compact_text`` when the
@@ -183,9 +183,12 @@ def build_revise_all_items_prompt(
           ``agent._render_allowed_claims_section(revise_input.allowed_claims)``),
           or ``""`` when no allowed-claims artifact was supplied.
     Postconditions:
-        - Returns a prompt string embedding the content plan, every feedback
-          item formatted via ``_format_feedback_item_line``, ``revision_plan``
-          as planning context, and the current draft.
+        - Returns a prompt string embedding ``REVISION_TASK_INSTRUCTIONS``, the
+          content plan, every feedback item formatted via
+          ``_format_feedback_item_line``, ``revision_plan`` as planning
+          context, a length block (``length_guidance`` when supplied,
+          otherwise a target-word-count range derived from
+          ``target_word_count``), and the current draft.
         - When present on ``revise_input``: ``revise_input.persistent_issues``
           is inserted before the feedback block; ``previous_feedback_items``
           (capped at ``MAX_PREVIOUS_FEEDBACK_ITEMS``) is inserted after it;

@@ -128,7 +128,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
             - Word count is computed via :func:`count_words`, a naive
               whitespace-token heuristic (not a linguistic word count).
         """
-        has_style_guide = self._system_prompt_content is not None
+        has_style_guidance = self._system_prompt_content is not None
         actual_word_count = count_words(draft)
         target_word_count = copy_editor_input.target_word_count
         soft_min = copy_editor_input.soft_min_words
@@ -172,7 +172,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         if context_parts:
             context_parts.append("")
 
-        if has_style_guide:
+        if has_style_guidance:
             context_parts.extend(
                 [
                     "---",
@@ -480,12 +480,12 @@ class BlogCopyEditorAgent(_BlogAgentBase):
                 )
             return output
 
-        has_style_guide = self._system_prompt_content is not None
+        has_style_guidance = self._system_prompt_content is not None
 
         logger.info(
-            "Copy editing: draft len=%s, has_style_guide=%s",
+            "Copy editing: draft len=%s, has_style_guidance=%s",
             len(draft),
-            has_style_guide,
+            has_style_guidance,
         )
 
         actual_word_count = count_words(draft)

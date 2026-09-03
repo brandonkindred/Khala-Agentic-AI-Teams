@@ -369,8 +369,8 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``system_prompt`` is a plain persona string, or a Strands
               system-content-block list (e.g. from
               ``build_system_prompt_with_content``) when a cacheable segment
-              is being attached. When falsy (``""`` or ``None``), falls back
-              to ``WRITING_SYSTEM_PROMPT``.
+              is being attached. When falsy (e.g. ``""``), falls back to
+              ``WRITING_SYSTEM_PROMPT``.
         Postconditions:
             - Returns the agent's response as a stripped string.
         Raises:

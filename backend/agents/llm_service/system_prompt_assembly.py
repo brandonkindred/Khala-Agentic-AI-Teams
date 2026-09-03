@@ -22,11 +22,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from .cache_breakpoint import CacheBreakpoint
+
 __all__ = ["build_system_prompt_with_content"]
+
+SystemContentSegment = str | dict[str, Any] | CacheBreakpoint
 
 
 def build_system_prompt_with_content(
-    system_prompt: str, system_prompt_content: list[Any] | None
+    system_prompt: str, system_prompt_content: list[SystemContentSegment] | None
 ) -> str | list[Any]:
     """Combine persona text with extra system-content segments.
 
