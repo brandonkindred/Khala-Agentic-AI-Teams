@@ -2238,5 +2238,39 @@ describe('CodingTeamPageComponent', () => {
       fixture.destroy();
       expect(component['focusTimer']).toBeNull();
     });
+
+    it('cancelSelection degrades gracefully when the originating row has been filtered out', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0]; // "Issue 1"
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        // Narrow the search to a term that excludes the selected issue's own row, mirroring
+        // what a real keystroke does (component.onIssueSearchChange()).
+        component.issueSearch = 'Issue 2';
+        component.onIssueSearchChange();
+        fixture.detectChanges();
+        const el: HTMLElement = fixture.nativeElement;
+        expect(el.querySelector('[data-issue-number="1"]')).toBeNull();
+
+        // No defined fallback exists yet for this edge case (documented as a known limitation
+        // in cancelSelection()) — this pins that it degrades gracefully rather than throwing.
+        expect(() => component.cancelSelection()).not.toThrow();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        expect(el.querySelector('.github-confirm-panel')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

@@ -760,7 +760,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Postconditions: `selectedIssue` is cleared, unmounting `.github-confirm-panel` (including the
    *   Cancel button that currently holds focus) on the next change-detection pass; once the row
    *   has re-rendered, focus returns to that issue's `.github-issue-row` button so it never drops
-   *   to `<body>`.
+   *   to `<body>`. Known limitation: if the issue search filter has removed that row from the
+   *   list by the time the deferred callback runs, no row is found and focus is left wherever the
+   *   browser put it (typically `<body>`, its default when the focused element unmounts) — this
+   *   edge case has no defined fallback target yet.
    */
   cancelSelection(): void {
     const issueNumber = this.selectedIssue?.number ?? null;
