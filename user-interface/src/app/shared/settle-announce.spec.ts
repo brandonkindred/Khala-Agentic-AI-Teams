@@ -6,6 +6,11 @@ describe('SettleAnnouncer', () => {
     vi.useRealTimers();
   });
 
+  it('rejects a non-positive settleMs, failing fast rather than degrading into a near-zero delay', () => {
+    expect(() => new SettleAnnouncer(0, vi.fn())).toThrow();
+    expect(() => new SettleAnnouncer(-100, vi.fn())).toThrow();
+  });
+
   it('does not announce before the settle window elapses', () => {
     vi.useFakeTimers();
     const onSettle = vi.fn();

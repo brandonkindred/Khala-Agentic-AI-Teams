@@ -37,7 +37,11 @@ export class SettleAnnouncer {
     private readonly settleMs: number,
     private readonly onSettle: (value: string) => void,
     private readonly onChange?: (value: string) => void,
-  ) {}
+  ) {
+    if (!(settleMs > 0)) {
+      throw new Error('SettleAnnouncer: settleMs must be a positive number of milliseconds');
+    }
+  }
 
   /** True while a settle timer is pending (a differing, non-empty update is awaiting its quiet
    *  window). Exposed so callers/tests can assert on debounce state without reaching into private

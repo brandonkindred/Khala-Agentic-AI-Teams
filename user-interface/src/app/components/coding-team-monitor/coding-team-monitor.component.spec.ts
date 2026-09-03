@@ -38,6 +38,18 @@ describe('CodingTeamMonitorComponent', () => {
     } as CodingTeamJobStatus;
   }
 
+  /** Runs `run` under fake timers, restoring real timers afterward even if `run` throws — the
+   *  shared wrapper for the debounce tests below, which otherwise each repeated this same
+   *  useFakeTimers/try/finally boilerplate. */
+  async function withFakeTimers(run: () => Promise<void>): Promise<void> {
+    vi.useFakeTimers();
+    try {
+      await run();
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
   function agent(over: Partial<CodingTeamAgentStatus>): CodingTeamAgentStatus {
     return {
       agent_id: 'a',
@@ -402,8 +414,7 @@ describe('CodingTeamMonitorComponent', () => {
   });
 
   it('announces the objective and progress in the hidden live region after the settle window', async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       const el = fixture.nativeElement as HTMLElement;
@@ -415,14 +426,11 @@ describe('CodingTeamMonitorComponent', () => {
       fixture.detectChanges();
       expect(region()?.textContent).toContain('Implementing the task graph');
       expect(region()?.textContent).toContain('47% complete');
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('settles a burst of differing progress ticks into a single announcement of the latest value', async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       const el = fixture.nativeElement as HTMLElement;
       const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
 
@@ -454,14 +462,11 @@ describe('CodingTeamMonitorComponent', () => {
       expect(region()?.textContent).toContain('30% complete');
       expect(region()?.textContent).not.toContain('10% complete');
       expect(region()?.textContent).not.toContain('20% complete');
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('leaves the live region text (and node) unchanged when the summary itself is unchanged', async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       await vi.advanceTimersByTimeAsync(6000);
@@ -483,14 +488,11 @@ describe('CodingTeamMonitorComponent', () => {
       const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
       expect(regionAfter).toBe(region);
       expect(regionAfter?.textContent).toBe(before);
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('leaves an in-flight settle timer running (neither cancelled nor restarted) when a repeat of the same summary arrives mid-settle', async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       const el = fixture.nativeElement as HTMLElement;
       const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
 
@@ -509,14 +511,11 @@ describe('CodingTeamMonitorComponent', () => {
       await vi.advanceTimersByTimeAsync(4000); // t=6000
       fixture.detectChanges();
       expect(region()?.textContent).toContain('47% complete');
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('cancels the summary settle timer on destroy and never announces afterward', async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       const region = (fixture.nativeElement as HTMLElement).querySelector(
@@ -533,14 +532,11 @@ describe('CodingTeamMonitorComponent', () => {
       await vi.advanceTimersByTimeAsync(6000);
       expect(component.announcementPending).toBe(false);
       expect(region?.textContent).toBe('');
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('clears the announcement immediately (no settle delay) when status is cleared to null', async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
       await vi.advanceTimersByTimeAsync(6000);
@@ -555,9 +551,7 @@ describe('CodingTeamMonitorComponent', () => {
       // Goes silent right away — no lingering stale percentage for another settle window.
       expect(region?.textContent).toBe('');
       expect(component.announcementPending).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 });
 
