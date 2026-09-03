@@ -419,7 +419,7 @@ expected_findings:
 ```diff
 --- a/app/utils/formatting.py
 +++ b/app/utils/formatting.py
-@@ -10,7 +10,10 @@ def format_currency(amount: float, currency: str = "USD") -> str:
+@@ -10,1 +10,5 @@ def format_currency(amount: float, currency: str = "USD") -> str:
 -    return f"{currency} {amount:,.2f}"
 +    return _format_amount(amount, currency)
 +
@@ -428,7 +428,7 @@ expected_findings:
 +    return f"{currency} {amount:,.2f}"
 --- a/app/utils/validation.py
 +++ b/app/utils/validation.py
-@@ -5,6 +5,9 @@ def is_valid_email(value: str) -> bool:
+@@ -5,1 +5,9 @@ def is_valid_email(value: str) -> bool:
 -    return "@" in value and "." in value.split("@")[-1]
 +    return _has_at_symbol(value) and _has_domain_dot(value)
 +
