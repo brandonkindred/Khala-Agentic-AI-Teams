@@ -1,14 +1,11 @@
 """Shape tests for the merged doc score+summarize prompt in blog_research_agent
 (``prompts.DOC_SCORE_AND_SUMMARIZE_PROMPT``).
 
-This prompt is not wired into ``ResearchAgent`` yet -- per issue #7870 (story 1
-of epic #7863), it deliberately has no call site: ``_score_one_document`` and
-``_summarize_one_document`` still run their original, separate prompts. These
-tests only verify the design itself: that the merged prompt carries both
-source prompts' full instruction content verbatim under separate headings,
-in order, and that its response-shape section names all six combined keys.
-Wiring it into the agent's scoring/summarization fan-outs is a follow-up
-story.
+``ResearchAgent._evaluate_one_document`` uses this prompt for its single
+score+summarize call. These tests verify the design itself, independent of
+that call site: that the merged prompt carries both source prompts' full
+instruction content verbatim under separate headings, in order, and that its
+response-shape section names all six combined keys.
 """
 
 from agents.blogging.blog_research_agent.prompts import (

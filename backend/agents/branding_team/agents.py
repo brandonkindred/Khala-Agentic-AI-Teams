@@ -319,11 +319,10 @@ def make_storyteller() -> Agent:
         narrative, and boilerplate variants. The agent is routed through
         the ``branding_narrative_messaging`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="Storyteller",
         description="Crafts the brand story, hero narrative, and boilerplate variants.",
-        system_prompt=render_agent_prompt(_STORYTELLER_PROMPT),
-        structured_output=BrandStoryOutput,
+        prompt=_STORYTELLER_PROMPT,
         agent_key=_PHASE2_AGENT_KEY,
     )
 

@@ -528,13 +528,31 @@ once per burst — bounded memory, never blocks the caller.
 Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`
 (default `30`; garbage → `30`, negatives clamped to `0`).
 
+### SE_TRACE_PRUNE_INTERVAL_S
+Seconds between background prune sweeps that enforce `SE_TRACE_RETENTION_DAYS`
+via `trace_store.prune_traces` (default `21600` = 6 hours; garbage → `21600`).
+Registration floors the resolved value at `60s` regardless of why it's low —
+including a deliberately configured value under 60, silently, with no warning
+— so the sweep never busy-loops. Mirrors `SE_TRACE_FLUSH_INTERVAL_S`'s pattern
+at a much slower cadence; retention is day-granularity, so tighter buys nothing.
+A sweep also runs immediately at startup (the heartbeat beats first), so a
+restart never waits a full interval for its first prune — relevant when that
+first sweep has a large stale-row backlog to delete. Pruning only applies
+when traces are stored in Postgres (`POSTGRES_HOST` set); it runs regardless
+of `SE_TRACE_TO_POSTGRES` so rows written while tracing was enabled are still
+pruned. When `POSTGRES_HOST` is not set, `SE_TRACE_PRUNE_INTERVAL_S` has no
+observable effect.
+
 ### SE_LEARNINGS_TOPN
 Number of past-sprint learnings injected into the Tech Lead's Design prompt
 (default `5`, clamped to `[0, 50]`; `0` disables injection; garbage → `5`).
 
 ### SE_LEARNINGS_RETENTION_DAYS
 Retention window (by `last_seen`) for `se_learnings` rows used by
-`learnings_store.prune_learnings` (default `365`).
+`learnings_store.prune_learnings` (default `365`). Unlike `se_agent_traces`
+(see `SE_TRACE_PRUNE_INTERVAL_S` above), nothing currently schedules
+`prune_learnings` — this window is defined but not yet enforced
+automatically; wiring it up the same way is tracked separately.
 
 ---
 
