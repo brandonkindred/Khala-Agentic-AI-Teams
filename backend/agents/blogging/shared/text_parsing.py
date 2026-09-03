@@ -17,6 +17,15 @@ correct. Migrating callers onto this module and deleting the private
 copies is deliberately deferred to a separate follow-up story, so this
 module can merge on its own; do not treat "correct implementation exists
 here" as "callers use it" until that follow-up lands.
+
+This reconciliation also introduces one deliberate behavior change ahead
+of that migration: ``format_feedback_item_line`` rejects a ``bool`` index
+(``isinstance(index, bool)``), where the still-live copies in
+``revision.py`` and ``agent.py`` do not (``bool`` subclasses ``int``, so
+they silently accept ``True``/``False`` as a positive index). No current
+caller passes a bool index, so this is not a behavior change in
+production today, but the eventual caller migration will need to treat
+it as a reviewed change rather than a mechanical import swap.
 """
 
 from __future__ import annotations
