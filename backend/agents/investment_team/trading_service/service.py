@@ -1910,7 +1910,14 @@ def resolve_resting_stop_loss_attachment(
     this ``ref_price``-anchored preview verbatim (``ref_price`` is the
     signal bar's close, which can gap away from where the entry actually
     fills — see :class:`StopAttachment`'s ``entry_price_pct`` field for why
-    that matters here specifically).
+    that matters here specifically). Also carries
+    ``reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"`` — the identical
+    literal :meth:`_EngineExitDispatcher._build_close_order` stamps for a
+    ``StopLossRule`` close on the bar-close path — so materialization (see
+    :class:`StopAttachment`'s ``reason`` field) tags the resting fill with
+    the same, gate-relied-upon attribution regardless of which path actually
+    closes the position, instead of the generic ``exit_leg_{idx}`` label the
+    rule-agnostic ``attached_exits`` plumbing would otherwise derive.
 
     Raises:
         ValueError: if ``rule`` is not resting-eligible (via
@@ -1932,7 +1939,12 @@ def resolve_resting_stop_loss_attachment(
     # attachment's final shape is established in one step; StopAttachment is a
     # Pydantic BaseModel, so model_copy (not dataclasses.replace) is the
     # correct mechanism here.
-    return attachment.model_copy(update={"entry_price_pct": rule.pct})
+    return attachment.model_copy(
+        update={
+            "entry_price_pct": rule.pct,
+            "reason": f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
+        }
+    )
 
 
 @dataclass

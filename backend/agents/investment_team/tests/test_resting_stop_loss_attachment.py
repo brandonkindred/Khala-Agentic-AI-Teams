@@ -35,16 +35,23 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
 )
 from investment_team.strategy_lab.executor.rule_compiler import PositionState, stop_loss_level
 from investment_team.strategy_lab.spec_dsl import (
+    BracketStopLeg,
+    BracketTakeProfitLeg,
     EntryRule,
     ExitRule,
     FixedFractionSizing,
+    OcoBracketRule,
     Predicate,
     StopLossRule,
     TakeProfitRule,
     protective_stop_price,
 )
 from investment_team.trading_service.engine.execution_model import RealisticExecutionModel
-from investment_team.trading_service.engine.fill_simulator import FillSimulator, FillSimulatorConfig
+from investment_team.trading_service.engine.fill_simulator import (
+    ENGINE_EXIT_REASON_PREFIX,
+    FillSimulator,
+    FillSimulatorConfig,
+)
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio
 from investment_team.trading_service.service import (
@@ -52,6 +59,7 @@ from investment_team.trading_service.service import (
     _EngineEntryDispatcher,
     _is_resting_stop_loss,
     _stop_loss_rule_to_leg_specs,
+    resolve_bracket_attachments,
     resolve_resting_stop_loss_attachment,
 )
 from investment_team.trading_service.strategy.contract import (
@@ -61,6 +69,7 @@ from investment_team.trading_service.strategy.contract import (
     OrderSide,
     OrderType,
     StopAttachment,
+    TimeInForce,
 )
 
 # ---------------------------------------------------------------------------
@@ -576,3 +585,210 @@ def test_end_to_end_resting_stop_short_side_materializes_and_closes_position() -
     assert len(outcome.closed_trades) == 1
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Fill semantics: through-bar, gap-through, no-trigger, reason attribution,
+# and direct comparison against the bracket stop leg's behavior.
+# ---------------------------------------------------------------------------
+
+
+def test_through_bar_fills_resting_stop_at_exact_price_long() -> None:
+    """A bar whose open stays on the safe side of the stop but whose low
+    crosses it fills at the stop's EXACT price, not a worse one — the
+    defining behavior a through-bar (as opposed to a gap-through bar) must
+    have."""
+    sim, order_book, _portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="long", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))  # entry fills; stop rests at 95
+
+    # Open (97) is above the stop (95); low (93) crosses it — a through-bar.
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=97.0, high=98.0, low=93.0, close=94.0))
+    [trade] = outcome.closed_trades
+    assert trade.exit_price == pytest.approx(95.0)
+
+
+def test_through_bar_fills_resting_stop_at_exact_price_short() -> None:
+    """Short mirror: a bar whose open stays above the stop but whose high
+    crosses it fills at the exact stop price."""
+    sim, order_book, _portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="short", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))  # entry fills; stop rests at 105
+
+    # Open (103) is below the stop (105); high (107) crosses it — a through-bar.
+    outcome = sim.process_bar(
+        _bar("2024-01-03", open_price=103.0, high=107.0, low=102.0, close=106.0)
+    )
+    [trade] = outcome.closed_trades
+    assert trade.exit_price == pytest.approx(105.0)
+
+
+def test_gap_through_bar_fills_resting_stop_at_worse_of_open_long() -> None:
+    """Acceptance criterion: a bar that gaps through the stop level fills at
+    worse-of-open, not the stop price — the level was never actually traded,
+    so filling at the nominal stop would be a more flattering, less faithful
+    result."""
+    sim, order_book, _portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="long", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))  # entry fills; stop rests at 95
+
+    # Open (90) has already gapped below the stop (95).
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=90.0, high=91.0, low=88.0, close=89.0))
+    [trade] = outcome.closed_trades
+    assert trade.exit_price == pytest.approx(90.0)
+    assert trade.exit_price != pytest.approx(95.0)
+
+
+def test_gap_through_bar_fills_resting_stop_at_worse_of_open_short() -> None:
+    """Short mirror of the gap-through case."""
+    sim, order_book, _portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="short", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))  # entry fills; stop rests at 105
+
+    # Open (110) has already gapped above the stop (105).
+    outcome = sim.process_bar(
+        _bar("2024-01-03", open_price=110.0, high=112.0, low=109.0, close=111.0)
+    )
+    [trade] = outcome.closed_trades
+    assert trade.exit_price == pytest.approx(110.0)
+    assert trade.exit_price != pytest.approx(105.0)
+
+
+def test_bar_not_reaching_stop_leaves_order_resting() -> None:
+    """A bar whose range never touches the stop level does not fill — the
+    order stays resting and the position stays open."""
+    sim, order_book, portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="long", close=100.0)
+    parent = order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))  # entry fills; stop rests at 95
+
+    # Low (96) never reaches the stop (95).
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=99.0, high=100.0, low=96.0, close=98.0))
+    assert outcome.closed_trades == []
+    assert "AAA" in portfolio.positions
+    [child] = order_book.children_of(parent.order_id)
+    assert child.request.stop_price == pytest.approx(95.0)
+
+
+def test_resting_stop_fill_carries_engine_exit_stop_loss_reason() -> None:
+    """Acceptance criterion: ``engine_exit:stop_loss`` reason attribution is
+    preserved for a resting-stop fill — the same literal the bar-close
+    evaluator stamps for this rule kind, which the alignment and conformance
+    quality gates match exactly."""
+    sim, order_book, _portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="long", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=97.0, high=98.0, low=93.0, close=94.0))
+    [trade] = outcome.closed_trades
+    assert trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+
+
+def test_resting_stop_trade_record_exit_price_shape_matches_bracket_field_names() -> None:
+    """Acceptance criterion: the realized exit price is recorded on the trade
+    record in the same shape a bracket stop's is, so downstream consumers
+    need no special case — same field names, all populated."""
+    sim, order_book, _portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="long", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=97.0, high=98.0, low=93.0, close=94.0))
+    [trade] = outcome.closed_trades
+    assert trade.exit_price == pytest.approx(95.0)
+    assert trade.exit_fill_price == pytest.approx(trade.exit_price)
+    assert trade.exit_bid_price is not None
+    assert trade.exit_order_type == OrderType.STOP.value
+
+
+@pytest.mark.parametrize(
+    ("open_price", "high", "low", "close", "expected_fill"),
+    [
+        pytest.param(97.0, 98.0, 93.0, 94.0, 95.0, id="through_bar"),
+        pytest.param(90.0, 91.0, 88.0, 89.0, 90.0, id="gap_through"),
+    ],
+)
+def test_resting_stop_matches_bracket_stop_leg_fill_behavior(
+    open_price: float, high: float, low: float, close: float, expected_fill: float
+) -> None:
+    """Acceptance criterion: the resting stop's behavior matches the bracket
+    stop leg's, verified by direct comparison on identical bars rather than
+    by assumption — both a through-bar and a gap-through bar. The two paths'
+    reasons are deliberately different (each keeps its own canonical
+    attribution); everything else about the fill must agree."""
+    pct = 0.05
+    entry_price = 100.0
+
+    resting_sim, resting_book, _resting_portfolio = _make_simulator()
+    resting_stop = resolve_resting_stop_loss_attachment(
+        StopLossRule(pct=pct, basis="entry_price"), OrderSide.LONG, entry_price
+    )
+    resting_req = OrderRequest(
+        client_order_id="resting-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        attached_exits=[resting_stop],
+    )
+    resting_book.submit(
+        resting_req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    resting_sim.process_bar(_bar("2024-01-02", open_price=entry_price))
+
+    bracket_sim, bracket_book, _bracket_portfolio = _make_simulator()
+    bracket = OcoBracketRule(
+        stop_loss=BracketStopLeg(pct=pct), take_profit=BracketTakeProfitLeg(pct=0.50)
+    )
+    bracket_stop, _bracket_take_profit = resolve_bracket_attachments(
+        bracket, OrderSide.LONG, entry_price
+    )
+    bracket_req = OrderRequest(
+        client_order_id="bracket-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        attached_stop_loss=bracket_stop,
+    )
+    bracket_book.submit(
+        bracket_req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+    bracket_sim.process_bar(_bar("2024-01-02", open_price=entry_price))
+
+    # Both resolvers must agree on where the stop sits before either bar fires.
+    assert resting_stop.stop_price == pytest.approx(bracket_stop.stop_price)
+
+    bar = _bar("2024-01-03", open_price=open_price, high=high, low=low, close=close)
+    resting_outcome = resting_sim.process_bar(bar)
+    bracket_outcome = bracket_sim.process_bar(bar)
+
+    [resting_trade] = resting_outcome.closed_trades
+    [bracket_trade] = bracket_outcome.closed_trades
+    assert resting_trade.exit_price == pytest.approx(expected_fill)
+    assert bracket_trade.exit_price == pytest.approx(expected_fill)
+    assert resting_trade.exit_price == pytest.approx(bracket_trade.exit_price)
+    assert resting_trade.net_pnl == pytest.approx(bracket_trade.net_pnl)
+    assert resting_trade.return_pct == pytest.approx(bracket_trade.return_pct)
+
+    assert resting_trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+    assert bracket_trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}bracket_sl"
