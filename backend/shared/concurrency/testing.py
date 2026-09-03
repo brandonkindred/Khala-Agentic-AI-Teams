@@ -4,12 +4,19 @@ Not part of ``shared.concurrency``'s production public API (see
 ``shared/concurrency/__init__.py``) — this module is imported only from test
 files. Before it existed, the "hold the first caller open inside construction via a
 started/release ``threading.Event`` handshake, let N threads queue up behind it,
-then release and join" idiom was hand-rolled, byte-for-byte, once per test in
-``shared/concurrency/tests/test_lazy_thread_safety.py`` and independently in three
+then release and join" idiom was hand-rolled, byte-for-byte, once per test in three
 ``branding_team`` test modules (``tests/test_store_singleton.py``,
 ``tests/test_conversation_phase_cache.py``, ``tests/test_brand_phase_cache.py``).
 This is the single shared copy, following the same pattern already established by
-``shared/temporal/testing.py`` and ``shared/postgres/testing.py``.
+``shared/temporal/testing.py`` and ``shared/postgres/testing.py``;
+``shared/concurrency/tests/test_lazy_thread_safety.py`` is its first consumer.
+
+Migrating those three ``branding_team`` copies to this harness is a mechanical,
+drop-in change, not a technical blocker — :meth:`ConcurrentFirstCallHarness.hold_open`
+accepts any zero-arg callable, including one that wraps a monkeypatched constructor.
+It is left undone here because it is out of scope for the issue this module was
+written for (``shared/concurrency`` only, no call-site or existing-test migration);
+tracked as a separate, opportunistic follow-up.
 """
 
 from __future__ import annotations
@@ -115,8 +122,12 @@ class ConcurrentFirstCallHarness(Generic[_T]):
         # to catch) can never block interpreter exit after the assertion below has
         # already reported the failure — the join-and-confirm loop is what actually
         # detects the hang; daemon status only keeps a detected hang from also
-        # wedging the process.
-        threads = [threading.Thread(target=call, daemon=True) for _ in range(thread_count)]
+        # wedging the process. Named so the still-alive assertion below identifies
+        # which logical worker hung, instead of an unhelpful default "Thread-17".
+        threads = [
+            threading.Thread(target=call, name=f"concurrent-first-call-{i}", daemon=True)
+            for i in range(thread_count)
+        ]
         threads[0].start()
         assert self._started.wait(timeout=self._wait_timeout), "first thread never entered hold_open"
         for t in threads[1:]:

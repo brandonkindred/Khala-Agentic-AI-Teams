@@ -14,16 +14,22 @@ rather than by timing luck, that:
   racing caller gets its own factory attempt and its own exception, nothing is
   cached, and the primitive is still buildable afterward (both primitives).
 
-The N-thread tests below race through :class:`~shared.concurrency.testing.ConcurrentFirstCallHarness`,
-the shared hold-open/release/join-and-confirm race harness — the same idiom already
-proven reliable in ``branding_team/tests/test_store_singleton.py``,
+The builds-exactly-once and raising-factory tests below (four of the five) race
+through :class:`~shared.concurrency.testing.ConcurrentFirstCallHarness`, the shared
+hold-open/release/join-and-confirm race harness — the same idiom already proven
+reliable in ``branding_team/tests/test_store_singleton.py``,
 ``branding_team/tests/test_conversation_phase_cache.py``, and
-``branding_team/tests/test_brand_phase_cache.py``, each of which still hand-rolls its
-own copy since it holds open a monkeypatched constructor rather than an arbitrary
-factory; migrating those three to the shared harness is a separate, opportunistic
-follow-up. Unlike those call sites, ``LazySingleton``/``KeyedLazyRegistry`` take an
-arbitrary ``factory`` callable directly, so the harness's :meth:`~shared.concurrency.testing.ConcurrentFirstCallHarness.hold_open`
-blocks inside the factory itself rather than needing to monkeypatch a constructor.
+``branding_team/tests/test_brand_phase_cache.py``. Those three still hand-roll their
+own copy of the idiom rather than using the harness; migrating them is a separate,
+opportunistic follow-up out of scope for this module (see
+``shared/concurrency/testing.py`` for why).
+
+The fifth test,
+``test_keyed_lazy_registry_distinct_keys_construct_concurrently_without_blocking_each_other``,
+is also multi-threaded but does not use the harness: it needs two independent
+started/release gates, one per key, so it can hold one key's build open while timing
+the other's completion — the harness has only a single shared release, built for
+racing many threads through one build rather than coordinating two independent ones.
 """
 
 from __future__ import annotations
