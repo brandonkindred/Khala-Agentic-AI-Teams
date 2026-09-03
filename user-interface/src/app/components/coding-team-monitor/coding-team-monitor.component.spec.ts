@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { vi } from 'vitest';
 import { CodingTeamMonitorComponent, codingTeamStatusSummary } from './coding-team-monitor.component';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
 
@@ -387,27 +388,134 @@ describe('CodingTeamMonitorComponent', () => {
     expect(region?.textContent).toBe('');
   });
 
-  it('announces the objective and progress in the hidden live region', async () => {
-    const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
-    const region = el.querySelector('.visually-hidden[aria-live="polite"]');
-    expect(region?.textContent).toContain('Implementing the task graph');
-    expect(region?.textContent).toContain('47% complete');
+  it('announces the objective and progress in the hidden live region after the settle window', async () => {
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 47,
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
+      // Nothing is announced yet — the settle timer hasn't fired.
+      expect(region()?.textContent).toBe('');
+
+      await vi.advanceTimersByTimeAsync(1500);
+      fixture.detectChanges();
+      expect(region()?.textContent).toContain('Implementing the task graph');
+      expect(region()?.textContent).toContain('47% complete');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles a burst of differing progress ticks into a single announcement of the latest value', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = fixture.nativeElement as HTMLElement;
+      const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
+
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 10,
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      expect(region()?.textContent).toBe('');
+
+      await vi.advanceTimersByTimeAsync(500);
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 20,
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      // A differing update mid-settle restarts the window instead of announcing early.
+      expect(region()?.textContent).toBe('');
+
+      await vi.advanceTimersByTimeAsync(500);
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 30,
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      expect(region()?.textContent).toBe('');
+
+      // No further update: the window settles on the latest value only, once.
+      await vi.advanceTimersByTimeAsync(1500);
+      fixture.detectChanges();
+      expect(region()?.textContent).toContain('30% complete');
+      expect(region()?.textContent).not.toContain('10% complete');
+      expect(region()?.textContent).not.toContain('20% complete');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('leaves the live region text (and node) unchanged when the summary itself is unchanged', async () => {
-    const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
-    const region = el.querySelector('.visually-hidden[aria-live="polite"]');
-    const before = region?.textContent;
-    await render({
-      job_id: 'j1',
-      status: 'running',
-      phase: 'coding',
-      progress: 47,
-      agents: [agent({ agent_id: 'x', display_name: 'X' })],
-    });
-    const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
-    expect(regionAfter).toBe(region);
-    expect(regionAfter?.textContent).toBe(before);
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 47,
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      await vi.advanceTimersByTimeAsync(1500);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const region = el.querySelector('.visually-hidden[aria-live="polite"]');
+      const before = region?.textContent;
+
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 47,
+        agents: [agent({ agent_id: 'x', display_name: 'X' })],
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+
+      // An unchanged summary must neither restart nor cancel an in-flight timer — here there is no
+      // timer at all, because the update was a no-op.
+      expect(component['summaryAnnounceTimer']).toBeNull();
+      const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
+      expect(regionAfter).toBe(region);
+      expect(regionAfter?.textContent).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the summary settle timer on destroy and never announces afterward', async () => {
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 47,
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      expect(component['summaryAnnounceTimer']).not.toBeNull();
+
+      fixture.destroy();
+      expect(component['summaryAnnounceTimer']).toBeNull();
+
+      // Advancing time after destroy must not resurrect the timer or throw.
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(component['summaryAnnounceTimer']).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
