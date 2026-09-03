@@ -1,15 +1,20 @@
-"""Unit tests for the agent/phase rollup result shape (metrics.agent_rollup).
+"""Unit tests for the agent/phase rollup (metrics.agent_rollup).
 
-This step defines the dataclass shape only — no computation exists yet, so these
-tests cover construction defaults and (de)serialization mechanics, not any
-ratio/percentile values.
+Covers both the dataclass shape (construction defaults, (de)serialization mechanics)
+and the pure grouping/percentile computation in ``compute_from_traces``.
 """
 
 from __future__ import annotations
 
 import json
 
-from software_engineering_team.metrics.agent_rollup import AgentRollupMetrics, CallRollup
+import pytest
+
+from software_engineering_team.metrics.agent_rollup import (
+    AgentRollupMetrics,
+    CallRollup,
+    compute_from_traces,
+)
 
 
 def test_call_rollup_defaults() -> None:
@@ -93,3 +98,207 @@ def test_to_dict_round_trip_nests_plain_dicts() -> None:
     # A group with no samples keeps its None sentinels through serialization.
     assert d["by_phase"]["execution"]["cache_read_ratio"] is None
     assert d["by_phase"]["execution"]["latency_ms_median"] is None
+
+
+def _row(
+    *,
+    agent_key: str = "agent",
+    phase: str = "phase",
+    cost_usd: float = 0.0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    latency_ms: float = 0.0,
+) -> dict:
+    return {
+        "agent_key": agent_key,
+        "phase": phase,
+        "cost_usd": cost_usd,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "latency_ms": latency_ms,
+    }
+
+
+def test_window_days_must_be_positive() -> None:
+    """compute_from_traces rejects a non-positive window_days."""
+    with pytest.raises(ValueError):
+        compute_from_traces([], window_days=0)
+    with pytest.raises(ValueError):
+        compute_from_traces([], window_days=-1.0)
+
+
+def test_empty_rows_yields_empty_groups() -> None:
+    """An empty row list is not an error: every grouping view is empty."""
+    m = compute_from_traces([], window_days=7.0)
+    assert m.window_days == 7.0
+    assert m.by_agent == {}
+    assert m.by_phase == {}
+    assert m.by_agent_phase == {}
+
+
+def test_single_group_aggregates_sums_and_percentiles() -> None:
+    """Every row in one agent/phase group contributes to its sums, ratio, and percentiles."""
+    rows = [
+        _row(
+            agent_key="backend",
+            phase="execution",
+            cost_usd=1.0,
+            input_tokens=100,
+            output_tokens=50,
+            cache_read_tokens=40,
+            cache_creation_tokens=10,
+            latency_ms=200,
+        ),
+        _row(
+            agent_key="backend",
+            phase="execution",
+            cost_usd=2.0,
+            input_tokens=200,
+            output_tokens=60,
+            cache_read_tokens=80,
+            cache_creation_tokens=20,
+            latency_ms=300,
+        ),
+        _row(
+            agent_key="backend",
+            phase="execution",
+            cost_usd=0.5,
+            input_tokens=50,
+            output_tokens=10,
+            cache_read_tokens=0,
+            cache_creation_tokens=0,
+            latency_ms=100,
+        ),
+    ]
+
+    m = compute_from_traces(rows, window_days=7.0)
+
+    r = m.by_agent_phase["backend"]["execution"]
+    assert r.call_count == 3
+    assert r.total_cost_usd == pytest.approx(3.5)
+    assert r.total_input_tokens == 350
+    assert r.total_output_tokens == 120
+    assert r.total_cache_read_tokens == 120
+    assert r.total_cache_creation_tokens == 30
+    assert r.cache_read_ratio == pytest.approx(0.24)  # 120 / (120 + 30 + 350)
+    assert r.latency_ms_median == pytest.approx(200.0)
+    assert r.latency_ms_p95 == pytest.approx(300.0)  # n=3, rank=ceil(2.85)=3
+    assert r.latency_ms_sample_count == 3
+
+    # by_agent and by_phase collapse to the same single group here.
+    assert m.by_agent["backend"].call_count == 3
+    assert m.by_phase["execution"].call_count == 3
+
+
+def test_multi_group_partitions_by_agent_phase_and_pair() -> None:
+    """Rows spanning agents and phases partition correctly into all three views, sorted."""
+    rows = [
+        _row(agent_key="backend", phase="execution", cost_usd=1.0, latency_ms=50),
+        _row(agent_key="backend", phase="design", cost_usd=2.0, latency_ms=150),
+        _row(agent_key="frontend", phase="execution", cost_usd=3.0, latency_ms=250),
+    ]
+
+    m = compute_from_traces(rows, window_days=1.0)
+
+    assert list(m.by_agent.keys()) == ["backend", "frontend"]
+    assert list(m.by_phase.keys()) == ["design", "execution"]
+    assert list(m.by_agent_phase.keys()) == ["backend", "frontend"]
+    assert list(m.by_agent_phase["backend"].keys()) == ["design", "execution"]
+
+    assert m.by_agent["backend"].call_count == 2
+    assert m.by_agent["frontend"].call_count == 1
+    assert m.by_phase["execution"].call_count == 2
+    assert m.by_phase["design"].call_count == 1
+    assert m.by_agent_phase["backend"]["execution"].call_count == 1
+    assert m.by_agent_phase["backend"]["design"].call_count == 1
+    assert m.by_agent_phase["frontend"]["execution"].call_count == 1
+
+
+def test_deterministic_regardless_of_input_row_order() -> None:
+    """Reordering the same logical rows produces an identical result, key order included."""
+    rows = [
+        _row(agent_key="backend", phase="execution", cost_usd=1.0, latency_ms=50),
+        _row(agent_key="backend", phase="design", cost_usd=2.0, latency_ms=150),
+        _row(agent_key="frontend", phase="execution", cost_usd=3.0, latency_ms=250),
+    ]
+
+    forward = compute_from_traces(rows, window_days=1.0)
+    backward = compute_from_traces(list(reversed(rows)), window_days=1.0)
+
+    assert list(forward.by_agent.keys()) == list(backward.by_agent.keys())
+    assert list(forward.by_phase.keys()) == list(backward.by_phase.keys())
+    assert list(forward.by_agent_phase.keys()) == list(backward.by_agent_phase.keys())
+    forward_dict = forward.to_dict()
+    backward_dict = backward.to_dict()
+    del forward_dict["computed_at"]
+    del backward_dict["computed_at"]
+    assert forward_dict == backward_dict
+
+
+def test_single_row_group_median_equals_p95() -> None:
+    """A group with exactly one call has its sole latency as both median and p95."""
+    rows = [_row(latency_ms=123.0)]
+
+    m = compute_from_traces(rows, window_days=1.0)
+
+    r = m.by_agent["agent"]
+    assert r.call_count == 1
+    assert r.latency_ms_sample_count == 1
+    assert r.latency_ms_median == pytest.approx(123.0)
+    assert r.latency_ms_p95 == pytest.approx(123.0)
+
+
+def test_p95_of_two_samples_is_the_larger() -> None:
+    """Nearest-rank p95 of two samples returns the worse (larger) one."""
+    rows = [_row(latency_ms=100.0), _row(latency_ms=200.0)]
+
+    m = compute_from_traces(rows, window_days=1.0)
+
+    r = m.by_agent["agent"]
+    assert r.latency_ms_median == pytest.approx(150.0)
+    assert r.latency_ms_p95 == pytest.approx(200.0)
+
+
+def test_p95_nearest_rank_for_larger_sample() -> None:
+    """p95 by nearest-rank (no interpolation) matches hand computation for n=4."""
+    rows = [_row(latency_ms=v) for v in (10.0, 20.0, 30.0, 40.0)]
+
+    m = compute_from_traces(rows, window_days=1.0)
+
+    # rank = max(1, min(4, ceil(0.95 * 4))) = ceil(3.8) = 4 -> the largest sample.
+    assert m.by_agent["agent"].latency_ms_p95 == pytest.approx(40.0)
+
+
+def test_cache_read_ratio_none_when_no_prompt_tokens() -> None:
+    """cache_read_ratio is None (not 0.0) when the group processed zero prompt-side tokens."""
+    rows = [_row(cost_usd=1.0, input_tokens=0, cache_read_tokens=0, cache_creation_tokens=0)]
+
+    m = compute_from_traces(rows, window_days=1.0)
+
+    r = m.by_agent["agent"]
+    assert r.call_count == 1
+    assert r.cache_read_ratio is None
+
+
+def test_cache_read_ratio_zero_when_tokens_exist_but_none_cached() -> None:
+    """cache_read_ratio is 0.0, not None, when prompt tokens exist but none were cache reads."""
+    rows = [_row(input_tokens=100, cache_read_tokens=0, cache_creation_tokens=0)]
+
+    m = compute_from_traces(rows, window_days=1.0)
+
+    assert m.by_agent["agent"].cache_read_ratio == pytest.approx(0.0)
+
+
+def test_empty_string_agent_and_phase_form_a_real_group() -> None:
+    """Rows with an empty agent_key/phase are grouped under '""', not dropped."""
+    rows = [_row(agent_key="", phase="")]
+
+    m = compute_from_traces(rows, window_days=1.0)
+
+    assert m.by_agent[""].call_count == 1
+    assert m.by_phase[""].call_count == 1
+    assert m.by_agent_phase[""][""].call_count == 1
