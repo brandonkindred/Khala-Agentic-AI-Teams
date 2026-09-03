@@ -113,6 +113,31 @@ def test_none_returning_factory_raises_and_leaves_key_retryable() -> None:
     assert registry.get_or_create("k", lambda: "recovered") == "recovered"
 
 
+def test_falsy_non_none_values_are_cached_not_rejected() -> None:
+    calls: list[str] = []
+
+    def build_zero() -> object:
+        calls.append("zero")
+        return 0
+
+    registry: KeyedLazyRegistry[str, object] = KeyedLazyRegistry()
+
+    # Only None is the sentinel. A falsy value is a perfectly good value, and it
+    # must be *cached* — not merely returned — or every later call would rebuild
+    # it. The caching assertion is what distinguishes the implementation's
+    # `is None` check from a truthiness check: under `if not value:` these keys
+    # would miss the cache forever and re-run their factories, which line
+    # coverage alone cannot detect since both forms execute the same lines.
+    assert registry.get_or_create("zero", build_zero) == 0
+    assert registry.get_or_create("empty", lambda: "") == ""
+    assert registry.get_or_create("false", lambda: False) is False
+
+    assert registry.get_or_create("zero", build_zero) == 0
+    assert calls == ["zero"]
+    assert registry.get_or_create("empty", lambda: "unused") == ""
+    assert registry.get_or_create("false", lambda: "unused") is False
+
+
 def test_factory_reentering_its_own_key_raises_instead_of_deadlocking() -> None:
     registry: KeyedLazyRegistry[str, str] = KeyedLazyRegistry()
 

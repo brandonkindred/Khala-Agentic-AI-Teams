@@ -275,11 +275,19 @@ _phase_caches: KeyedLazyRegistry[str, PhaseOutputCache] = KeyedLazyRegistry()
 def _get_or_create_phase_cache(conversation_id: str) -> PhaseOutputCache:
     return _phase_caches.get_or_create(conversation_id, PhaseOutputCache)
 
-# A value needing constructor arguments is just a closure:
-def _get_team_semaphore(self, team: str) -> threading.BoundedSemaphore:
-    return self._team_semaphores.get_or_create(
-        team, lambda: threading.BoundedSemaphore(self.per_team_limit)
-    )
+# A value needing constructor arguments is just a closure. Held as an instance
+# attribute here, since the value depends on per-instance configuration:
+class TeamSemaphorePool:
+    def __init__(self, per_team_limit: int) -> None:
+        self.per_team_limit = per_team_limit
+        self._team_semaphores: KeyedLazyRegistry[str, threading.BoundedSemaphore] = (
+            KeyedLazyRegistry()
+        )
+
+    def _get_team_semaphore(self, team: str) -> threading.BoundedSemaphore:
+        return self._team_semaphores.get_or_create(
+            team, lambda: threading.BoundedSemaphore(self.per_team_limit)
+        )
 ```
 
 - `get_or_create(key, factory)` — returns that key's value, calling `factory()`

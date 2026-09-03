@@ -170,13 +170,18 @@ class KeyedLazyRegistry(Generic[K, _T]):
         """Return ``key``'s value, building it via ``factory`` on first success.
 
         Preconditions:
-            ``key`` is hashable; ``factory`` takes no arguments, returns a
-            non-``None`` ``_T`` or raises, and does not call
-            :meth:`get_or_create` on this same instance for ``key`` or for any
-            key this registry saw earlier than ``key`` (both raise
+            ``key`` is hashable; ``factory`` takes no arguments and returns a
+            non-``None`` ``_T`` or raises. On nesting, see the class
+            Preconditions, which state the rule authoritatively — in short,
+            ``factory`` must not call :meth:`get_or_create` on this same
+            instance for ``key`` itself, nor for a key seen earlier *and left
+            unbuilt* (one whose own ``factory`` previously raised); both raise
             ``RuntimeError`` from the underlying
             :class:`~shared.concurrency.keyed_lock_manager.KeyedLockManager`
-            rather than deadlocking).
+            rather than deadlocking. Building a key this registry has not seen,
+            and reading one that is already built, are both always permitted —
+            a built key returns on the unlocked fast path below and never
+            acquires its lock, so the ordering rule is never consulted.
 
         Postconditions:
             See the class Postconditions: exactly-once construction per key
