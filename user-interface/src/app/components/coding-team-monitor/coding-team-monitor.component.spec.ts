@@ -505,13 +505,46 @@ describe('CodingTeamMonitorComponent', () => {
         progress: 47,
       } as CodingTeamJobStatus);
       fixture.detectChanges();
+      const region = (fixture.nativeElement as HTMLElement).querySelector(
+        '.visually-hidden[aria-live="polite"]',
+      );
       expect(component['summaryAnnounceTimer']).not.toBeNull();
+      // Nothing has settled yet, so the DOM-observable text is still empty.
+      expect(region?.textContent).toBe('');
 
       fixture.destroy();
       expect(component['summaryAnnounceTimer']).toBeNull();
 
-      // Advancing time after destroy must not resurrect the timer or throw.
+      // Advancing time after destroy must not resurrect the timer, throw, or update the DOM.
       await vi.advanceTimersByTimeAsync(1500);
+      expect(component['summaryAnnounceTimer']).toBeNull();
+      expect(region?.textContent).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the announcement immediately (no settle delay) when status is cleared to null', async () => {
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('status', {
+        job_id: 'j1',
+        status: 'running',
+        phase: 'coding',
+        progress: 47,
+      } as CodingTeamJobStatus);
+      fixture.detectChanges();
+      await vi.advanceTimersByTimeAsync(1500);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const region = el.querySelector('.visually-hidden[aria-live="polite"]');
+      expect(region?.textContent).toContain('47% complete');
+
+      fixture.componentRef.setInput('status', null);
+      fixture.detectChanges();
+
+      // Goes silent right away — no lingering stale percentage for another settle window.
+      expect(region?.textContent).toBe('');
       expect(component['summaryAnnounceTimer']).toBeNull();
     } finally {
       vi.useRealTimers();

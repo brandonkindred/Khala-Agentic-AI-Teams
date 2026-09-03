@@ -145,13 +145,25 @@ export class CodingTeamMonitorComponent implements OnDestroy {
    * per poll.
    *
    * Preconditions: `nextSummary` is a codingTeamStatusSummary() output, or '' for no status.
-   * Postconditions: when `nextSummary` equals the summary already announced or in flight, any
-   * pending settle timer is left completely untouched — neither restarted nor cancelled — and no
-   * announcement work happens. When it differs, any pending settle timer is replaced with a fresh
-   * one; after SUMMARY_ANNOUNCE_SETTLE_MS with no further differing update, announcedSummary is set
-   * to `nextSummary` and the timer handle is cleared to null.
+   * Postconditions: when `nextSummary` is '' (no status), any pending settle timer is cleared and
+   * announcedSummary is cleared immediately — a run ending/clearing must go silent right away, not
+   * keep announcing a stale percentage for another settle window. When `nextSummary` equals the
+   * summary already announced or in flight, any pending settle timer is left completely untouched —
+   * neither restarted nor cancelled — and no announcement work happens. When it differs (and is
+   * non-empty), any pending settle timer is replaced with a fresh one; after
+   * SUMMARY_ANNOUNCE_SETTLE_MS with no further differing update, announcedSummary is set to
+   * `nextSummary` and the timer handle is cleared to null.
    */
   private scheduleAnnouncement(nextSummary: string): void {
+    if (!nextSummary) {
+      if (this.summaryAnnounceTimer) {
+        clearTimeout(this.summaryAnnounceTimer);
+        this.summaryAnnounceTimer = null;
+      }
+      this.previousSummary = '';
+      this._announcedSummary.set('');
+      return;
+    }
     if (nextSummary === this.previousSummary) {
       return;
     }
