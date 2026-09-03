@@ -39,7 +39,13 @@ from software_engineering_team.models import AgentStatusEntry
 # an address-comments run, for instance, would otherwise surface a malformed
 # owner as the route's "origin remote names a different repository" 400,
 # blaming the checkout for a bad identifier.
-_GITHUB_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+#
+# A LEADING dot is allowed when a non-dot follows it, because ``.github`` is a
+# real and common repository name (the org-level defaults repository), and
+# rejecting it here would 422 every request naming it. The second character
+# must not itself be a dot, so ``..`` and every ``..``-prefixed traversal
+# spelling stay rejected, as does a bare ``.``.
+_GITHUB_NAME_PATTERN = r"^(?:[A-Za-z0-9]|\.[A-Za-z0-9])[A-Za-z0-9._-]*$"
 # GitHub caps owner names at 39 characters and repository names at 100; the
 # looser 100 is used for both so oversized junk never reaches an API URL.
 _GITHUB_NAME_MAX_LENGTH = 100

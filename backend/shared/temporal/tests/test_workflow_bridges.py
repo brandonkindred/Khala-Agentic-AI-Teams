@@ -435,6 +435,37 @@ def _await_cancelled_flag(captured, timeout_s: float = 2.0) -> None:
     assert captured.get("execute_workflow_cancelled") is True
 
 
+def _flush_worker_loop(loop, rounds: int = 3, timeout_s: float = 2.0) -> None:
+    """Drain the worker loop's already-queued work, deterministically.
+
+    The counterpart to :func:`_await_cancelled_flag` for asserting that a
+    cancellation was NOT requested. Absence cannot be established by waiting a
+    while and looking: a fixed sleep only makes the window wider, and under CI
+    load a real cancellation could still land after it. What CAN be established
+    is ordering. ``run_coroutine_threadsafe`` queues its callback behind
+    everything already scheduled on the loop, so once a trivial coroutine
+    submitted AFTER the call under test has completed, any ``future.cancel()``
+    that call made was already delivered to the cancelled task and its handler
+    already ran. Several rounds are used because a cancellation takes a couple
+    of loop passes (schedule the cancel, resume the task at its suspension
+    point, run its ``except CancelledError`` handler).
+
+    Preconditions:
+        - ``loop`` is the running worker loop the call under test used, and the
+          call under test has already returned on this thread.
+        - ``rounds`` is the number of round trips; ``timeout_s`` bounds each.
+    Postconditions:
+        - Returns once ``rounds`` trivial coroutines have run to completion on
+          ``loop`` -- so every callback queued before the first of them,
+          including any cancellation the call under test requested, has been
+          processed.
+        - Raises ``concurrent.futures.TimeoutError`` if the loop does not run
+          one within ``timeout_s`` -- never waits unbounded.
+    """
+    for _ in range(rounds):
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=timeout_s)
+
+
 def _run_execute_sync_bounded(**kwargs):
     """Call ``runner.execute_workflow_sync`` on a bounded background thread.
 
@@ -512,9 +543,12 @@ def test_execute_workflow_sync_without_reattach_leaves_the_waiter_running(runnin
 
     # Cancellation is asynchronous, so a bare "not True" immediately after the
     # raise would also pass if a cancel HAD been requested but not yet
-    # delivered. Give the loop the same grace window the reattach test uses
-    # before concluding no cancellation was requested.
-    time.sleep(0.2)
+    # delivered. Establish the ordering rather than guessing at a duration: a
+    # fixed sleep only widens the window, and a real cancellation could still
+    # land after it under CI load. Draining the loop's already-queued work
+    # guarantees any cancel this call made has been delivered by the time the
+    # flag is read.
+    _flush_worker_loop(running_loop)
     assert captured.get("execute_workflow_cancelled") is not True
 
 

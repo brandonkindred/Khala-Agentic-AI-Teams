@@ -1136,7 +1136,8 @@ class TestGitHubNameValidation:
         ]
 
     @pytest.mark.parametrize(
-        "bad", [" ", "", "acme/widgets", "../etc", "%2e%2e", "-leading-dash", "x" * 101]
+        "bad",
+        [" ", "", "acme/widgets", "../etc", "%2e%2e", "-leading-dash", "x" * 101, ".", "..evil"],
     )
     def test_malformed_owner_is_rejected(self, bad: str) -> None:
         # Named failure, not a bare `pytest.raises` inside the loop: five models
@@ -1150,7 +1151,7 @@ class TestGitHubNameValidation:
                 continue
             pytest.fail(f"{model.__name__} accepted malformed owner {bad!r}")
 
-    @pytest.mark.parametrize("bad", [" ", "", "acme/widgets", "..", "x" * 101])
+    @pytest.mark.parametrize("bad", [" ", "", "acme/widgets", "..", "x" * 101, ".", "..evil"])
     def test_malformed_repo_is_rejected(self, bad: str) -> None:
         # Same reasoning as test_malformed_owner_is_rejected: name the model.
         for model, extras in self._models():
@@ -1160,9 +1161,14 @@ class TestGitHubNameValidation:
                 continue
             pytest.fail(f"{model.__name__} accepted malformed repo {bad!r}")
 
-    @pytest.mark.parametrize("good", ["acme", "Acme-Corp", "a.b_c-d", "0day"])
+    @pytest.mark.parametrize("good", ["acme", "Acme-Corp", "a.b_c-d", "0day", ".github"])
     def test_well_formed_names_are_accepted(self, good: str) -> None:
         """Both names round-trip unchanged on every model.
+
+        ``.github`` is in the accepted set deliberately: the org-level defaults
+        repository is a real, common target, so a leading dot followed by an
+        alphanumeric must pass while ``.`` and ``..evil`` (pinned above) stay
+        rejected.
 
         Asserting ``repo`` too is what keeps ``test_malformed_repo_is_rejected``
         honest: on a model that did NOT declare a ``repo`` field but forbids

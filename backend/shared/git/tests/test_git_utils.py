@@ -948,3 +948,17 @@ def test_resolve_remote_branch_sha_immune_to_concurrent_fetch_head_overwrite(
     assert ok is True, sha
     assert sha == expected
     assert sha != other_sha
+
+
+@pytest.mark.parametrize(
+    "local_path",
+    ["github.com/acme/widget", "github.com/acme/widget.git", "a/github.com/acme/widget"],
+)
+def test_remote_url_matches_rejects_scheme_less_colon_less_local_path(local_path: str) -> None:
+    """A value with neither a scheme nor a colon is a LOCAL path to git.
+
+    ``github.com/acme/widget`` is a relative directory, not a remote in either
+    supported form. This function gates pushes to a checkout's origin, so
+    accepting it on the strength of its trailing segments would fail OPEN.
+    """
+    assert remote_url_matches(local_path, "acme", "widget") is False

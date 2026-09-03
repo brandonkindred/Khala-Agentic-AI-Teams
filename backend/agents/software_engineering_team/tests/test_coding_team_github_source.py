@@ -1636,6 +1636,8 @@ class TestCheckoutRunningRoute:
         assert resp.json() == {"running_job_id": None}
 
     def test_is_read_only_and_creates_no_job(self, patched_app) -> None:
+        """The pre-check is a QUERY: asking who holds a checkout must never
+        itself create a job row that a later scan would then report."""
         before = len(patched_app["jobs"].list_jobs())
         resp = patched_app["client"].get(
             "/checkout/running", params={"repo_path": patched_app["repo_path"]}

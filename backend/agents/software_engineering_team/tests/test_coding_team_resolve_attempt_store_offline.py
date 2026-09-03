@@ -108,6 +108,31 @@ def test_has_recorded_resolve_failure_false_when_postgres_disabled(monkeypatch) 
     no_conn.assert_not_called()
 
 
+def _assert_all_three_writes_warned_and_returned(caplog: pytest.LogCaptureFixture) -> None:
+    """Run every best-effort write and assert each logged exactly one WARNING.
+
+    Shared by the two fault-injection tests below, which differ only in WHERE
+    the failure is raised (acquiring the connection vs. mid-statement) and must
+    assert the identical log-and-continue outcome.
+
+    Preconditions:
+        - ``store.is_postgres_enabled`` returns True and ``store.get_conn`` is
+          already monkeypatched to fail, and ``caplog`` is capturing at WARNING
+          level with no prior records from this test.
+    Postconditions:
+        - Returns None once all three writes returned normally (an error raised
+          by any of them propagates out of this helper and fails the calling
+          test) and exactly three WARNING records were emitted, each naming the
+          failure.
+    """
+    store.record_resolve_failure("o", "r", 7, "T1", 3)
+    store.clear_resolve_attempt("o", "r", 7, "T1")
+    store.clear_resolve_attempts_for_pr("o", "r", 7)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 3
+    assert all("failed" in r.getMessage() for r in warnings)
+
+
 def test_writes_swallow_db_errors(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
 
@@ -117,12 +142,7 @@ def test_writes_swallow_db_errors(monkeypatch, caplog: pytest.LogCaptureFixture)
     monkeypatch.setattr(store, "get_conn", _boom)
     # Best-effort: a DB failure is logged (via shared.postgres.helpers.best_effort_write), never raised.
     with caplog.at_level("WARNING"):
-        store.record_resolve_failure("o", "r", 7, "T1", 3)
-        store.clear_resolve_attempt("o", "r", 7, "T1")
-        store.clear_resolve_attempts_for_pr("o", "r", 7)
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 3
-    assert all("failed" in r.getMessage() for r in warnings)
+        _assert_all_three_writes_warned_and_returned(caplog)
 
 
 def test_has_recorded_resolve_failure_degrades_on_db_error(monkeypatch) -> None:
@@ -153,12 +173,7 @@ def test_writes_swallow_db_errors_raised_mid_query(
     monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
 
     with caplog.at_level("WARNING"):
-        store.record_resolve_failure("o", "r", 7, "T1", 3)
-        store.clear_resolve_attempt("o", "r", 7, "T1")
-        store.clear_resolve_attempts_for_pr("o", "r", 7)
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 3
-    assert all("failed" in r.getMessage() for r in warnings)
+        _assert_all_three_writes_warned_and_returned(caplog)
 
 
 @pytest.mark.parametrize("fault", ["execute", "fetchone"])

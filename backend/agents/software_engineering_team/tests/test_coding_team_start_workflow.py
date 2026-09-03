@@ -470,3 +470,36 @@ def test_dispatchers_reject_falsy_non_dict_plan_input(monkeypatch, dispatch, fal
     with pytest.raises(ValueError, match="requires plan_input to be a dict when provided"):
         dispatch(falsy)
     assert calls == [], "dispatcher forwarded plan_input across the Temporal boundary before validating it"
+
+
+@pytest.mark.parametrize(
+    "github,plan_input,expected",
+    [
+        ({"token": "x"}, None, "github workflow payload"),
+        (None, {"nested": {"api_key": "x"}}, "plan_input workflow payload"),
+    ],
+    ids=["github", "plan_input"],
+)
+def test_payload_builder_raises_on_a_credential_named_key(github, plan_input, expected):
+    """The serialization-boundary re-check covers BOTH payload dicts, and raises.
+
+    `plan_input` is copied into the same permanent Temporal event history as
+    `github`, so a boundary check that screened only `github` left the other
+    half of the payload unguarded. It must also RAISE rather than assert:
+    `python -O` strips asserts, which would remove the last stop entirely in
+    exactly the deployments least likely to be watched.
+    """
+    with pytest.raises(ValueError, match="must not include a credential-named key") as exc:
+        sw._build_workflow_payload("job-7", "/repo", plan_input, github)
+    assert expected in str(exc.value)
+
+
+def test_payload_builder_accepts_clean_dicts():
+    """The re-check is a screen, not a rewrite: a clean payload round-trips."""
+    payload = sw._build_workflow_payload("job-7", "/repo", {"title": "t"}, {"owner": "o"})
+    assert payload == {
+        "job_id": "job-7",
+        "repo_path": "/repo",
+        "plan_input": {"title": "t"},
+        "github": {"owner": "o"},
+    }

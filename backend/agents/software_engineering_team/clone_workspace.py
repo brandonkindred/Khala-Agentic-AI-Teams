@@ -32,9 +32,15 @@ _PER_ISSUE_DIR_RE = re.compile(re.escape(_PER_ISSUE_PREFIX) + r"\d+")
 
 # Per-PR checkout directory name, for the address-comments flow (unified_api's
 # ``_resolve_repo_path`` with ``pr_number`` set). A distinct ``pr-`` prefix (rather
-# than reusing ``issue-``) is required, not stylistic: GitHub issues and pull
-# requests share one numbering sequence per repository, so ``issue-42`` and PR #42
-# would otherwise collide on the same checkout directory.
+# than reusing ``issue-``) is required, not stylistic: the ``issue-`` shape is
+# MEANINGFUL to consumers that read the number back out of it. ``is_per_issue_dir``
+# classifies a directory as a per-issue checkout from the name alone, and the
+# issue-scoped rescue tooling (``_latest_issue_rescue_ref``) selects branches by
+# the same ``issue-<number>`` tag. Naming a PR checkout ``issue-42`` would
+# therefore make a PR's workspace and rescue history indistinguishable from
+# issue 42's -- a misclassification, not a directory-name clash (issues and pull
+# requests share one numbering sequence, so no repository has both an issue 42
+# and a PR 42).
 _PER_PR_PREFIX = "pr-"
 PER_PR_DIR_TEMPLATE = _PER_PR_PREFIX + "{pr_number}"
 _PER_PR_DIR_RE = re.compile(re.escape(_PER_PR_PREFIX) + r"\d+")

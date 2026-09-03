@@ -10,7 +10,7 @@ collide with the API's ``create_job`` and the activity-owned status bookkeeping.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 from shared.temporal import execute_workflow_sync, start_workflow_sync
 from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
@@ -263,24 +263,36 @@ def _build_workflow_payload(
         - ``job_id``/``repo_path`` have already passed
           :func:`_validate_common_args`, and ``github``/``plan_input`` have
           already passed :func:`_validate_github_arg` /
-          :func:`_validate_plan_input_arg`. This builder performs NO validation
-          of its own and copies both payload dicts VERBATIM into the durable
-          Temporal workflow argument, so a caller that skips the validators
-          would otherwise bypass the credential screen entirely — and Temporal
-          event history is permanent. Because that failure is IRREVERSIBLE, the
-          credential half of the precondition is re-asserted here rather than
+          :func:`_validate_plan_input_arg`. This builder re-checks ONLY the
+          credential half of that precondition (shape and presence checks are
+          left to the validators) and otherwise copies both payload dicts
+          VERBATIM into the durable Temporal workflow argument, so a caller
+          that skips the validators would otherwise bypass the credential
+          screen entirely — and Temporal event history is permanent. Because
+          that failure is IRREVERSIBLE, the re-check is made here rather than
           left to caller convention: it is one cheap dict-key scan at the
           serialization boundary, and it is the last point at which a
-          credential-named key can still be stopped.
+          credential-named key can still be stopped. It covers BOTH payload
+          dicts, and raises rather than asserts so it survives ``python -O``,
+          where an ``assert`` would be stripped and the boundary left
+          unguarded in exactly the deployments least likely to be watched.
 
     Postconditions:
         - Returns ``{"job_id", "repo_path", "plan_input"}`` plus ``"github"``
           when ``github`` is truthy (omitted entirely when falsy/``None``, so a
           caller with no GitHub context doesn't send a spurious empty dict).
+
+    Raises:
+        ValueError: ``github`` or ``plan_input`` is a truthy dict-like value
+            carrying a credential-named key at any nesting depth (see
+            :func:`_contains_token_key`).
     """
-    assert not (github and _contains_token_key(github)), (
-        "github workflow payload must not include a credential-named key"
-    )
+    for name, candidate in (("github", github), ("plan_input", plan_input)):
+        if candidate and _contains_token_key(candidate):
+            raise ValueError(
+                f"{name} workflow payload must not include a credential-named key "
+                "(any _TOKEN_KEY_MARKERS substring)"
+            )
     payload: Dict[str, Any] = {
         "job_id": job_id,
         "repo_path": repo_path,
@@ -299,7 +311,7 @@ def _prepare_workflow_args(
     *,
     caller: str,
     github_required: bool,
-) -> tuple[Dict[str, Any], str]:
+) -> Tuple[Dict[str, Any], str]:
     """Validate a dispatch's arguments and build its Temporal payload + workflow id.
 
     Both dispatchers ran the identical validate-then-build prologue --

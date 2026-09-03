@@ -1336,6 +1336,38 @@ class TestEnsureNamedRemote:
         assert (name, err) == ("khala-pr-head", None)
         assert _must(clone, "remote", "get-url", "khala-pr-head") == "https://[::1]:8443/o/r.git"
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            "https://x-access-token:placeholder@[::1/o/r.git",
+            "https://x-access-token:placeholder@[bogus]/o/r.git",
+        ],
+    )
+    def test_malformed_bracketed_authority_is_reported_not_raised(
+        self, api, fork_pair, malformed: str
+    ) -> None:
+        """`urlsplit` itself raises on a malformed bracketed authority.
+
+        An unterminated `[` and a bracketed non-IP host each make `urlsplit`
+        raise ValueError before the userinfo slice runs, which would escape a
+        function whose whole contract is to report every failure as the second
+        tuple element. Pinned for both spellings, and pinned to leak nothing:
+        the userinfo has NOT been stripped at that point, so neither returned
+        element may carry any part of the original authority.
+        """
+        _, clone, _fork = fork_pair
+
+        name, err = api._ensure_named_remote(clone, malformed)
+
+        assert err is not None
+        assert "malformed authority" in err
+        assert name == "https://<unparsable-authority>"
+        for leaked in ("placeholder", "x-access-token", "@"):
+            assert leaked not in name
+            assert leaked not in err
+        config = (Path(clone) / ".git" / "config").read_text(encoding="utf-8")
+        assert "placeholder" not in config
+
     def test_repeated_calls_with_same_url_are_idempotent(self, api, fork_pair) -> None:
         """A retry on the same checkout (the child job re-dispatching after a
         transient failure) must not error just because the remote already
@@ -1471,6 +1503,11 @@ class TestPushBranchToFork:
         _commit_file(clone, "fix.py", "x = 1\n", "the fix")
         ok, err = api._push_branch(clone, fork_url, "khala-fix")
         assert ok is True, err
+        # Captured BEFORE the rewrite: this is what "replaced rather than
+        # stacked" is measured against. Comparing the fork against the clone
+        # after the second push would prove nothing -- any successful push
+        # makes those two equal for the same ref, stacked or not.
+        count_after_first_push = _must(fork, "rev-list", "--count", "khala-fix")
 
         # AMEND rather than add a commit: the retried run rewrites the branch
         # it pushed before (the pipeline squashes/re-authors its fix), so the
@@ -1490,10 +1527,10 @@ class TestPushBranchToFork:
 
         assert ok is True, err
         assert _must(fork, "log", "-1", "--format=%s", "khala-fix") == "the better fix"
-        # The rewrite really replaced the old commit rather than stacking on it.
-        assert _must(fork, "rev-list", "--count", "khala-fix") == _must(
-            clone, "rev-list", "--count", "khala-fix"
-        )
+        # The rewrite really replaced the old commit rather than stacking on
+        # it: the fork's history length is UNCHANGED from before the amend,
+        # even though its tip commit is now a different one.
+        assert _must(fork, "rev-list", "--count", "khala-fix") == count_after_first_push
         # Still exactly one registered fork remote: registration is idempotent,
         # so a retry must not accumulate remotes or repoint an existing one.
         # Both halves are asserted -- the URL check alone would stay green if a

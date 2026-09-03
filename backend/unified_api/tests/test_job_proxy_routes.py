@@ -213,7 +213,11 @@ def test_every_job_returning_proxy_route_redacts() -> None:
     A future job-returning proxy added without ``_redact_job_secrets`` is a
     silent credential leak, and no per-route test would catch its absence. So
     assert it structurally: every ``/api/jobs`` route whose upstream returns a
-    job record must mention the redactor in its own source.
+    job record must CALL the redactor in its own source.
+
+    The call syntax (``_redact_job_secrets(``) is required, not the bare name:
+    a route that merely mentions the redactor in a comment or a TODO would
+    otherwise satisfy this guard while forwarding the payload untouched.
 
     ``delete_job`` and ``mark_all_interrupted`` are deliberately exempt --
     their job-service counterparts return ``{"deleted": bool}`` and
@@ -228,7 +232,7 @@ def test_every_job_returning_proxy_route_redacts() -> None:
             continue
         if endpoint.__name__ in exempt:
             continue
-        if "_redact_job_secrets" not in inspect.getsource(endpoint):
+        if "_redact_job_secrets(" not in inspect.getsource(endpoint):
             unredacted.append(f"{path} ({endpoint.__name__})")
     assert unredacted == [], f"job-returning proxy routes missing redaction: {unredacted}"
 
@@ -470,6 +474,16 @@ def _credential_job_fields() -> set[str]:
           record -- reading them all is pure cost, and a match inside one would
           be an unfixable false failure. Pure apart from reading the tree; an
           unreadable file is skipped rather than failing the scan.
+        - KNOWN BLIND SPOT: only the SUBSCRIPT spelling is matched. A field
+          introduced as part of a dict LITERAL (``fields = {"x_token": ...}``)
+          or merged in with ``fields.update({...})`` is invisible to this scan.
+          Both spellings are absent from the current source -- every team
+          assigns keys one at a time -- and matching them would mean either
+          parsing the AST or matching bare ``"key":`` pairs anywhere in a file,
+          which over the whole backend tree produces false failures a
+          contributor cannot resolve. Documented rather than closed, because a
+          guard that cries wolf gets deleted; the assignment spelling stays the
+          convention this guard enforces.
     """
     found: set[str] = set()
     for py in _backend.rglob("*.py"):
@@ -498,6 +512,9 @@ def test_redacted_job_fields_covers_every_credential_job_field() -> None:
     so this scan does: any ``*_fields["...token/secret/credential/..."]``
     assignment in backend source that is neither in the denylist nor in the
     justified :data:`_NON_CREDENTIAL_JOB_FIELDS` allowlist fails here.
+
+    Bounded by the scan's spelling: see :func:`_credential_job_fields` for the
+    dict-literal/``.update()`` blind spot this therefore inherits.
     """
     credential_fields = _credential_job_fields()
     # Self-check: the scan is only a guard if it actually finds the field the

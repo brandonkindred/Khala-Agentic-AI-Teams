@@ -1068,6 +1068,21 @@ def test_resolve_repo_path_uses_se_workspace_dir_with_pr(monkeypatch):
     assert path == "/work/acme_widget/pr-9"
 
 
+def test_resolve_repo_path_uses_workspace_root_with_pr(monkeypatch):
+    """WORKSPACE_ROOT alone, in PR mode, yields <root>/<owner>_<repo>/pr-N.
+
+    The issue-flow sibling above pins the same root against `issue-N`, but no
+    test exercised WORKSPACE_ROOT on its own in PR mode: with SE_WORKSPACE_DIR
+    covering the pr-N layout and AGENT_CACHE covering its own, a middle-tier
+    branch that emitted the ISSUE segment here would have gone uncaught.
+    """
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", "/ws")
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=5)
+    assert path == "/ws/acme_widget/pr-5"
+
+
 def test_resolve_repo_path_operator_override_returned_verbatim_for_pr(monkeypatch):
     """An operator-pinned repo_path is returned verbatim, never per-PR-namespaced.
 
@@ -1717,6 +1732,11 @@ def test_start_pr_review_falls_back_to_configured_default_repo(monkeypatch):
     payload = fake.last_payload()
     assert payload["owner"] == "acme"
     assert payload["repo"] == "widget"
+
+
+# ---------------------------------------------------------------------------
+# _github_api_base(): GITHUB_API_URL normalization (GHES bases)
+# ---------------------------------------------------------------------------
 
 
 def test_github_api_base_strips_trailing_slash(monkeypatch):

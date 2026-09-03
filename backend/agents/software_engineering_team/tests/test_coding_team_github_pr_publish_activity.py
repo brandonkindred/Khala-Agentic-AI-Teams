@@ -338,7 +338,7 @@ def _capture_prepare_kwargs(monkeypatch: pytest.MonkeyPatch, api: Any) -> dict[s
     """
     captured: dict[str, Any] = {}
 
-    def _fake_prepare(*_args: Any, **kwargs: Any):
+    def _fake_prepare(*_args: Any, **kwargs: Any) -> tuple[bool, None, list]:
         captured.update(kwargs)
         return True, None, []
 

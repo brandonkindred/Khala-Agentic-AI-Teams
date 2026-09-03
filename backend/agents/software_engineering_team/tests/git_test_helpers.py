@@ -95,6 +95,12 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
           set one itself, and ``git commit`` fails without it. Both current
           callers' own ``_init_repo`` helpers set this on the repo they build
           before ever calling this function.
+        - ``repo``'s working tree and index are CLEAN on entry (no uncommitted
+          or staged changes the caller still needs). The failure path's
+          ``reset --hard`` is unconditional, so anything a caller had staged or
+          modified before calling would be discarded along with the failed
+          commit's remnants. Both current callers pass a freshly built
+          throwaway repo, which satisfies this trivially.
         - ``filename`` is repository-relative. It MAY name a nested path
           (``pkg/mod.py``): missing parent directories are created here, so a
           caller does not have to pre-create them just to commit a file.

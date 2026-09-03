@@ -1801,6 +1801,12 @@ class GitHubClient(_GitHubHttpMixin):
               report ``missing=False`` alongside ``content=None`` (GitHub gave
               no 404 for those). Raises ``GitHubAPIError`` only for a non-404
               error status, same as :meth:`get_file_contents`.
+            - JSON decoding is NOT wrapped: a 2xx response whose body is not
+              valid JSON raises ``requests.exceptions.JSONDecodeError`` (a
+              ``ValueError`` subclass) straight out of ``response.json()``, not
+              ``GitHubAPIError`` — the same uncaught shape :meth:`_execute_graphql`
+              documents. Callers that must not let a malformed body escape as an
+              unexpected ``ValueError`` have to catch it themselves.
         """
         response = self._request(
             "GET", f"/repos/{owner}/{repo}/contents/{path}", params={"ref": ref}

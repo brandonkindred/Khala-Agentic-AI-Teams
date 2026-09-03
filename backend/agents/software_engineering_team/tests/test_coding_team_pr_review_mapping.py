@@ -1805,3 +1805,15 @@ class TestFindSimilarOpenIssueViaLlm:
         )
         prompt = calls[0]["prompt"]
         assert "ghp_" not in prompt
+        # The BODIES too, not just the universally-known prefix: masking only
+        # `ghp_` while leaving the 22 following characters intact would satisfy
+        # the assertion above and still hand the provider a reconstructable
+        # credential, since the prefix is a constant anyone can prepend.
+        for body in (
+            "DDDDDDDDDDDDDDDDDDDDDD",
+            "FFFFFFFFFFFFFFFFFFFFFF",
+            "CCCCCCCCCCCCCCCCCCCCCC",
+            "SSSSSSSSSSSSSSSSSSSSSS",
+            "GGGGGGGGGGGGGGGGGGGGGG",
+        ):
+            assert body not in prompt

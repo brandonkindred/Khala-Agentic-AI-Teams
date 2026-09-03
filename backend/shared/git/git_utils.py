@@ -44,48 +44,37 @@ def remote_url_matches(
         - ``expected_host`` MAY include a port (e.g. a GitHub Enterprise
           Server host like ``"git.example.com:8443"``, as
           ``web_host_for_api_base_url`` returns when the configured API base
-          URL's ``netloc`` carries one) — the scp-colon normalization below
-          only runs for scheme-less (scp-style) input, so a URL-form
-          ``remote_url``'s own host:port survives intact for comparison.
+          URL's ``netloc`` carries one).
     Postconditions:
-        - Returns True iff ALL of: (a) the URL's host segment equals
-          ``expected_host`` case-insensitively — a substring/suffix match on
-          just the ``owner/repo`` path segments alone would accept
-          ``https://evil.example.com/owner/repo.git`` as a match for
-          ``owner/repo``, since only the LAST two path segments were ever
-          compared; checking the host closes that gap. When ``expected_host``
-          itself carries NO port, an explicit port on the URL's host segment
-          (e.g. ``ssh://git@github.com:22/owner/repo.git``, or an HTTPS
-          equivalent) is stripped before this comparison — it is incidental
-          (a default or custom SSH/HTTPS port), not part of the identity
-          being checked. When ``expected_host`` DOES carry a port (the GHES
-          case above), the comparison stays exact and no stripping happens;
-          (b) the URL's last two
-          ``/``-separated path segments equal ``owner``/``repo``
-          case-insensitively (GitHub owner/repo names are case-insensitive)
-          after stripping a trailing ``.git`` (matched case-insensitively too,
-          so ``repo.GIT`` strips exactly like ``repo.git``) — a substring match would give
-          false positives (``acme/widget`` inside ``acme/widget-extra``).
-          Returns False for a malformed, empty, or too-short URL, or a host
-          mismatch — never assumed to match on unverifiable input.
-        - Handles both HTTPS (``https://host/owner/repo.git``) and scp-style
-          SSH (``git@host:owner/repo.git``) remote URL forms. The scp form's
-          colon (there is no scheme prefix to signal a URL) is normalized to
-          a ``/`` so both split into path segments the same way; a
-          scheme-prefixed URL's colon is left untouched instead, since there
-          it can only be a ``host:port`` separator (scp syntax has no scheme)
-          — converting it would mangle a GHES host's port into its own bogus
-          path segment and break the host-segment comparison below. Also
-          handles an HTTPS remote carrying userinfo credentials
+        - Accepts both remote URL forms: scheme-prefixed
+          (``https://host/owner/repo.git``, ``ssh://git@host/owner/repo.git``)
+          and scp-style SSH (``git@host:owner/repo.git``), with or without a
+          trailing ``.git`` and with or without userinfo credentials
           (``https://x-access-token:TOKEN@host/owner/repo.git``, the form a
-          token-based clone produces) — the userinfo is stripped before the
-          scp-colon normalization runs, so its embedded colon is never
-          mistaken for the scp form's host separator.
-        - When ``expected_host`` carries a port, the host comparison stays
-          EXACT, and scp-style remotes (``git@host:owner/repo``) can therefore
-          never match it: scp syntax has no way to express a port, so such a
-          remote's host segment is always bare. A caller pinning a
-          ``host:port`` must expect URL-form remotes.
+          token-based clone produces). The inline comments below explain how
+          each form is normalized.
+        - Returns True iff BOTH: (a) the URL's host segment equals
+          ``expected_host``, and (b) its last two ``/``-separated path
+          segments equal ``owner``/``repo``. All three comparisons are
+          case-insensitive (GitHub owner/repo names are case-insensitive), as
+          is the trailing-``.git`` strip, and all are EXACT rather than
+          substring — ``acme/widget`` must not match ``acme/widget-extra``,
+          and matching the path segments alone would accept
+          ``https://evil.example.com/owner/repo.git``.
+        - The host comparison tolerates an incidental port on the URL only
+          when ``expected_host`` carries none: a port there (e.g.
+          ``ssh://git@github.com:22/owner/repo.git``) is stripped before
+          comparing. When ``expected_host`` DOES carry a port the comparison
+          stays exact, so scp-style remotes can never match it — scp syntax
+          cannot express a port, so such a remote's host segment is always
+          bare, and a caller pinning a ``host:port`` must expect URL-form
+          remotes.
+        - Returns False for a malformed, empty, or too-short value, a host
+          mismatch, or a scheme-less, colon-less value (e.g.
+          ``"github.com/owner/repo"``, which git reads as a LOCAL filesystem
+          path). This function gates pushes to a checkout's origin, so
+          anything unverifiable fails CLOSED rather than matching on its
+          trailing segments.
     """
     cleaned = remote_url.strip().rstrip("/")
     # Case-INSENSITIVE, like every other identity comparison in this function:
@@ -121,6 +110,14 @@ def remote_url_matches(
         if "/" not in head:
             cleaned = tail
     if not had_scheme:
+        # No scheme AND no colon left is not a remote URL in either supported
+        # form: git reads such a value as a LOCAL filesystem path
+        # ("github.com/owner/repo" is a relative directory, not a host). Match
+        # it and this guard fails OPEN -- it gates pushes to a checkout's
+        # origin, so a path that merely happens to end in the expected
+        # host/owner/repo segments would be accepted as the real remote.
+        if ":" not in cleaned:
+            return False
         # Normalize the scp-style "git@host:owner/repo" form to use "/"
         # throughout so both URL styles split into path segments the same
         # way. Safe here specifically because scp syntax has no scheme, so

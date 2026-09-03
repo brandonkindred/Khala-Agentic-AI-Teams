@@ -196,7 +196,14 @@ def test_504_on_timeout(mock_cfg, mock_cred, mock_path, mock_clone, monkeypatch)
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ReadTimeout("slow"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
-        assert client.post(_URL, json={}).status_code == 504
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 504
+    # Pin the detail, not just the code: this route's other proxy failures also
+    # answer 5xx, and a status-only assertion would stay green if the timeout
+    # branch started returning some other branch's message.
+    assert resp.json()["detail"] == (
+        "Coding team service timed out while starting the comment-addressing job."
+    )
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
@@ -207,7 +214,11 @@ def test_502_on_unreachable(mock_cfg, mock_cred, mock_path, mock_clone, monkeypa
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ConnectError("refused"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
-        assert client.post(_URL, json={}).status_code == 502
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 502
+    # Distinguishable from the malformed-body 502 below, which is the whole
+    # point of asserting the detail: both are 502 from the same handler.
+    assert resp.json()["detail"] == "Could not reach coding team service: refused"
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
@@ -234,7 +245,11 @@ def test_502_on_malformed_success_body(mock_cfg, mock_cred, mock_path, mock_clon
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(200, {"unexpected": "shape"}))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
-        assert client.post(_URL, json={}).status_code == 502
+        resp = client.post(_URL, json={})
+    assert resp.status_code == 502
+    # A 200 whose body lacks `job_id` is an UPSTREAM CONTRACT failure, not an
+    # unreachable service; the detail is what separates the two 502s.
+    assert resp.json()["detail"] == "Coding team service returned an unexpected response: 'job_id'"
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)

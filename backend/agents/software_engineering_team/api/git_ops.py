@@ -13,8 +13,8 @@ re-entering a half-initialized ``git_ops`` and failing on the not-yet-bound
 from-imports. Deferring to call time breaks the cycle at its only edge without
 changing what any call site sees: the import statement resolves the same live
 module object out of ``sys.modules``, so ``monkeypatch.setattr(main, ...)``
-still takes effect exactly as before, and the cost is one dict lookup against
-git subprocess calls.
+still takes effect exactly as before, and the cost is one ``sys.modules`` dict
+lookup per call -- negligible beside the git subprocesses these functions run.
 """
 
 from __future__ import annotations
@@ -982,7 +982,13 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
         - On a git failure returns ``(remote, error)``: the caller's value is
           returned as given for a plain name, and userinfo-stripped for a URL
           (never a name that failed to register) alongside
-          a message describing the failure. Note the fallback's two writes are
+          a message describing the failure.
+        - When a URL's authority cannot be parsed at all (malformed brackets),
+          returns ``("<scheme>://<unparsable-authority>", error)`` rather than
+          raising, so this function still reports EVERY failure as the second
+          tuple element. Neither element carries any part of the original
+          authority, since userinfo stripping is exactly what could not be
+          performed. Note the fallback's two writes are
           NOT atomic: if the push-URL reset fails after the fetch URL was
           already updated, the checkout's git config is left half-updated, so
           callers must treat the returned error as fatal for this checkout
@@ -1009,7 +1015,26 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
     # The raw slice preserves host case, port text, and bracketed IPv6
     # authorities (``user@[::1]:8080``) verbatim, and drops exactly the
     # userinfo.
-    parts = urlsplit(remote)
+    #
+    # `urlsplit` itself raises ValueError before any of that when the authority
+    # has malformed brackets -- an unterminated `[` ("Invalid IPv6 URL") or a
+    # bracketed host that is not an IP literal ("... does not appear to be an
+    # IPv4 or IPv6 address"). That is the same contract break the `.port`
+    # accessor would have caused, one parse step earlier, so it is caught here
+    # and reported as the documented second tuple element. Neither the offending
+    # URL nor the parser's own message is echoed: the userinfo has not been
+    # stripped yet (that is what failed), and the parser quotes fragments of the
+    # authority it could not classify, so both are treated as potentially
+    # credential-bearing. The scheme alone is safe -- userinfo always follows
+    # "://" -- so it is kept to make the failure recognisable in a log.
+    try:
+        parts = urlsplit(remote)
+    except ValueError:
+        return (
+            f"{remote.split('://', 1)[0]}://<unparsable-authority>",
+            "could not parse fork remote URL: malformed authority "
+            "(unterminated or non-IP bracketed host)",
+        )
     if "@" in parts.netloc:
         remote = urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
     # `--` ends option parsing before the name/URL positionals: the only caller
