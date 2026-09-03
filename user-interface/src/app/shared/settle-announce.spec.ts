@@ -41,6 +41,24 @@ describe('SettleAnnouncer', () => {
     expect(onSettle).toHaveBeenCalledExactlyOnceWith('a');
   });
 
+  it('treats an update with the same value after a completed settle as a no-op', async () => {
+    // Distinct from the in-flight case above: no timer exists at all here, guarding against an
+    // implementation that only special-cases "unchanged" while a timer happens to be pending (e.g.
+    // `if (value === this.previousValue && this.timer) return;`), which would re-announce an
+    // identical value forever on a steady stream of repeated polls.
+    vi.useFakeTimers();
+    const onSettle = vi.fn();
+    const announcer = new SettleAnnouncer(1500, onSettle);
+    announcer.update('a');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(onSettle).toHaveBeenCalledTimes(1);
+
+    announcer.update('a'); // same value, no timer in flight — must not re-arm or re-announce
+    expect(announcer.isPending).toBe(false);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(onSettle).toHaveBeenCalledTimes(1);
+  });
+
   it('replaces (restarts) the pending timer on a differing update, proven against the ORIGINAL deadline', async () => {
     // A weaker "keep the original timer, just announce the latest value when it fires" implementation
     // would pass a test that only checks the value at the end — this pins the actual restart by
@@ -145,14 +163,36 @@ describe('SettleAnnouncer', () => {
     const onChange = vi.fn();
     const announcer = new SettleAnnouncer(1500, onSettle, onChange);
     announcer.update('a');
-    announcer.dispose();
+    onChange.mockClear(); // isolate the post-dispose assertion from this setup call
 
+    announcer.dispose();
     announcer.update('b'); // a differing, non-empty value — would normally arm a fresh timer
     expect(announcer.isPending).toBe(false);
-    expect(onChange).not.toHaveBeenCalledWith('b');
+    expect(onChange).not.toHaveBeenCalled(); // no callback of any kind fires after dispose
 
     await vi.advanceTimersByTimeAsync(1500);
     expect(onSettle).not.toHaveBeenCalled();
+  });
+
+  it('stays consistent when onChange re-enters update() synchronously with a newer value', async () => {
+    // Proves the timer-before-onChange ordering: a re-entrant update() call from inside onChange
+    // must not leave a stale, orphaned timer alongside the new one — exactly one settle should
+    // fire, with the latest value.
+    vi.useFakeTimers();
+    const onSettle = vi.fn();
+    let reentered = false;
+    const announcer = new SettleAnnouncer(1500, onSettle, () => {
+      if (!reentered) {
+        reentered = true;
+        announcer.update('b');
+      }
+    });
+
+    announcer.update('a');
+    expect(announcer.isPending).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(onSettle).toHaveBeenCalledExactlyOnceWith('b');
   });
 
   it('dispose is a no-op when nothing is pending', () => {

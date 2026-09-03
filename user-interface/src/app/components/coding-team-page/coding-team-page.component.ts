@@ -47,10 +47,10 @@ import {
 const RUNS_POLL_MS = 15000;
 
 /** Quiet period after the last "thinking" token before announcing a settled line count — tuned for
- *  a raw LLM token stream (many updates per second), not this page's HTTP poll cadence. Local to
- *  this component; NOT shared with coding-team-monitor.component.ts's summary announcer, which polls
- *  at a much slower, fixed cadence and needs its own differently-sized window (see
- *  SUMMARY_ANNOUNCE_SETTLE_MS there) — only the SettleAnnouncer timer mechanism is shared. */
+ * a raw LLM token stream (many updates per second), not this page's HTTP poll cadence. Local to
+ * this component; NOT shared with coding-team-monitor.component.ts's summary announcer, which polls
+ * at a much slower, fixed cadence and needs its own differently-sized window (see
+ * SUMMARY_ANNOUNCE_SETTLE_MS there) — only the SettleAnnouncer timer mechanism is shared. */
 const THINKING_ANNOUNCE_SETTLE_MS = 1500;
 
 /** localStorage key for the last repo the user expanded, so it can be pre-expanded on return. */
@@ -323,7 +323,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     },
   );
   /** True while `thinkingAnnouncer` has a pending settle timer — exposed so callers/tests can check
-   *  debounce state without reaching into the private field. */
+   * debounce state without reaching into the private field. */
   get thinkingAnnouncementPending(): boolean {
     return this.thinkingAnnouncer.isPending;
   }

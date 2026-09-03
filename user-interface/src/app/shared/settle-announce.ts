@@ -29,9 +29,14 @@ export class SettleAnnouncer {
    * settled value once it has held for `settleMs` with no further differing update, and with '' when
    * `update('')` is called (immediately, not after a delay — see `update`). `onChange`, if given, is
    * called synchronously inside `update` whenever a differing, non-empty value is first accepted,
-   * before the settle timer is (re)armed — for a caller that wants an immediate provisional cue (e.g.
+   * after the settle timer is (re)armed — for a caller that wants an immediate provisional cue (e.g.
    * "Agent is thinking…") ahead of the eventual settled announcement; omit it for a caller that wants
-   * no announcement at all until the value has settled.
+   * no announcement at all until the value has settled. Arming the timer first (rather than after
+   * `onChange` returns) makes a synchronous re-entrant `update()` call from inside `onChange` safe: it
+   * sees the already-armed timer and correctly replaces it, so exactly one settle fires with the
+   * latest value. `onChange` should still not throw — an exception there propagates out of `update()`,
+   * but `previousValue` and the timer are already consistent by that point, so a caller that catches it
+   * and retries is not left in a broken state.
    */
   constructor(
     private readonly settleMs: number,
@@ -44,8 +49,8 @@ export class SettleAnnouncer {
   }
 
   /** True while a settle timer is pending (a differing, non-empty update is awaiting its quiet
-   *  window). Exposed so callers/tests can assert on debounce state without reaching into private
-   *  fields. */
+   * window). Exposed so callers/tests can assert on debounce state without reaching into private
+   * fields. */
   get isPending(): boolean {
     return this.timer !== null;
   }
@@ -78,16 +83,16 @@ export class SettleAnnouncer {
     }
     this.previousValue = nextValue;
     this.clearTimer();
-    this.onChange?.(nextValue);
     this.timer = setTimeout(() => {
       this.timer = null;
       this.onSettle(nextValue);
     }, this.settleMs);
+    this.onChange?.(nextValue);
   }
 
   /** Preconditions: none. Postconditions: any pending settle timer is cleared and its handle set to
-   *  null. The instance is permanently disposed — every subsequent `update()` call is a no-op — so
-   *  it can never fire, or be re-armed, after the owning view/component is destroyed. */
+   * null. The instance is permanently disposed — every subsequent `update()` call is a no-op — so
+   * it can never fire, or be re-armed, after the owning view/component is destroyed. */
   dispose(): void {
     this.disposed = true;
     this.clearTimer();

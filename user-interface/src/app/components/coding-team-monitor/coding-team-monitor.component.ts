@@ -24,14 +24,14 @@ const CODING_TEAM_PHASES: PhaseDefinition[] = [
 const SUMMARY_OBJECTIVE_MAX_CHARS = 60;
 
 /** Quiet period a differing summary must hold before the live region's announcement settles.
- *  `status` is fed by the parent page's `pollJobStatus` poll (job-status-poller.ts, default
- *  `intervalMs = 5000`, used unmodified by coding-team-page.component.ts's `startPolling`), so this
- *  must exceed 5000ms — otherwise a status that changes on every poll would still restart and
- *  re-fire the timer once per poll (a fixed delay, not real coalescing). Sized at the poll interval
- *  plus a margin, so a run whose progress changes on every single poll stays silent until it
- *  actually plateaus for a beat, and only a genuine lull produces an announcement. NOT shared with
- *  coding-team-page.component.ts's THINKING_ANNOUNCE_SETTLE_MS, which is tuned for a much faster
- *  raw token stream — only the SettleAnnouncer timer mechanism is shared, not this value. */
+ * `status` is fed by the parent page's `pollJobStatus` poll (job-status-poller.ts, default
+ * `intervalMs = 5000`, used unmodified by coding-team-page.component.ts's `startPolling`), so this
+ * must exceed 5000ms — otherwise a status that changes on every poll would still restart and
+ * re-fire the timer once per poll (a fixed delay, not real coalescing). Sized at the poll interval
+ * plus a margin, so a run whose progress changes on every single poll stays silent until it
+ * actually plateaus for a beat, and only a genuine lull produces an announcement. NOT shared with
+ * coding-team-page.component.ts's THINKING_ANNOUNCE_SETTLE_MS, which is tuned for a much faster
+ * raw token stream — only the SettleAnnouncer timer mechanism is shared, not this value. */
 const SUMMARY_ANNOUNCE_SETTLE_MS = 6000;
 
 /**
@@ -81,9 +81,11 @@ export class CodingTeamMonitorComponent implements OnDestroy {
    * Preconditions: `value` is the latest polled job status, or null before the first poll / after
    * the parent clears it.
    * Postconditions: `status` reads back `value` immediately, so every other reader (objectiveText,
-   * overallProgress, the stepper/activity/roster helpers) reflects it synchronously. The live-region
-   * announcement is NOT updated synchronously — it is handed to `announcer.update()`, which decides
-   * whether this change starts, replaces, or leaves untouched the pending settle timer.
+   * overallProgress, the stepper/activity/roster helpers) reflects it synchronously. For a non-null
+   * `value` the live-region announcement is NOT updated synchronously — it is handed to
+   * `announcer.update()`, which decides whether this change starts, replaces, or leaves untouched
+   * the pending settle timer. A null `value` clears the announcement immediately, with no settle
+   * delay.
    */
   @Input()
   set status(value: CodingTeamJobStatus | null) {
@@ -98,16 +100,16 @@ export class CodingTeamMonitorComponent implements OnDestroy {
 
   private readonly _announcedSummary = signal('');
   /** Debounced text for the hidden live region — settled by `announcer`, see
-   *  `shared/settle-announce.ts`. */
+   * `shared/settle-announce.ts`. */
   readonly announcedSummary = this._announcedSummary.asReadonly();
   /** Owns the settle-timer bookkeeping for `announcedSummary`; disposed in `ngOnDestroy`. No
-   *  `onChange` cue — unlike the parent page's thinking announcer, this region stays silent until
-   *  a summary actually settles, rather than showing an immediate provisional cue. */
+   * `onChange` cue — unlike the parent page's thinking announcer, this region stays silent until
+   * a summary actually settles, rather than showing an immediate provisional cue. */
   private readonly announcer = new SettleAnnouncer(SUMMARY_ANNOUNCE_SETTLE_MS, (value) =>
     this._announcedSummary.set(value),
   );
   /** True while `announcer` has a pending settle timer — exposed so callers/tests can check
-   *  debounce state without reaching into the private field. */
+   * debounce state without reaching into the private field. */
   get announcementPending(): boolean {
     return this.announcer.isPending;
   }
