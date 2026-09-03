@@ -157,9 +157,10 @@ def make_stub_llm_class() -> type:
           ``DummyLLMClient``), suitable for use as ``ResearchAgent(llm_client=...)`` or
           ``strands.Agent(model=...)``. ``complete_json`` inspects the prompt text for
           keywords distinguishing the blog research pipeline's topic-analysis, query-plan,
-          candidate-scoring, summarization, and similar-topics stages, and returns the
-          matching canned response; prompts matching none of those keyword sets get a
-          generic analysis/outline response.
+          combined candidate scoring+summarization, and similar-topics stages (plus two
+          now-legacy single-purpose scoring-only and summarization-only branches kept for
+          older prompt shapes), and returns the matching canned response; prompts matching
+          none of those keyword sets get a generic analysis/outline response.
     """
     from llm_service import DummyLLMClient
 
@@ -178,6 +179,18 @@ def make_stub_llm_class() -> type:
                         {"query_text": "test overview query", "intent": "overview"},
                         {"query_text": "test how-to query", "intent": "how-to"},
                     ]
+                }
+            # ResearchAgent._evaluate_one_document's merged score+summarize prompt
+            # carries both sets of markers at once, so this combined check must be
+            # tried before the two now-legacy single-purpose branches below.
+            if "relevance_score" in lowered and "summary:" in lowered and "key_points" in lowered:
+                return {
+                    "relevance_score": 0.9,
+                    "authority_score": 0.8,
+                    "accuracy_score": 0.85,
+                    "type": "guides",
+                    "summary": "Test summary.",
+                    "key_points": ["Key point A", "Key point B"],
                 }
             if "relevance_score" in lowered and "type" in lowered:
                 return {
