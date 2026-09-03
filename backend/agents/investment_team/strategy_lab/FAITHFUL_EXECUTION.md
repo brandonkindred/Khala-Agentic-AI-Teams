@@ -93,6 +93,13 @@ entry at all" from "one rule is dead but others fire", and the per-leg diagnosti
 bottleneck (a leg that never holds, or legs that never co-occur). Findings are recorded on the
 gate timeline; routing stays with the existing post-backtest zero-trade path.
 
+This probe currently only catches a rule that never fires at all ("dead"). It does not yet catch
+a rule that fires plenty on its own but is always shadowed by an earlier, higher-priority rule in
+`evaluate_entry_rules`'s first-match-wins scan ("structurally starved") — that extension is
+tracked separately. The authoritative priority decision and the formal "structurally starved"
+definition it must detect are documented on `evaluate_entry_rules` in
+`executor/predicate_evaluator.py`.
+
 ### 6. Design-time spec-quality hardening (`design_system.md`, `strategy_validator.py`, `orchestrator.py`)
 
 - **`max_position_pct` ceiling.** The shared `RiskLimits.max_position_pct` field is intentionally
