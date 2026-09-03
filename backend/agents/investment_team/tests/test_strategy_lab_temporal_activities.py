@@ -4214,3 +4214,9 @@ def test_non_probe_resume_failure_still_logs_warning_with_a_traceback(
     warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
     assert warnings
     assert any(rec.exc_info is not None for rec in warnings)
+    # Level and traceback alone do not pin what the record SAYS: a message that
+    # stopped naming the lost resume would still satisfy both, and naming it is
+    # the whole point of keeping this branch a warning.
+    assert any(
+        "failed to reconstruct (treating as no resume)" in rec.getMessage() for rec in warnings
+    ), "non-probe resume failure must still name the lost cross-attempt resume"

@@ -162,8 +162,13 @@ def build_temporal_planning_answer_callback(
           pause again. Omitted, a re-pause reuses ``resume_token``, which is
           still preferable to answering a batch silently but leaves the two
           rounds sharing one token.
-        - ``allow_repause`` is a bool. ``False`` forbids a further pause and makes
-          this callback resolve whatever it is handed. A caller that loops on
+        - ``allow_repause`` is a bool. ``False`` forbids a further pause: when
+          ``submitted_answers`` is provided, the callback resolves whatever it is
+          handed, defaulting any unmatched question. It does NOT make the
+          no-answers callback resolve -- with ``submitted_answers=None`` there is
+          nothing to resolve with, so that callback still raises the initial pause
+          on ``resume_token`` regardless of this flag (see the postcondition
+          below). A caller that loops on
           pauses MUST bound that loop and pass ``False`` on its final round,
           because nothing here guarantees convergence on its own: a resume replays
           Planning from scratch, and an ``OpenQuestion.id`` reaches the model

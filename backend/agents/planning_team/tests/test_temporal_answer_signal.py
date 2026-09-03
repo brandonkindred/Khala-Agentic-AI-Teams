@@ -344,9 +344,9 @@ def test_empty_submitted_answers_pauses_rather_than_submitting_nothing() -> None
         next_resume_token=lambda: "tok-2",
     )
 
-    with pytest.raises(PlanningAnswerPauseSignal) as exc:
+    with pytest.raises(PlanningAnswerPauseSignal) as excinfo:
         cb([{"id": "q1"}])
-    assert exc.value.resume_token == "tok-2"
+    assert excinfo.value.resume_token == "tok-2"
 
 
 def test_a_fully_answered_batch_resolves_while_a_new_one_pauses() -> None:

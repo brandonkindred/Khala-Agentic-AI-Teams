@@ -20,6 +20,7 @@ from software_engineering_team.code_review_agent.tool_call_budget import (
     ToolCallBudgetModel,
     _has_text_delta,
     _is_tool_use_delta,
+    _is_tool_use_start,
     resolve_agent_tool_call_cap,
 )
 
@@ -402,6 +403,7 @@ class _ParallelBatchModel(_StatelessModel):
 
 
 def _tool_use_ids(events: List[Dict]) -> List[str]:
+    """The toolUseIds announced via ``contentBlockStart``, in emission order."""
     return [
         event["contentBlockStart"]["start"]["toolUse"]["toolUseId"]
         for event in events
@@ -437,6 +439,7 @@ def test_cap_bounds_tool_calls_within_a_single_parallel_batch() -> None:
 
 
 def test_cap_of_one_executes_exactly_one_tool_call() -> None:
+    """A cap of 1 admits exactly the first call of a parallel batch, and charges one."""
     model = ToolCallBudgetModel(_ParallelBatchModel(4), 1)
 
     events = _drain(model, messages=[], tool_specs=[{"name": "read_file"}])
@@ -556,8 +559,6 @@ def test_strands_model_defaults_are_bound_to_the_wrapper() -> None:
     assert model.context_window_limit is None
     # `count_tokens` is a Model method: the wrapper must be bound as `self`, so
     # the caller's first argument stays its first argument.
-    import asyncio
-
     tokens = asyncio.run(model.count_tokens([{"role": "user", "content": [{"text": "hi"}]}]))
     assert isinstance(tokens, int)
 
@@ -908,8 +909,6 @@ def test_a_falsy_tool_use_start_is_not_a_tool_call() -> None:
     tool use charges the budget for a call that never happens, and at the cap
     drops a block that may carry real assistant text.
     """
-    from software_engineering_team.code_review_agent.tool_call_budget import _is_tool_use_start
-
     assert _is_tool_use_start(
         {"contentBlockStart": {"start": {"toolUse": {"toolUseId": "t", "name": "read_file"}}}}
     )
