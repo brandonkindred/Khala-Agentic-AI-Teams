@@ -199,6 +199,18 @@ class HitlAnswerSignalMixin:
           :func:`_validate_answer_batch`) — but ``is not None`` remains the
           contractually correct test, not an accident of today's validation
           choice.
+        - ``__init__``'s composition guard (below) only detects a conflicting
+          signal mixin that ran *earlier* in the MRO: it raises when this
+          mixin's state attributes already exist, which only happens if a
+          same-named sibling (e.g. ``PlanningAnswerSignalMixin``) already set
+          them. If ``HitlAnswerSignalMixin`` is listed *first* in a class's
+          bases instead, this ``__init__`` runs first, passes the guard, and
+          a later sibling's ``__init__`` would silently overwrite this
+          mixin's state with no error raised. The guard is therefore a
+          best-effort backstop for one base order, not a substitute for the
+          module docstring's blanket "do not compose with
+          ``PlanningAnswerSignalMixin``" rule, which applies regardless of
+          base order.
     """
 
     def __init__(self) -> None:
