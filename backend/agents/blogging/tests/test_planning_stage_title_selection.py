@@ -144,7 +144,7 @@ def test_outline_abort_skips_title_selection_and_keeps_fail_sentinel(monkeypatch
 
     assert calls == []
     assert result is not None
-    planning_phase_result, draft, status = result
+    _, draft, status = result
     assert draft is None
     assert status == "FAIL"
 
@@ -155,10 +155,9 @@ def test_title_selection_called_with_stage_bound_values(monkeypatch) -> None:
     from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
 
     llm_client = object()
-    job_updater_calls: list[dict] = []
 
-    def job_updater(**kw):
-        job_updater_calls.append(kw)
+    def job_updater(**_kw):
+        pass
 
     ctx = _make_ctx(monkeypatch, job_id="job-42", job_updater=job_updater)
     ctx.llm_client = llm_client
