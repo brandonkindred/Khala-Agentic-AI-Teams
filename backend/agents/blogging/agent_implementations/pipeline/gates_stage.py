@@ -31,11 +31,12 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
         ctx: The shared ``PipelineContext``. Reads ``brief``, ``work_dir``,
             ``llm_client``, ``length_policy``, ``job_id``, ``job_updater``,
             ``max_rewrite_iterations``, ``run_gates``, ``plan``,
-            ``elicited_stories_text``, and ``draft_result``; writes the final
-            ``draft_result`` and ``status``.
+            ``elicited_stories_text``, ``selected_title``, and ``draft_result``;
+            writes the final ``draft_result`` and ``status``.
     Preconditions:
         - The draft stage populated ``ctx.draft_result``/``ctx.plan``/
-          ``ctx.elicited_stories_text``.
+          ``ctx.elicited_stories_text``. ``ctx.selected_title`` is also read, so a
+          gate-driven rewrite preserves the author's chosen title.
     Postconditions:
         - Sets ``ctx.draft_result`` (final) and ``ctx.status`` (PASS or
           NEEDS_HUMAN_REVIEW). Always returns None (no early aborts).
@@ -90,6 +91,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
     run_gates = ctx.run_gates
     plan = ctx.plan
     elicited_stories_text = ctx.elicited_stories_text
+    selected_title = ctx.selected_title
     draft_result = ctx.draft_result
     _update = _make_update(job_updater)
 
@@ -471,7 +473,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                     tone_or_purpose=brief.tone_or_purpose,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
-                    selected_title=None,
+                    selected_title=selected_title,
                     elicited_stories=elicited_stories_text or None,
                     allowed_claims=allowed_claims,
                 )
