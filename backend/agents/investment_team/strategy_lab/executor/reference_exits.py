@@ -1,20 +1,28 @@
-"""Exit-side replay for the reference-ledger simulator: ``StopLossRule``.
+"""Exit-side replay for the reference-ledger simulator: resting-order exits.
 
 Second half of the reference-ledger simulator designed in
 ``system_design/reference_ledger_trade_model.md``, attaching exit modelling to
-the entry-side replay in :mod:`reference_entries`. This step covers exactly one
-exit rule kind — ``StopLossRule``, the most-used one — across all four variants
-(``entry_price`` / trailing bases x ``market`` / ``limit`` styles). Take-profit,
-scaled take-profit, signal exits, and the combined simulator that lets every
-kind compete on the same bar are later steps.
+the entry-side replay in :mod:`reference_entries`. Two exit rule kinds are
+covered so far: ``StopLossRule`` across all four variants (``entry_price`` /
+trailing bases x ``market`` / ``limit`` styles), and the take-profit family —
+standalone ``TakeProfitRule`` and laddered ``ScaledTakeProfitRule``. Signal
+exits and the combined simulator that lets every kind compete on the same bar
+are later steps.
 
-Trigger decisions are NOT re-derived here: they come from the shared, pure
-``rule_compiler.stop_loss_triggers`` (and its ``stop_loss_level`` /
-``stop_limit_prices`` geometry), the same functions the live evaluator and the
-post-hoc conformance gate call. What this module adds — and what those shared
-functions deliberately do not cover — is resting-order FILL mechanics: which
-bar the order fills on, at what price, gap handling, the trailing watermark's
-own bar-by-bar ratchet, and the stop-limit arm/latch.
+Stop-loss trigger decisions are NOT re-derived here: they come from the
+shared, pure ``rule_compiler.stop_loss_triggers`` (and its ``stop_loss_level``
+/ ``stop_limit_prices`` geometry), the same functions the live evaluator and
+the post-hoc conformance gate call. Take-profit's trigger/target formula
+(``entry * (1 ± pct)``, then a single bar-range comparison) is instead
+inlined directly in this module rather than importing ``rule_compiler``'s
+private ``_take_profit_triggers``: it is a two-line, self-contained formula
+with no drift risk, the same stance ``entry_price_basis``/``_round_price``
+already take on other small production-adjacent formulas with no public
+export. What this module adds — and what neither the shared stop-loss
+functions nor the inlined take-profit formula cover on their own — is
+resting-order FILL mechanics: which bar an order fills on, at what price, gap
+handling, the stop's trailing watermark ratchet, the stop-limit arm/latch, and
+the take-profit ladder's rung cursor / materialization lifecycle.
 
 Target behavior, not shipped behavior
 -------------------------------------
@@ -39,29 +47,50 @@ as new pure code.
 Scope limits deliberately left to later steps
 ---------------------------------------------
 * ``replay_entry_rules`` opens at most one position per symbol and never
-  re-enters, so this returns at most one exit per symbol. Re-entry after a stop
-  closes a position needs the combined driver that resolves exits before
-  entries on each bar.
+  re-enters, so this returns at most one exit per symbol. Re-entry after a
+  stop or take-profit closes a position needs the combined driver that
+  resolves exits before entries on each bar.
 * No quantity/sizing, capital ledger, or risk-limit admission gates; no
-  cross-symbol merged ``(timestamp, symbol)`` timeline; no competition against
-  other exit rule kinds (a take-profit or signal exit that would have closed the
-  position first is simply not modeled yet, so a stop here may fire on a bar
-  where the full simulator would not have had a position left to close).
-* ``ReferenceStopLossExit`` is correspondingly narrower than the design doc's
-  ``ReferenceTrade``, exactly as ``ReferenceEntryFill`` is on the entry side:
-  its fields match ``ReferenceTrade``'s exit-side fields 1:1 in
-  name/type/semantics so a later step can join an entry fill and an exit into a
-  full ``ReferenceTrade`` without renaming anything.
+  cross-symbol merged ``(timestamp, symbol)`` timeline; no competition between
+  the two families this module DOES cover and the ones it does not
+  (``StopLossRule`` vs. the take-profit family, or either vs. a signal exit) —
+  a stop-loss replay and a take-profit-family replay over the same spec are
+  each modeled as if the other's rules did not exist, so either may fire on a
+  bar where the full simulator would not have had a position left to close.
+* The take-profit family models no true multi-bar entry continuation: this
+  simulator's entries always fill instantaneously in one shot
+  (:func:`~.reference_entries.replay_entry_rules`), so the live engine's
+  ``entry_continuation_in_flight`` deferral is vacuously always satisfied
+  here. Both it and the engine's per-rung ``scaled_partial_in_flight``
+  deferral collapse to the same structural fact in this module: the bar walk
+  starts at ``entry_bar + 1`` and calls ``_RestingTakeProfitFamily.step``
+  exactly once per bar, strictly in order, so no candidate — first or
+  ladder-advanced — is ever examined before the bar after it can legally
+  fire. No separate "eligible bar" state is needed to enforce that; see
+  ``_LadderCursor``'s and ``_RestingTakeProfitFamily``'s own docstrings.
+* ``ReferenceStopLossExit``/``ReferenceTakeProfitExit`` are correspondingly
+  narrower than the design doc's ``ReferenceTrade``, exactly as
+  ``ReferenceEntryFill`` is on the entry side: their fields match
+  ``ReferenceTrade``'s exit-side fields 1:1 in name/type/semantics so a later
+  step can join an entry fill and an exit into a full ``ReferenceTrade``
+  without renaming anything.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Literal, Mapping, Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, List, Literal, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 
 from ...models import StrategySpec
-from ..spec_dsl import ExitRule, StopLossRule, first_side_stop_factor, stop_caps_side
+from ..spec_dsl import (
+    ExitRule,
+    ScaledTakeProfitRule,
+    StopLossRule,
+    TakeProfitRule,
+    first_side_stop_factor,
+    stop_caps_side,
+)
 from .reference_entries import ReferenceEntryFill, replay_entry_rules
 from .rule_compiler import (
     BarSnapshot,
@@ -86,6 +115,18 @@ if TYPE_CHECKING:
 # reference model and a future reader can see the exact shape being reproduced.
 _SHORT_SAFETY_STOP_PCT = 1.0
 _SHORT_SAFETY_STOP_BASIS = "entry_price"
+
+# Mirrors trading_service/engine/order_book.py's FILL_QTY_REL_TOL — the
+# relative tolerance production uses to decide a position is "closed enough"
+# despite floating-point summation noise in a ladder's rung quantities. Not
+# imported: importing anything from trading_service/engine/* is forbidden
+# (see the module docstring's Exclusions section and
+# ``test_module_imports_no_forbidden_engine_module``). Kept as a local
+# constant, the same treatment ``_SHORT_SAFETY_STOP_PCT`` already gets for its
+# own production mirror. NOT interchangeable with ``spec_dsl.LADDER_SUM_TOL``
+# (1e-9): that is the DSL validator's bound on a ladder's rung-fraction sum,
+# unrelated to this runtime closure test.
+_FILL_QTY_REL_TOL = 1e-12
 
 
 @dataclass(frozen=True)
@@ -150,6 +191,93 @@ class ReferenceStopLossExit:
             )
         if self.exit_rule_kind != "stop_loss":
             raise ValueError(f"exit_rule_kind must be 'stop_loss', got {self.exit_rule_kind!r}")
+
+
+@dataclass(frozen=True)
+class ReferenceTakeProfitExit:
+    """One reference position closed by a modeled take-profit-family rule.
+
+    A single record type serves BOTH ``TakeProfitRule`` and
+    ``ScaledTakeProfitRule`` closes, unlike the separate ``ReferenceStopLossExit``:
+    a combined resolver (see :class:`_RestingTakeProfitFamily`) races a spec's
+    standalone targets and ladder rungs against each other bar by bar, so it
+    must already return one unified outcome type — two record classes would
+    just need an artificial union wrapping them for no benefit. Every field
+    matches ``ReferenceTrade``'s same-named field in type and semantics, same
+    as ``ReferenceStopLossExit``.
+
+    For a ``scaled_take_profit`` close, ``level_index`` identifies the RUNG
+    THAT FINALLY CLOSED the position — not every rung that contributed to
+    ``exit_price`` along the way (a ladder whose first two rungs fired before a
+    third rung emptied the position still records only the third rung's
+    index). A ``take_profit`` close never carries a rung, so ``level_index`` is
+    ``None`` there — the same "absent rather than present-and-meaningless"
+    stance ``ReferenceStopLossExit`` takes by omitting the field outright,
+    adapted here to an ``Optional`` field instead because this record type
+    must represent both shapes.
+
+    Invariants (all enforced in ``__post_init__``): ``0 <= entry_bar <
+    exit_bar``; ``exit_price`` is finite and positive; ``exit_rule_index >= 0``;
+    ``exit_rule_kind`` is ``"take_profit"`` or ``"scaled_take_profit"``;
+    ``level_index`` is populated (and ``>= 0``) if and only if
+    ``exit_rule_kind == "scaled_take_profit"``.
+    """
+
+    symbol: str
+    entry_bar: int
+    exit_bar: int
+    exit_date: str
+    exit_price: float
+    exit_rule_kind: Literal["take_profit", "scaled_take_profit"]
+    exit_rule_index: int
+    level_index: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        """Enforce this record's structural contract at construction.
+
+        Fail-fast at construction, matching ``ReferenceStopLossExit``: a
+        record built directly by a test or a later matching module's adapter
+        cannot exist in an invalid state either.
+
+        Preconditions: none beyond typing.
+        Postconditions: raises ``ValueError`` when ``entry_bar < 0``,
+        ``exit_bar <= entry_bar``, ``exit_rule_index < 0``, ``exit_price`` is
+        not a positive finite number, ``exit_rule_kind`` is anything but
+        ``"take_profit"``/``"scaled_take_profit"``, or ``level_index``'s
+        presence disagrees with ``exit_rule_kind`` (populated for
+        ``"take_profit"``, absent or negative for ``"scaled_take_profit"``);
+        otherwise the instance is structurally valid. ``symbol`` and
+        ``exit_date`` are recorded as given, not validated, the same stance
+        ``ReferenceStopLossExit`` takes.
+        """
+        if self.entry_bar < 0:
+            raise ValueError(f"entry_bar must be >= 0, got {self.entry_bar!r}")
+        if self.exit_bar <= self.entry_bar:
+            raise ValueError(
+                f"exit_bar must be > entry_bar ({self.entry_bar!r}), got {self.exit_bar!r}"
+            )
+        if self.exit_rule_index < 0:
+            raise ValueError(f"exit_rule_index must be >= 0, got {self.exit_rule_index!r}")
+        if not (self.exit_price > 0 and math.isfinite(self.exit_price)):
+            raise ValueError(
+                f"exit_price must be a positive finite number, got {self.exit_price!r}"
+            )
+        if self.exit_rule_kind not in ("take_profit", "scaled_take_profit"):
+            raise ValueError(
+                "exit_rule_kind must be 'take_profit' or 'scaled_take_profit', "
+                f"got {self.exit_rule_kind!r}"
+            )
+        if self.exit_rule_kind == "scaled_take_profit":
+            if self.level_index is None:
+                raise ValueError(
+                    "level_index is required when exit_rule_kind is 'scaled_take_profit'"
+                )
+            if self.level_index < 0:
+                raise ValueError(f"level_index must be >= 0, got {self.level_index!r}")
+        elif self.level_index is not None:
+            raise ValueError(
+                f"level_index must be None when exit_rule_kind is 'take_profit', got {self.level_index!r}"
+            )
 
 
 def _decimals_for(reference_price: float) -> int:
@@ -320,6 +448,46 @@ def stop_loss_rules_for_side(
         for idx, rule in enumerate(rules)
         if isinstance(rule, StopLossRule) and stop_caps_side(rule.basis, side)
     ]
+
+
+def take_profit_rules(rules: Sequence[ExitRule]) -> List[Tuple[int, TakeProfitRule]]:
+    """The standalone ``TakeProfitRule`` members of ``rules``, in spec order.
+
+    Unlike :func:`stop_loss_rules_for_side`, no side-compatibility filter
+    applies: a ``TakeProfitRule``'s target formula is symmetric across both
+    sides (``entry * (1 + pct)`` for a long, ``entry * (1 - pct)`` for a
+    short) — there is no basis analog that can mismatch the position's side
+    the way ``trailing_low``/``trailing_high`` can for a stop. Every
+    ``TakeProfitRule`` in ``rules`` is therefore always a live candidate,
+    regardless of which side the caller resolves against.
+
+    Preconditions: ``rules`` are ``ExitRule`` members (non-take-profit members
+    are valid input and are skipped).
+    Postconditions: returns ``(spec_index, rule)`` pairs in ascending spec
+    index, containing exactly the ``TakeProfitRule``\\ s in ``rules``. The
+    indices are indices into ``rules`` as given, so they are the
+    ``exit_rule_index`` values a fired rule records.
+    """
+    return [(idx, rule) for idx, rule in enumerate(rules) if isinstance(rule, TakeProfitRule)]
+
+
+def scaled_take_profit_rules(
+    rules: Sequence[ExitRule],
+) -> List[Tuple[int, ScaledTakeProfitRule]]:
+    """The ``ScaledTakeProfitRule`` ladders in ``rules``, in spec order.
+
+    Same "no side filtering" stance as :func:`take_profit_rules` — see its
+    docstring; a ladder rung's target formula is equally symmetric across
+    sides.
+
+    Preconditions: ``rules`` are ``ExitRule`` members (non-ladder members are
+    valid input and are skipped).
+    Postconditions: returns ``(spec_index, rule)`` pairs in ascending spec
+    index, containing exactly the ``ScaledTakeProfitRule``\\ s in ``rules``.
+    The indices are indices into ``rules`` as given, so they are the
+    ``exit_rule_index`` values a fired rung's closing record attributes to.
+    """
+    return [(idx, rule) for idx, rule in enumerate(rules) if isinstance(rule, ScaledTakeProfitRule)]
 
 
 class _RestingStopLoss:
@@ -622,6 +790,380 @@ def replay_stop_loss_exits(
     out: List[ReferenceStopLossExit] = []
     for entry in replay_entry_rules(spec, bars):
         found = resolve_stop_loss_exit(
+            rules,
+            entry,
+            bars[entry.symbol],
+            entry_slippage_bps=entry_slippage_bps,
+        )
+        if found is not None:
+            out.append(found)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Take-profit family: standalone ``TakeProfitRule`` and laddered
+# ``ScaledTakeProfitRule``
+# ---------------------------------------------------------------------------
+
+
+def _take_profit_target(anchor: float, pct: float, side: Literal["long", "short"]) -> float:
+    """The exact resting-limit target for one standalone rule or ladder rung.
+
+    Single source of the take-profit-family target formula, inlined here
+    rather than imported (see this module's docstring) since it is a
+    two-line, self-contained formula with no drift risk.
+
+    Preconditions: ``anchor`` is the position's post-slippage
+    :func:`entry_price_basis`; ``pct`` is the rule's/rung's positive profit
+    magnitude; ``side`` is ``"long"`` or ``"short"``.
+    Postconditions: returns ``anchor * (1 + pct)`` for a long and
+    ``anchor * (1 - pct)`` for a short — the exact price the resting limit
+    fills at, never gap-adjusted (see the design doc's ``take_profit``
+    subsection for why this is asymmetric with stop-loss's worse-of-open
+    rule).
+    """
+    return anchor * (1.0 + pct) if side == "long" else anchor * (1.0 - pct)
+
+
+def _take_profit_target_reached(side: Literal["long", "short"], bar: "Bar", target: float) -> bool:
+    """Whether ``bar``'s OWN range reaches ``target`` — no watermark involved.
+
+    This is deliberately NOT the live engine's ``_next_scaled_rung`` test
+    (which folds in a running high-water-mark since entry, so a rung a single
+    spike bar clears stays "eligible" on every later bar even after a
+    retrace). A take-profit target is a fixed price, so "the current bar's own
+    extreme reaches it" is a strict superset of any watermark-based test — the
+    watermark always folds in the current bar's own extreme by construction —
+    and the design doc requires firing to depend only on THIS bar's own range,
+    never an earlier bar's spike alone. So no cross-bar price state exists
+    anywhere in this module's take-profit-family code; see
+    :class:`_RestingTakeProfitFamily`'s docstring for the fuller argument.
+
+    Preconditions: ``target`` is the resolved take-profit-family target price.
+    Postconditions: returns ``True`` iff ``bar.high >= target`` for a long (a
+    sell) or ``bar.low <= target`` for a short (a buy).
+    """
+    return bar.high >= target if side == "long" else bar.low <= target
+
+
+@dataclass
+class _LadderCursor:
+    """Per-ladder cursor state for one ``ScaledTakeProfitRule`` on one position.
+
+    Mutable, unlike the frozen records elsewhere in this module: this is pure
+    internal bookkeeping advanced bar-by-bar by
+    :class:`_RestingTakeProfitFamily` and never exposed to a caller. Mirrors
+    the live engine's ``_ScaledLadderCursor`` (keyed the same way — per
+    ``rule_index`` — but scoped to one position, since this module walks one
+    position at a time rather than a whole per-strategy dispatcher).
+
+    Carries no explicit "next eligible bar" field for the engine's
+    ``scaled_partial_in_flight`` materialization-bar deferral — a newly-armed
+    rung is not eligible on the same bar an earlier rung just fired, but
+    :meth:`_RestingTakeProfitFamily.step` already guarantees that structurally
+    without extra state: it builds one bar's candidate list from the cursor
+    BEFORE advancing it, and its only caller (:func:`resolve_take_profit_family_exit`)
+    walks bars strictly sequentially, one ``step`` call per bar. So the
+    newly-advanced rung is never even examined until the NEXT ``step`` call —
+    which is, by construction, a later bar. Tracking a redundant eligibility
+    bar would duplicate an invariant the call structure already enforces.
+
+    Invariants: ``next_rung`` only ever increases.
+    """
+
+    rule_index: int
+    rule: ScaledTakeProfitRule
+    next_rung: int
+
+
+class _TakeProfitFireResult(NamedTuple):
+    """The winning candidate's outcome once its fill fully closes the position.
+
+    ``raw_price`` is the qty-weighted average across every partial fill plus
+    this closing fill — UNROUNDED; the caller applies :func:`_round_price`
+    exactly once, matching the one-rounding-pass discipline
+    :func:`entry_price_basis`/:func:`resolve_stop_loss_exit` already use.
+    """
+
+    exit_rule_index: int
+    exit_rule_kind: Literal["take_profit", "scaled_take_profit"]
+    raw_price: float
+    level_index: Optional[int]
+
+
+class _Candidate(NamedTuple):
+    """One take-profit-family candidate reachable on the bar being evaluated."""
+
+    exit_rule_index: int
+    exit_rule_kind: Literal["take_profit", "scaled_take_profit"]
+    price: float
+    qty: float
+    level_index: Optional[int]
+    ladder: Optional[_LadderCursor]
+
+
+class _RestingTakeProfitFamily:
+    """One modeled take-profit-family resting-order book for one open position.
+
+    Owns every standalone ``TakeProfitRule`` and every ``ScaledTakeProfitRule``
+    ladder attached to one position, racing them together bar by bar exactly
+    as the live engine's ``first_exit_intent_for_position`` walks one combined
+    rule list in spec order and fires at most one intent per position per bar
+    — the SAME per-position (not per-rule, not per-ladder) firing budget, so a
+    bar reachable by two different ladders' cursor rungs, or by a standalone
+    target and a rung, still only fires the lower-``exit_rule_index`` one.
+
+    Unlike :class:`_RestingStopLoss`, this object carries NO cross-bar price
+    watermark. See :func:`_take_profit_target_reached`'s docstring for why: a
+    take-profit-family target is a FIXED price resolved once at entry, so the
+    current bar's own range is provably sufficient (and required) on its own.
+    The only cross-bar state this object owns is per-ladder cursor bookkeeping
+    — a real simplification versus step 1's trailing-stop watermark.
+
+    A fired ladder rung that does not exhaust the position's remaining
+    quantity does NOT emit a closing outcome — it advances internal state
+    (``_remaining_qty``, the firing ladder's cursor, ``_fills``) and the walk
+    continues, mirroring the design doc's "a fired rung does not emit its own
+    ``ReferenceTrade``" rule. Only the position's FINAL closing event — a
+    standalone target (always closes whatever remains) or a rung that leaves
+    ``_remaining_qty`` within :data:`_FILL_QTY_REL_TOL` of zero — produces an
+    outcome, carrying the qty-weighted average price across every partial fill
+    plus that final one.
+
+    Invariants:
+      * ``_remaining_qty`` only ever decreases.
+      * Each ladder's ``next_rung`` only ever increases.
+      * The FIRST rung of every ladder, and every standalone rule, is only
+        ever checked starting at ``entry_bar + 1``: this object's only caller
+        (:func:`resolve_take_profit_family_exit`) starts its bar walk there,
+        so ``step`` is simply never invoked for ``entry_bar`` itself — the
+        materialization-bar deferral for a position's FIRST candidate needs no
+        state on this object either, for the same structural reason
+        :class:`_LadderCursor` needs none for a ladder's LATER rungs.
+    """
+
+    def __init__(
+        self,
+        *,
+        side: Literal["long", "short"],
+        anchor: float,
+        standalone: Sequence[Tuple[int, TakeProfitRule]],
+        ladders: Sequence[Tuple[int, ScaledTakeProfitRule]],
+    ) -> None:
+        """Arm a take-profit-family resting-order book for a freshly filled position.
+
+        Preconditions: ``anchor`` is the position's post-slippage
+        :func:`entry_price_basis` (finite, ``> 0``); ``standalone``/``ladders``
+        are the ``(spec_index, rule)`` pairs from :func:`take_profit_rules` /
+        :func:`scaled_take_profit_rules`, together non-empty. The caller must
+        not invoke :meth:`step` for the position's own entry bar — only for
+        ``entry_bar + 1`` onward — which is this object's only source of
+        materialization-bar deferral for a position's first candidates; see
+        this class's own Invariants for why no additional state is needed
+        here to enforce that.
+        Postconditions: every ladder's cursor starts at rung 0.
+        ``_remaining_qty`` starts at the nominal ``_original_qty`` (``1.0`` —
+        this step models no real sizing, the same nominal-``qty=1.0`` stance
+        ``_RestingStopLoss`` takes).
+        """
+        self._side = side
+        self._anchor = anchor
+        self._standalone = list(standalone)
+        self._ladders = [
+            _LadderCursor(rule_index=idx, rule=rule, next_rung=0) for idx, rule in ladders
+        ]
+        self._original_qty = 1.0
+        self._remaining_qty = 1.0
+        self._fills: List[Tuple[float, float]] = []
+
+    def step(self, bar: "Bar") -> Optional[_TakeProfitFireResult]:
+        """Evaluate ``bar``, applying at most one winning candidate.
+
+        Preconditions: the caller invokes this once per bar, in strictly
+        increasing bar order, starting no earlier than the position's
+        ``entry_bar + 1`` (see this class's own Invariants for why that is
+        this object's only source of materialization-bar deferral).
+        Postconditions: returns the position's FINAL closing outcome once this
+        bar's winning candidate exhausts ``_remaining_qty`` (within
+        :data:`_FILL_QTY_REL_TOL`); returns ``None`` otherwise, whether because
+        no candidate was reachable this bar or because the winning rung fired
+        but left the position open. Internal state advances whenever a
+        candidate fires, whether or not this call returns a result.
+        """
+        candidates: List[_Candidate] = []
+        for idx, rule in self._standalone:
+            target = _take_profit_target(self._anchor, rule.pct, self._side)
+            if _take_profit_target_reached(self._side, bar, target):
+                # A standalone rule is always a full close of whatever
+                # remains — the design doc's "every other exit rule kind is
+                # always a full-position close."
+                candidates.append(
+                    _Candidate(idx, "take_profit", target, self._remaining_qty, None, None)
+                )
+        for ladder in self._ladders:
+            if ladder.next_rung >= len(ladder.rule.levels):
+                continue  # ladder exhausted
+            level = ladder.rule.levels[ladder.next_rung]
+            target = _take_profit_target(self._anchor, level.pct, self._side)
+            if _take_profit_target_reached(self._side, bar, target):
+                rung_qty = min(level.qty_fraction * self._original_qty, self._remaining_qty)
+                candidates.append(
+                    _Candidate(
+                        ladder.rule_index,
+                        "scaled_take_profit",
+                        target,
+                        rung_qty,
+                        ladder.next_rung,
+                        ladder,
+                    )
+                )
+        if not candidates:
+            return None
+
+        # Ascending exit_rule_index tie-break: the single rule that makes the
+        # firing budget per-POSITION rather than per-ladder/per-rule, since
+        # only one element of this combined list is ever taken regardless of
+        # how many standalone rules/ladders were reachable this bar.
+        winner = min(candidates, key=lambda c: c.exit_rule_index)
+        self._fills.append((winner.qty, winner.price))
+        self._remaining_qty -= winner.qty
+        if winner.ladder is not None:
+            winner.ladder.next_rung += 1
+
+        if self._remaining_qty > self._original_qty * _FILL_QTY_REL_TOL:
+            return None  # rung fired, position still open — keep walking
+
+        total_qty = sum(qty for qty, _ in self._fills)
+        weighted_price = sum(qty * price for qty, price in self._fills) / total_qty
+        return _TakeProfitFireResult(
+            exit_rule_index=winner.exit_rule_index,
+            exit_rule_kind=winner.exit_rule_kind,
+            raw_price=weighted_price,
+            level_index=winner.level_index,
+        )
+
+
+def resolve_take_profit_family_exit(
+    rules: Sequence[ExitRule],
+    entry: ReferenceEntryFill,
+    symbol_bars: "Sequence[Bar]",
+    *,
+    entry_slippage_bps: float = 0.0,
+) -> Optional[ReferenceTakeProfitExit]:
+    """Model the take-profit-family close of one already-opened reference position.
+
+    The per-position core of :func:`replay_take_profit_family_exits`, exposed
+    separately so a later step can drive it against a position whose entry
+    came from somewhere other than a whole-spec replay — mirrors
+    :func:`resolve_stop_loss_exit`'s own role. A spec's standalone
+    ``TakeProfitRule``\\ s and ``ScaledTakeProfitRule`` ladders are resolved
+    together by a single :class:`_RestingTakeProfitFamily`, not by two
+    independent walks: they must race on the same bar per the design doc's
+    tie-break rule, and two independent resolvers could each decide "I fire
+    this bar" without knowing about the other, double-closing the position.
+
+    Preconditions:
+        - ``rules`` is the WORKING exit-rule list from
+          :func:`working_exit_rules` (not raw ``spec.exit_rules``), so every
+          index is the one a fired rule/rung should record.
+        - ``entry`` was produced against ``symbol_bars``: ``0 <= entry.entry_bar
+          < len(symbol_bars)``.
+        - ``entry_slippage_bps`` is finite and in ``[0, 10_000)``.
+
+    Postconditions:
+        - Returns the position's FINAL closing record — the first bar at or
+          after ``entry.entry_bar + 1`` whose winning candidate's fill fully
+          closes the position (within :data:`_FILL_QTY_REL_TOL`) — or ``None``
+          when the position is still open (never touched, or only partially
+          reduced by earlier rungs) when ``symbol_bars`` runs out. Mirrors
+          production reporting a still-open position rather than a synthetic
+          force-close.
+        - The returned record's ``exit_price`` is the qty-weighted average of
+          every partial fill plus the final closing fill, rounded once to
+          production's own bid-price bucket; its ``exit_rule_index`` indexes
+          ``rules``; ``level_index`` is populated iff the final closing event
+          was a ladder rung.
+
+    Invariants: does not mutate ``rules``, ``entry``, or ``symbol_bars``, and
+    is deterministic in its inputs.
+    """
+    if not 0 <= entry.entry_bar < len(symbol_bars):
+        raise ValueError(
+            f"entry.entry_bar {entry.entry_bar!r} is out of range for {len(symbol_bars)} bars"
+        )
+    standalone = take_profit_rules(rules)
+    ladders = scaled_take_profit_rules(rules)
+    if not standalone and not ladders:
+        return None
+    anchor = entry_price_basis(symbol_bars[entry.entry_bar].open, entry.side, entry_slippage_bps)
+    family = _RestingTakeProfitFamily(
+        side=entry.side,
+        anchor=anchor,
+        standalone=standalone,
+        ladders=ladders,
+    )
+    for exit_bar in range(entry.entry_bar + 1, len(symbol_bars)):
+        bar = symbol_bars[exit_bar]
+        fired = family.step(bar)
+        if fired is None:
+            continue
+        return ReferenceTakeProfitExit(
+            symbol=entry.symbol,
+            entry_bar=entry.entry_bar,
+            exit_bar=exit_bar,
+            exit_date=bar.timestamp[:10],
+            exit_price=_round_price(fired.raw_price),
+            exit_rule_kind=fired.exit_rule_kind,
+            exit_rule_index=fired.exit_rule_index,
+            level_index=fired.level_index,
+        )
+    return None
+
+
+def replay_take_profit_family_exits(
+    spec: StrategySpec,
+    bars: "Mapping[str, Sequence[Bar]]",
+    *,
+    entry_slippage_bps: float = 0.0,
+) -> List[ReferenceTakeProfitExit]:
+    """Replay ``spec``'s take-profit-family exits over ``bars``.
+
+    Opens reference positions with the shared entry-side replay, then models
+    each one's take-profit/scaled-take-profit close with resting-order fill
+    semantics. Mirrors :func:`replay_stop_loss_exits`'s shape exactly,
+    substituting the take-profit-family resolver.
+
+    Preconditions:
+        - ``spec`` is a validated ``StrategySpec`` with ``requires_custom_code``
+          False.
+        - ``bars`` maps symbol to a chronological ``Bar`` sequence (an empty
+          sequence is skipped, not an error, mirroring
+          :func:`replay_stop_loss_exits`'s own stance).
+        - ``entry_slippage_bps`` is finite and in ``[0, 10_000)`` — it shifts
+          the post-slippage anchor every target/rung hangs off, so it can
+          change both the recorded exit price and which bar the position
+          closes on.
+
+    Postconditions:
+        - Returns at most one ``ReferenceTakeProfitExit`` per symbol, in the
+          order the entry replay yields positions. Fewer whenever a position
+          is still open when its bars run out, or the spec has no
+          ``TakeProfitRule``/``ScaledTakeProfitRule`` at all.
+        - Every returned record's ``exit_rule_index`` indexes
+          :func:`working_exit_rules`'s list.
+
+    Invariants:
+        - No side effects: does not mutate ``spec`` or ``bars``, and performs
+          no I/O.
+        - Deterministic: identical inputs always produce an identical list.
+        - Imports no module reaching ``trading_service/service.py`` or the four
+          forbidden ``trading_service/engine/`` modules (see this module's
+          docstring).
+    """
+    rules = working_exit_rules(spec)
+    out: List[ReferenceTakeProfitExit] = []
+    for entry in replay_entry_rules(spec, bars):
+        found = resolve_take_profit_family_exit(
             rules,
             entry,
             bars[entry.symbol],

@@ -1,4 +1,5 @@
-"""Unit tests for ``executor.reference_exits`` (``StopLossRule`` modelling)."""
+"""Unit tests for ``executor.reference_exits`` (``StopLossRule`` and
+take-profit-family modelling)."""
 
 from __future__ import annotations
 
@@ -12,10 +13,15 @@ from investment_team.models import StrategySpec
 from investment_team.strategy_lab.executor.reference_entries import ReferenceEntryFill
 from investment_team.strategy_lab.executor.reference_exits import (
     ReferenceStopLossExit,
+    ReferenceTakeProfitExit,
     entry_price_basis,
     replay_stop_loss_exits,
+    replay_take_profit_family_exits,
     resolve_stop_loss_exit,
+    resolve_take_profit_family_exit,
+    scaled_take_profit_rules,
     stop_loss_rules_for_side,
+    take_profit_rules,
     working_exit_rules,
 )
 from investment_team.strategy_lab.spec_dsl import (
@@ -23,7 +29,9 @@ from investment_team.strategy_lab.spec_dsl import (
     ExitRule,
     OcoBracketRule,
     Predicate,
+    ScaledTakeProfitRule,
     StopLossRule,
+    TakeProfitLevel,
     TakeProfitRule,
 )
 
@@ -904,3 +912,520 @@ def test_math_helper_is_used_for_the_finiteness_guard():
     assert not math.isfinite(float("inf"))
     with pytest.raises(ValueError):
         _record(exit_price=float("inf"))
+
+
+def test_fill_qty_rel_tol_is_a_local_constant_not_imported_from_order_book():
+    """A cheap guard so a future contributor doesn't "fix" the deliberate
+    duplication by importing the forbidden ``order_book`` module."""
+    from investment_team.strategy_lab.executor import reference_exits
+
+    assert reference_exits._FILL_QTY_REL_TOL == 1e-12
+
+
+# ---------------------------------------------------------------------------
+# take_profit_rules / scaled_take_profit_rules — filtering helpers
+# ---------------------------------------------------------------------------
+
+
+def test_take_profit_rules_returns_only_take_profit_rule_instances_in_spec_order():
+    rules = [
+        StopLossRule(pct=0.05),
+        TakeProfitRule(pct=0.1),
+        ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=1.0)]),
+        TakeProfitRule(pct=0.2),
+    ]
+    assert [i for i, _ in take_profit_rules(rules)] == [1, 3]
+
+
+def test_scaled_take_profit_rules_returns_only_scaled_take_profit_rule_instances_in_spec_order():
+    rules = [
+        StopLossRule(pct=0.05),
+        TakeProfitRule(pct=0.1),
+        ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=1.0)]),
+        TakeProfitRule(pct=0.2),
+    ]
+    assert [i for i, _ in scaled_take_profit_rules(rules)] == [2]
+
+
+# ---------------------------------------------------------------------------
+# Standalone take_profit — exact-price fill geometry
+# ---------------------------------------------------------------------------
+
+
+def _resolve_tp(rules, bars, side="long", entry_bar=1, **kw):
+    return resolve_take_profit_family_exit(
+        rules, _entry(side=side, entry_bar=entry_bar), bars, **kw
+    )
+
+
+def test_long_take_profit_fills_at_the_exact_target_through_bar():
+    """The bar trades up through 105 without gapping past it, so the resting
+    target fills AT the target — not at the open, not at the high."""
+    rules = [TakeProfitRule(pct=0.05)]
+    bars = [_flat(100.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.5)]
+    got = _resolve_tp(rules, bars)
+    assert (got.exit_bar, got.exit_price) == (2, 105.0)
+    assert (got.exit_rule_kind, got.exit_rule_index, got.entry_bar) == ("take_profit", 0, 1)
+    assert got.level_index is None
+
+
+def test_long_take_profit_gap_through_still_fills_at_exactly_the_target():
+    """The bar opens at 110, already above the 105 target, but a limit fills
+    exactly at its price — never better, never worse — unlike a stop."""
+    rules = [TakeProfitRule(pct=0.05)]
+    bars = [_flat(100.0), _flat(100.0), _bar(110.0, 112.0, 109.0, 111.0)]
+    got = _resolve_tp(rules, bars)
+    assert (got.exit_bar, got.exit_price) == (2, 105.0)
+
+
+def test_short_take_profit_fills_at_the_exact_target_through_bar():
+    rules = [TakeProfitRule(pct=0.05)]
+    bars = [_flat(100.0), _flat(100.0), _bar(99.0, 99.5, 94.0, 96.0)]
+    got = _resolve_tp(rules, bars, side="short")
+    assert (got.exit_bar, got.exit_price) == (2, 95.0)
+
+
+def test_short_take_profit_gap_through_still_fills_at_exactly_the_target():
+    rules = [TakeProfitRule(pct=0.05)]
+    bars = [_flat(100.0), _flat(100.0), _bar(90.0, 91.0, 88.0, 89.0)]
+    got = _resolve_tp(rules, bars, side="short")
+    assert (got.exit_bar, got.exit_price) == (2, 95.0)
+
+
+def test_take_profit_is_not_eligible_on_its_own_entry_bar():
+    """The resting order materializes at entry fill and is not eligible until
+    the next bar — a target reached on the entry bar itself does not fire."""
+    rules = [TakeProfitRule(pct=0.05)]
+    breach_on_entry = _bar(100.0, 106.0, 100.0, 105.0)
+    bars = [_flat(100.0), breach_on_entry, _flat(100.0)]
+    assert _resolve_tp(rules, bars) is None
+
+
+def test_no_take_profit_rule_produces_no_exit():
+    bars = [_flat(100.0), _flat(100.0), _bar(150.0, 160.0, 150.0, 155.0)]
+    assert _resolve_tp([StopLossRule(pct=0.1)], bars) is None
+
+
+def test_position_open_at_the_last_bar_produces_no_take_profit_record():
+    rules = [TakeProfitRule(pct=0.05)]
+    bars = [_flat(100.0), _flat(100.0), _flat(101.0), _flat(102.0)]
+    assert _resolve_tp(rules, bars) is None
+
+
+def test_take_profit_exit_date_comes_from_the_fill_bar():
+    rules = [TakeProfitRule(pct=0.05)]
+    bars = [
+        _flat(100.0, "2024-03-01T00:00:00"),
+        _flat(100.0, "2024-03-02T00:00:00"),
+        _bar(101.0, 106.0, 100.0, 105.0, "2024-03-03T14:30:00"),
+    ]
+    assert _resolve_tp(rules, bars).exit_date == "2024-03-03"
+
+
+def test_take_profit_exit_price_is_rounded_to_the_production_bucket():
+    """A percentage-derived target carries more places than production stores,
+    so an unrounded reference price would mismatch every trade."""
+    rules = [TakeProfitRule(pct=0.0333)]
+    bars = [_flat(9.0), _flat(9.0), _bar(8.9, 9.4, 8.9, 9.3)]
+    got = _resolve_tp(rules, bars)
+    assert got.exit_price == pytest.approx(9.2997, abs=1e-9)  # 9 * 1.0333, sub-$10 bucket
+
+
+def test_out_of_range_entry_bar_is_rejected_for_take_profit():
+    with pytest.raises(ValueError, match="out of range"):
+        resolve_take_profit_family_exit(
+            [TakeProfitRule(pct=0.05)], _entry(entry_bar=9), [_flat(100.0)]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Standalone-vs-standalone tie-breaking
+# ---------------------------------------------------------------------------
+
+
+def test_lowest_spec_index_standalone_take_profit_wins_when_two_targets_reach_on_one_bar():
+    rules = [TakeProfitRule(pct=0.10), TakeProfitRule(pct=0.03)]
+    bars = [_flat(100.0), _flat(100.0), _bar(101.0, 115.0, 100.0, 112.0)]
+    got = _resolve_tp(rules, bars)
+    assert (got.exit_rule_index, got.exit_price) == (0, 110.0)
+
+
+def test_a_later_standalone_take_profit_still_fires_when_no_earlier_one_triggers():
+    rules = [TakeProfitRule(pct=0.10), TakeProfitRule(pct=0.03)]
+    bars = [_flat(100.0), _flat(100.0), _bar(101.0, 104.0, 100.0, 103.5)]
+    got = _resolve_tp(rules, bars)
+    assert (got.exit_rule_index, got.exit_price) == (1, 103.0)
+
+
+# ---------------------------------------------------------------------------
+# Single-ladder sequential rungs
+# ---------------------------------------------------------------------------
+
+
+def test_single_ladder_first_rung_closes_the_configured_fraction_and_leaves_position_open():
+    """A ladder whose only rung so far reduces, but does not empty, the
+    position produces no record while bars remain to check the next rung."""
+    rule = ScaledTakeProfitRule(
+        levels=[
+            TakeProfitLevel(pct=0.05, qty_fraction=0.5),
+            TakeProfitLevel(pct=0.10, qty_fraction=0.5),
+        ]
+    )
+    bars = [_flat(100.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]
+    assert _resolve_tp([rule], bars) is None
+
+
+def test_single_ladder_multi_rung_sequential_bars_produce_correct_weighted_average_exit_price():
+    rule = ScaledTakeProfitRule(
+        levels=[
+            TakeProfitLevel(pct=0.05, qty_fraction=0.5),
+            TakeProfitLevel(pct=0.10, qty_fraction=0.5),
+        ]
+    )
+    bars = [
+        _flat(100.0),
+        _flat(100.0),  # 1: entry
+        _bar(101.0, 106.0, 100.0, 105.0),  # 2: rung 0 fires at 105, qty 0.5
+        _flat(105.0),  # 3: filler, rung 1 (110) not reached
+        _bar(109.0, 111.0, 108.0, 110.0),  # 4: rung 1 fires at 110, qty 0.5 -> closes
+    ]
+    got = _resolve_tp([rule], bars)
+    assert (got.exit_bar, got.exit_rule_kind, got.exit_rule_index, got.level_index) == (
+        4,
+        "scaled_take_profit",
+        0,
+        1,
+    )
+    assert got.exit_price == pytest.approx(107.5)  # (0.5*105 + 0.5*110) / 1.0
+
+
+def test_ladder_that_sums_to_exactly_one_fully_closes_with_the_last_rungs_level_index():
+    rule = ScaledTakeProfitRule(
+        levels=[
+            TakeProfitLevel(pct=0.02, qty_fraction=0.2),
+            TakeProfitLevel(pct=0.05, qty_fraction=0.3),
+            TakeProfitLevel(pct=0.10, qty_fraction=0.5),
+        ]
+    )
+    bars = [
+        _flat(100.0),
+        _flat(100.0),  # 1: entry
+        _bar(101.0, 103.0, 100.0, 102.0),  # 2: rung 0 (102) fires, qty 0.2
+        _bar(102.0, 106.0, 101.0, 105.0),  # 3: rung 1 (105) fires, qty 0.3
+        _bar(105.0, 112.0, 104.0, 111.0),  # 4: rung 2 (110) fires, qty 0.5 -> closes
+    ]
+    got = _resolve_tp([rule], bars)
+    assert (got.exit_bar, got.level_index) == (4, 2)
+    assert got.exit_price == pytest.approx(106.9)  # 0.2*102 + 0.3*105 + 0.5*110
+
+
+def test_ladder_that_sums_to_less_than_one_leaves_a_residual_open_and_emits_no_record():
+    rule = ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=0.5)])
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(101.0, 106.0, 100.0, 105.0),  # only rung fires, 0.5 remains open forever
+        _flat(105.0),
+        _flat(105.0),
+    ]
+    assert _resolve_tp([rule], bars) is None
+
+
+def test_ladder_shortfall_within_fill_qty_rel_tol_still_closes_and_emits_a_record():
+    """Floating-point summation noise (e.g. rungs landing at ``1.0 - 1e-13``
+    instead of exactly ``1.0``) must still be treated as fully closed — this
+    exercises ``_FILL_QTY_REL_TOL`` (1e-12), not the DSL's ``LADDER_SUM_TOL``
+    (1e-9, a validator bound on the sum, unrelated to this runtime check)."""
+    rule = ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=1.0 - 1e-13)])
+    bars = [_flat(100.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]
+    got = _resolve_tp([rule], bars)
+    assert got is not None
+    assert (got.exit_bar, got.exit_rule_kind, got.level_index) == (2, "scaled_take_profit", 0)
+    assert got.exit_price == pytest.approx(105.0)
+
+
+# ---------------------------------------------------------------------------
+# One-rung-per-bar-per-position enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_a_spike_bar_that_crosses_two_rungs_fires_only_the_cursor_rung_this_bar():
+    """A bar whose range clears both rungs at once still only advances the
+    cursor by one; the second rung fires on a later bar, matching the shipped
+    engine's ``_ScaledLadderCursor`` (never the acceptance-criteria wording of
+    "all crossed rungs fill in one bar" — see the plan's resolved ambiguity)."""
+    rule = ScaledTakeProfitRule(
+        levels=[
+            TakeProfitLevel(pct=0.05, qty_fraction=0.3),
+            TakeProfitLevel(pct=0.10, qty_fraction=0.7),
+        ]
+    )
+    bars = [
+        _flat(100.0),
+        _flat(100.0),  # 1: entry
+        _bar(101.0, 115.0, 100.0, 112.0),  # 2: high=115 clears BOTH 105 and 110
+        _bar(110.0, 111.0, 109.0, 110.5),  # 3: rung 1 (110) fires here, not bar 2
+    ]
+    got = _resolve_tp([rule], bars)
+    assert got.exit_bar == 3  # not 2 — proves only the cursor rung fired on the spike bar
+    assert got.level_index == 1
+    assert got.exit_price == pytest.approx(108.5)  # 0.3*105 + 0.7*110
+
+
+def test_a_rung_does_not_fire_on_a_bar_whose_own_range_never_reaches_it_even_after_an_earlier_spike():
+    """Production's ``_next_scaled_rung`` is watermark-based: a rung a single
+    spike bar clears stays "eligible" on every later bar even after price
+    retraces. This module must NOT reproduce that — a rung only fires on a
+    bar whose OWN range reaches its target, so a fabricated fill on a bar that
+    never traded there must not occur."""
+    rule = ScaledTakeProfitRule(
+        levels=[
+            TakeProfitLevel(pct=0.02, qty_fraction=0.3),
+            TakeProfitLevel(pct=0.08, qty_fraction=0.7),
+        ]
+    )
+    bars = [
+        _flat(100.0),
+        _flat(100.0),  # 1: entry
+        # rung 0's target (102) AND rung 1's target (108) are both cleared by
+        # this bar's high (109) — but only rung 0 (the cursor) is checked.
+        _bar(101.0, 109.0, 100.0, 103.0),  # 2: rung 0 fires at 102
+        _bar(103.0, 104.0, 102.0, 103.5),  # 3: rung 1 cursor, but high=104 < 108 -> no fire
+        _flat(103.5),  # 4: still no fire
+        _bar(107.0, 109.0, 106.0, 108.5),  # 5: high=109 >= 108 -> NOW fires
+    ]
+    got = _resolve_tp([rule], bars)
+    assert got.exit_bar == 5
+    assert got.level_index == 1
+    assert got.exit_price == pytest.approx(106.2)  # 0.3*102 + 0.7*108
+
+
+# ---------------------------------------------------------------------------
+# Standalone-vs-rung tie-break, both directions
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_take_profit_beats_a_reachable_ladder_rung_on_the_same_bar_when_it_has_the_lower_spec_index():
+    rules = [
+        TakeProfitRule(pct=0.05),  # index 0, target 105
+        ScaledTakeProfitRule(
+            levels=[TakeProfitLevel(pct=0.03, qty_fraction=1.0)]
+        ),  # index 1, target 103
+    ]
+    bars = [_flat(100.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]
+    got = _resolve_tp(rules, bars)
+    assert (got.exit_rule_kind, got.exit_rule_index, got.exit_price, got.level_index) == (
+        "take_profit",
+        0,
+        105.0,
+        None,
+    )
+
+
+def test_ladder_rung_beats_a_reachable_standalone_take_profit_on_the_same_bar_when_it_has_the_lower_spec_index():
+    rules = [
+        ScaledTakeProfitRule(
+            levels=[TakeProfitLevel(pct=0.03, qty_fraction=1.0)]
+        ),  # index 0, target 103
+        TakeProfitRule(pct=0.05),  # index 1, target 105
+    ]
+    bars = [_flat(100.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]
+    got = _resolve_tp(rules, bars)
+    assert (got.exit_rule_kind, got.exit_rule_index, got.exit_price, got.level_index) == (
+        "scaled_take_profit",
+        0,
+        103.0,
+        0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Two ladders on one position — per-position (not per-ladder) firing budget
+# ---------------------------------------------------------------------------
+
+
+def test_two_ladders_on_one_position_fire_at_most_one_rung_per_bar_even_when_both_are_reachable():
+    rules = [
+        ScaledTakeProfitRule(
+            levels=[TakeProfitLevel(pct=0.02, qty_fraction=0.5)]
+        ),  # index 0, target 102
+        ScaledTakeProfitRule(
+            levels=[TakeProfitLevel(pct=0.06, qty_fraction=0.5)]
+        ),  # index 1, target 106
+    ]
+    bars = [
+        _flat(100.0),
+        _flat(100.0),  # 1: entry
+        # Both ladders' single rung is reachable this bar (high=108 >= 102 and
+        # >= 106). If both fired here (a bug), the position would close on
+        # THIS bar; correctly, only ladder 0 (lower index) fires here.
+        _bar(101.0, 108.0, 100.0, 107.0),  # 2
+        _bar(107.0, 109.0, 106.0, 108.0),  # 3: ladder 1's rung fires here instead
+    ]
+    got = _resolve_tp(rules, bars)
+    assert got.exit_bar == 3  # not 2 — proves the two ladders did not both fire on bar 2
+    assert got.exit_price == pytest.approx(104.0)  # 0.5*102 + 0.5*106
+
+
+# ---------------------------------------------------------------------------
+# ReferenceTakeProfitExit value-object contract
+# ---------------------------------------------------------------------------
+
+
+def _record_tp(**overrides) -> ReferenceTakeProfitExit:
+    kwargs = {
+        "symbol": "AAA",
+        "entry_bar": 1,
+        "exit_bar": 4,
+        "exit_date": "2024-01-05",
+        "exit_price": 105.0,
+        "exit_rule_kind": "take_profit",
+        "exit_rule_index": 0,
+        "level_index": None,
+    }
+    kwargs.update(overrides)
+    return ReferenceTakeProfitExit(**kwargs)
+
+
+def test_valid_take_profit_record_constructs():
+    assert _record_tp().exit_price == 105.0
+
+
+def test_valid_scaled_take_profit_record_constructs():
+    got = _record_tp(exit_rule_kind="scaled_take_profit", level_index=1)
+    assert got.level_index == 1
+
+
+def test_take_profit_record_rejects_a_level_index():
+    with pytest.raises(ValueError, match="level_index"):
+        _record_tp(exit_rule_kind="take_profit", level_index=0)
+
+
+def test_scaled_take_profit_record_requires_a_level_index():
+    with pytest.raises(ValueError, match="level_index"):
+        _record_tp(exit_rule_kind="scaled_take_profit", level_index=None)
+
+
+def test_scaled_take_profit_record_rejects_a_negative_level_index():
+    with pytest.raises(ValueError, match="level_index"):
+        _record_tp(exit_rule_kind="scaled_take_profit", level_index=-1)
+
+
+def test_take_profit_record_rejects_a_negative_entry_bar():
+    with pytest.raises(ValueError, match="entry_bar"):
+        _record_tp(entry_bar=-1)
+
+
+@pytest.mark.parametrize("exit_bar", [0, 1])
+def test_take_profit_record_exit_bar_must_be_strictly_after_entry_bar(exit_bar):
+    with pytest.raises(ValueError, match="exit_bar"):
+        _record_tp(entry_bar=1, exit_bar=exit_bar)
+
+
+def test_take_profit_record_rejects_a_negative_exit_rule_index():
+    with pytest.raises(ValueError, match="exit_rule_index"):
+        _record_tp(exit_rule_index=-1)
+
+
+@pytest.mark.parametrize("price", [0.0, -1.0, float("nan"), float("inf")])
+def test_take_profit_record_rejects_nonpositive_or_nonfinite_exit_price(price):
+    with pytest.raises(ValueError, match="exit_price"):
+        _record_tp(exit_price=price)
+
+
+def test_take_profit_record_rejects_an_unknown_exit_rule_kind():
+    with pytest.raises(ValueError, match="exit_rule_kind"):
+        _record_tp(exit_rule_kind="stop_loss", level_index=None)
+
+
+def test_take_profit_record_is_frozen():
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        _record_tp().exit_price = 1.0
+
+
+# ---------------------------------------------------------------------------
+# replay_take_profit_family_exits — the (spec, bars) entry point
+# ---------------------------------------------------------------------------
+
+
+def test_replay_opens_from_entry_rules_and_closes_on_the_standalone_take_profit():
+    spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
+    bars = {
+        "AAA": [
+            _flat(101.0),  # entry predicate fires (close > 100)
+            _bar(100.0, 100.0, 100.0, 100.0),  # entry fills here at open 100
+            _bar(101.0, 106.0, 100.0, 105.0),  # clears the 105 target
+        ]
+    }
+    (got,) = replay_take_profit_family_exits(spec, bars)
+    assert (got.symbol, got.entry_bar, got.exit_bar, got.exit_price, got.exit_rule_kind) == (
+        "AAA",
+        1,
+        2,
+        105.0,
+        "take_profit",
+    )
+
+
+def test_replay_opens_from_entry_rules_and_closes_on_a_ladders_final_rung():
+    spec = _spec(
+        exit_rules=[ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=1.0)])]
+    )
+    bars = {
+        "AAA": [
+            _flat(101.0),
+            _bar(100.0, 100.0, 100.0, 100.0),
+            _bar(101.0, 106.0, 100.0, 105.0),
+        ]
+    }
+    (got,) = replay_take_profit_family_exits(spec, bars)
+    assert (got.exit_rule_kind, got.level_index, got.exit_price) == ("scaled_take_profit", 0, 105.0)
+
+
+def test_take_profit_replay_returns_nothing_when_no_entry_fires():
+    spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
+    bars = {"AAA": [_flat(50.0), _flat(50.0), _bar(50.0, 55.0, 45.0, 52.0)]}
+    assert replay_take_profit_family_exits(spec, bars) == []
+
+
+def test_replay_returns_nothing_when_the_position_never_reaches_any_target():
+    spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
+    bars = {"AAA": [_flat(101.0), _flat(100.0), _flat(101.0), _flat(102.0)]}
+    assert replay_take_profit_family_exits(spec, bars) == []
+
+
+def test_take_profit_replay_handles_symbols_independently():
+    spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
+    reaches = [_flat(101.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]
+    never = [_flat(101.0), _flat(100.0), _flat(101.0)]
+    got = replay_take_profit_family_exits(spec, {"AAA": reaches, "BBB": never})
+    assert [r.symbol for r in got] == ["AAA"]
+
+
+def test_take_profit_replay_passes_slippage_through_to_the_anchor():
+    spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
+    bars = {"AAA": [_flat(101.0), _flat(100.0), _bar(101.0, 108.0, 100.0, 107.0)]}
+    assert (
+        replay_take_profit_family_exits(spec, bars, entry_slippage_bps=0.0)[0].exit_price == 105.0
+    )
+    assert replay_take_profit_family_exits(spec, bars, entry_slippage_bps=200.0)[
+        0
+    ].exit_price == pytest.approx(107.1)
+
+
+def test_take_profit_replay_does_not_mutate_its_inputs():
+    spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
+    bars = {"AAA": [_flat(101.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]}
+    exit_rules_before = list(spec.exit_rules)
+    bars_before = {k: list(v) for k, v in bars.items()}
+    replay_take_profit_family_exits(spec, bars)
+    assert list(spec.exit_rules) == exit_rules_before
+    assert {k: list(v) for k, v in bars.items()} == bars_before
+
+
+def test_take_profit_replay_is_deterministic():
+    spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
+    bars = {"AAA": [_flat(101.0), _flat(100.0), _bar(101.0, 106.0, 100.0, 105.0)]}
+    assert replay_take_profit_family_exits(spec, bars) == replay_take_profit_family_exits(
+        spec, bars
+    )
