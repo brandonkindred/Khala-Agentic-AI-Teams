@@ -1113,6 +1113,20 @@ describe('CodingTeamPageComponent', () => {
     });
   });
 
+  describe('issueRowTooltip', () => {
+    it('returns the title alone when the issue is not in progress', async () => {
+      await setup();
+      expect(component.issueRowTooltip({ title: 'Fix the thing', inProgress: false })).toBe('Fix the thing');
+    });
+
+    it('appends the in-progress clause when the issue is in progress', async () => {
+      await setup();
+      expect(component.issueRowTooltip({ title: 'Fix the thing', inProgress: true })).toBe(
+        'Fix the thing — The coding team is already working on this issue'
+      );
+    });
+  });
+
   describe('dependency indicator rendering', () => {
     it('renders a blocked indicator with the open-dependency count', async () => {
       integrationsSpy.getGitHubIssues.mockReturnValue(
