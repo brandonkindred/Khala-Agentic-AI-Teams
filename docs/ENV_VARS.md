@@ -530,7 +530,8 @@ restart never waits a full interval for its first prune — relevant when that
 first sweep has a large stale-row backlog to delete. Pruning only applies
 when traces are stored in Postgres (`POSTGRES_HOST` set); it runs regardless
 of `SE_TRACE_TO_POSTGRES` so rows written while tracing was enabled are still
-pruned, and this variable has no observable effect otherwise.
+pruned. When `POSTGRES_HOST` is not set, `SE_TRACE_PRUNE_INTERVAL_S` has no
+observable effect.
 
 ### SE_LEARNINGS_TOPN
 Number of past-sprint learnings injected into the Tech Lead's Design prompt
