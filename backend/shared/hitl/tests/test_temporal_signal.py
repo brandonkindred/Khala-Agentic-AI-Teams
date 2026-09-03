@@ -6,12 +6,19 @@ server), the same lightweight pattern
 ``planning_team/tests/test_temporal_answer_signal.py`` and
 ``software_engineering_team/tests/test_coding_team_temporal_workflow.py`` use
 for the sibling implementations this module was extracted from.
+
+**This is the canonical suite for the mixin's standalone behavioral
+contract.** ``software_engineering_team/tests/test_shared_infra_gap_coverage.py``
+mirrors these same cases (see that module's docstring) purely because it's
+the only one of the two CI actually collects today -- update THIS suite
+first when the mixin's contract changes, then mirror the change there.
 """
 
 from __future__ import annotations
 
 import typing
 
+import pytest
 from temporalio.converter import value_to_type
 
 import shared.hitl.temporal_signal as temporal_signal_module
@@ -24,6 +31,28 @@ from shared.hitl.temporal_signal import (
 
 class _Workflow(HitlAnswerSignalMixin):
     """Minimal stand-in for a real ``@workflow.defn`` class mixing this in."""
+
+
+class _PriorMixinOwningTheSameAttribute:
+    """Stand-in for a sibling signal mixin (e.g. PlanningAnswerSignalMixin) that
+    also chains super().__init__() and owns one of the same attribute names."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active_resume_token = None
+
+
+def test_init_raises_if_a_prior_mixin_already_owns_the_same_state() -> None:
+    """Composing HitlAnswerSignalMixin with another mixin that owns the same
+    private attribute names (forbidden per the module docstring) must fail
+    loudly at construction time -- silently overwriting the sibling's state
+    would alias its signal contract onto this one instead."""
+
+    class _Both(HitlAnswerSignalMixin, _PriorMixinOwningTheSameAttribute):
+        pass
+
+    with pytest.raises(TypeError, match="_active_resume_token"):
+        _Both()
 
 
 def _answer(question_id: str = "q1", **overrides) -> dict:

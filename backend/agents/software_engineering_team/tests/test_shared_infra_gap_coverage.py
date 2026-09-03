@@ -15,21 +15,24 @@ CI job or ``CodingTeamWorkflow`` migrates onto this shared primitive (see
 ``shared/hitl/temporal_signal.py``'s module docstring).
 
 More thorough, standalone-mixin behavioral coverage lives in
-``shared/hitl/tests/test_temporal_signal.py`` and
-``planning_team/tests/test_temporal_workflow_signal.py`` -- useful for local
-development and as documentation, but neither runs in CI today for the same
-reason (no CI job passes ``shared/hitl/tests/`` or ``planning_team/tests/``
-to pytest). This file is therefore the only CI-enforced regression coverage
-for this behavior, so it also carries a minimal check that the real
-``PlanningWorkflow`` class (not just the standalone mixin) actually wires up
-correctly -- the composition-level assertions those uncollected suites would
-otherwise be the sole guard for.
+``shared/hitl/tests/test_temporal_signal.py`` (the canonical suite for the
+mixin's contract -- update it first when the contract changes, then mirror
+here) and ``planning_team/tests/test_temporal_workflow_signal.py`` -- useful
+for local development and as documentation, but neither runs in CI today for
+the same reason (no CI job passes ``shared/hitl/tests/`` or
+``planning_team/tests/`` to pytest). This file is therefore the only
+CI-enforced regression coverage for this behavior, so it also carries a
+minimal check that the real ``PlanningWorkflow`` class (not just the
+standalone mixin) actually wires up correctly -- the composition-level
+assertions those uncollected suites would otherwise be the sole guard for.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+
+import pytest
 
 import shared.hitl.temporal_signal as _temporal_signal_module
 from shared.command_runner.error_parsing import (
@@ -258,11 +261,38 @@ def _answer(question_id: str = "q1") -> dict:
     return {"question_id": question_id, "selected_option_id": None, "other_text": None}
 
 
+class _FakeWorkflowLogger:
+    """Records warning() calls as (msg, args) tuples for assertions."""
+
+    def __init__(self) -> None:
+        self.warnings: list[tuple] = []
+
+    def warning(self, msg, *args) -> None:
+        self.warnings.append((msg, args))
+
+
 def test_hitl_signal_mixin_init_state() -> None:
     wf = _Workflow()
     assert wf._active_resume_token is None
     assert wf._submitted_answers is None
     assert wf._buffered_signals == {}
+
+
+def test_hitl_signal_mixin_init_raises_if_a_prior_mixin_owns_the_same_state() -> None:
+    """Composing HitlAnswerSignalMixin with another mixin that owns the same
+    private attribute names (forbidden per the module docstring) must fail
+    loudly at construction time rather than silently aliasing state."""
+
+    class _PriorMixin:
+        def __init__(self) -> None:
+            super().__init__()
+            self._active_resume_token = None
+
+    class _Both(HitlAnswerSignalMixin, _PriorMixin):
+        pass
+
+    with pytest.raises(TypeError, match="_active_resume_token"):
+        _Both()
 
 
 def test_hitl_signal_mixin_rejects_malformed_answer_batch() -> None:
@@ -340,15 +370,7 @@ def test_hitl_signal_mixin_logs_diagnostic_inside_a_workflow(monkeypatch) -> Non
     workflow.in_workflow()) is only reachable inside a real Temporal workflow
     sandbox -- monkeypatch it here so the operator diagnostic trail this
     module's postconditions promise is actually exercised by CI."""
-
-    class _FakeLogger:
-        def __init__(self) -> None:
-            self.warnings: list[tuple] = []
-
-        def warning(self, msg, *args) -> None:
-            self.warnings.append((msg, args))
-
-    fake_logger = _FakeLogger()
+    fake_logger = _FakeWorkflowLogger()
     monkeypatch.setattr(_temporal_signal_module.workflow, "in_workflow", lambda: True)
     monkeypatch.setattr(_temporal_signal_module.workflow, "logger", fake_logger)
 
@@ -361,15 +383,7 @@ def test_hitl_signal_mixin_diagnostic_is_a_silent_no_op_outside_a_workflow(monke
     """Complementary to the in-workflow test above: when workflow.in_workflow()
     is False -- the case every other test in this module exercises implicitly
     -- the documented contract is a no-op, not a fallback logger."""
-
-    class _FakeLogger:
-        def __init__(self) -> None:
-            self.warnings: list[tuple] = []
-
-        def warning(self, msg, *args) -> None:
-            self.warnings.append((msg, args))
-
-    fake_logger = _FakeLogger()
+    fake_logger = _FakeWorkflowLogger()
     monkeypatch.setattr(_temporal_signal_module.workflow, "in_workflow", lambda: False)
     monkeypatch.setattr(_temporal_signal_module.workflow, "logger", fake_logger)
 

@@ -196,6 +196,20 @@ class HitlAnswerSignalMixin:
 
     def __init__(self) -> None:
         super().__init__()
+        # Guards the module docstring's "do not compose with PlanningAnswerSignalMixin"
+        # warning: that mixin owns the identical attribute names and also chains
+        # super().__init__(), so if it already ran (earlier in this MRO), silently
+        # overwriting its state here would alias its signal contract onto this one.
+        # Failing loudly at construction time turns that into a deterministic,
+        # replay-safe error instead of runtime state corruption.
+        for _attr in ("_active_resume_token", "_submitted_answers", "_buffered_signals"):
+            if hasattr(self, _attr):
+                raise TypeError(
+                    f"{type(self).__name__} already defines {_attr!r}; composing "
+                    "HitlAnswerSignalMixin with another signal mixin that owns the "
+                    "same state (e.g. PlanningAnswerSignalMixin) is unsupported -- "
+                    "see this module's docstring."
+                )
         self._active_resume_token: Optional[str] = None
         self._submitted_answers: Optional[List[Dict[str, Any]]] = None
         self._buffered_signals: Dict[str, List[Dict[str, Any]]] = {}
