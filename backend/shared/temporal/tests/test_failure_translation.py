@@ -75,8 +75,12 @@ def test_context_links_are_followed_when_no_cause_is_set() -> None:
 
 
 def test_str_is_used_when_the_node_carries_no_message() -> None:
-    with pytest.raises(JobNotFound, match="JobNotFound"):
-        translate_workflow_failure(MarkedError("JobNotFound"), MARKERS)
+    """str(exc) must differ from the marker, or a node.type-based regression would pass too."""
+    exc = MarkedError("JobNotFound")
+    exc.args = ("job 42 vanished without a message",)
+
+    with pytest.raises(JobNotFound, match="job 42 vanished without a message"):
+        translate_workflow_failure(exc, MARKERS)
 
 
 def test_the_first_matching_marker_in_the_chain_wins() -> None:
