@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Generic, List, TypeVar
+from typing import Callable, Generic, TypeVar
 
 __all__ = ["ConcurrentFirstCallHarness"]
 
@@ -110,7 +110,13 @@ class ConcurrentFirstCallHarness(Generic[_T]):
             confirmed finished before this call returns, or ``AssertionError`` names
             the ones still alive.
         """
-        threads = [threading.Thread(target=call) for _ in range(thread_count)]
+        assert thread_count >= 1, f"thread_count must be >= 1, got {thread_count}"
+        # Daemon so a thread that's genuinely stuck (the deadlock this harness exists
+        # to catch) can never block interpreter exit after the assertion below has
+        # already reported the failure — the join-and-confirm loop is what actually
+        # detects the hang; daemon status only keeps a detected hang from also
+        # wedging the process.
+        threads = [threading.Thread(target=call, daemon=True) for _ in range(thread_count)]
         threads[0].start()
         assert self._started.wait(timeout=self._wait_timeout), "first thread never entered hold_open"
         for t in threads[1:]:
@@ -121,5 +127,5 @@ class ConcurrentFirstCallHarness(Generic[_T]):
         self._release.set()
         for t in threads:
             t.join(timeout=self._wait_timeout)
-        still_alive: List[str] = [t.name for t in threads if t.is_alive()]
+        still_alive: list[str] = [t.name for t in threads if t.is_alive()]
         assert not still_alive, f"threads still alive after join (possible deadlock): {still_alive}"

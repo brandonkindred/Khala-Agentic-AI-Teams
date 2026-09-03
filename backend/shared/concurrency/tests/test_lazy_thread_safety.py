@@ -109,17 +109,28 @@ def test_keyed_lazy_registry_distinct_keys_construct_concurrently_without_blocki
         results["b"] = registry.get_or_create("b", lambda: "b-value")
         b_done.set()
 
-    thread_a = threading.Thread(target=_build_a)
+    thread_a = threading.Thread(target=_build_a, daemon=True)
     thread_a.start()
-    assert started_a.wait(timeout=_WAIT_TIMEOUT), "key 'a' factory never started"
+    try:
+        assert started_a.wait(timeout=_WAIT_TIMEOUT), "key 'a' factory never started"
 
-    thread_b = threading.Thread(target=_build_b)
-    thread_b.start()
-    assert b_done.wait(timeout=_NON_BLOCKING_BOUND), "key 'b' construction blocked on key 'a's in-flight build"
-    thread_b.join(timeout=_WAIT_TIMEOUT)
-
-    release_a.set()
-    thread_a.join(timeout=_WAIT_TIMEOUT)
+        thread_b = threading.Thread(target=_build_b, daemon=True)
+        thread_b.start()
+        try:
+            assert b_done.wait(timeout=_NON_BLOCKING_BOUND), (
+                "key 'b' construction blocked on key 'a's in-flight build"
+            )
+        finally:
+            thread_b.join(timeout=_WAIT_TIMEOUT)
+            assert not thread_b.is_alive(), "thread_b did not finish"
+    finally:
+        # Always release key 'a's factory and join it, even if an assertion above
+        # failed — otherwise thread_a stays blocked on release_a.wait() for up to
+        # _WAIT_TIMEOUT seconds and raises its own confusing secondary
+        # AssertionError on a background thread after the real failure is reported.
+        release_a.set()
+        thread_a.join(timeout=_WAIT_TIMEOUT)
+    assert not thread_a.is_alive(), "thread_a did not finish"
 
     assert results["b"] == "b-value"
     assert results["a"] == "a-value"
@@ -134,7 +145,7 @@ def test_lazy_singleton_concurrent_raising_factory_leaves_instance_retryable() -
     """
     harness: ConcurrentFirstCallHarness[str] = ConcurrentFirstCallHarness()
     singleton: LazySingleton[str] = LazySingleton()
-    errors: list[BaseException] = []
+    errors: list[RuntimeError] = []
     errors_lock = threading.Lock()
 
     def _boom() -> str:
@@ -160,7 +171,7 @@ def test_keyed_lazy_registry_concurrent_raising_factory_leaves_key_retryable() -
     """Same proof as the singleton case, for one key racing a failing factory."""
     harness: ConcurrentFirstCallHarness[str] = ConcurrentFirstCallHarness()
     registry: KeyedLazyRegistry[str, str] = KeyedLazyRegistry()
-    errors: list[BaseException] = []
+    errors: list[RuntimeError] = []
     errors_lock = threading.Lock()
 
     def _boom() -> str:
