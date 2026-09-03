@@ -47,6 +47,11 @@ ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
     "allowed_claims.json": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "outline.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "draft_v1.md": {"producer_phase": "draft_initial", "producer_agent": "BlogWriterAgent"},
+    # Deliberately absent from ARTIFACT_NAMES: exposing this artifact via the
+    # artifacts API (api/routers/artifacts.py) is explicit Out of Scope for the
+    # story that introduced it. This entry only registers producer metadata now
+    # so a future story can wire up API exposure without re-deriving
+    # producer_phase/producer_agent.
     "draft_v1_stories.md": {
         "producer_phase": "story_elicitation",
         "producer_agent": "BlogWriterAgent",
