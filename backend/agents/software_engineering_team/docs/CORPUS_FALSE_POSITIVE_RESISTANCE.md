@@ -145,11 +145,13 @@ already rules on:
 The middle and bottom rows are the pair this document is actually about:
 same underlying intent (this gate shouldn't report certain things here),
 but only the bottom row is something the matching rule as specified can
-check. The three rows are also structurally distinguishable YAML — an
-absent `gates` entry, an empty `expected_findings`, or N `must_not_find`
-labels — so a labeler, a schema validator, and the matching rule all see
-which case they're looking at directly; nothing has to be inferred from
-what's missing.
+check. The three rows are also structurally distinguishable YAML for a given
+gate — a gate absent from `gates`, no labels for that gate in
+`expected_findings` (the flat, per-label `gate` field means this is a
+per-gate condition, not a whole-document `expected_findings: []`, in a
+multi-gate case), or N `must_not_find` labels for it — so a labeler, a
+schema validator, and the matching rule all see which case they're looking
+at directly; nothing has to be inferred from what's missing.
 
 **What this convention deliberately does not claim.** It is per-class, not
 "this gate finds nothing of any kind." A case asserting whole-diff
@@ -202,11 +204,12 @@ the matching-rule document draws out:
 Point 2 (location) applies exactly as `GATE_FINDING_MATCHING_RULE.md` §4
 already specifies for either polarity — the ±3-line tolerance for a bounded
 region, file-only comparison for a file-wide one, and the same asymmetry
-that a finding carrying only a file (no resolved line) never satisfies a
-bounded label. A `must_not_find` label gets no different, more forgiving,
-or stricter tolerance than a `must_find` label at the same location; the
-polarity only changes what a passing match *means* (satisfied vs.
-violated), never what counts as passing.
+that a finding carrying only a file (no resolved line) never passes the
+match test against a bounded label — so it neither satisfies a `must_find`
+bounded label nor violates a `must_not_find` one. A `must_not_find` label
+gets no different, more forgiving, or stricter tolerance than a `must_find`
+label at the same location; the polarity only changes what a passing match
+*means* (satisfied vs. violated), never what counts as passing.
 
 §6's deterministic many-to-many assignment does not apply here. §6 exists to
 decide, for `must_find`, which single finding among several candidates gets
