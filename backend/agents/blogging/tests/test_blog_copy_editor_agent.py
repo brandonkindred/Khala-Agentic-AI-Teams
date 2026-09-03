@@ -415,6 +415,52 @@ def test_init_includes_brand_spec_in_system_prompt_content() -> None:
     assert "Use short sentences." in segment_text
 
 
+def test_system_prompt_content_is_byte_identical_to_headed_join() -> None:
+    """agent._system_prompt_content[0].text is exactly the heading+join
+    construction (both sections), with leading/trailing whitespace on the
+    inputs stripped before joining."""
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content="  Acme voice: bold and direct.  \n",
+        writing_style_guide_content="\tUse short sentences.\n",
+    )
+
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert segment.text == (
+        "--- BRAND SPEC ---\nAcme voice: bold and direct.\n\n"
+        "--- WRITING STYLE GUIDE ---\nUse short sentences."
+    )
+
+
+def test_system_prompt_content_omits_writing_guide_heading_when_blank() -> None:
+    """A blank writing_style_guide_content contributes neither its heading
+    nor an extra blank line -- only the brand-spec section appears."""
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content="Acme voice: bold and direct.",
+        writing_style_guide_content="   ",
+    )
+
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert segment.text == "--- BRAND SPEC ---\nAcme voice: bold and direct."
+
+
+def test_system_prompt_content_omits_brand_spec_heading_when_blank() -> None:
+    """A blank brand_spec_content contributes neither its heading nor an
+    extra blank line -- only the writing-style section appears."""
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content="",
+        writing_style_guide_content="Use short sentences.",
+    )
+
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert segment.text == "--- WRITING STYLE GUIDE ---\nUse short sentences."
+
+
 def test_build_editor_prompt_includes_optional_context() -> None:
     """Optional input fields appear in the assembled editor context."""
     agent = BlogCopyEditorAgent(

@@ -252,6 +252,55 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
     assert "BRAND AND STYLE" not in draft_prompt
 
 
+def test_system_prompt_content_is_byte_identical_to_headed_join() -> None:
+    """agent._system_prompt_content[0].text is exactly the heading+join
+    construction (both sections), with leading/trailing whitespace on the
+    inputs stripped before joining."""
+    from llm_service import CacheBreakpoint
+
+    agent = make_writer_agent(
+        brand_spec_content="  MyBrand: Test brand.  \n",
+        writing_style_guide_content="\tUse concise, natural sentences.\n",
+    )
+
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert segment.text == (
+        "--- BRAND SPEC ---\nMyBrand: Test brand.\n\n"
+        "--- WRITING STYLE GUIDE ---\nUse concise, natural sentences."
+    )
+
+
+def test_system_prompt_content_omits_writing_guide_heading_when_blank() -> None:
+    """A blank writing_style_guide_content contributes neither its heading
+    nor an extra blank line -- only the brand-spec section appears."""
+    from llm_service import CacheBreakpoint
+
+    agent = make_writer_agent(
+        brand_spec_content="MyBrand: Test brand.",
+        writing_style_guide_content="   ",
+    )
+
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert segment.text == "--- BRAND SPEC ---\nMyBrand: Test brand."
+
+
+def test_system_prompt_content_omits_brand_spec_heading_when_blank() -> None:
+    """A blank brand_spec_content contributes neither its heading nor an
+    extra blank line -- only the writing-style section appears."""
+    from llm_service import CacheBreakpoint
+
+    agent = make_writer_agent(
+        brand_spec_content="",
+        writing_style_guide_content="Use concise, natural sentences.",
+    )
+
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert segment.text == "--- WRITING STYLE GUIDE ---\nUse concise, natural sentences."
+
+
 def test_outline_for_prompt_includes_section_titles() -> None:
     """outline_for_prompt flattens the content plan for LLM consumption."""
     inp = WriterInput(
