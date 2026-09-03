@@ -126,6 +126,15 @@ _MAX_ORDER_EVENTS = 20
 # is re-exported here for the many call sites and external importers that read it
 # off this module.
 
+#: The ``engine_exit:stop_loss`` literal, defined once. Every engine-owned
+#: stop-loss attribution site stamps this exact string — ``_EngineExitDispatcher.
+#: _build_close_order`` on the bar-close path, ``resolve_resting_stop_loss_attachment``
+#: on the resting-order path, and ``_build_exit_reconciler``'s closure for a
+#: reconciled strategy close — and the ``alignment_checks`` /
+#: ``exit_rule_conformance`` quality gates match it byte-exactly. A single named
+#: source means an edit to the suffix can't desynchronize one site from another.
+ENGINE_EXIT_REASON_STOP_LOSS = f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+
 
 def _engine_exit_kind(reason: str) -> str:
     """The bare ``rule_kind`` encoded in an engine-exit order ``reason``.
@@ -286,7 +295,7 @@ def _build_exit_reconciler(
             if kind == "take_profit":
                 return f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
             if kind == "stop_loss":
-                return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+                return ENGINE_EXIT_REASON_STOP_LOSS
             if kind == "signal_exit":
                 # Match the engine's emitted form ``engine_exit:signal_exit[N]``
                 # (``_build_close_order``) so the rule-firing-rate gate, which
@@ -1243,11 +1252,12 @@ class _EngineExitDispatcher:
         """
         self._next_seq += 1
         close_side = tracked.close_side
-        reason = (
-            f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
-            if intent.rule_kind == "signal_exit"
-            else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
-        )
+        if intent.rule_kind == "signal_exit":
+            reason = f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
+        elif intent.rule_kind == "stop_loss":
+            reason = ENGINE_EXIT_REASON_STOP_LOSS
+        else:
+            reason = f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         if intent.is_scaled_rung:
             # Scaled rung: close this rung's fraction of the full opened position
             # (``scale_in_qty`` is irrelevant — a true partial deliberately leaves
@@ -1911,8 +1921,8 @@ def resolve_resting_stop_loss_attachment(
     signal bar's close, which can gap away from where the entry actually
     fills — see :class:`StopAttachment`'s ``entry_price_pct`` field for why
     that matters here specifically). Also carries
-    ``reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"`` — the identical
-    literal :meth:`_EngineExitDispatcher._build_close_order` stamps for a
+    ``reason == ENGINE_EXIT_REASON_STOP_LOSS`` — the same named constant
+    :meth:`_EngineExitDispatcher._build_close_order` stamps for a
     ``StopLossRule`` close on the bar-close path — so materialization (see
     :class:`StopAttachment`'s ``reason`` field) tags the resting fill with
     the same, gate-relied-upon attribution regardless of which path actually
@@ -1942,7 +1952,7 @@ def resolve_resting_stop_loss_attachment(
     return attachment.model_copy(
         update={
             "entry_price_pct": rule.pct,
-            "reason": f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
+            "reason": ENGINE_EXIT_REASON_STOP_LOSS,
         }
     )
 

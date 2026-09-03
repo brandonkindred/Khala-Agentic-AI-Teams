@@ -612,8 +612,9 @@ def test_through_bar_fills_resting_stop_at_exact_price_long() -> None:
 
 
 def test_through_bar_fills_resting_stop_at_exact_price_short() -> None:
-    """Short mirror: a bar whose open stays above the stop but whose high
-    crosses it fills at the exact stop price."""
+    """Short mirror: a bar whose open stays on the safe side of the stop
+    (below it, for a short) but whose high crosses it fills at the exact
+    stop price."""
     sim, order_book, _portfolio = _make_simulator()
     req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="short", close=100.0)
     order_book.submit(
