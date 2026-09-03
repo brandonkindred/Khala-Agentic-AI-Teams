@@ -7,6 +7,7 @@ and the pure grouping/percentile computation in ``compute_from_traces``.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -110,7 +111,7 @@ def _row(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     latency_ms: float = 0.0,
-) -> dict:
+) -> dict[str, Any]:
     """Build one se_agent_traces-shaped row; keyword-only defaults let each test override only the fields under test."""
     return {
         "agent_key": agent_key,

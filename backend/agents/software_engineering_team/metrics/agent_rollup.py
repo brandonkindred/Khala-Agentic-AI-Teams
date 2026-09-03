@@ -91,9 +91,9 @@ class CallRollup:
     reason.
 
     These invariants are documented, not enforced here: this dataclass has no
-    ``__post_init__`` validation. The future pure computation step is this shape's
-    single producer and is responsible for upholding them (and asserting them in
-    its tests) — e.g. ``cache_read_ratio`` in ``[0, 1]`` when not ``None``, and
+    ``__post_init__`` validation. :func:`compute_from_traces` is this shape's single
+    producer and is responsible for upholding them (and asserting them in its tests)
+    — e.g. ``cache_read_ratio`` in ``[0, 1]`` when not ``None``, and
     ``latency_ms_sample_count == 0`` implying both percentiles are ``None``.
     """
 
