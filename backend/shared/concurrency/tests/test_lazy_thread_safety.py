@@ -14,105 +14,71 @@ rather than by timing luck, that:
   racing caller gets its own factory attempt and its own exception, nothing is
   cached, and the primitive is still buildable afterward (both primitives).
 
-The blocking-then-releasing harness mirrors the one already proven reliable in
-``branding_team/tests/test_store_singleton.py`` and
-``branding_team/tests/test_brand_phase_cache.py``: hold the first caller open inside
-its factory via a ``threading.Event`` handshake, let the rest queue up behind it, then
-release. Unlike those two call sites, ``LazySingleton``/``KeyedLazyRegistry`` take an
-arbitrary ``factory`` callable directly, so the harness blocks inside the factory
-itself rather than needing to monkeypatch a constructor.
+The N-thread tests below race through :class:`~shared.concurrency.testing.ConcurrentFirstCallHarness`,
+the shared hold-open/release/join-and-confirm race harness — the same idiom already
+proven reliable in ``branding_team/tests/test_store_singleton.py``,
+``branding_team/tests/test_conversation_phase_cache.py``, and
+``branding_team/tests/test_brand_phase_cache.py``, each of which still hand-rolls its
+own copy since it holds open a monkeypatched constructor rather than an arbitrary
+factory; migrating those three to the shared harness is a separate, opportunistic
+follow-up. Unlike those call sites, ``LazySingleton``/``KeyedLazyRegistry`` take an
+arbitrary ``factory`` callable directly, so the harness's :meth:`~shared.concurrency.testing.ConcurrentFirstCallHarness.hold_open`
+blocks inside the factory itself rather than needing to monkeypatch a constructor.
 """
 
 from __future__ import annotations
 
 import threading
-import time
 
 from shared.concurrency.keyed_lazy_registry import KeyedLazyRegistry
 from shared.concurrency.lazy_singleton import LazySingleton
+from shared.concurrency.testing import ConcurrentFirstCallHarness
 
 _THREAD_COUNT = 8
 _WAIT_TIMEOUT = 5
+# Generous margin for the distinct-keys non-blocking proof below: an independent
+# build is near-instant, while a wrongly serialized build would block until
+# release_a is set — i.e. effectively forever within this bound — so any value
+# much larger than the cost of one uncontended build works.
+_NON_BLOCKING_BOUND = 2
 
 
 def test_lazy_singleton_concurrent_first_call_builds_exactly_once() -> None:
     """Concurrent first calls must not race past the None-check and double-build."""
-    build_count = 0
-    build_count_lock = threading.Lock()
-    started = threading.Event()
-    release = threading.Event()
-
-    def factory() -> object:
-        nonlocal build_count
-        with build_count_lock:
-            build_count += 1
-        started.set()
-        assert release.wait(timeout=_WAIT_TIMEOUT), "test setup deadlocked waiting for release"
-        return object()
-
+    harness: ConcurrentFirstCallHarness[object] = ConcurrentFirstCallHarness()
     singleton: LazySingleton[object] = LazySingleton()
     results: list[object] = []
     results_lock = threading.Lock()
 
     def _call() -> None:
-        value = singleton.get_or_create(factory)
+        value = singleton.get_or_create(lambda: harness.hold_open(object))
         with results_lock:
             results.append(value)
 
-    threads = [threading.Thread(target=_call) for _ in range(_THREAD_COUNT)]
-    threads[0].start()
-    assert started.wait(timeout=_WAIT_TIMEOUT), "first thread never entered factory"
-    for t in threads[1:]:
-        t.start()
-    # Give the other threads a chance to reach (and block on) the internal lock
-    # before releasing the first thread to finish construction.
-    time.sleep(0.1)
-    release.set()
-    for t in threads:
-        t.join(timeout=_WAIT_TIMEOUT)
+    harness.run(_THREAD_COUNT, _call)
 
     assert len(results) == _THREAD_COUNT
     assert len({id(r) for r in results}) == 1
-    assert build_count == 1
+    assert harness.build_count == 1
 
 
 def test_keyed_lazy_registry_concurrent_first_call_builds_exactly_once_per_key() -> None:
     """Concurrent first calls for the same new key must not double-build."""
-    build_count = 0
-    build_count_lock = threading.Lock()
-    started = threading.Event()
-    release = threading.Event()
-
-    def factory() -> object:
-        nonlocal build_count
-        with build_count_lock:
-            build_count += 1
-        started.set()
-        assert release.wait(timeout=_WAIT_TIMEOUT), "test setup deadlocked waiting for release"
-        return object()
-
+    harness: ConcurrentFirstCallHarness[object] = ConcurrentFirstCallHarness()
     registry: KeyedLazyRegistry[str, object] = KeyedLazyRegistry()
     results: list[object] = []
     results_lock = threading.Lock()
 
     def _call() -> None:
-        value = registry.get_or_create("shared-key", factory)
+        value = registry.get_or_create("shared-key", lambda: harness.hold_open(object))
         with results_lock:
             results.append(value)
 
-    threads = [threading.Thread(target=_call) for _ in range(_THREAD_COUNT)]
-    threads[0].start()
-    assert started.wait(timeout=_WAIT_TIMEOUT), "first thread never entered factory"
-    for t in threads[1:]:
-        t.start()
-    time.sleep(0.1)
-    release.set()
-    for t in threads:
-        t.join(timeout=_WAIT_TIMEOUT)
+    harness.run(_THREAD_COUNT, _call)
 
     assert len(results) == _THREAD_COUNT
     assert len({id(r) for r in results}) == 1
-    assert build_count == 1
+    assert harness.build_count == 1
 
 
 def test_keyed_lazy_registry_distinct_keys_construct_concurrently_without_blocking_each_other() -> None:
@@ -149,7 +115,7 @@ def test_keyed_lazy_registry_distinct_keys_construct_concurrently_without_blocki
 
     thread_b = threading.Thread(target=_build_b)
     thread_b.start()
-    assert b_done.wait(timeout=2), "key 'b' construction blocked on key 'a's in-flight build"
+    assert b_done.wait(timeout=_NON_BLOCKING_BOUND), "key 'b' construction blocked on key 'a's in-flight build"
     thread_b.join(timeout=_WAIT_TIMEOUT)
 
     release_a.set()
@@ -166,42 +132,25 @@ def test_lazy_singleton_concurrent_raising_factory_leaves_instance_retryable() -
     ever cached on failure) and its own exception — not just the first one to reach
     the lock — and the instance is still buildable afterward.
     """
-    call_count = 0
-    call_count_lock = threading.Lock()
-    started = threading.Event()
-    release = threading.Event()
-
-    def failing_factory() -> str:
-        nonlocal call_count
-        with call_count_lock:
-            call_count += 1
-        started.set()
-        assert release.wait(timeout=_WAIT_TIMEOUT), "test setup deadlocked waiting for release"
-        raise RuntimeError("boom")
-
+    harness: ConcurrentFirstCallHarness[str] = ConcurrentFirstCallHarness()
     singleton: LazySingleton[str] = LazySingleton()
     errors: list[BaseException] = []
     errors_lock = threading.Lock()
 
+    def _boom() -> str:
+        raise RuntimeError("boom")
+
     def _call() -> None:
         try:
-            singleton.get_or_create(failing_factory)
+            singleton.get_or_create(lambda: harness.hold_open(_boom))
         except RuntimeError as exc:
             with errors_lock:
                 errors.append(exc)
 
-    threads = [threading.Thread(target=_call) for _ in range(_THREAD_COUNT)]
-    threads[0].start()
-    assert started.wait(timeout=_WAIT_TIMEOUT), "first thread never entered factory"
-    for t in threads[1:]:
-        t.start()
-    time.sleep(0.1)
-    release.set()
-    for t in threads:
-        t.join(timeout=_WAIT_TIMEOUT)
+    harness.run(_THREAD_COUNT, _call)
 
     assert len(errors) == _THREAD_COUNT
-    assert call_count == _THREAD_COUNT
+    assert harness.build_count == _THREAD_COUNT
 
     # Nothing was cached across the whole race: the instance still builds normally.
     assert singleton.get_or_create(lambda: "recovered") == "recovered"
@@ -209,42 +158,25 @@ def test_lazy_singleton_concurrent_raising_factory_leaves_instance_retryable() -
 
 def test_keyed_lazy_registry_concurrent_raising_factory_leaves_key_retryable() -> None:
     """Same proof as the singleton case, for one key racing a failing factory."""
-    call_count = 0
-    call_count_lock = threading.Lock()
-    started = threading.Event()
-    release = threading.Event()
-
-    def failing_factory() -> str:
-        nonlocal call_count
-        with call_count_lock:
-            call_count += 1
-        started.set()
-        assert release.wait(timeout=_WAIT_TIMEOUT), "test setup deadlocked waiting for release"
-        raise RuntimeError("boom")
-
+    harness: ConcurrentFirstCallHarness[str] = ConcurrentFirstCallHarness()
     registry: KeyedLazyRegistry[str, str] = KeyedLazyRegistry()
     errors: list[BaseException] = []
     errors_lock = threading.Lock()
 
+    def _boom() -> str:
+        raise RuntimeError("boom")
+
     def _call() -> None:
         try:
-            registry.get_or_create("shared-key", failing_factory)
+            registry.get_or_create("shared-key", lambda: harness.hold_open(_boom))
         except RuntimeError as exc:
             with errors_lock:
                 errors.append(exc)
 
-    threads = [threading.Thread(target=_call) for _ in range(_THREAD_COUNT)]
-    threads[0].start()
-    assert started.wait(timeout=_WAIT_TIMEOUT), "first thread never entered factory"
-    for t in threads[1:]:
-        t.start()
-    time.sleep(0.1)
-    release.set()
-    for t in threads:
-        t.join(timeout=_WAIT_TIMEOUT)
+    harness.run(_THREAD_COUNT, _call)
 
     assert len(errors) == _THREAD_COUNT
-    assert call_count == _THREAD_COUNT
+    assert harness.build_count == _THREAD_COUNT
 
     # Nothing was cached for this key across the whole race: it still builds normally.
     assert registry.get_or_create("shared-key", lambda: "recovered") == "recovered"
