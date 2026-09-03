@@ -776,9 +776,35 @@ _FENCE_SEQUENCES = (
 )
 
 
+# Matches each fence sequence in BOTH the raw form (``<existing_issue``) and the
+# already-entity-encoded form (``&lt;existing_issue``). The second alternative is
+# what keeps the transform faithful: without it, text that arrives pre-encoded is
+# indistinguishable from the defuser's own output, so an author could hand-write
+# the exact string this function emits and the reader could not tell whether the
+# bracket was originally a literal ``<``.
 _FENCE_SEQUENCE_RE = re.compile(
-    "|".join(re.escape(seq) for seq in _FENCE_SEQUENCES), re.IGNORECASE
+    "|".join(re.escape(prefix + seq[1:]) for prefix in ("<", "&lt;") for seq in _FENCE_SEQUENCES),
+    re.IGNORECASE,
 )
+
+
+def _escape_fence_match(match: "re.Match[str]") -> str:
+    """Entity-encode the leading character of one matched fence sequence.
+
+    Preconditions:
+        - ``match`` was produced by :data:`_FENCE_SEQUENCE_RE`, so ``match.group(0)``
+          begins with either ``<`` or ``&lt;`` (in any case).
+    Postconditions:
+        - Returns the matched text with its leading ``<`` replaced by ``&lt;``, or
+          its leading ``&`` replaced by ``&amp;`` when the match was already
+          entity-encoded. Both forms therefore stop being fence tokens, and the two
+          inputs stay DISTINGUISHABLE in the output rather than collapsing onto the
+          same string.
+        - Pure; never raises.
+    """
+    matched = match.group(0)
+    assert matched[:1] in ("<", "&"), f"unexpected fence match {matched!r}"
+    return ("&amp;" if matched.startswith("&") else "&lt;") + matched[1:]
 
 
 def _defuse_fences(text: str) -> str:
@@ -800,8 +826,16 @@ def _defuse_fences(text: str) -> str:
         - Returns ``text`` with the opening angle bracket of every sequence in
           :data:`_FENCE_SEQUENCES` replaced by its HTML entity
           (``</existing_issue`` -> ``&lt;/existing_issue``), so the result
-          contains no substring that could close or open one of this module's
-          fences, while the text stays readable as the same content. Escaping
+          contains no LITERAL substring that could close or open one of this
+          module's fences, while the text stays readable as the same content.
+          Text that ARRIVES already entity-encoded (``&lt;/existing_issue``, the
+          shape this function itself emits) is encoded one further step to
+          ``&amp;lt;/existing_issue``, so a hand-written encoded tag and a
+          defused literal one do not collapse onto the same output: whatever a
+          model makes of ``&lt;`` in a fenced body, only text that really
+          contained a raw ``<`` renders that way. The transform is therefore
+          injective on fence sequences and repeat-application-safe (a second
+          pass leaves ``&amp;lt;`` alone). Escaping
           the bracket rather than prefixing it (a backslash would leave the tag
           itself intact and still readable as a tag) is what makes the
           neutralization assertable: the fence tokens are simply ABSENT from the
@@ -811,7 +845,7 @@ def _defuse_fences(text: str) -> str:
         - Pure; never raises. A string containing no fence sequence is returned
           unchanged.
     """
-    return _FENCE_SEQUENCE_RE.sub(lambda m: "&lt;" + m.group(0)[1:], text)
+    return _FENCE_SEQUENCE_RE.sub(_escape_fence_match, text)
 
 
 # Both interpolation sites carry attacker-influenceable text -- the proposal's

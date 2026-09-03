@@ -266,14 +266,21 @@ def _build_workflow_payload(
           :func:`_validate_plan_input_arg`. This builder performs NO validation
           of its own and copies both payload dicts VERBATIM into the durable
           Temporal workflow argument, so a caller that skips the validators
-          bypasses the credential screen entirely — and Temporal event history
-          is permanent.
+          would otherwise bypass the credential screen entirely — and Temporal
+          event history is permanent. Because that failure is IRREVERSIBLE, the
+          credential half of the precondition is re-asserted here rather than
+          left to caller convention: it is one cheap dict-key scan at the
+          serialization boundary, and it is the last point at which a
+          credential-named key can still be stopped.
 
     Postconditions:
         - Returns ``{"job_id", "repo_path", "plan_input"}`` plus ``"github"``
           when ``github`` is truthy (omitted entirely when falsy/``None``, so a
           caller with no GitHub context doesn't send a spurious empty dict).
     """
+    assert not (github and _contains_token_key(github)), (
+        "github workflow payload must not include a credential-named key"
+    )
     payload: Dict[str, Any] = {
         "job_id": job_id,
         "repo_path": repo_path,
@@ -437,8 +444,10 @@ def execute_coding_team_workflow(
             ``github`` or ``plan_input`` contains a CREDENTIAL-named key (any of :data:`_TOKEN_KEY_MARKERS`)
             at any nesting depth (see :func:`_contains_token_key`).
         RuntimeError: ``CodingTeamWorkflow.run`` returned a non-dict result; the
-            message names the observed type so the payload shape is diagnosable
-            from the error alone.
+            message names BOTH the workflow id and the observed type, so the run
+            is identifiable in Temporal from the error alone. This surfaces on a
+            per-comment background worker, far from the dispatch context, where
+            the type name by itself would not say WHICH run misbehaved.
         Exception: Any other exception ``execute_workflow_sync`` itself raises
             (a Temporal RPC error, the workflow's own failure exception, a
             cancellation, etc.) propagates unchanged — this function does not
@@ -470,6 +479,7 @@ def execute_coding_team_workflow(
     logger.info("CodingTeamWorkflow id=%s reached terminal result", workflow_id)
     if not isinstance(result, dict):
         raise RuntimeError(
-            f"CodingTeamWorkflow returned a non-dict result: {type(result).__name__}"
+            f"CodingTeamWorkflow id={workflow_id} returned a non-dict result: "
+            f"{type(result).__name__}"
         )
     return result

@@ -303,8 +303,12 @@ _GHS = f"ghs_{'C' * 22}"
 _GHR = f"ghr_{'D' * 22}"
 _GHP2 = f"ghp_{'E' * 22}"
 _GHO = f"gho_{'H' * 24}"
-# Fine-grained PAT shape: its body contains underscores, which is exactly why
-# the ``gh[pousr]_[A-Za-z0-9]+`` alternative can never match it.
+# Fine-grained PAT shape. The ``gh[pousr]_[A-Za-z0-9]+`` alternative can never
+# match it, but NOT because of the underscores in its body: the prefix
+# ``github_pat_`` contains no ``gh`` digraph at all (it reads g-i-t-h-u-b), so
+# that alternative has nothing to anchor on anywhere in the string. This shape
+# therefore only ever matches via the scrubber's dedicated fine-grained-PAT
+# alternative, which is what these parity cases exist to prove.
 _PAT = f"github_pat_{'F' * 12}_{'G' * 12}"
 
 

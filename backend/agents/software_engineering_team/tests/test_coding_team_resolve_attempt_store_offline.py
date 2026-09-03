@@ -8,6 +8,7 @@ database.
 
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import MagicMock
 
 import pytest
@@ -342,8 +343,6 @@ class _SqliteConn:
 @pytest.fixture()
 def sqlite_store(monkeypatch):
     """Point the store at an in-memory sqlite database with the real table shape."""
-    import sqlite3
-
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """CREATE TABLE address_comments_resolve_attempts (
@@ -428,9 +427,18 @@ def test_clear_for_pr_removes_only_that_prs_rows(sqlite_store) -> None:
 
 
 def test_clear_removes_the_row_end_to_end(sqlite_store) -> None:
-    """The cleanup path deletes the evidence the two writes above created, so a
-    resolved thread stops looking like a known failure on the next run."""
+    """The cleanup path deletes the evidence the two writes below created.
+
+    The SECOND write is the point: it re-records the same thread with an
+    UNKNOWN reply id, which the upsert's ``COALESCE`` resolves by KEEPING the
+    id already on record. So the row reaching ``clear_resolve_attempt`` is the
+    coalesced one, and this pins that the cleanup deletes THAT row -- a
+    resolved thread stops looking like a known failure on the next run.
+    """
     store.record_resolve_failure("o", "r", 7, "T1", 3)
+    store.record_resolve_failure("o", "r", 7, "T1", None)
+    assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is True
+
     store.clear_resolve_attempt("o", "r", 7, "T1")
 
     assert store.has_recorded_resolve_failure("o", "r", 7, "T1", 3) is False

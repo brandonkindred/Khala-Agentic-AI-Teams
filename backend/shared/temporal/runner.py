@@ -197,7 +197,13 @@ def execute_workflow_sync(
         - ``reattach_on_timeout=False`` (default): a client-side wait timeout
           raises ``concurrent.futures.TimeoutError`` exactly as before — the
           workflow itself keeps running server-side (Temporal is durable), but
-          this call stops waiting on it.
+          this call stops waiting on it. The abandoned ``execute_workflow``
+          waiter is deliberately NOT cancelled on this path, unlike the
+          reattach path below: there is no second waiter here for it to
+          conflict with, and ``.cancel()`` can abort the START itself when the
+          server has not yet accepted it (see the reattach edge case below) —
+          which would break this very guarantee that the workflow keeps
+          running server-side. The asymmetry is intentional.
         - ``reattach_on_timeout=True``: a client-side wait timeout does NOT
           raise. Instead this reattaches to the same still-running workflow (by
           its known ``workflow_id``, via ``get_workflow_handle`` — no new

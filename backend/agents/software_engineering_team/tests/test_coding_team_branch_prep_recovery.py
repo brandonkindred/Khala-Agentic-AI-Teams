@@ -1280,6 +1280,62 @@ class TestEnsureNamedRemote:
         name, err = api._ensure_named_remote(clone, fork_url)
         assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url
 
+    def test_malformed_port_does_not_escape_as_an_exception(self, api, fork_pair) -> None:
+        """An out-of-range port must still come back as ``(remote, error)``.
+
+        Deriving the authority from ``urlsplit(...).port`` raises ValueError for
+        a port outside 0-65535, which would propagate out of a function whose
+        whole contract is to report failures as the second tuple element. The
+        malformed-URL case is precisely the one most likely to reach here, so it
+        must not be the one that breaks the contract -- and the credential must
+        still be gone from whatever is returned.
+        """
+        _, clone, _fork = fork_pair
+        not_a_real_credential = "placeholder"
+        bad_port = f"https://x-access-token:{not_a_real_credential}@example.invalid:99999/o/r.git"
+
+        name, err = api._ensure_named_remote(clone, bad_port)
+
+        # git rejects the URL (or accepts it -- either is fine); what is pinned
+        # is that this returns rather than raising, and leaks nothing.
+        assert not_a_real_credential not in name
+        assert "@" not in name
+        if err is not None:
+            assert not_a_real_credential not in err
+        config = (Path(clone) / ".git" / "config").read_text(encoding="utf-8")
+        assert not_a_real_credential not in config
+
+    def test_host_case_survives_userinfo_stripping(self, api, fork_pair) -> None:
+        """The docstring promises the host is "preserved exactly".
+
+        ``urlsplit(...).hostname`` lowercases, so building the authority from it
+        silently rewrites a mixed-case host -- a change to the registered URL
+        that has nothing to do with removing the credential.
+        """
+        _, clone, _fork = fork_pair
+        not_a_real_credential = "placeholder"
+        mixed = f"https://x-access-token:{not_a_real_credential}@Example.INVALID/o/r.git"
+
+        name, err = api._ensure_named_remote(clone, mixed)
+
+        assert (name, err) == ("khala-pr-head", None)
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == (
+            "https://Example.INVALID/o/r.git"
+        )
+
+    def test_bracketed_ipv6_authority_survives_userinfo_stripping(
+        self, api, fork_pair
+    ) -> None:
+        """A bracketed IPv6 authority keeps its brackets and port."""
+        _, clone, _fork = fork_pair
+        not_a_real_credential = "placeholder"
+        v6 = f"https://x-access-token:{not_a_real_credential}@[::1]:8443/o/r.git"
+
+        name, err = api._ensure_named_remote(clone, v6)
+
+        assert (name, err) == ("khala-pr-head", None)
+        assert _must(clone, "remote", "get-url", "khala-pr-head") == "https://[::1]:8443/o/r.git"
+
     def test_repeated_calls_with_same_url_are_idempotent(self, api, fork_pair) -> None:
         """A retry on the same checkout (the child job re-dispatching after a
         transient failure) must not error just because the remote already
@@ -1440,4 +1496,8 @@ class TestPushBranchToFork:
         )
         # Still exactly one registered fork remote: registration is idempotent,
         # so a retry must not accumulate remotes or repoint an existing one.
+        # Both halves are asserted -- the URL check alone would stay green if a
+        # retry had ALSO left a second, differently-named remote behind, which
+        # is exactly the accumulation this claims to rule out.
+        assert _must(clone, "remote").split() == ["khala-pr-head", "origin"]
         assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url

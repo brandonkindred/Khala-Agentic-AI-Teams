@@ -275,7 +275,15 @@ def test_best_effort_write_swallows_and_logs_the_failure(
     with caplog.at_level("WARNING", logger="shared.postgres.helpers"):
         assert best_effort_write("my_table", "record_thing", _boom) is None
 
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    # Filter on the LOGGER as well as the level: `caplog.records` collects from
+    # every logger in the process, so a WARNING emitted by an unrelated library
+    # during this test would break the count assertion for a reason that has
+    # nothing to do with the behavior under test.
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and r.name == "shared.postgres.helpers"
+    ]
     assert len(warnings) == 1
     # The label is what an operator greps for, so pin its exact composition.
     assert warnings[0].getMessage() == "my_table: record_thing failed"

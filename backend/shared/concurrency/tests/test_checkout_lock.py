@@ -158,6 +158,48 @@ def test_body_exception_still_releases_the_lock(tmp_path: Path) -> None:
     _assert_flock_is_free(lock_path)
 
 
+def test_failed_release_is_logged_and_does_not_mask_the_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising ``__exit__`` must be REPORTED, and must not displace the body's error.
+
+    Nothing awaits the release future's result, so an unlogged failure surfaces
+    only as asyncio's incidental "exception was never retrieved" message at GC
+    time -- arbitrarily later and on an unrelated stack. For a primitive whose
+    contract is "the lock is always released", a violation is precisely what an
+    operator needs to see, since a stuck flock wedges every later checkout on
+    this path.
+    """
+    lock_path = tmp_path / ".test.lock"
+
+    class _RaisingOnExit:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            raise OSError("flock release failed")
+
+    monkeypatch.setattr(checkout_lock_module, "flock_lock", lambda _path: _RaisingOnExit())
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        async with held_checkout_lock(
+            loop, lock_path, platform_owned=True, owner="acme", repo="widget", log_prefix="test"
+        ):
+            raise ValueError("body boom")
+
+    with caplog.at_level("WARNING"):
+        # The BODY's exception is what propagates: the release failure is
+        # logged, never raised, so it cannot replace the real error.
+        with pytest.raises(ValueError, match="body boom"):
+            asyncio.run(_run())
+
+    assert any(
+        r.levelno == logging.WARNING and "flock release failed" in r.getMessage()
+        for r in caplog.records
+    ), "expected a WARNING naming the release failure"
+
+
 def test_platform_owned_lock_failure_raises_oserror(tmp_path: Path) -> None:
     """A parent directory that cannot be created surfaces as OSError, and the
     body never runs."""

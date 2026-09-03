@@ -254,7 +254,10 @@ class TestRunningReviewForPrUnit:
         child["parent_job_id"] = "job-1"
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [stale_parent, child])
 
+        job_updates: List[Dict[str, Any]] = []
+
         def _boom_on_child(job_id, **kw):
+            job_updates.append({"job_id": job_id, **kw})
             if job_id != "job-1":
                 raise RuntimeError("job service unreachable")
 
@@ -262,6 +265,15 @@ class TestRunningReviewForPrUnit:
         monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
 
         assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
+
+        # The calls are asserted, not just discarded: with them thrown away this
+        # test would stay green if the sweep were reordered so the parent never
+        # got terminalized at all (nothing would raise, and admission would be
+        # unblocked for the wrong reason). Both must hold -- the parent really
+        # was marked failed, and the child's failure did not undo that.
+        updated = {u["job_id"]: u for u in job_updates}
+        assert updated["job-1"]["status"] == "failed"
+        assert "job-1:comment:2" in updated
 
 
 # ---------------------------------------------------------------------------

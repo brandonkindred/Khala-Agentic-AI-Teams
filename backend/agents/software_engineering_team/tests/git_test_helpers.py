@@ -26,21 +26,30 @@ def current_branch(repo: str) -> str:
 
     One shared spelling of the ``git rev-parse --abbrev-ref HEAD`` subprocess
     call the branch-prep tests assert on repeatedly, so the invocation (and its
-    ``check=True``/text handling) exists once for every test module instead of
-    once per module.
+    text handling) exists once for every test module instead of once per module.
 
     Preconditions:
         - ``repo`` is a git checkout with a resolvable HEAD.
     Postconditions:
-        - Returns the abbreviated branch name, whitespace-stripped. Raises
-          ``subprocess.CalledProcessError`` if ``rev-parse`` fails.
+        - Returns the abbreviated branch name, whitespace-stripped.
+        - Raises ``AssertionError`` naming the checkout and git's stderr if
+          ``rev-parse`` fails — the same failure reporting ``commit_on_branch``'s
+          ``_run`` uses, rather than a bare ``CalledProcessError`` whose message
+          carries only an exit code. A failing helper in a git test is nearly
+          always diagnosed from CI output alone, where the exit code says
+          nothing about WHY.
     """
-    return subprocess.run(
+    result = subprocess.run(
         ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
         capture_output=True,
         text=True,
-    ).stdout.strip()
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"git -C {repo} rev-parse --abbrev-ref HEAD failed "
+            f"(exit {result.returncode}): {result.stderr}"
+        )
+    return result.stdout.strip()
 
 
 def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> str:

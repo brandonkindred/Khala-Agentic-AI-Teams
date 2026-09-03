@@ -348,6 +348,32 @@ class CodingTeamWorkflow:
             return
         self._submitted_answers = answers
 
+    async def _mark_job_failed(self, *, job_id: str, message: str) -> dict[str, Any]:
+        """Run the mark-job-failed activity — ONE spelling of its invocation.
+
+        Both terminalization paths (the notice fallback in
+        :meth:`_best_effort_github_failure_notice` and the notice-free
+        :meth:`_best_effort_mark_job_failed`) reached for the same activity with
+        the same request shape, timeout and retry policy. Keeping two copies
+        meant a change to any of those three had to be made twice, and a
+        divergence would be invisible until a failure path ran in production.
+
+        Preconditions:
+            - Called from ``run`` (or a helper it awaits) while this workflow is
+              executing; ``job_id`` identifies this workflow's job and
+              ``message`` is the non-empty diagnostic to record against it.
+        Postconditions:
+            - Returns the resulting job snapshot on success.
+            - Propagates any activity failure (after the shared bounded
+              retries); the two callers each decide whether to swallow it.
+        """
+        return await workflow.execute_activity(
+            mark_coding_team_job_failed_activity,
+            {"job_id": job_id, "error": message},
+            start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=_GITHUB_ACTIVITY_RETRY,
+        )
+
     async def _best_effort_github_failure_notice(
         self,
         *,
@@ -387,12 +413,7 @@ class CodingTeamWorkflow:
             _log_github_side_effect_failure(
                 "github_failure_notice_activity failed; marking job failed locally"
             )
-            return await workflow.execute_activity(
-                mark_coding_team_job_failed_activity,
-                {"job_id": job_id, "error": message},
-                start_to_close_timeout=timedelta(minutes=1),
-                retry_policy=_GITHUB_ACTIVITY_RETRY,
-            )
+            return await self._mark_job_failed(job_id=job_id, message=message)
 
     async def _best_effort_mark_job_failed(self, *, job_id: str, message: str) -> None:
         """Terminalize the Khala job record WITHOUT posting any GitHub notice.
@@ -419,12 +440,7 @@ class CodingTeamWorkflow:
               what surfaces. Returns normally in both cases.
         """
         try:
-            await workflow.execute_activity(
-                mark_coding_team_job_failed_activity,
-                {"job_id": job_id, "error": message},
-                start_to_close_timeout=timedelta(minutes=1),
-                retry_policy=_GITHUB_ACTIVITY_RETRY,
-            )
+            await self._mark_job_failed(job_id=job_id, message=message)
         except Exception:
             _log_github_side_effect_failure(
                 "best-effort mark-job-failed for an unusable github payload failed; "
@@ -477,7 +493,10 @@ class CodingTeamWorkflow:
               ``owner``, ``repo``, ``base``, and ``integration_branch``, plus
               either ``issue_number``/``issue_title`` for issue-driven publishing
               or ``publish_mode="existing_pr"``/``pr_number`` for review-comment
-              remediation. ``remote`` defaults to ``"origin"`` when absent.
+              remediation. ``remote``, when present, must be a non-blank
+              string; it defaults to ``"origin"`` when absent or falsy, and
+              any other value is a caller-contract violation rejected up
+              front like the required keys.
               Optional ``expected_head_sha`` and ``expected_base_sha`` values
               are both forwarded to ``github_branch_prep_activity`` (see its
               contract) so branch prep fails closed if the integration branch
@@ -600,6 +619,7 @@ class CodingTeamWorkflow:
         is_existing_pr_publish = False
         pr_number = None
         issue_number = issue_title = None
+        remote = "origin"
         if isinstance(github, dict) and github:
             # Every validation failure below is a caller-contract violation, and
             # each raises immediately rather than taking the terminalize-with-
@@ -676,6 +696,25 @@ class CodingTeamWorkflow:
                             "github payload key 'issue_title' must be a non-empty string, "
                             f"got {issue_title!r}"
                         )
+                # `remote` is optional, so it is validated separately from the
+                # required keys above: absent/blank means "origin". What it must
+                # NOT do is fall through unchecked -- `github.get("remote") or
+                # "origin"` rescues only FALSY values, so a truthy non-string
+                # (``remote=123``) would reach `github_branch_prep_activity`
+                # verbatim and fail there as an ACTIVITY failure, reproducing the
+                # exact misleading-notice failure mode this block exists to
+                # prevent. Validate once here and pass the local to both activity
+                # call sites.
+                raw_remote = github.get("remote")
+                if not raw_remote:
+                    remote = "origin"
+                elif not isinstance(raw_remote, str) or not raw_remote.strip():
+                    raise ValueError(
+                        "github payload key 'remote' must be a non-empty string when "
+                        f"present, got {raw_remote!r}"
+                    )
+                else:
+                    remote = raw_remote
             except ValueError as invalid_payload:
                 await self._best_effort_mark_job_failed(
                     job_id=request["job_id"], message=str(invalid_payload)
@@ -692,7 +731,7 @@ class CodingTeamWorkflow:
                     {
                         "job_id": request["job_id"],
                         "repo_path": request["repo_path"],
-                        "remote": github.get("remote") or "origin",
+                        "remote": remote,
                         "default_branch": base,
                         "integration_branch": integration_branch,
                         "issue_number": github.get("issue_number"),
@@ -812,7 +851,7 @@ class CodingTeamWorkflow:
                     "repo_path": request["repo_path"],
                     "base": base,
                     "integration_branch": integration_branch,
-                    "remote": github.get("remote") or "origin",
+                    "remote": remote,
                     "cleanup_checkout_on_success": bool(
                         github.get("cleanup_checkout_on_success")
                     ),

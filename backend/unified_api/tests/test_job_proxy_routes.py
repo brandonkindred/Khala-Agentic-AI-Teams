@@ -433,6 +433,28 @@ _NON_CREDENTIAL_JOB_FIELDS = {
 }
 
 
+# Directory names that never contain this repository's own source. ``tests`` and
+# ``__pycache__`` were always excluded; the rest are the environment/build
+# directories a real checkout accumulates -- ``backend/.venv`` in particular
+# exists here and holds an order of magnitude more Python files than the
+# repository itself.
+_NON_SOURCE_DIRS = frozenset(
+    {
+        "tests",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        "build",
+        "dist",
+        "site-packages",
+        "node_modules",
+    }
+)
+
+
 def _credential_job_fields() -> set[str]:
     """Every credential-looking job-record field name assigned anywhere in ``backend``.
 
@@ -440,14 +462,19 @@ def _credential_job_fields() -> set[str]:
         - ``_backend`` points at the repository's ``backend`` directory.
     Postconditions:
         - Returns the set of literal ``*_fields["<key>"] = ...`` keys found in
-          non-test Python sources whose name matches
-          :data:`_CREDENTIAL_FIELD_RE`. Pure apart from reading the tree; an
+          FIRST-PARTY, non-test Python sources whose name matches
+          :data:`_CREDENTIAL_FIELD_RE`. Directories named in
+          :data:`_NON_SOURCE_DIRS` are skipped: a developer checkout has
+          ``backend/.venv`` in it, whose thousands of third-party modules are
+          neither this repository's source nor able to add a field to the job
+          record -- reading them all is pure cost, and a match inside one would
+          be an unfixable false failure. Pure apart from reading the tree; an
           unreadable file is skipped rather than failing the scan.
     """
     found: set[str] = set()
     for py in _backend.rglob("*.py"):
         parts = py.parts
-        if "tests" in parts or "__pycache__" in parts or py.name.startswith("test_"):
+        if _NON_SOURCE_DIRS.intersection(parts) or py.name.startswith("test_"):
             continue
         try:
             text = py.read_text(encoding="utf-8")

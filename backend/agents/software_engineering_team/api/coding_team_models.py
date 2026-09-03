@@ -25,13 +25,20 @@ from shared.hitl.models import (  # noqa: F401
 )
 from software_engineering_team.models import AgentStatusEntry
 
-# GitHub owner (user/org) and repository names: ASCII alphanumerics, ``-``,
-# ``_`` and ``.``, starting with an alphanumeric. Anchored, so a whitespace-only
-# value, an embedded ``/`` (a two-segment "owner/repo" pasted into one field) or
-# a path traversal (``..``) is a 422 at the boundary instead of a confusing
-# downstream failure — an address-comments run, for instance, would otherwise
-# surface a malformed owner as the route's "origin remote names a different
-# repository" 400, blaming the checkout for a bad identifier.
+# A deliberately LOOSE superset of GitHub's owner and repository naming rules:
+# ASCII alphanumerics, ``-``, ``_`` and ``.``, starting with an alphanumeric.
+# It is not a faithful encoding of either rule set -- GitHub owners in fact
+# allow only alphanumerics and single, non-trailing hyphens, so this pattern
+# accepts owner spellings GitHub itself would reject. That is intentional: the
+# GitHub API is the authority on whether a name exists, and duplicating its
+# (independently evolving) rules here would reject valid names on a schema
+# change we do not control. What this pattern is for is REJECTING SHAPES, not
+# validating identity. Anchored, so a whitespace-only value, an embedded ``/``
+# (a two-segment "owner/repo" pasted into one field) or a path traversal
+# (``..``) is a 422 at the boundary instead of a confusing downstream failure --
+# an address-comments run, for instance, would otherwise surface a malformed
+# owner as the route's "origin remote names a different repository" 400,
+# blaming the checkout for a bad identifier.
 _GITHUB_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 # GitHub caps owner names at 39 characters and repository names at 100; the
 # looser 100 is used for both so oversized junk never reaches an API URL.

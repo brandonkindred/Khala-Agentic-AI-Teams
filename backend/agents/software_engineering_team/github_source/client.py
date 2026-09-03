@@ -352,7 +352,7 @@ def scrub_token_from_text(msg: str) -> str:
     return _BARE_TOKEN_RE.sub("***", _TOKEN_URL_RE.sub("https://***@", msg))
 
 
-def redact_secret(text: str, secret: str | None) -> str:
+def redact_secret(text: str, secret: Optional[str]) -> str:
     """Redact a KNOWN secret from ``text`` by value, then pattern-scrub the rest.
 
     :func:`scrub_token_from_text` is pattern matching over arbitrary text and

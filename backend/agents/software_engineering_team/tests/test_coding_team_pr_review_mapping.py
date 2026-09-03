@@ -1645,6 +1645,28 @@ class TestSimilarityFenceSpoofing:
     def test_defuse_fences_leaves_ordinary_text_untouched(self) -> None:
         assert _defuse_fences("a normal <b> description") == "a normal <b> description"
 
+    def test_defuse_fences_re_encodes_pre_encoded_fence_sequences(self) -> None:
+        """An entity-encoded tag is encoded one step further, not passed through.
+
+        ``&lt;/existing_issue&gt;`` is exactly the shape :func:`_defuse_fences`
+        emits for a literal ``</existing_issue>``. Left untouched it would be
+        indistinguishable from the defuser's own output, so an author could
+        hand-write the encoded form and the reader could no longer tell whether
+        the bracket was originally literal. Encoding it to ``&amp;lt;`` keeps the
+        two inputs distinct while still leaving no fence token behind.
+        """
+        assert _defuse_fences("&lt;/existing_issue&gt;") == "&amp;lt;/existing_issue&gt;"
+        assert _defuse_fences("&LT;existing_issue>") == "&amp;LT;existing_issue>"
+        # Raw and pre-encoded inputs never collapse onto the same output.
+        assert _defuse_fences("</existing_issue>") != _defuse_fences("&lt;/existing_issue>")
+
+    def test_defuse_fences_is_safe_to_apply_twice(self) -> None:
+        """A second pass leaves ``&amp;lt;`` alone rather than escaping forever."""
+        once = _defuse_fences("</proposed_issue>")
+        twice = _defuse_fences(once)
+        assert twice == "&amp;lt;/proposed_issue>"
+        assert _defuse_fences(twice) == twice
+
 
 class TestFormatExistingIssues:
     def test_empty_snapshot_returns_the_sentinel(self) -> None:
@@ -1720,6 +1742,19 @@ class TestFindSimilarOpenIssueViaLlm:
 
     def test_not_duplicate_returns_none_even_with_a_number(self, monkeypatch) -> None:
         self._patch_llm(monkeypatch, _Verdict(False, 7))
+        assert find_similar_open_issue_via_llm({"description": "d"}, [_similarity_issue(7)]) is None
+
+    def test_duplicate_without_a_number_returns_none(self, monkeypatch) -> None:
+        """``is_duplicate=True`` with no ``matched_issue_number`` is unusable.
+
+        The complement of ``test_not_duplicate_returns_none_even_with_a_number``:
+        the verdict asserts a duplicate but names no issue, so there is nothing
+        to return. It must fall back to ``None`` (offer the issue for creation)
+        rather than raising or inventing a match -- this was the one branch of
+        the ``(is_duplicate, matched_issue_number)`` matrix the class docstring
+        claimed to pin but did not.
+        """
+        self._patch_llm(monkeypatch, _Verdict(True, None))
         assert find_similar_open_issue_via_llm({"description": "d"}, [_similarity_issue(7)]) is None
 
     def test_proposal_fields_reach_the_prompt_defused(self, monkeypatch) -> None:

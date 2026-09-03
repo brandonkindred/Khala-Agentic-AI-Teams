@@ -1000,12 +1000,18 @@ def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str
     # current caller passes such a URL; this makes the guarantee structural
     # rather than a property of the callers, and also keeps a credential out
     # of the value echoed back in this function's error returns.
+    # Rebuild the authority by slicing the RAW netloc at the last "@" rather
+    # than from `parts.hostname`/`parts.port`: those two accessors normalize
+    # (hostname is lowercased, silently rewriting a case-sensitive host) and
+    # `parts.port` RAISES ValueError on an out-of-range port, which would
+    # escape this function and break the documented ``(remote, error)`` return
+    # contract for a malformed URL -- the one shape most likely to reach here.
+    # The raw slice preserves host case, port text, and bracketed IPv6
+    # authorities (``user@[::1]:8080``) verbatim, and drops exactly the
+    # userinfo.
     parts = urlsplit(remote)
-    if parts.username or parts.password:
-        netloc = parts.hostname or ""
-        if parts.port:
-            netloc = f"{netloc}:{parts.port}"
-        remote = urlunsplit(parts._replace(netloc=netloc))
+    if "@" in parts.netloc:
+        remote = urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
     # `--` ends option parsing before the name/URL positionals: the only caller
     # of this URL branch (`_pr_head_remote`) always builds an "https://..."
     # value from GitHub's own API response, which can never start with `-`, but

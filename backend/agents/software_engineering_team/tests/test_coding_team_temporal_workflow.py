@@ -1065,6 +1065,12 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
         # names but never exercised: validation is exact-match, so a future
         # `mode.strip().lower()` would silently accept this and must not.
         ({"publish_mode": "Existing_PR"}, r"unsupported github\.publish_mode: 'Existing_PR'"),
+        # `remote` is optional, and `github.get("remote") or "origin"` rescues
+        # only FALSY values -- a truthy non-string would otherwise reach branch
+        # prep verbatim and fail there as an activity failure.
+        ({"remote": 123}, r"'remote' must be a non-empty string when present"),
+        ({"remote": "   "}, r"'remote' must be a non-empty string when present"),
+        ({"remote": ["origin"]}, r"'remote' must be a non-empty string when present"),
     ],
     ids=[
         "owner-none",
@@ -1078,6 +1084,9 @@ def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
         "pr-number-str",
         "pr-number-negative",
         "publish-mode-case-variant",
+        "remote-int",
+        "remote-blank",
+        "remote-list",
     ],
 )
 def test_unusable_github_payload_values_fail_closed_up_front(

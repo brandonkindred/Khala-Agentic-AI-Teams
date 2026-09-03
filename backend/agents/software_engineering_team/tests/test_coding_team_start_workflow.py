@@ -139,6 +139,35 @@ def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
     # caller reattaches to the same still-running workflow rather than giving
     # up after one wait window (see runner.execute_workflow_sync's docstring).
     assert captured["reattach_on_timeout"] is True
+    # The dispatcher must hand the runner CodingTeamWorkflow.run itself, not some
+    # other callable: this value was captured but never checked, which read as
+    # verification that did not exist.
+    assert captured["workflow_run"] is sw.CodingTeamWorkflow.run
+
+
+def test_execute_coding_team_workflow_names_the_workflow_id_on_a_non_dict_result(
+    monkeypatch,
+):
+    """The non-dict-result RuntimeError must identify WHICH run misbehaved.
+
+    This raise surfaces on a per-comment background worker, far from the
+    dispatch call site; the observed type name alone does not say which
+    workflow produced it, so the id has to be in the message.
+    """
+
+    def _fake_execute(workflow_run, *args, **kwargs):
+        return ["not", "a", "dict"]
+
+    monkeypatch.setattr(sw, "execute_workflow_sync", _fake_execute)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sw.execute_coding_team_workflow(
+            "parent:comment:5", "/repo", None, dict(_VALID_GITHUB)
+        )
+
+    message = str(excinfo.value)
+    assert f"{WORKFLOW_ID_PREFIX}parent:comment:5" in message
+    assert "list" in message
 
 
 # A github payload that passes validation on its own, so the two argument-presence

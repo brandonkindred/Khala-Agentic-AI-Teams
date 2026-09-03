@@ -3269,8 +3269,12 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
 
     repo_path = _resolve_repo_path(cfg, owner, repo, pr_number=pr_number)
     # An operator-pinned repo_path override is not per-PR-namespaced and is never
-    # auto-cleaned/lock-guarded by this service — mirrors run_github_issue's
-    # cleanup_checkout_on_success computation.
+    # auto-cleaned by this service — mirrors run_github_issue's
+    # cleanup_checkout_on_success computation. It IS still lock-guarded: the
+    # `held_checkout_lock` below runs for both kinds of checkout, differing only
+    # in that a pinned one takes the lock BEST-EFFORT (an acquisition OSError
+    # degrades to a warning and proceeds, since a pinned path may live under a
+    # parent this service cannot write to) rather than fail-closed.
     platform_owned = not _repo_path_override(cfg, owner, repo)
 
     loop = asyncio.get_running_loop()

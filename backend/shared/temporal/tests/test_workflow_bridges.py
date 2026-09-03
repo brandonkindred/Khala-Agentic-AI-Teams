@@ -489,6 +489,35 @@ def test_execute_workflow_sync_without_reattach_raises_timeout(running_loop):
         _run_execute_sync_bounded(workflow_id="wid", task_queue="q", execute_timeout_s=0.05)
 
 
+def test_execute_workflow_sync_without_reattach_leaves_the_waiter_running(running_loop):
+    """The default path deliberately does NOT cancel the initial waiter.
+
+    Its reattach sibling does, and for a good reason (two coroutines would
+    otherwise long-poll the same workflow). This path has no second waiter to
+    conflict with, and cancelling here would be actively harmful: ``.cancel()``
+    on the ``execute_workflow`` future can abort the START itself if the server
+    has not yet accepted it, which would break the documented guarantee that
+    "the workflow itself keeps running server-side" after a client-side
+    timeout. So the asymmetry is the contract, not an oversight -- pinned here
+    so a future "symmetry" cleanup that adds ``future.cancel()`` to this branch
+    fails loudly instead of silently trading a durable workflow for a tidier
+    event loop.
+    """
+    captured: dict = {}
+    client_mod.set_temporal_client(_FakeSlowExecClient(captured))
+    client_mod.set_temporal_loop(running_loop)
+
+    with pytest.raises(TimeoutError):
+        _run_execute_sync_bounded(workflow_id="wid", task_queue="q", execute_timeout_s=0.05)
+
+    # Cancellation is asynchronous, so a bare "not True" immediately after the
+    # raise would also pass if a cancel HAD been requested but not yet
+    # delivered. Give the loop the same grace window the reattach test uses
+    # before concluding no cancellation was requested.
+    time.sleep(0.2)
+    assert captured.get("execute_workflow_cancelled") is not True
+
+
 def test_execute_workflow_sync_reattach_returns_result_after_timeout(running_loop):
     """reattach_on_timeout=True: a client-side timeout reattaches to the same
     workflow id (via get_workflow_handle, never starting a new run) and returns

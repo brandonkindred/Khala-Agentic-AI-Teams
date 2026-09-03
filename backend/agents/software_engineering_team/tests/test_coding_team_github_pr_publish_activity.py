@@ -324,6 +324,28 @@ class TestGithubPrPublishActivityStatusMapping:
         }
 
 
+def _capture_prepare_kwargs(monkeypatch: pytest.MonkeyPatch, api: Any) -> dict[str, Any]:
+    """Stub ``_prepare_issue_branch`` with a success and capture its kwargs.
+
+    Preconditions:
+        - ``api`` is the module under test; ``monkeypatch`` is function-scoped so
+          the stub is undone at teardown.
+    Postconditions:
+        - ``api._prepare_issue_branch`` is replaced by a stub returning
+          ``(True, None, [])``, and the returned dict is populated with the
+          keyword arguments of every call to it. The dict is live: read it AFTER
+          driving the activity.
+    """
+    captured: dict[str, Any] = {}
+
+    def _fake_prepare(*_args: Any, **kwargs: Any):
+        captured.update(kwargs)
+        return True, None, []
+
+    monkeypatch.setattr(api, "_prepare_issue_branch", _fake_prepare)
+    return captured
+
+
 class TestGithubBranchPrepActivityExpectedHeadSha:
     def test_expected_head_sha_forwarded_when_present(
         self, monkeypatch: pytest.MonkeyPatch, api: Any
@@ -332,13 +354,7 @@ class TestGithubBranchPrepActivityExpectedHeadSha:
         keyword argument when present in the request -- that passthrough is the
         whole stale-plan guard, so a dropped kwarg would silently disable it."""
         _stub_token(monkeypatch, api)
-        captured: dict[str, Any] = {}
-
-        def _fake_prepare(*_args: Any, **kwargs: Any):
-            captured.update(kwargs)
-            return True, None, []
-
-        monkeypatch.setattr(api, "_prepare_issue_branch", _fake_prepare)
+        captured = _capture_prepare_kwargs(monkeypatch, api)
 
         result = _branch_prep()(
             {
@@ -361,13 +377,7 @@ class TestGithubBranchPrepActivityExpectedHeadSha:
         explicitly as ``None`` (the issue-driven flow's shape), so the callee always
         sees the keyword and never has to distinguish absent from unset."""
         _stub_token(monkeypatch, api)
-        captured: dict[str, Any] = {}
-
-        def _fake_prepare(*_args: Any, **kwargs: Any):
-            captured.update(kwargs)
-            return True, None, []
-
-        monkeypatch.setattr(api, "_prepare_issue_branch", _fake_prepare)
+        captured = _capture_prepare_kwargs(monkeypatch, api)
 
         _branch_prep()(
             {

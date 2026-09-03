@@ -132,6 +132,13 @@ async def held_checkout_lock(
           not enough once a caller can be cancelled repeatedly; only looping
           until the future is genuinely done makes cleanup itself
           cancellation-safe against any number of repeat cancellations.
+        - A release that RAISES is logged at WARNING (naming ``lock_path``) and
+          never propagated: this cleanup runs in the ``finally``, so raising
+          would displace whatever exception the body was already propagating.
+          Inspecting the release future's ``exception()`` is what makes the
+          failure visible at all -- nothing else awaits its result, so an
+          unlogged failure would surface only as asyncio's incidental
+          "exception was never retrieved" message at GC time.
         - A ``CancelledError`` raised while awaiting acquisition propagates
           to the caller as normal (this helper does not suppress
           cancellation); only the release bookkeeping is cancellation-safe.
@@ -210,5 +217,33 @@ async def held_checkout_lock(
             # flock).
             release_future = loop.run_in_executor(None, lock_cm.__exit__, exc_type, exc_val, exc_tb)
             while not release_future.done():
-                with contextlib.suppress(asyncio.CancelledError):
+                # TWO things are suppressed here, for different reasons.
+                # ``CancelledError``: a repeat cancellation of THIS coroutine
+                # aborts only this one await, so the loop retries it until the
+                # future is genuinely done. ``Exception``: a release that FAILED
+                # would otherwise be re-raised by this await, out of the
+                # ``finally``, DISPLACING whatever exception the body was
+                # already propagating -- turning a real error into a confusing
+                # unlock error. The failure is not swallowed: it is reported by
+                # the explicit inspection below.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await asyncio.shield(release_future)
+            # A release that RAISED must not go unreported. Nothing awaits this
+            # future's result, so without this the only trace of a failed
+            # release is asyncio's incidental "exception was never retrieved"
+            # message at GC time -- arbitrarily later, on an unrelated stack,
+            # and easy to miss entirely. The contract of this primitive is that
+            # the lock is always released, so a violation of it is exactly what
+            # an operator needs to see: a stuck flock wedges every later
+            # checkout on this path. Logged, never raised: this runs in the
+            # generator's finally, and raising here would replace whatever
+            # exception the body was already propagating.
+            if not release_future.cancelled():
+                release_exc = release_future.exception()
+                if release_exc is not None:
+                    logger.warning(
+                        "checkout lock release failed for %s: %s",
+                        lock_path,
+                        release_exc,
+                        exc_info=release_exc,
+                    )
