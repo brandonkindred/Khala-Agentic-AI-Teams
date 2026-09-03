@@ -793,8 +793,9 @@ describe('CodingTeamPageComponent', () => {
       const rows = Array.from(el.querySelectorAll('.github-issue-row')) as HTMLElement[];
       const selectedRow = rows.find((r) => r.getAttribute('aria-expanded') === 'true');
       expect(selectedRow?.textContent).toContain('Issue 2');
-      expect(selectedRow?.getAttribute('aria-controls')).toBe('confirm-panel-2');
-      const panel = el.querySelector('#confirm-panel-2');
+      const expectedId = component.confirmPanelId(2);
+      expect(selectedRow?.getAttribute('aria-controls')).toBe(expectedId);
+      const panel = el.querySelector(`[id="${expectedId}"]`);
       expect(panel).not.toBeNull();
       expect(panel?.classList.contains('github-confirm-panel')).toBe(true);
     });
@@ -2144,6 +2145,14 @@ describe('CodingTeamPageComponent', () => {
         expect(panel).not.toBeNull();
         expect(panel?.contains(document.activeElement)).toBe(true);
         expect(document.activeElement).not.toBe(row);
+
+        // The panel's accessible name comes from its heading via aria-labelledby, not subtree
+        // fallback on a plain div — assert the wiring actually points at the rendered heading.
+        const labelledBy = panel?.getAttribute('aria-labelledby');
+        expect(labelledBy).toBe(component.confirmPanelHeadingId(issue.number));
+        const heading = el.querySelector(`[id="${labelledBy}"]`);
+        expect(heading?.tagName).toBe('H3');
+        expect(heading?.textContent).toContain('Start AI coding on this issue?');
       } finally {
         vi.useRealTimers();
       }
@@ -2168,7 +2177,7 @@ describe('CodingTeamPageComponent', () => {
         fixture.detectChanges();
 
         const el: HTMLElement = fixture.nativeElement;
-        const row = el.querySelector<HTMLButtonElement>(`[aria-controls="confirm-panel-${issue.number}"]`);
+        const row = el.querySelector<HTMLButtonElement>(`[aria-controls="${component.confirmPanelId(issue.number)}"]`);
         expect(row).not.toBeNull();
         expect(document.activeElement).toBe(row);
         expect(el.querySelector('.github-confirm-panel')).toBeNull();

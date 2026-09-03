@@ -452,10 +452,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       clearTimeout(this.thinkingAnnounceTimer);
       this.thinkingAnnounceTimer = null;
     }
-    if (this.focusTimer) {
-      clearTimeout(this.focusTimer);
-      this.focusTimer = null;
-    }
+    this.clearFocusTimer();
     this.refreshTrigger$.complete();
   }
 
@@ -747,9 +744,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    *   simply moves the confirmation panel to the new row.
    * Postconditions: `selectedIssue` (and its derived `selectedIssueOpenDepsText`) is set, which
    *   renders `.github-confirm-panel` under this issue's row on the next change-detection pass;
-   *   once rendered, focus moves into that panel (named by its existing `<h3>`) so AT users hear
-   *   the confirmation heading — and the blocked-dependency warning, when present — instead of
-   *   focus staying on the row button they just activated.
+   *   once rendered, focus moves into that panel (named via `aria-labelledby` pointing at its
+   *   `<h3>`) so AT users hear the confirmation heading — and the blocked-dependency warning,
+   *   when present — instead of focus staying on the row button they just activated.
    */
   selectIssue(issue: GitHubIssueItem): void {
     this.selectedIssue = issue;
@@ -773,27 +770,48 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** After the confirm panel for `issueNumber` renders, move focus into it. */
-  private moveFocusToConfirmPanel(issueNumber: number): void {
+  /**
+   * Repo-scoped id for the confirm panel of `issueNumber` under the currently expanded repo.
+   * Only one repo is ever expanded at a time (see `toggleRepo`), but scoping by repo full name
+   * here means the id/`aria-controls` wiring stays correct even if that invariant ever changes —
+   * a bare issue number is only unique within a repo.
+   */
+  confirmPanelId(issueNumber: number): string {
+    return `confirm-panel-${this.selectedRepo?.full_name ?? ''}-${issueNumber}`;
+  }
+
+  /** Id for the confirm panel's heading, referenced by the panel's `aria-labelledby`. */
+  confirmPanelHeadingId(issueNumber: number): string {
+    return `confirm-panel-heading-${this.selectedRepo?.full_name ?? ''}-${issueNumber}`;
+  }
+
+  /** Clear any pending focus-move timer, e.g. before scheduling a new one or on destroy. */
+  private clearFocusTimer(): void {
     if (this.focusTimer !== null) {
       clearTimeout(this.focusTimer);
+      this.focusTimer = null;
     }
+  }
+
+  /** After the confirm panel for `issueNumber` renders, move focus into it. */
+  private moveFocusToConfirmPanel(issueNumber: number): void {
+    this.clearFocusTimer();
+    const id = this.confirmPanelId(issueNumber);
     this.focusTimer = deferFocus(this.host.nativeElement, (root) =>
-      root.querySelector<HTMLElement>(`#confirm-panel-${issueNumber}`),
+      root.querySelector<HTMLElement>(`[id="${id}"]`),
     );
   }
 
   /**
    * After the confirm panel for `issueNumber` unmounts, move focus back to its row's button
-   * (found via the row's existing `aria-controls="confirm-panel-<number>"` wiring — the row has
-   * no id of its own).
+   * (found via the row's existing `aria-controls` wiring — the row has no id of its own). Repo
+   * full names can't contain `"`, so interpolating the id into this attribute selector is safe.
    */
   private moveFocusToIssueRow(issueNumber: number): void {
-    if (this.focusTimer !== null) {
-      clearTimeout(this.focusTimer);
-    }
+    this.clearFocusTimer();
+    const id = this.confirmPanelId(issueNumber);
     this.focusTimer = deferFocus(this.host.nativeElement, (root) =>
-      root.querySelector<HTMLElement>(`[aria-controls="confirm-panel-${issueNumber}"]`),
+      root.querySelector<HTMLElement>(`[aria-controls="${id}"]`),
     );
   }
 
