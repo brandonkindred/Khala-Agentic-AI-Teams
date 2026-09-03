@@ -235,6 +235,13 @@
                       } @else {
                       <div class="github-issues-list">
                         @for (vm of pagedIssueVms; track vm.number) {
+                          <!--
+                            No tabindex on the nested title/chip spans below: a focusable
+                            descendant of a <button> is invalid per the HTML interactive-content
+                            model and would add a second tab stop to every issue row. Both
+                            messages are composed into issueRowTooltip() and bound on the button
+                            itself instead.
+                          -->
                           <button
                             class="github-issue-row"
                             type="button"
@@ -242,15 +249,13 @@
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
                             [attr.aria-controls]="selectedIssue?.number === vm.number ? confirmPanelId(vm.number) : null"
                             [attr.data-issue-number]="vm.number"
+                            [matTooltip]="issueRowTooltip(vm)"
                             (click)="selectIssue(vm.issue)"
                           >
                             <span class="github-issue-row__number">#{{ vm.number }}</span>
-                            <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
+                            <span class="github-issue-row__title">{{ vm.title }}</span>
                             @if (vm.inProgress) {
-                              <span
-                                class="github-label-chip github-label-chip--active"
-                                matTooltip="The coding team is already working on this issue"
-                              >
+                              <span class="github-label-chip github-label-chip--active">
                                 <mat-icon aria-hidden="true">engineering</mat-icon>
                                 In progress
                               </span>

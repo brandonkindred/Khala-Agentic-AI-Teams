@@ -860,6 +860,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Composed tooltip for an issue row button: the issue title, plus a clause noting the coding
+   * team is already working the issue when it is in progress.
+   *
+   * Preconditions: `vm.title` is the issue's full (untruncated) title and is non-empty (GitHub
+   *   issue titles cannot be blank).
+   * Postconditions: returns `vm.title` alone when `vm.inProgress` is false; otherwise returns
+   *   `"<title> — The coding team is already working on this issue"`. The returned string is
+   *   always non-empty. Pure — no side effects.
+   */
+  issueRowTooltip(vm: { title: string; inProgress: boolean }): string {
+    const clause = 'The coding team is already working on this issue';
+    return vm.inProgress ? `${vm.title} — ${clause}` : vm.title;
+  }
+
+  /**
    * Rebuild the Running/Recent run-row view-models from the current `runningRuns`/`recentRuns`.
    *
    * Preconditions: `runningRuns`/`recentRuns` reflect the snapshot being rendered.

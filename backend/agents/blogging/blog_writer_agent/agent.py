@@ -9,7 +9,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
@@ -23,6 +23,11 @@ from agents.blogging.shared.content_planning_loop import (
 from agents.blogging.shared.content_profile import LengthPolicy
 from agents.blogging.shared.json_retry import run_json_gate
 from agents.blogging.shared.prompt_budget import resolve_model_context_tokens
+from agents.blogging.shared.system_prompt_assembly import (
+    SystemContentSegment,
+    build_headed_blogging_system_prompt_content,
+    build_system_prompt_with_content,
+)
 from pydantic import ValidationError
 from strands import Agent
 from strands.types.exceptions import EventLoopException
@@ -339,14 +344,21 @@ class BlogWriterAgent(_BlogAgentBase):
             self._text_model = llm_client
         self._writing_style_prompt = (writing_style_guide_content or "").strip()
         self._brand_spec_prompt = (brand_spec_content or "").strip()
-        parts: list[str] = []
-        if self._brand_spec_prompt:
-            parts.append("--- BRAND SPEC ---\n" + self._brand_spec_prompt)
-        if self._writing_style_prompt:
-            parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
-        self._style_prompt = "\n\n".join(parts)
+        # Cacheable system-content segment carrying the (headed) brand spec and
+        # writing style guide, or None when both are blank. Delivered via
+        # Agent(system_prompt=...) at the call sites below rather than embedded
+        # as plain text in the user prompt, so a stable prefix isn't re-billed
+        # on every turn.
+        self._system_prompt_content = build_headed_blogging_system_prompt_content(
+            self._brand_spec_prompt, self._writing_style_prompt
+        )
+        self._writing_system_prompt_with_content = build_system_prompt_with_content(
+            WRITING_SYSTEM_PROMPT, self._system_prompt_content
+        )
 
-    def _call_agent(self, model: Any, prompt: str, system_prompt: str = "") -> str:
+    def _call_agent(
+        self, model: Any, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> str:
         """Construct a Strands Agent, invoke it, and return stripped text.
 
         Shared invocation path for ``_call_text`` and ``_call_json_raw``, which
@@ -355,6 +367,11 @@ class BlogWriterAgent(_BlogAgentBase):
         Preconditions:
             - ``model`` is a configured LLM client/model object.
             - ``prompt`` is a non-empty string.
+            - ``system_prompt`` is a plain persona string, or a Strands
+              system-content-block list (e.g. from
+              ``build_system_prompt_with_content``) when a cacheable segment
+              is being attached. When falsy (e.g. ``""``), falls back to
+              ``WRITING_SYSTEM_PROMPT``.
         Postconditions:
             - Returns the agent's response as a stripped string.
         Raises:
@@ -365,7 +382,9 @@ class BlogWriterAgent(_BlogAgentBase):
         agent = Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
         return str(agent(prompt)).strip()
 
-    def _call_text(self, prompt: str, system_prompt: str = "") -> str:
+    def _call_text(
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> str:
         """Call the text-mode Strands Agent and return its stripped text output.
 
         Used for drafting and revision paths that emit the ``---DRAFT---``
@@ -374,10 +393,14 @@ class BlogWriterAgent(_BlogAgentBase):
 
         Preconditions:
             - ``prompt`` is a non-empty string (enforced by ``_call_agent``).
+            - ``system_prompt``, if falsy, falls back to
+              ``WRITING_SYSTEM_PROMPT`` (via ``_call_agent``).
         """
         return self._call_agent(self._text_model, prompt, system_prompt)
 
-    def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
+    def _call_json_raw(
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> str:
         """Invoke the injected model via Strands and return its stripped assistant text.
 
         Uses ``self._model`` as supplied by the caller (typically already configured
@@ -389,10 +412,14 @@ class BlogWriterAgent(_BlogAgentBase):
 
         Preconditions:
             - ``prompt`` is a non-empty string (enforced by ``_call_agent``).
+            - ``system_prompt``, if falsy, falls back to
+              ``WRITING_SYSTEM_PROMPT`` (via ``_call_agent``).
         """
         return self._call_agent(self._model, prompt, system_prompt)
 
-    def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
+    def _call_agent_json(
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> dict:
         """Invoke the injected model via Strands and parse JSON from the result.
 
         Appends a soft JSON-only instruction and runs ``extract_json_from_response``
@@ -403,6 +430,10 @@ class BlogWriterAgent(_BlogAgentBase):
         Preconditions:
             - ``prompt`` is a non-empty string (enforced by ``_call_agent`` via
               ``_call_json_raw``).
+            - ``system_prompt``, if falsy, falls back to ``WRITING_SYSTEM_PROMPT``
+              (via ``_call_json_raw``). Accepts a plain persona string or a
+              Strands system-content-block list (e.g. from
+              ``build_system_prompt_with_content``).
         Postconditions:
             - Returns a parsed JSON **object** (``dict``). Non-dict JSON values
               raise ``LLMJsonParseError``.
@@ -419,7 +450,9 @@ class BlogWriterAgent(_BlogAgentBase):
             raise LLMJsonParseError(f"Expected a JSON object, got {type(data).__name__}")
         return data
 
-    def _fallback_draft_via_json(self, prompt: str, system_prompt: str = "") -> Optional[str]:
+    def _fallback_draft_via_json(
+        self, prompt: str, system_prompt: Union[str, List[SystemContentSegment]] = ""
+    ) -> Optional[str]:
         """Parse a revised draft via shared JSON retry when the text path fails.
 
         Preconditions:
@@ -462,19 +495,6 @@ class BlogWriterAgent(_BlogAgentBase):
         if isinstance(raw_draft, str) and raw_draft.strip():
             return raw_draft.strip()
         return None
-
-    def _brand_section_for_prompt(self) -> str:
-        """Return the brand-spec block for revision prompts, or a fallback string.
-
-        Postconditions:
-            - Returns ``self._brand_spec_prompt`` when non-empty; otherwise a
-              fixed fallback instructing the model to follow the style guide.
-        """
-        return (
-            self._brand_spec_prompt
-            if self._brand_spec_prompt
-            else "No brand specification was provided. Follow the style guide below."
-        )
 
     def _assert_guidelines_present(self) -> None:
         """Require both brand and writing guideline inputs before drafting/revising."""
@@ -721,32 +741,19 @@ class BlogWriterAgent(_BlogAgentBase):
             logger.warning("Empty content plan; returning minimal draft.")
             return WriterOutput(draft="# Draft\n\nAdd a content plan to generate a draft.")
 
-        style_guide_text = self._style_prompt
-
         logger.info(
             "Generating draft: outline len=%s, style_guide len=%s",
             len(outline),
-            len(style_guide_text),
+            len(self._writing_style_prompt),
         )
 
-        brand_section = (
-            self._brand_spec_prompt
-            if self._brand_spec_prompt
-            else "No brand specification was provided. Follow the style guide below."
-        )
+        # Brand spec and writing style guide are delivered once via the cached
+        # system-prompt segment (self._writing_system_prompt_with_content, see
+        # __init__) rather than embedded here; _assert_guidelines_present()
+        # above guarantees both are non-empty, so there is no no-brand case to
+        # cover with a fallback line.
         prompt_parts = [
             DRAFT_TASK_INSTRUCTIONS,
-            "",
-            "---",
-            "BRAND AND STYLE (mandatory for every sentence):",
-            "---",
-            brand_section,
-            "",
-            "---",
-            "STYLE GUIDE (you must follow every applicable rule):",
-            "---",
-            style_guide_text,
-            "",
         ]
         prompt_parts.extend(
             [
@@ -839,7 +846,9 @@ class BlogWriterAgent(_BlogAgentBase):
         # programming bugs (TypeError/ValueError/etc.) propagate.
         draft = ""
         try:
-            raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
+            raw_response = self._call_text(
+                prompt, system_prompt=self._writing_system_prompt_with_content
+            )
             draft = _extract_draft_after_marker(raw_response)
         except Exception as e:
             cause = _unwrap_llm_cause(e)
@@ -850,7 +859,9 @@ class BlogWriterAgent(_BlogAgentBase):
                 cause,
             )
             try:
-                data = self._call_agent_json(prompt)
+                data = self._call_agent_json(
+                    prompt, system_prompt=self._writing_system_prompt_with_content
+                )
                 if isinstance(data, dict):
                     raw_draft = data.get("draft")
                     if isinstance(raw_draft, str) and raw_draft.strip():
@@ -956,7 +967,6 @@ class BlogWriterAgent(_BlogAgentBase):
             logger.info("No feedback items; returning draft unchanged.")
             return WriterOutput(draft=draft)
 
-        style_guide_text = self._style_prompt
         items = list(revise_input.feedback_items)
         num_items = len(items)
         logger.info("Revising draft: %s feedback items (plan-first batch revision)", num_items)
@@ -1016,9 +1026,7 @@ class BlogWriterAgent(_BlogAgentBase):
             draft,
             items,
             plan_text,
-            style_guide_text,
             revise_input,
-            brand_section=self._brand_section_for_prompt(),
             llm=self._model,
             allowed_claims_section=_render_allowed_claims_section(revise_input.allowed_claims),
         )
@@ -1026,7 +1034,9 @@ class BlogWriterAgent(_BlogAgentBase):
         primary_succeeded = False
         for attempt in range(BATCH_EXECUTE_MAX_RETRIES):
             try:
-                raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
+                raw_response = self._call_text(
+                    prompt, system_prompt=self._writing_system_prompt_with_content
+                )
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
@@ -1063,7 +1073,7 @@ class BlogWriterAgent(_BlogAgentBase):
         if not primary_succeeded:
             try:
                 fallback = self._fallback_draft_via_json(
-                    prompt, system_prompt=WRITING_SYSTEM_PROMPT
+                    prompt, system_prompt=self._writing_system_prompt_with_content
                 )
                 if fallback:
                     current_draft = fallback
@@ -1231,6 +1241,10 @@ class BlogWriterAgent(_BlogAgentBase):
         cycle where the user acts as the editor.
 
         Postconditions:
+            - Brand-spec and writing-guideline content is delivered via the
+              system prompt (``self._writing_system_prompt_with_content``) on
+              both the primary text path and the JSON fallback path, not
+              embedded in the user prompt.
             - The prompt includes an ALLOWED CLAIMS section (per
               ``_render_allowed_claims_section``) when ``allowed_claims`` yields
               a non-empty rendered section, so `[CLAIM:id]` tags survive this
@@ -1255,21 +1269,8 @@ class BlogWriterAgent(_BlogAgentBase):
         if not draft.strip():
             return WriterOutput(draft=draft)
 
-        style_guide_text = self._style_prompt
-        brand_section = self._brand_section_for_prompt()
-
         prompt_parts = [
             USER_FEEDBACK_REVISION_INSTRUCTIONS.replace("{user_feedback}", user_feedback),
-            "",
-            "---",
-            "BRAND AND STYLE (mandatory for every sentence):",
-            "---",
-            brand_section,
-            "",
-            "---",
-            "STYLE GUIDE (follow in the revised draft):",
-            "---",
-            style_guide_text,
             "",
             "---",
             "CONTENT PLAN:",
@@ -1338,7 +1339,9 @@ class BlogWriterAgent(_BlogAgentBase):
         primary_succeeded = False
         for attempt in range(BATCH_EXECUTE_MAX_RETRIES):
             try:
-                raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
+                raw_response = self._call_text(
+                    prompt, system_prompt=self._writing_system_prompt_with_content
+                )
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
@@ -1376,7 +1379,7 @@ class BlogWriterAgent(_BlogAgentBase):
         if not primary_succeeded:
             try:
                 fallback = self._fallback_draft_via_json(
-                    prompt, system_prompt=WRITING_SYSTEM_PROMPT
+                    prompt, system_prompt=self._writing_system_prompt_with_content
                 )
                 if fallback:
                     current_draft = fallback
