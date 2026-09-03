@@ -164,7 +164,7 @@ deterministic tie-breaking — is specified in
 How a case positively declares false-positive resistance — a
 `must_not_find` label scoped to a region rather than the absence of
 labels — and how that plays out against the matching rule, with worked
-`must_find`/`must_not_find` examples, is specified in
+`must_find`/`must_not_find` examples, are specified in
 [`docs/CORPUS_FALSE_POSITIVE_RESISTANCE.md`](docs/CORPUS_FALSE_POSITIVE_RESISTANCE.md).
 
 ## Plan folder
