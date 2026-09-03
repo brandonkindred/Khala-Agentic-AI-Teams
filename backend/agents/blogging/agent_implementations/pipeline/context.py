@@ -29,8 +29,12 @@ class PipelineContext:
     Invariants:
         - ``llm_client`` and ``length_policy`` are resolved (non-None) before any
           stage runs.
-        - ``planning_phase_result``/``plan``/``elicited_stories_text`` are populated
-          by the planning stage before the draft stage reads them.
+        - ``planning_phase_result``/``plan``/``elicited_stories_text``/
+          ``covered_sections`` are populated by the planning stage before the draft
+          stage reads them. ``covered_sections`` is the de-duplicated set of plan
+          section titles that already received an author narrative (a fresh
+          interview or a story-bank hit); it is ``None`` only before the planning
+          stage runs and a ``set[str]`` (possibly empty) afterward.
         - ``selected_title`` has no in-pipeline producer: no stage writes it, so it
           holds whatever the caller passed at construction (``None`` by default).
           The draft stage reads it and threads it into the writer/revision inputs;
@@ -60,6 +64,7 @@ class PipelineContext:
     planning_phase_result: Optional[PlanningPhaseResult] = None
     plan: Optional[ContentPlan] = None
     elicited_stories_text: Optional[str] = None
+    covered_sections: Optional[set[str]] = None
     selected_title: Optional[str] = None
     draft_result: Optional["WriterOutput"] = None
     status: PipelineStatus = "PASS"

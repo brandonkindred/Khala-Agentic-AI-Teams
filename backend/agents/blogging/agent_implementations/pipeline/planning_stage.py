@@ -44,12 +44,19 @@ def run_planning_stage(
         ctx: The shared ``PipelineContext``. Reads ``brief``, ``work_dir``,
             ``llm_client``, ``length_policy``, ``series_context``, ``job_id``, and
             ``job_updater``; writes ``planning_phase_result``/``plan``/
-            ``elicited_stories_text`` (and ``status`` on abort).
+            ``elicited_stories_text``/``covered_sections`` (and ``status`` on abort).
     Preconditions:
         - ``ctx.llm_client`` and ``ctx.length_policy`` are resolved.
     Postconditions:
         - On success sets ``ctx.planning_phase_result``/``ctx.plan``/
-          ``ctx.elicited_stories_text`` and returns None.
+          ``ctx.elicited_stories_text``/``ctx.covered_sections`` and returns None.
+        - ``ctx.covered_sections`` is the de-duplicated union of plan section titles
+          drawn from two sources: sections with a non-empty fresh-interview
+          narrative (derived from ``collected_story_pairs``, never by
+          substring-matching ``elicited_stories_text``) and sections with a
+          story-bank hit. It is always a ``set[str]`` — empty when story
+          elicitation is skipped, fails, or finds nothing — reproducing today's
+          behavior exactly since nothing downstream reads the field yet.
         - Returns a terminal ``(planning_phase_result, None, "FAIL")`` tuple if the
           HITL wait ends without a human response — either the job was
           cancelled/failed while awaiting outline approval, or the job record
@@ -112,6 +119,10 @@ def run_planning_stage(
     # Story elicitation: ghost writer surfaces personal anecdotes
     # ------------------------------------------------------------------
     elicited_stories_text: Optional[str] = None
+    # Section titles that already have an author narrative, from either source
+    # below. Initialized unconditionally so it stays an empty set (never left
+    # undefined) when elicitation is skipped, fails, or finds nothing.
+    covered_sections: set[str] = set()
     if job_id is not None and job_updater is not None:
         try:
             from agents.blogging.ghost_writer_agent import GhostWriterElicitationAgent, StoryGap
@@ -175,6 +186,10 @@ def run_planning_stage(
                         )
                         collected_story_pairs.append((gap, result.narrative))
 
+                covered_sections.update(
+                    gap.section_title for gap, _narrative in collected_story_pairs
+                )
+
                 if collected_narratives:
                     elicited_stories_text = "\n\n".join(collected_narratives)
                     complete_story_elicitation(job_id, elicited_stories=collected_narratives)
@@ -232,6 +247,10 @@ def run_planning_stage(
 
         bank_keywords = _extract_plan_keywords(plan)
         bank_results = find_relevant_stories(bank_keywords, limit=5)
+        # A banked story satisfies its section just as a fresh interview does,
+        # regardless of whether its narrative text also happens to duplicate
+        # something already in elicited_stories_text (checked below).
+        covered_sections.update(r["section_title"] for r in bank_results)
         if bank_results:
             bank_stories = []
             for r in bank_results:
@@ -248,6 +267,8 @@ def run_planning_stage(
                 else:
                     elicited_stories_text = bank_text
                 logger.info("Story bank: augmented with %d banked story(ies)", len(bank_stories))
+    except CancelledError:
+        raise
     except Exception as e:
         logger.warning("Story bank retrieval failed (non-fatal): %s", e)
 
@@ -384,4 +405,5 @@ def run_planning_stage(
     ctx.planning_phase_result = planning_phase_result
     ctx.plan = plan
     ctx.elicited_stories_text = elicited_stories_text
+    ctx.covered_sections = covered_sections
     return None
