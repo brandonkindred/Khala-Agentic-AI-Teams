@@ -13,6 +13,10 @@ result to Strands ``Agent(system_prompt=...)`` is not blogging-specific, so
 (the team-independent infra package this team already depends on for
 ``CacheBreakpoint``) rather than duplicated — see
 ``llm_service.system_prompt_assembly`` for its implementation and contract.
+``SystemContentSegment`` (the element type of its ``system_prompt_content``
+list) is re-exported alongside it so blogging agents can type-annotate their
+own ``system_prompt`` parameters (e.g. ``blog_writer_agent``'s ``_call_agent``
+family) without importing ``llm_service`` directly.
 
 ``build_headed_blogging_system_prompt_content`` additionally owns the
 ``--- BRAND SPEC ---`` / ``--- WRITING STYLE GUIDE ---`` heading text, since
