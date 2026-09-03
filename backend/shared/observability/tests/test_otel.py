@@ -12,6 +12,8 @@ independent of the specific service name used.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 _SERVICE_NAME = "unit-test-team"
@@ -277,8 +279,10 @@ def test_build_span_exporter_selects_the_grpc_transport(monkeypatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
 
     exporter = _build_span_exporter()
-    assert isinstance(exporter, OTLPSpanExporter)
-    exporter.shutdown()
+    try:
+        assert isinstance(exporter, OTLPSpanExporter)
+    finally:
+        exporter.shutdown()
 
 
 def test_build_metric_exporter_selects_the_grpc_transport(monkeypatch) -> None:
@@ -293,8 +297,10 @@ def test_build_metric_exporter_selects_the_grpc_transport(monkeypatch) -> None:
     monkeypatch.delenv("OTEL_METRICS_EXPORTER", raising=False)
 
     exporter = _build_metric_exporter()
-    assert isinstance(exporter, OTLPMetricExporter)
-    exporter.shutdown()
+    try:
+        assert isinstance(exporter, OTLPMetricExporter)
+    finally:
+        exporter.shutdown()
 
 
 def test_build_span_exporter_returns_none_when_the_package_is_missing(monkeypatch) -> None:
@@ -417,7 +423,11 @@ class _RecordingProvider:
 
 
 class _FailingProvider:
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+
     def shutdown(self) -> None:
+        self.shutdown_calls += 1
         raise RuntimeError("exporter already closed")
 
 
@@ -437,13 +447,23 @@ def test_shutdown_otel_flushes_both_providers(monkeypatch) -> None:
 
 
 def test_shutdown_otel_swallows_provider_failures(monkeypatch) -> None:
-    """Shutdown runs from a lifespan hook; it must never raise on the way out."""
+    """Shutdown runs from a lifespan hook; it must never raise on the way out.
+
+    Asserts both providers were actually invoked, not just that no exception
+    escaped — otherwise the test would pass just as well if shutdown_otel
+    stopped calling shutdown() on either provider entirely.
+    """
     from shared.observability import otel as otel_module
 
-    monkeypatch.setattr(otel_module, "_tracer_provider", _FailingProvider())
-    monkeypatch.setattr(otel_module, "_meter_provider", _FailingProvider())
+    tracer_provider = _FailingProvider()
+    meter_provider = _FailingProvider()
+    monkeypatch.setattr(otel_module, "_tracer_provider", tracer_provider)
+    monkeypatch.setattr(otel_module, "_meter_provider", meter_provider)
 
     otel_module.shutdown_otel()
+
+    assert tracer_provider.shutdown_calls == 1
+    assert meter_provider.shutdown_calls == 1
 
 
 def test_shutdown_otel_is_safe_before_initialization(monkeypatch) -> None:
@@ -576,10 +596,31 @@ def test_init_otel_returns_false_when_the_sdk_is_missing(reinitializable_otel, m
     assert reinitializable_otel.is_otel_enabled() is False
 
 
+def _make_discarding_metric_exporter() -> Any:
+    """Build a metric exporter that accepts and drops every batch, silently.
+
+    Stands in for ``ConsoleMetricExporter`` in tests: a real ``MetricExporter``
+    subclass (so the reader can read its temporality/aggregation preferences),
+    but its ``export`` never prints the payload to stdout on provider shutdown.
+    """
+    from opentelemetry.sdk.metrics.export import MetricExporter, MetricExportResult
+
+    class _DiscardingMetricExporter(MetricExporter):
+        def export(self, metrics_data: Any, timeout_millis: float = 10_000, **kwargs: Any) -> Any:
+            return MetricExportResult.SUCCESS
+
+        def force_flush(self, timeout_millis: float = 10_000) -> bool:
+            return True
+
+        def shutdown(self, timeout_millis: float = 30_000, **kwargs: Any) -> None:
+            return None
+
+    return _DiscardingMetricExporter()
+
+
 def test_init_otel_wires_exporters_when_they_resolve(reinitializable_otel, monkeypatch) -> None:
     """The exporter-present branches actually deliver spans, not just build providers."""
     pytest.importorskip("opentelemetry.sdk.trace")
-    from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
         InMemorySpanExporter,
     )
@@ -587,7 +628,7 @@ def test_init_otel_wires_exporters_when_they_resolve(reinitializable_otel, monke
     span_exporter = InMemorySpanExporter()
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
     monkeypatch.setattr(reinitializable_otel, "_build_span_exporter", lambda: span_exporter)
-    monkeypatch.setattr(reinitializable_otel, "_build_metric_exporter", ConsoleMetricExporter)
+    monkeypatch.setattr(reinitializable_otel, "_build_metric_exporter", _make_discarding_metric_exporter)
 
     assert reinitializable_otel.init_otel(service_name="x", team_key="exporters") is True
 
@@ -609,21 +650,28 @@ def test_init_otel_wires_exporters_when_they_resolve(reinitializable_otel, monke
             tracer_provider.shutdown()
 
 
-def test_init_otel_is_latched_after_the_first_call(monkeypatch) -> None:
+def test_init_otel_is_latched_after_the_first_call(reinitializable_otel, monkeypatch) -> None:
     """A second call returns the first call's verdict without re-running init.
 
+    Uses ``reinitializable_otel`` to force ``_initialized`` False on entry, so the
+    test's own first call is guaranteed to run the real init path rather than
+    inheriting an already-latched module — otherwise the assertion below would
+    pass even with a broken latch, since the first call would already be a no-op.
     The spy is the load-bearing half: returning the same verdict proves nothing on
     its own, since a broken latch would re-run initialization and still report the
     same result. An exporter rebuild is the cheapest observable side effect of that
-    re-run, so its absence is what pins the latch.
+    re-run, so its absence on the *second* call is what pins the latch.
     """
-    from shared.observability import otel as otel_module
+    pytest.importorskip("opentelemetry.sdk.trace")
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
 
     build_calls: list[int] = []
-    monkeypatch.setattr(otel_module, "_build_span_exporter", lambda: build_calls.append(1))
+    monkeypatch.setattr(reinitializable_otel, "_build_span_exporter", lambda: build_calls.append(1))
 
-    first = otel_module.init_otel(service_name="ignored", team_key="ignored")
-    second = otel_module.init_otel(service_name="also-ignored", team_key="also")
+    first = reinitializable_otel.init_otel(service_name="ignored", team_key="ignored")
+    assert build_calls == [1], "the test's own first call must run the real init path"
+
+    second = reinitializable_otel.init_otel(service_name="also-ignored", team_key="also")
 
     assert second is first
-    assert build_calls == []
+    assert build_calls == [1], "a second call must not rebuild the exporter"

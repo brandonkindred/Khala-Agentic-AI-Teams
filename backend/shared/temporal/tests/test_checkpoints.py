@@ -236,6 +236,23 @@ def test_wait_for_input_times_out(client: FakeJobServiceClient, monkeypatch: pyt
     assert job["status"] == "waiting"
 
 
+def test_wait_for_input_times_out_for_a_missing_job(
+    client: FakeJobServiceClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Against a nonexistent job every state write is a silent no-op, per the
+    fake's documented ``update_job`` contract, so the only way out is the
+    timeout — no job record is conjured along the way.
+    """
+    readings = iter([0.0])
+    monkeypatch.setattr(checkpoints.time, "monotonic", lambda: next(readings, 5.0))
+    monkeypatch.setattr(checkpoints.time, "sleep", _never_sleep)
+
+    with pytest.raises(TimeoutError, match="wait_for_input timed out: job=unknown key=title"):
+        checkpoints.wait_for_input("blogging", "unknown", "title", timeout_seconds=1)
+
+    assert client.get_job("unknown") is None
+
+
 # ---------------------------------------------------------------------------
 # _manager
 # ---------------------------------------------------------------------------
