@@ -608,6 +608,7 @@ class BrandingTeamOrchestrator:
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
         phase_cache: Optional[PhaseOutputCache] = PhaseOutputCache(),
+        should_continue: Optional[Callable[[], bool]] = None,
         _use_monolithic: bool = False,
     ) -> TeamOutput:
         """Run the branding pipeline up to and including *target_phase*
@@ -629,9 +630,21 @@ class BrandingTeamOrchestrator:
               is a ``PhaseOutputCache`` instance (possibly empty) -- it must not
               be ``None``. When ``_use_monolithic`` is ``True``, ``phase_cache``
               is ignored.
+            - ``should_continue``, when not ``None``, is a zero-argument
+              callable returning ``bool``. It is invoked at most once per
+              phase iteration -- so at most ``len(PHASE_ORDER)`` times over a
+              whole run, each against a phase that is itself a multi-agent
+              LLM fan-out -- and must be side-effect-free and non-raising: a
+              bounded read (a flag, or a single status lookup such as a
+              job-store cancellation check) is fine, but it must not mutate
+              caller or orchestrator state and must not raise, since an
+              exception from it propagates out of ``run``.
 
         Postconditions:
-            - Returns a fully populated ``TeamOutput``.
+            - Returns a fully populated ``TeamOutput`` (unless ``should_continue``
+              truncates the run before every phase up to ``target_phase``
+              completes -- see the ``should_continue`` postcondition below,
+              which describes exactly which fields go ``None`` in that case).
             - When ``store``, ``brand_id``, and a resolved ``client_id`` are
               present, persists the output via ``store.append_brand_version``.
               Raises ``BrandVersionAppendConflict`` if the brand row disappeared
@@ -665,6 +678,43 @@ class BrandingTeamOrchestrator:
               ``run_single_phase`` itself takes no ``phase_cache`` parameter
               -- so a warm cache elsewhere in the process cannot alter the
               Temporal workflow branch, which keeps invoking every phase.
+            - ``should_continue`` defaults to ``None``, which is a documented
+              no-op: every existing caller that doesn't pass it behaves
+              identically to before this parameter existed. When provided
+              and ``_use_monolithic`` is ``False`` (the default), it is
+              forwarded to ``_run_phases_with_cache``, which calls it at
+              most once per phase iteration and never again after it first
+              returns ``False``: that first ``False`` latches cancellation
+              for the remainder of the call, so that phase and every later
+              phase degrade to ``(None, False)`` exactly as they would if
+              ``target_phase`` had truncated the run there -- same output
+              shape, and a not-yet-attempted phase is not folded into
+              ``TeamOutput.degraded_phases``. This holds regardless of what
+              ``should_continue`` would return on a hypothetical later call
+              (it is never given the chance) -- callers do not need to
+              guarantee monotonicity. When ``_use_monolithic`` is ``True``,
+              ``should_continue`` is accepted but never consulted, matching
+              that branch's existing testing/comparison-only,
+              no-production-caller status.
+            - The thread path (``api/background.py``) is the one production
+              caller that passes ``should_continue``, wiring it to the
+              job-store cancellation flag so a cancel requested mid-run stops
+              the phase loop. The chat path (``api/conversation.py``) and the
+              Temporal path (which calls ``run_single_phase`` directly and
+              never this method) do not pass it and are unaffected -- Temporal
+              runs its own equivalent between-phase cancel check. A
+              ``should_continue``-triggered stop does **not** short-circuit
+              compliance checks, integrations, ``_assemble_team_output``, or
+              ``store.append_brand_version`` below -- it only changes which
+              phases ran, exactly like a smaller ``target_phase`` would, and
+              the resulting (possibly-truncated) output is persisted the same
+              way any other ``run()`` output is. Whether a truncated result
+              should be persisted at all is the wiring caller's decision, not
+              this method's: ``run`` does not infer cancellation intent from a
+              truncated result, nor treat it specially. The thread-path caller
+              does not currently gate persistence -- a cancel-truncated output
+              is still appended, a deliberate residual tracked separately from
+              the cancellation gate itself.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
@@ -694,7 +744,9 @@ class BrandingTeamOrchestrator:
             assert phase_cache is not None, (
                 "phase_cache must be a PhaseOutputCache instance when _use_monolithic=False"
             )
-            extractions = self._run_phases_with_cache(mission, stop_idx, phase_cache)
+            extractions = self._run_phases_with_cache(
+                mission, stop_idx, phase_cache, should_continue
+            )
 
         strategic_core, narrative, visual_identity, channel_activation, governance = (
             output for output, _ in extractions
@@ -747,6 +799,7 @@ class BrandingTeamOrchestrator:
         mission: BrandingMission,
         stop_idx: int,
         cache: PhaseOutputCache,
+        should_continue: Optional[Callable[[], bool]] = None,
     ) -> List[tuple[Optional[BaseModel], bool]]:
         """Run each phase up to ``stop_idx`` in isolation, reusing cache hits.
 
@@ -759,6 +812,11 @@ class BrandingTeamOrchestrator:
             - ``stop_idx`` is a valid index into ``PHASE_ORDER`` (as computed
               by ``run`` from ``target_phase``).
             - ``cache`` is a ``PhaseOutputCache`` instance (possibly empty).
+            - ``should_continue``, when not ``None``, is a zero-argument
+              callable returning ``bool``. It is invoked at most once per
+              phase iteration and must be side-effect-free and non-raising; a
+              bounded read (a flag, or a single status lookup such as a
+              job-store cancellation check) is within contract.
         Postconditions:
             - Returns exactly ``len(PHASE_ORDER)`` ``(output, degraded)``
               pairs in ``PHASE_ORDER`` order, matching the shape and contract
@@ -781,12 +839,35 @@ class BrandingTeamOrchestrator:
               per-phase budgets -- not capped at any single overall deadline
               the way the monolithic-graph path's one execution timeout caps
               the whole run.
+            - ``should_continue`` defaults to ``None``, under which this
+              method's behavior is unchanged from before this parameter
+              existed -- the cancellation check below is never reached. When
+              provided, it is called at most once per phase iteration not
+              already excluded by ``stop_idx``, and never again after it
+              first returns ``False``: that first ``False`` latches
+              cancellation for the remainder of this call, so that phase and
+              every later phase in ``PHASE_ORDER`` are appended as
+              ``(None, False)`` without invoking ``run_single_phase`` or
+              reading/writing ``cache`` for them -- identical in shape to the
+              ``stop_idx`` truncation above. This holds regardless of what
+              ``should_continue`` would return on a hypothetical later call
+              (it is never given the chance) -- callers do not need to
+              guarantee monotonicity. A phase already reached (cache hit or
+              fresh run) in an earlier iteration of this same call is
+              unaffected.
         """
         upstream_models: dict[BrandPhase, BaseModel] = {}
         prior_outputs: dict[str, dict] = {}
         extractions: List[tuple[Optional[BaseModel], bool]] = []
+        cancelled = False
         for min_idx, phase in enumerate(PHASE_ORDER):
             if stop_idx < min_idx:
+                extractions.append((None, False))
+                continue
+
+            if not cancelled and should_continue is not None and not should_continue():
+                cancelled = True
+            if cancelled:
                 extractions.append((None, False))
                 continue
 

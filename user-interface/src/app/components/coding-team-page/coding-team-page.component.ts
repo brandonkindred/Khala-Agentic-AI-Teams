@@ -19,6 +19,7 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
+import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { CodingTeamMonitorComponent } from '../coding-team-monitor/coding-team-monitor.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { OutOfScopeIssuesComponent } from './out-of-scope-issues/out-of-scope-issues.component';
@@ -147,6 +148,7 @@ interface IssueRowVm {
     MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,
+    LoadingSpinnerComponent,
     CodingTeamMonitorComponent,
     TeamAssistantChatComponent,
     OutOfScopeIssuesComponent,
@@ -763,6 +765,23 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return issue.blocked
       ? `Blocked by ${this.openDepRefs(issue)} — must be closed first`
       : `Depends on ${this.allDepRefs(issue)} (all complete)`;
+  }
+
+  /**
+   * Composed tooltip for a repo row button: the repo's description (when present) plus a
+   * clarification that GitHub's open-issue count includes pull requests.
+   *
+   * Preconditions: `repo` is a loaded GitHub repo item; `repo.description` may be null,
+   *   undefined, or an empty/whitespace-only string.
+   * Postconditions: returns `"<description> — Open issues and pull requests reported by
+   *   GitHub"` when `repo.description` is non-empty after trimming; otherwise returns
+   *   `"Open issues and pull requests reported by GitHub"` alone, with no leading separator
+   *   or empty clause. The returned string is always non-empty. Pure — no side effects.
+   */
+  repoRowTooltip(repo: GitHubRepoItem): string {
+    const clarification = 'Open issues and pull requests reported by GitHub';
+    const description = repo.description?.trim();
+    return description ? `${description} — ${clarification}` : clarification;
   }
 
   /**

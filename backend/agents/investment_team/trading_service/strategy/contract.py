@@ -157,7 +157,7 @@ class StopAttachment(BaseModel):
     # entry-anchored level diverge. This matters specifically for a leg
     # whose trigger geometry is *also* independently recomputed elsewhere
     # from the real fill price (e.g. the bar-close stop-loss evaluator's
-    # ``rule_compiler._stop_loss_level``, which the entry_price/market
+    # ``rule_compiler.stop_loss_level``, which the entry_price/market
     # resting-stop-loss migration leaves active alongside this resting
     # order) — without re-anchoring here, the two would disagree about
     # where the stop sits. Unused (``None``) by every other leg kind/source,

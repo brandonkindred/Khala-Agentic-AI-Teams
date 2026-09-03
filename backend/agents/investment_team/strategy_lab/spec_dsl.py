@@ -710,7 +710,7 @@ def protective_stop_price(ref_price: float, pct: float, *, is_long: bool) -> flo
     a short's sits *above* it (``ref * (1 + pct)``). This is the single source
     of that geometry, shared by every consumer that must derive the same level
     from the same reference and never drift apart: the bar-close evaluator
-    (``rule_compiler._stop_loss_level``, for both the static ``entry_price``
+    (``rule_compiler.stop_loss_level``, for both the static ``entry_price``
     basis and the trailing bases — trailing only changes which price is passed
     as ``ref_price``, not the formula), the generalized exit-leg resolver
     (``trading_service.service.resolve_exit_leg_attachments``, whose preview
@@ -727,7 +727,7 @@ def protective_stop_price(ref_price: float, pct: float, *, is_long: bool) -> flo
     finiteness/sign/bound constraint here — callers validate the result
     against their own contract; ``ExitLegSpec``/``_is_resting_stop_loss``
     bound ``pct`` to ``(0, 1)`` before it reaches here, ``rule_compiler.
-    _stop_loss_level`` passes ``StopLossRule.pct`` bounded to ``(0, 1.0]``
+    stop_loss_level`` passes ``StopLossRule.pct`` bounded to ``(0, 1.0]``
     (a long at ``pct == 1.0`` resolves to level 0, which never triggers
     against positive bar prices), and the STOP-family branch of
     ``resolve_exit_leg_attachments`` validates the resolved price

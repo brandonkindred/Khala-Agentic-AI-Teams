@@ -1870,7 +1870,7 @@ def _stop_loss_rule_to_leg_specs(rule: StopLossRule) -> List[ExitLegSpec]:
     Postconditions: returns ``[ExitLegSpec(kind=STOP, pct=rule.pct)]`` —
     the same shape :func:`_bracket_to_leg_specs` builds for a market-style
     bracket stop leg, so :func:`resolve_exit_leg_attachments` resolves
-    identical price math for both (see ``rule_compiler._stop_loss_level``,
+    identical price math for both (see ``rule_compiler.stop_loss_level``,
     which this mirrors: ``ref_price * (1 ∓ pct)``).
     """
     # Explicit raise (not assert, which ``python -O`` strips) so the contract
@@ -2032,7 +2032,7 @@ class _EngineEntryDispatcher:
         # ``FillSimulator._materialize_stop_child`` re-anchors it to the
         # entry's real fill price before submitting the child (see
         # ``StopAttachment.entry_price_pct``) — the same
-        # ``entry_price * (1 ∓ pct)`` formula ``rule_compiler._stop_loss_level``
+        # ``entry_price * (1 ∓ pct)`` formula ``rule_compiler.stop_loss_level``
         # uses for the bar-close evaluator. Without that re-anchor, a gap
         # entry would leave the two paths disagreeing about the stop level
         # (not just redundantly re-evaluating it), which is a materially

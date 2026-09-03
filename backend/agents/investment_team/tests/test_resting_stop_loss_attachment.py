@@ -6,7 +6,7 @@ Covers:
 - ``_is_resting_stop_loss``: the eligibility predicate (basis/style/pct bound).
 - ``_stop_loss_rule_to_leg_specs`` / ``resolve_resting_stop_loss_attachment``: the
   translation into the generalized exit-leg attachment plumbing, and that its
-  price math matches ``rule_compiler._stop_loss_level`` (the bar-close evaluator's
+  price math matches ``rule_compiler.stop_loss_level`` (the bar-close evaluator's
   own formula) exactly.
 - ``_EngineEntryDispatcher``: ``maybe_emit`` attaches the resolved ``StopAttachment``
   via ``attached_exits`` (not the fixed ``attached_stop_loss`` bracket field), and
@@ -33,7 +33,7 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
 )
-from investment_team.strategy_lab.executor.rule_compiler import PositionState, _stop_loss_level
+from investment_team.strategy_lab.executor.rule_compiler import PositionState, stop_loss_level
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     ExitRule,
@@ -147,7 +147,7 @@ def test_resolved_price_matches_bar_close_evaluator(
 ) -> None:
     """Acceptance criterion: the resting attachment's stop price is derived from
     the entry price and ``pct`` via the exact same formula
-    ``rule_compiler._stop_loss_level`` uses for the bar-close evaluator, so the
+    ``rule_compiler.stop_loss_level`` uses for the bar-close evaluator, so the
     two paths can never disagree on where the stop sits."""
     rule = StopLossRule(pct=0.03, basis="entry_price")
     attachment = resolve_resting_stop_loss_attachment(rule, side, entry_price)
@@ -159,7 +159,7 @@ def test_resolved_price_matches_bar_close_evaluator(
         high_since_entry=entry_price,
         low_since_entry=entry_price,
     )
-    assert attachment.stop_price == pytest.approx(_stop_loss_level(rule, position))
+    assert attachment.stop_price == pytest.approx(stop_loss_level(rule, position))
 
 
 def test_resolve_resting_stop_loss_attachment_rejects_ineligible_rule() -> None:
@@ -255,7 +255,7 @@ def test_protective_stop_price_matches_direction(is_long: bool, expected: float)
 
 
 def test_stop_loss_level_delegates_to_protective_stop_price() -> None:
-    """``rule_compiler._stop_loss_level`` and the shared helper must never
+    """``rule_compiler.stop_loss_level`` and the shared helper must never
     drift apart — they are the same formula, not two copies of it."""
     rule = StopLossRule(pct=0.05, basis="entry_price")
     long_pos = PositionState(
@@ -274,8 +274,8 @@ def test_stop_loss_level_delegates_to_protective_stop_price() -> None:
         high_since_entry=200.0,
         low_since_entry=200.0,
     )
-    assert _stop_loss_level(rule, long_pos) == protective_stop_price(200.0, 0.05, is_long=True)
-    assert _stop_loss_level(rule, short_pos) == protective_stop_price(200.0, 0.05, is_long=False)
+    assert stop_loss_level(rule, long_pos) == protective_stop_price(200.0, 0.05, is_long=True)
+    assert stop_loss_level(rule, short_pos) == protective_stop_price(200.0, 0.05, is_long=False)
 
 
 def test_resolve_resting_stop_loss_attachment_delegates_to_protective_stop_price() -> None:

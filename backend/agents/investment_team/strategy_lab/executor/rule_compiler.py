@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal, Mapping, Optional, Sequence
+from typing import Literal, Mapping, NamedTuple, Optional, Sequence
 
 from ..spec_dsl import (
     ExitRule,
@@ -462,11 +462,9 @@ def _intent_for_rule(
     stop_price: Optional[float] = None
     limit_price: Optional[float] = None
     if isinstance(rule, StopLossRule) and style == "limit":
-        stop_price = _stop_loss_level(rule, position)
-        offset = stop_price * rule.limit_offset_pct
-        limit_price = protective_limit_price(
-            stop_price, offset, closing_long=(position.side == "long")
-        )
+        prices = stop_limit_prices(rule, position)
+        stop_price = prices.stop_price
+        limit_price = prices.limit_price
     return ExitIntent(
         symbol=symbol,
         rule_kind=_kind_of(rule),
@@ -524,7 +522,7 @@ def _next_scaled_rung(
     )
 
 
-def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
+def stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     """Resolve the price level at which ``rule`` floors (long) / caps (short)
     the position. Single source of the stop-level *reference selection*
     (entry price vs. the running trailing extreme); the actual floor/cap
@@ -532,8 +530,11 @@ def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     shared with every other consumer that must derive the same level from the
     same reference (see that function's docstring for the full list) so none
     of them can silently drift apart. :func:`stop_loss_triggers` compares the
-    bar against this level, and the limit-style evaluator rests a STOP_LIMIT
-    here, so the trigger decision and the resting limit can never disagree.
+    bar against this level, :func:`stop_limit_prices` rests a STOP_LIMIT off
+    it, and the reference-ledger exit replay derives its fill price from it —
+    so the trigger decision, the resting limit, and the modeled fill can never
+    disagree. Public for that last caller, which lives outside this module and
+    must not re-derive the formula.
 
     Preconditions: ``rule`` is side-compatible with ``position`` — the basis can
     fire for this side. ``stop_loss_triggers`` enforces this by returning early
@@ -551,6 +552,78 @@ def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     else:
         ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
     return protective_stop_price(ref, rule.pct, is_long=is_long)
+
+
+class StopLimitPrices(NamedTuple):
+    """The two resting prices of a limit-style stop, named so they cannot swap.
+
+    Both are same-typed floats whose only distinguishing property — the limit
+    sits on the protective side of the stop — lives in their meaning, not their
+    type. Returned as a named pair so a call site reads
+    ``prices.limit_price`` rather than relying on positional order: a
+    transposed unpack would type-check silently and rest a STOP_LIMIT with the
+    two prices swapped, which is a wrong fill rather than a loud failure.
+    """
+
+    stop_price: float
+    limit_price: float
+
+
+def stop_limit_prices(rule: StopLossRule, position: PositionState) -> StopLimitPrices:
+    """Resolve a limit-style stop's stop/limit price pair.
+
+    Single source of the limit-style geometry, the way :func:`stop_loss_level` is
+    for the trigger level: the offset is a fraction OF THE STOP LEVEL
+    (``stop_price * limit_offset_pct``), and only then does
+    :func:`protective_limit_price` apply the side's sign convention. Splitting
+    those two steps across call sites is how the two halves drift, so callers
+    that need the resting prices — the dispatcher's intent builder here, and the
+    reference-ledger exit replay — take them from this one place.
+
+    Preconditions, on ``rule``: ``style == "limit"``, ``basis ==
+    "entry_price"``, and ``limit_offset_pct`` populated and in ``(0, 1)``.
+    ``StopLossRule``'s validator already enforces all four, but they are
+    re-asserted here rather than delegated: this helper is the single source of
+    the limit-style geometry for both the dispatcher and the reference ledger,
+    so a future loosening of that validator would otherwise let it silently
+    compute prices for a shape it was never designed for — a trailing-basis
+    limit stop re-prices every bar, which a static resting limit cannot
+    represent, and an offset outside ``(0, 1)`` rests the limit level with the
+    stop (``0.0``) or through zero (``>= 1.0``), neither of which is
+    protective.
+    Preconditions, on ``position``: ``side`` is ``"long"``/``"short"`` and
+    ``entry_price > 0``. These are the CALLER's to establish and are not
+    re-checked here — :func:`stop_loss_level`, which resolves the level this
+    builds on, reads the same fields under the same unchecked contract, so
+    guarding them on this path alone would make the market-style and
+    limit-style paths disagree about who owns them.
+    Postconditions: returns a :class:`StopLimitPrices` whose ``stop_price`` is
+    the level :func:`stop_loss_level` resolves and whose ``limit_price`` sits on
+    the protective side of it — below for a long close, above for a short. Both
+    are strictly positive: ``pct < 1.0`` and ``limit_offset_pct < 1.0`` keep a
+    long's ``entry * (1 - pct) * (1 - limit_offset_pct)`` above zero, and the
+    short side only ever adds.
+    Raises ``ValueError`` when any of the four ``rule`` preconditions above is
+    violated.
+    """
+    if rule.style != "limit":
+        raise ValueError(f"stop_limit_prices requires style='limit', got {rule.style!r}")
+    if rule.basis != "entry_price":
+        raise ValueError(
+            "a limit-style stop rests at a static level, so it requires "
+            f"basis='entry_price', got {rule.basis!r}"
+        )
+    if rule.limit_offset_pct is None:
+        raise ValueError("limit-style StopLossRule requires limit_offset_pct")
+    if not 0.0 < rule.limit_offset_pct < 1.0:
+        raise ValueError(
+            "limit_offset_pct must be in (0, 1) for the limit to rest on the "
+            f"protective side of the stop, got {rule.limit_offset_pct!r}"
+        )
+    stop_price = stop_loss_level(rule, position)
+    offset = stop_price * rule.limit_offset_pct
+    limit_price = protective_limit_price(stop_price, offset, closing_long=(position.side == "long"))
+    return StopLimitPrices(stop_price=stop_price, limit_price=limit_price)
 
 
 def _kind_of(rule: ExitRule) -> ExitRuleKind:
@@ -610,13 +683,13 @@ def stop_loss_triggers(rule: StopLossRule, position: PositionState, bar: BarSnap
             # for longs rather than firing, so a misconfigured spec doesn't
             # silently flush every long position on bar 1.
             return False
-        return bar.low <= _stop_loss_level(rule, position)
+        return bar.low <= stop_loss_level(rule, position)
 
     # short
     if rule.basis == "trailing_high":
         # ``trailing_high`` is the long-side counterpart; no-op for shorts.
         return False
-    return bar.high >= _stop_loss_level(rule, position)
+    return bar.high >= stop_loss_level(rule, position)
 
 
 def _take_profit_triggers(rule: TakeProfitRule, position: PositionState, bar: BarSnapshot) -> bool:

@@ -1672,7 +1672,7 @@ class FillSimulator:
         # at entry-emission time off the signal bar's close) may have gapped
         # away from where the entry actually filled — re-derive it from the
         # real fill price via ``protective_stop_price``, the single shared
-        # source of this geometry (also used by ``rule_compiler._stop_loss_level``
+        # source of this geometry (also used by ``rule_compiler.stop_loss_level``
         # and ``resolve_exit_leg_attachments`` — see that helper's docstring),
         # so this resting child and the (still independently active) bar-close
         # evaluator can never disagree about where the stop sits. The

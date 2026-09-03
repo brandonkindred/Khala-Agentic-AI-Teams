@@ -23,23 +23,51 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+# The full field set _record_to_row reads, including cache_read_tokens/
+# cache_creation_tokens — deliberately NOT pre-set by __init__ (see its
+# Postconditions), so validation below whitelists by name rather than by
+# hasattr(), which would reject exactly the override that field exists for.
+_FIELDS = frozenset(
+    {
+        "timestamp",
+        "team",
+        "agent_key",
+        "job_id",
+        "task_id",
+        "phase",
+        "model",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cost_usd",
+        "latency_ms",
+        "status",
+        "outcome",
+        "objective",
+        "request_id",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+    }
+)
+
 
 class TraceCallRecord:
     """Minimal stand-in for :class:`llm_service.telemetry.LLMCallRecord`.
 
     Preconditions:
-        Every key in ``overrides`` names an attribute this class already sets in
-        ``__init__`` — this is a plain ``setattr``, not a schema, so a misspelled
-        key silently adds an unused attribute rather than overriding the
-        intended one.
+        Every key in ``overrides`` is one of :data:`_FIELDS` — an unknown key
+        raises ``AttributeError`` rather than silently creating an unused
+        attribute (a misspelled override would otherwise surface only as a
+        confusing downstream assertion diff).
     Postconditions:
         The constructed instance exposes every field
-        :func:`trace_store._record_to_row` reads (``timestamp`` through
-        ``request_id``), with any ``overrides`` values applied on top. Neither
-        ``cache_read_tokens`` nor ``cache_creation_tokens`` is set unless passed
-        as an override — a bare ``TraceCallRecord()`` has no cache-token
-        attributes at all (not merely zero), which is what lets it double as
-        the "cache fields missing entirely" case without a separate stub.
+        :func:`trace_store._record_to_row` reads *except*
+        ``cache_read_tokens``/``cache_creation_tokens``, with any
+        ``overrides`` values applied on top of those defaults. The two cache
+        fields are set only when passed as an override — a bare
+        ``TraceCallRecord()`` has no cache-token attributes at all (not
+        merely zero), which is what lets it double as the "cache fields
+        missing entirely" case without a separate stub.
     """
 
     def __init__(self, **overrides: Any) -> None:
@@ -60,6 +88,8 @@ class TraceCallRecord:
         self.objective = "o"
         self.request_id = "r1"
         for k, v in overrides.items():
+            if k not in _FIELDS:
+                raise AttributeError(f"Unknown TraceCallRecord attribute: {k!r}")
             setattr(self, k, v)
 
 

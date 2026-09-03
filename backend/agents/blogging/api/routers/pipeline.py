@@ -10,6 +10,7 @@ from agents.blogging.api.background import (
     _prepare_pipeline_input,
     _run_pipeline_with_tracking,
 )
+from agents.blogging.api.dependencies import require_web_search_configured
 from agents.blogging.api.models import (
     FullPipelineRequest,
     FullPipelineResponse,
@@ -17,6 +18,7 @@ from agents.blogging.api.models import (
     TitleChoiceResponse,
     _format_audience,
 )
+from agents.blogging.blog_research_agent.tools.web_search import is_web_search_configured
 from agents.blogging.shared.brand_spec import brand_spec_prompt_configured
 from agents.blogging.shared.content_plan import (
     content_plan_summary_text,
@@ -34,11 +36,24 @@ router = APIRouter()
     "/full-pipeline",
     response_model=FullPipelineResponse,
     summary="Run full blog pipeline with gates",
-    description="Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
+    description=(
+        "Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all "
+        "artifacts. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset or blank "
+        "(see GET /health)."
+    ),
 )
 def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
-    """Run the full brand-aligned pipeline with artifact persistence and gates."""
+    """Run the full brand-aligned pipeline with artifact persistence and gates.
+
+    Raises:
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank.
+        HTTPException(422, "planning_failed"): when the planning stage raises PlanningError
+            (detail includes failure_reason).
+        HTTPException(500): when the pipeline fails for any other reason.
+    """
     from agents.blogging.api import main as _main
+
+    require_web_search_configured()
 
     run_pipeline = _import_run_pipeline()
 
@@ -90,6 +105,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "brand_spec_configured": brand_spec_prompt_configured(),
+        "web_search_configured": is_web_search_configured(),
     }
 
 
@@ -97,10 +113,21 @@ def health() -> dict:
     "/full-pipeline-async",
     response_model=StartPipelineResponse,
     summary="Start full pipeline asynchronously",
-    description="Starts the full blog pipeline in the background. Returns a job_id for polling status.",
+    description=(
+        "Starts the full blog pipeline in the background. Returns a job_id for polling "
+        "status. Rejects with 422 web_search_not_configured if OLLAMA_API_KEY is unset or blank "
+        "(see GET /health)."
+    ),
 )
 def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResponse:
-    """Start the full pipeline asynchronously and return job_id for polling."""
+    """Start the full pipeline asynchronously and return job_id for polling.
+
+    Raises:
+        HTTPException(501): when the job store module is unavailable -- checked
+            before the web-search precondition, so a broken deployment is
+            reported as unavailable rather than as a configuration error.
+        HTTPException(422, "web_search_not_configured"): when OLLAMA_API_KEY is unset or blank.
+    """
     from agents.blogging.api import main as _main
 
     if _main.create_blog_job is None:
@@ -108,6 +135,8 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
             status_code=501,
             detail="Async pipeline not available - job store module not found",
         )
+
+    require_web_search_configured()
 
     job_id = str(uuid.uuid4())[:8]
     audience_str = _format_audience(request.audience)

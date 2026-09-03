@@ -7,7 +7,7 @@
   [attr.aria-busy]="true"
   [attr.aria-label]="message ?? 'Loading'"
 >
-  <mat-spinner [diameter]="diameter"></mat-spinner>
+  <mat-spinner [diameter]="diameter" aria-hidden="true"></mat-spinner>
   @if (message) {
     <p class="message">{{ message }}</p>
   }

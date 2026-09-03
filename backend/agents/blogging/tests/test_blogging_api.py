@@ -31,6 +31,19 @@ def test_health_includes_brand_spec_configured(client: TestClient) -> None:
     assert isinstance(data["brand_spec_configured"], bool)
 
 
+def test_health_includes_web_search_configured(client: TestClient, monkeypatch) -> None:
+    """GET /health reflects is_web_search_configured() via web_search_configured."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "some-key")
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["web_search_configured"] is True
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    r2 = client.get("/health")
+    assert r2.status_code == 200
+    assert r2.json()["web_search_configured"] is False
+
+
 def test_list_job_artifacts_404_when_job_missing(client: TestClient) -> None:
     """GET /job/{id}/artifacts returns 404 when job_id does not exist."""
     r = client.get(f"/job/{uuid.uuid4()}/artifacts")

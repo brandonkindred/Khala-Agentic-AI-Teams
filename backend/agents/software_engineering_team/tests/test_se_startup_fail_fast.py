@@ -82,6 +82,10 @@ def _stub_non_worker_startup(monkeypatch, calls: list[str]) -> None:
         lambda: None,
     )
     monkeypatch.setattr(
+        "software_engineering_team.shared.trace_pruner.register_trace_pruner",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         "software_engineering_team.coding_engine_provider.SECodeEngineProvider",
         lambda: object(),
     )
