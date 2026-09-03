@@ -131,7 +131,7 @@ class _PairCooccurrence:
     Invariants: ``earlier_index < later_index`` (an ordered pair; both index
     into the SAME filtered ``entry_rules`` list :meth:`PredicateReachabilityProbe.probe_pairs`
     builds, matching :meth:`PredicateReachabilityProbe.probe`'s existing indexing
-    convention).
+    convention) — enforced in :meth:`__post_init__`.
     """
 
     earlier_index: int
@@ -142,6 +142,12 @@ class _PairCooccurrence:
     later_fires: int
     later_independent_fires: int
     legs: tuple[_PairLegCooccurrence, ...]
+
+    def __post_init__(self) -> None:
+        """Enforce the ``earlier_index < later_index`` invariant at construction time."""
+        assert self.earlier_index < self.later_index, (
+            "earlier_index must be less than later_index (an ordered pair)"
+        )
 
     @property
     def judged(self) -> bool:

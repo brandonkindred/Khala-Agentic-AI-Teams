@@ -374,9 +374,12 @@ def test_pair_later_dead_is_distinct_from_never_independent() -> None:
 
 
 def test_pair_leg_diagnostics_decompose_later_rule_two_leg_all_of() -> None:
-    # Both legs' firing windows sit entirely inside _ALIVE's judged, always-
-    # firing range, so the all_of as a whole (and each leg individually) never
-    # fires independently of it — exercising the per-leg breakdown.
+    # Leg 1 (close>300) fires i in [201, 299] — entirely inside _ALIVE's
+    # judged, always-firing range [199, 299]. Leg 2 (close<360) fires i in
+    # [0, 259]; its early fires (i < 199) land on bars where _ALIVE is still
+    # in warmup, which the co-occurrence tally excludes from `evaluated`
+    # altogether. So both legs — and hence the all_of as a whole — never fire
+    # independently of _ALIVE, exercising the per-leg breakdown.
     later = AllOf(
         of=[
             Predicate(lhs="bar.close", op=">", rhs=300.0),  # fires i > 200
