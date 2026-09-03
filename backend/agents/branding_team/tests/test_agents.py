@@ -749,11 +749,12 @@ def test_build_spec_agent_builds_agent_from_structured_output_spec(
 
 
 # Schema-derived factories migrated to ``_build_spec_agent`` so far: Phase 1
-# (Strategic Core, all six) plus Phase 2's one schema-derived factory
+# (Strategic Core, all six), Phase 2's one schema-derived factory
 # (Storyteller — the other five Phase 2 specialists are hand-written
-# ``fields=``-based and out of scope for this migration). Stories 4-6 of the
-# epic extend this tuple as later phases migrate, rather than adding a new
-# AST-walking test each time.
+# ``fields=``-based and out of scope for this migration), and all nine of
+# Phase 3 (Visual Identity). Remaining stories of the epic extend this tuple
+# as later phases migrate, rather than adding a new AST-walking test each
+# time.
 _BUILD_SPEC_AGENT_FACTORY_NAMES: tuple[str, ...] = (
     "make_discovery_auditor",
     "make_purpose_vision_writer",
@@ -762,6 +763,15 @@ _BUILD_SPEC_AGENT_FACTORY_NAMES: tuple[str, ...] = (
     "make_differentiation_mapper",
     "make_positioning_synthesizer",
     "make_storyteller",
+    "make_moodboard_conceptualist",
+    "make_converge_decider",
+    "make_logo_specifier",
+    "make_color_system_builder",
+    "make_typography_builder",
+    "make_iconography_director",
+    "make_photography_video_director",
+    "make_voice_tone_builder",
+    "make_design_system_codifier",
 )
 
 
