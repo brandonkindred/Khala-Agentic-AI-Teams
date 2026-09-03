@@ -2122,4 +2122,69 @@ describe('CodingTeamPageComponent', () => {
       expect(component['thinkingAnnounceTimer']).toBeNull();
     });
   });
+
+  describe('focus management (issue #7918)', () => {
+    it('selectIssue moves focus into the confirm panel, not left on the row button', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+        const el: HTMLElement = fixture.nativeElement;
+        const row = el.querySelector<HTMLButtonElement>('.github-issue-row');
+        expect(row).not.toBeNull();
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        const panel = el.querySelector('.github-confirm-panel');
+        expect(panel).not.toBeNull();
+        expect(panel?.contains(document.activeElement)).toBe(true);
+        expect(document.activeElement).not.toBe(row);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancelSelection returns focus to the originating issue row button', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        component.cancelSelection();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        const el: HTMLElement = fixture.nativeElement;
+        const row = el.querySelector<HTMLButtonElement>(`[aria-controls="confirm-panel-${issue.number}"]`);
+        expect(row).not.toBeNull();
+        expect(document.activeElement).toBe(row);
+        expect(el.querySelector('.github-confirm-panel')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancels the pending focus timer on destroy', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      component.selectIssue(component.issues[0]);
+      expect(component['focusTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['focusTimer']).toBeNull();
+    });
+  });
 });

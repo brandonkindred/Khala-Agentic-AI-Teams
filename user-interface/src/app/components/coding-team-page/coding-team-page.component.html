@@ -275,7 +275,7 @@
 
                           <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
                           @if (selectedIssue?.number === vm.number) {
-                            <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
+                            <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number" tabindex="-1">
                               <h3>Start AI coding on this issue?</h3>
                               <div class="github-confirm-panel__issue">
                                 <span class="issue-number">{{ repo.full_name }}#{{ vm.number }}</span>

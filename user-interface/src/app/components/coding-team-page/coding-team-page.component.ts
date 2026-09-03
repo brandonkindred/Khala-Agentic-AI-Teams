@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnDestroy, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, ElementRef, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
@@ -32,6 +32,7 @@ import type { CodingTeamGitHubContext, CodingTeamJobListItem, CodingTeamJobStatu
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { deferFocus } from '../../shared/defer-focus';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
 import { NotificationService } from '../../core/notification.service';
@@ -163,6 +164,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly integrationsApi = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly notifications = inject(NotificationService);
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   /** Which single view is visible. The page opens on the job Runs panel. */
   private _activeView: 'chat' | 'github' | 'jobs' | 'issues' = 'jobs';
@@ -425,6 +427,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private initialRunsLoad = true;
   /** Handle for the copy-confirmation reset, cleared on destroy so it never fires on a dead view. */
   private copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Handle for the pending confirm-panel/row focus move, cleared on destroy so it never fires on a dead view. */
+  private focusTimer: ReturnType<typeof setTimeout> | null = null;
 
   ngOnInit(): void {
     this.checkGitHubConfig();
@@ -447,6 +451,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     if (this.thinkingAnnounceTimer) {
       clearTimeout(this.thinkingAnnounceTimer);
       this.thinkingAnnounceTimer = null;
+    }
+    if (this.focusTimer) {
+      clearTimeout(this.focusTimer);
+      this.focusTimer = null;
     }
     this.refreshTrigger$.complete();
   }
@@ -732,14 +740,61 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.onIssueSearchChange();
   }
 
-  /** Select an issue, surfacing the run-confirmation affordance inline under its row. */
+  /**
+   * Select an issue, surfacing the run-confirmation affordance inline under its row.
+   *
+   * Preconditions: none enforced — selecting a different issue while one is already selected
+   *   simply moves the confirmation panel to the new row.
+   * Postconditions: `selectedIssue` (and its derived `selectedIssueOpenDepsText`) is set, which
+   *   renders `.github-confirm-panel` under this issue's row on the next change-detection pass;
+   *   once rendered, focus moves into that panel (named by its existing `<h3>`) so AT users hear
+   *   the confirmation heading — and the blocked-dependency warning, when present — instead of
+   *   focus staying on the row button they just activated.
+   */
   selectIssue(issue: GitHubIssueItem): void {
     this.selectedIssue = issue;
+    this.moveFocusToConfirmPanel(issue.number);
   }
 
-  /** Clear the issue selection, collapsing the inline confirmation panel. */
+  /**
+   * Clear the issue selection, collapsing the inline confirmation panel.
+   *
+   * Preconditions: none enforced.
+   * Postconditions: `selectedIssue` is cleared, unmounting `.github-confirm-panel` (including the
+   *   Cancel button that currently holds focus) on the next change-detection pass; once the row
+   *   has re-rendered, focus returns to that issue's `.github-issue-row` button so it never drops
+   *   to `<body>`.
+   */
   cancelSelection(): void {
+    const issueNumber = this.selectedIssue?.number ?? null;
     this.selectedIssue = null;
+    if (issueNumber !== null) {
+      this.moveFocusToIssueRow(issueNumber);
+    }
+  }
+
+  /** After the confirm panel for `issueNumber` renders, move focus into it. */
+  private moveFocusToConfirmPanel(issueNumber: number): void {
+    if (this.focusTimer !== null) {
+      clearTimeout(this.focusTimer);
+    }
+    this.focusTimer = deferFocus(this.host.nativeElement, (root) =>
+      root.querySelector<HTMLElement>(`#confirm-panel-${issueNumber}`),
+    );
+  }
+
+  /**
+   * After the confirm panel for `issueNumber` unmounts, move focus back to its row's button
+   * (found via the row's existing `aria-controls="confirm-panel-<number>"` wiring — the row has
+   * no id of its own).
+   */
+  private moveFocusToIssueRow(issueNumber: number): void {
+    if (this.focusTimer !== null) {
+      clearTimeout(this.focusTimer);
+    }
+    this.focusTimer = deferFocus(this.host.nativeElement, (root) =>
+      root.querySelector<HTMLElement>(`[aria-controls="confirm-panel-${issueNumber}"]`),
+    );
   }
 
   /** True when the issue is blocked by, or depends on, one or more other issues. */

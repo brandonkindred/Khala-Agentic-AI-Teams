@@ -172,6 +172,42 @@ describe('CodingTeamPageComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
+  it('has no axe violations on the GitHub view with an issue selected (confirm panel open)', async () => {
+    await setup();
+    showView('github');
+    expandFirstRepo();
+    component.selectIssue(component.issues[0]);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.github-confirm-panel')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('has no axe violations on the GitHub view with a blocked issue selected', async () => {
+    integrationsSpy.getGitHubIssues.mockReturnValue(
+      of([
+        {
+          number: 1,
+          title: 'Blocked issue',
+          body_preview: 'body',
+          labels: [],
+          html_url: 'https://example.com/1',
+          dependencies: [{ number: 2, title: 'Dep', state: 'open' }],
+          open_dependencies: [2],
+          blocked: true,
+        },
+      ]),
+    );
+    await setup();
+    showView('github');
+    expandFirstRepo();
+    component.selectIssue(component.issues[0]);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-inline-banner[variant="warning"]')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
   it('has no axe violations on the Jobs view with no runs', async () => {
     await setup();
     showView('jobs');
