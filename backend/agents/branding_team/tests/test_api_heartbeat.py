@@ -152,6 +152,11 @@ def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) ->
 
     def _fake_run_single_phase(mission, phase, prior_outputs=None):
         phases_run.append(phase.value)
+        # A gate regression that lets a later phase through must fail loudly
+        # here, not with a confusing type error deep inside the orchestrator
+        # from handing it a strategic-core output for e.g. narrative_messaging.
+        if phase is not BrandPhase.STRATEGIC_CORE:
+            raise AssertionError(f"phase issued after cancel: {phase.value}")
         return StrategicCoreOutput(positioning_statement="cancel-test-core"), False
 
     monkeypatch.setattr(api_main.orchestrator, "run_single_phase", _fake_run_single_phase)
@@ -175,3 +180,7 @@ def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) ->
     # _run_branding_core -> _job_not_cancelled -> is_job_cancelled, not just
     # that some cancellation flag flipped.
     assert seen_job_ids and set(seen_job_ids) == {job_id}
+    # The gate must actually have been re-consulted (and flipped) before
+    # narrative_messaging -- otherwise this would pass vacuously if the
+    # orchestrator simply stopped after one phase for an unrelated reason.
+    assert state.is_cancelled_calls >= 2 and state.cancelled
