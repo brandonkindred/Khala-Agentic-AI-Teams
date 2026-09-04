@@ -18,9 +18,9 @@ import asyncio
 import atexit
 import concurrent.futures
 import os
-import threading
 from typing import Awaitable, Optional, TypeVar
 
+from shared.concurrency import LazySingleton
 from shared.env_config import env_int
 from shared.http import aclose_async_pool
 
@@ -39,8 +39,28 @@ def _offload_pool_workers() -> int:
     return env_int("BRANDING_RUN_CORO_OFFLOAD_WORKERS", 4, floor=1)
 
 
-_offload_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
-_offload_pool_lock = threading.Lock()
+_offload_pool: LazySingleton[concurrent.futures.ThreadPoolExecutor] = LazySingleton()
+# Mirrors whatever ThreadPoolExecutor _offload_pool currently holds, so
+# _reset_offload_pool_after_fork can unregister its atexit callback without a
+# public "peek" API on LazySingleton. Written only inside _build_offload_pool,
+# which LazySingleton.get_or_create already serializes to run at most once per
+# _offload_pool instance — this is not a second hand-rolled lock, just a plain
+# assignment inside code that's already serialized.
+_constructed_offload_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+
+def _build_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Factory for ``_offload_pool.get_or_create`` — builds the pool and registers its atexit shutdown."""
+    global _constructed_offload_pool
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=_offload_pool_workers(), thread_name_prefix="branding-run-coroutine"
+    )
+    # Best-effort cleanup on interpreter exit. Threads in this pool only run
+    # briefly per offloaded coroutine (see run_coroutine), so this should not
+    # delay shutdown in practice; wait=False avoids blocking exit on a stuck run.
+    atexit.register(pool.shutdown, wait=False)
+    _constructed_offload_pool = pool
+    return pool
 
 
 def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
@@ -48,7 +68,10 @@ def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
 
     Postconditions:
         Returns the same ``ThreadPoolExecutor`` on every call after the first;
-        registers an ``atexit`` shutdown the first time it is created.
+        registers an ``atexit`` shutdown the first time it is created (see
+        ``_build_offload_pool``). Concurrent first calls race safely —
+        ``LazySingleton.get_or_create`` serializes them under its own internal
+        lock — so exactly one pool is built and every caller observes it.
 
     Note:
         Created lazily on first use rather than at module import time: worker
@@ -59,42 +82,31 @@ def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
         such fork, in whichever process first calls ``run_coroutine`` from a
         thread with a running loop.
     """
-    global _offload_pool
-    if _offload_pool is None:
-        with _offload_pool_lock:
-            if _offload_pool is None:
-                pool = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=_offload_pool_workers(), thread_name_prefix="branding-run-coroutine"
-                )
-                # Best-effort cleanup on interpreter exit. Threads in this pool
-                # only run briefly per offloaded coroutine (see run_coroutine), so
-                # this should not delay shutdown in practice; wait=False avoids
-                # blocking exit on a stuck run.
-                atexit.register(pool.shutdown, wait=False)
-                _offload_pool = pool
-    return _offload_pool
+    return _offload_pool.get_or_create(_build_offload_pool)
 
 
 def _reset_offload_pool_after_fork() -> None:
-    """Drop the offload pool reference inherited by a freshly forked child.
+    """Drop the offload pool inherited by a freshly forked child.
 
     A ``ThreadPoolExecutor``'s worker threads do not survive ``os.fork()``
     (only the forking thread continues in the child), so if the pool was
     already created in the parent before a fork, the child would otherwise
     inherit a reference to threads that don't exist there. Registering this
-    via ``os.register_at_fork`` closes that gap on top of lazy creation: the
-    child drops the stale reference and lazily builds its own fresh pool the
-    next time ``run_coroutine`` needs to offload.
+    via ``os.register_at_fork`` closes that gap on top of lazy creation:
+    replacing ``_offload_pool`` with a fresh, unconstructed ``LazySingleton``
+    makes the child lazily build its own fresh pool the next time
+    ``run_coroutine`` needs to offload.
 
     Also unregisters the parent pool's ``atexit`` shutdown callback (a stale
     reference to a pool that doesn't exist in this process) so process exit in
     the child doesn't invoke it; the fresh pool the child eventually builds
-    registers its own.
+    registers its own via ``_build_offload_pool``.
     """
-    global _offload_pool
-    if _offload_pool is not None:
-        atexit.unregister(_offload_pool.shutdown)
-    _offload_pool = None
+    global _offload_pool, _constructed_offload_pool
+    if _constructed_offload_pool is not None:
+        atexit.unregister(_constructed_offload_pool.shutdown)
+        _constructed_offload_pool = None
+    _offload_pool = LazySingleton()
 
 
 if hasattr(os, "register_at_fork"):  # POSIX only; no-op on platforms without fork.
