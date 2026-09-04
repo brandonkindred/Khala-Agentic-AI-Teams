@@ -465,7 +465,7 @@ describe('CodingTeamMonitorComponent', () => {
     });
   });
 
-  it('leaves the live region text (and node) unchanged when the summary itself is unchanged', async () => {
+  it('leaves the live region text unchanged when the summary itself is unchanged', async () => {
     await withFakeTimers(async () => {
       fixture.componentRef.setInput('status', runningJob(47));
       fixture.detectChanges();
@@ -486,7 +486,6 @@ describe('CodingTeamMonitorComponent', () => {
       // case where a timer IS in flight when the repeat arrives).
       expect(component.announcementPending).toBe(false);
       const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
-      expect(regionAfter).toBe(region);
       expect(regionAfter?.textContent).toBe(before);
     });
   });

@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import { SettleAnnouncer } from './settle-announce';
+import { SettleAnnouncer } from './settle-announcer';
 
 describe('SettleAnnouncer', () => {
   afterEach(() => {

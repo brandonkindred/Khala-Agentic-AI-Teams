@@ -3,7 +3,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
-import { SettleAnnouncer } from '../../shared/settle-announce';
+import { SettleAnnouncer } from '../../shared/settle-announcer';
 
 /** One step of the phase stepper. Local, to keep the monitor decoupled from other features. */
 interface PhaseDefinition {
