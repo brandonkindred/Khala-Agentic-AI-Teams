@@ -304,3 +304,90 @@ def test_empty_string_agent_and_phase_form_a_real_group() -> None:
     assert m.by_agent[""].call_count == 1
     assert m.by_phase[""].call_count == 1
     assert m.by_agent_phase[""][""].call_count == 1
+
+
+def test_zero_call_group_is_zeros_and_nones() -> None:
+    """A declared agent_key/phase pair with no rows reports zeros/None, not an omission or a raise."""
+    m = compute_from_traces(
+        [],
+        window_days=7.0,
+        expected_agent_keys=["backend"],
+        expected_phases=["execution"],
+    )
+
+    r = m.by_agent_phase["backend"]["execution"]
+    assert r.call_count == 0
+    assert r.total_cost_usd == 0.0
+    assert r.total_input_tokens == 0
+    assert r.total_output_tokens == 0
+    assert r.total_cache_read_tokens == 0
+    assert r.total_cache_creation_tokens == 0
+    assert r.cache_read_ratio is None
+    assert r.latency_ms_median is None
+    assert r.latency_ms_p95 is None
+    assert r.latency_ms_sample_count == 0
+    assert m.by_agent["backend"].call_count == 0
+    assert m.by_phase["execution"].call_count == 0
+
+
+def test_zero_call_group_equals_empty_group_rollup() -> None:
+    """A zero-call declared group is byte-for-byte a default CallRollup — one code path, no drift."""
+    m = compute_from_traces([], window_days=1.0, expected_agent_keys=["backend"])
+
+    assert m.by_agent["backend"] == CallRollup()
+
+
+def test_empty_window_with_expected_keys_yields_full_zero_call_grid() -> None:
+    """An empty window plus declared agents/phases still produces the full cross-product, all zero-call."""
+    m = compute_from_traces(
+        [],
+        window_days=7.0,
+        expected_agent_keys=["backend", "frontend"],
+        expected_phases=["design", "execution"],
+    )
+
+    assert list(m.by_agent.keys()) == ["backend", "frontend"]
+    assert list(m.by_phase.keys()) == ["design", "execution"]
+    assert list(m.by_agent_phase.keys()) == ["backend", "frontend"]
+    for agent_key in ("backend", "frontend"):
+        assert list(m.by_agent_phase[agent_key].keys()) == ["design", "execution"]
+        for phase in ("design", "execution"):
+            assert m.by_agent_phase[agent_key][phase].call_count == 0
+
+
+def test_expected_keys_never_drop_observed_keys() -> None:
+    """A declared agent/phase set is a union with what was observed, never a replacement."""
+    rows = [_row(agent_key="backend", phase="execution", cost_usd=1.0, latency_ms=50)]
+
+    m = compute_from_traces(
+        rows,
+        window_days=1.0,
+        expected_agent_keys=["frontend"],
+        expected_phases=["design"],
+    )
+
+    assert m.by_agent["backend"].call_count == 1
+    assert m.by_agent["frontend"].call_count == 0
+    assert m.by_phase["execution"].call_count == 1
+    assert m.by_phase["design"].call_count == 0
+    # The observed pair stays populated; the declared phase densifies every agent
+    # in by_agent_phase, observed or declared.
+    assert m.by_agent_phase["backend"]["execution"].call_count == 1
+    assert m.by_agent_phase["backend"]["design"].call_count == 0
+    assert m.by_agent_phase["frontend"]["design"].call_count == 0
+    assert "execution" not in m.by_agent_phase["frontend"]
+
+
+def test_expected_keys_default_and_empty_iterable_match_sparse_behavior() -> None:
+    """Omitting expected_agent_keys/expected_phases and passing empty iterables are equivalent to today's sparse result."""
+    rows = [_row(agent_key="backend", phase="execution")]
+
+    default_result = compute_from_traces(rows, window_days=1.0)
+    explicit_empty = compute_from_traces(
+        rows, window_days=1.0, expected_agent_keys=[], expected_phases=[]
+    )
+
+    assert default_result.by_agent.keys() == explicit_empty.by_agent.keys()
+    assert default_result.by_phase.keys() == explicit_empty.by_phase.keys()
+    assert default_result.by_agent_phase.keys() == explicit_empty.by_agent_phase.keys()
+    assert "frontend" not in default_result.by_agent

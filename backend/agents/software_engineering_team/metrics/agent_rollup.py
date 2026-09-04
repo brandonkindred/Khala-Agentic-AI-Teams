@@ -12,7 +12,8 @@ module.
 - ``by_phase`` — one :class:`CallRollup` per ``phase``, ignoring agent_key.
 - ``by_agent_phase`` — ``by_agent_phase[agent_key][phase]``, one entry per distinct
   (agent_key, phase) pair observed; combinations that never co-occur are absent, not
-  an empty ``CallRollup``. A nested ``dict[str, dict[str, CallRollup]]`` is used rather than a tuple key
+  an empty ``CallRollup``, *unless* the caller opts in to seeing them — see
+  **Zero-call groups** below. A nested ``dict[str, dict[str, CallRollup]]`` is used rather than a tuple key
   (breaks ``asdict()``/JSON serialization) or a composite string key like
   ``"agent::phase"`` (risks delimiter collisions with real identifiers). Nesting is
   a direct extension of ``dora.py``'s existing ``dict[str, ...]`` idiom and stays
@@ -21,6 +22,18 @@ module.
 All three are needed: per-agent and per-phase views answer "who/what is expensive"
 on their own, but a given agent's token and cache profile can differ materially
 across phases, so tiering or cache-breakpoint decisions need the pair.
+
+**Zero-call groups** — a group with no rows (an empty window, or an ``agent_key``/
+``phase`` that a caller cares about but that never appears in ``rows``) is never
+synthesized implicitly; :func:`compute_from_traces` only reports what it observes
+unless told otherwise. A caller who wants a *declared* group to appear even at zero
+calls — e.g. so a dashboard shows an agent went quiet in a phase, rather than
+omitting it — passes ``expected_agent_keys``/``expected_phases`` to
+:func:`compute_from_traces`. A declared-but-unobserved group is produced by the exact
+same code path as an observed one (``_rollup_for_group`` on an empty row list), so it
+follows the ``None``-vs-``0`` rule below automatically: ``call_count == 0``, every sum
+``0``/``0.0``, and ``cache_read_ratio``/``latency_ms_median``/``latency_ms_p95`` all
+``None``. There is no separate zero-call code path to drift from the populated one.
 
 **Cache-read ratio** — per :class:`CallRollup`, defined as::
 
@@ -71,6 +84,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -184,36 +198,68 @@ def _rollup_for_group(rows: list[dict[str, Any]]) -> CallRollup:
     )
 
 
-def compute_from_traces(rows: list[dict[str, Any]], window_days: float) -> AgentRollupMetrics:
+def compute_from_traces(
+    rows: list[dict[str, Any]],
+    window_days: float,
+    *,
+    expected_agent_keys: Optional[Iterable[str]] = None,
+    expected_phases: Optional[Iterable[str]] = None,
+) -> AgentRollupMetrics:
     """Compute the per-``agent_key``/per-``phase`` rollup from a list of trace rows.
 
     A pure computation over already-fetched ``se_agent_traces``-shaped row dicts — it
     does not mutate ``rows`` and has no database dependency, mirroring
     :func:`dora.compute_from_events`. The sole non-deterministic output is
     ``computed_at``, stamped from the UTC wall clock at call time; every other field is
-    a deterministic function of ``rows`` and ``window_days``. ``window_days`` is not
-    used to filter rows (callers are expected to have already scoped ``rows`` to the
-    window); it is only carried onto the returned :class:`AgentRollupMetrics`.
+    a deterministic function of ``rows``, ``window_days``, ``expected_agent_keys``, and
+    ``expected_phases``. ``window_days`` is not used to filter rows (callers are
+    expected to have already scoped ``rows`` to the window); it is only carried onto
+    the returned :class:`AgentRollupMetrics`.
+
+    ``expected_agent_keys``/``expected_phases`` opt a caller into zero-call groups
+    (see the module docstring's **Zero-call groups** section) rather than only
+    reporting what ``rows`` happens to contain:
+
+    - ``expected_agent_keys`` (if not ``None``) is unioned into ``by_agent``'s key set
+      and into ``by_agent_phase``'s outer key set — an agent with no rows at all still
+      gets a zero-call ``CallRollup`` in ``by_agent``, and an (initially empty) entry
+      in ``by_agent_phase``.
+    - ``expected_phases`` (if not ``None``) is unioned into ``by_phase``'s key set and,
+      for *every* agent that ends up in ``by_agent_phase`` (observed or declared via
+      ``expected_agent_keys``), into that agent's inner phase key set — a phase that
+      never invoked a given agent still gets a zero-call ``CallRollup`` under that
+      agent.
+    - Passing both densifies ``by_agent_phase`` to the full cross-product of declared
+      agents x declared phases. Passing only one densifies just that dimension;
+      neither ever removes an observed key.
 
     Preconditions:
         - ``window_days > 0``.
         - Each element of ``rows`` is a dict shaped like an ``se_agent_traces`` record:
           ``agent_key``/``phase`` (strings, ``""`` permitted and treated as a real
           group) plus the numeric fields :func:`_rollup_for_group` requires.
+        - ``expected_agent_keys``/``expected_phases``, if given, are iterables of
+          ``str`` (``""`` permitted); duplicates are permitted and have no effect.
     Postconditions:
         - Raises ``ValueError`` if ``window_days <= 0``; never raises for an empty
-          ``rows`` list, returning an ``AgentRollupMetrics`` with empty
-          ``by_agent``/``by_phase``/``by_agent_phase`` dicts instead.
-        - ``by_agent`` has one entry per distinct ``agent_key`` seen in ``rows``;
-          ``by_phase`` one per distinct ``phase``; ``by_agent_phase`` has one entry per
-          distinct (agent_key, phase) pair seen — combinations that never co-occur are
-          absent, not an empty ``CallRollup``. No observed group is dropped, including
-          the ``""`` group.
+          ``rows`` list (with or without expected keys), returning a well-formed
+          ``AgentRollupMetrics`` instead — ``by_agent``/``by_phase``/``by_agent_phase``
+          are empty dicts when no rows and no expected keys are given.
+        - ``by_agent`` has one entry per distinct ``agent_key`` seen in ``rows`` plus
+          every key in ``expected_agent_keys``; ``by_phase`` likewise for ``phase`` and
+          ``expected_phases``; ``by_agent_phase`` has one entry per distinct
+          (agent_key, phase) pair seen, extended per the densification rules above —
+          combinations neither observed nor declared stay absent, not an empty
+          ``CallRollup``. No observed or declared group is dropped, including the
+          ``""`` group.
         - Keys within each of the three dicts (and within each inner ``by_agent_phase``
           dict) are sorted ascending, so the result is deterministic for a fixed row
-          *set* regardless of input row order — not just for a fixed row sequence.
-        - Every ``CallRollup`` it produces satisfies the invariants documented on that
-          class and this module (``None`` vs. ``0`` rule, ratio/percentile math).
+          *set* and expected-key *set*, regardless of input order.
+        - Every ``CallRollup`` it produces — observed or zero-call — satisfies the
+          invariants documented on that class and this module (``None`` vs. ``0``
+          rule, ratio/percentile math); a zero-call group is produced by
+          :func:`_rollup_for_group` on an empty row list like any other group, so no
+          code path in this function divides by a count that can be zero.
     """
     if window_days <= 0:
         raise ValueError("window_days must be > 0")
@@ -230,6 +276,19 @@ def compute_from_traces(rows: list[dict[str, Any]], window_days: float) -> Agent
         by_agent_rows[agent_key].append(row)
         by_phase_rows[phase].append(row)
         by_agent_phase_rows[agent_key][phase].append(row)
+
+    if expected_agent_keys is not None:
+        for agent_key in expected_agent_keys:
+            by_agent_rows.setdefault(agent_key, [])
+            by_agent_phase_rows.setdefault(agent_key, defaultdict(list))
+
+    if expected_phases is not None:
+        expected_phase_list = list(expected_phases)
+        for phase in expected_phase_list:
+            by_phase_rows.setdefault(phase, [])
+        for agent_key in by_agent_phase_rows:
+            for phase in expected_phase_list:
+                by_agent_phase_rows[agent_key].setdefault(phase, [])
 
     metrics = AgentRollupMetrics(
         window_days=window_days,
