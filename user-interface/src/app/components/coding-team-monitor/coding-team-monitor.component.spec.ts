@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { vi } from 'vitest';
 import { CodingTeamMonitorComponent, codingTeamStatusSummary } from './coding-team-monitor.component';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
 
@@ -22,6 +23,31 @@ describe('CodingTeamMonitorComponent', () => {
     fixture.detectChanges();
     await fixture.whenStable();
     return fixture.nativeElement as HTMLElement;
+  }
+
+  /** A running, job 'j1', phase 'coding' status at the given progress — the shape shared by the
+   *  debounce tests below, which otherwise differ only in `progress` and the occasional `agents`
+   *  override. */
+  function runningJob(progress: number, extra: Partial<CodingTeamJobStatus> = {}): CodingTeamJobStatus {
+    return {
+      job_id: 'j1',
+      status: 'running',
+      phase: 'coding',
+      progress,
+      ...extra,
+    } as CodingTeamJobStatus;
+  }
+
+  /** Runs `run` under fake timers, restoring real timers afterward even if `run` throws — the
+   *  shared wrapper for the debounce tests below, which otherwise each repeated this same
+   *  useFakeTimers/try/finally boilerplate. */
+  async function withFakeTimers(run: () => Promise<void>): Promise<void> {
+    vi.useFakeTimers();
+    try {
+      await run();
+    } finally {
+      vi.useRealTimers();
+    }
   }
 
   function agent(over: Partial<CodingTeamAgentStatus>): CodingTeamAgentStatus {
@@ -387,27 +413,144 @@ describe('CodingTeamMonitorComponent', () => {
     expect(region?.textContent).toBe('');
   });
 
-  it('announces the objective and progress in the hidden live region', async () => {
-    const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
-    const region = el.querySelector('.visually-hidden[aria-live="polite"]');
-    expect(region?.textContent).toContain('Implementing the task graph');
-    expect(region?.textContent).toContain('47% complete');
+  it('announces the objective and progress in the hidden live region after the settle window', async () => {
+    await withFakeTimers(async () => {
+      fixture.componentRef.setInput('status', runningJob(47));
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
+      // Nothing is announced yet — the settle timer hasn't fired.
+      expect(region()?.textContent).toBe('');
+
+      await vi.advanceTimersByTimeAsync(6000);
+      fixture.detectChanges();
+      expect(region()?.textContent).toContain('Implementing the task graph');
+      expect(region()?.textContent).toContain('47% complete');
+    });
   });
 
-  it('leaves the live region text (and node) unchanged when the summary itself is unchanged', async () => {
-    const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
-    const region = el.querySelector('.visually-hidden[aria-live="polite"]');
-    const before = region?.textContent;
-    await render({
-      job_id: 'j1',
-      status: 'running',
-      phase: 'coding',
-      progress: 47,
-      agents: [agent({ agent_id: 'x', display_name: 'X' })],
+  it('settles a burst of differing progress ticks into a single announcement of the latest value', async () => {
+    await withFakeTimers(async () => {
+      const el = fixture.nativeElement as HTMLElement;
+      const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
+
+      fixture.componentRef.setInput('status', runningJob(10)); // t=0, original deadline would be t=6000
+      fixture.detectChanges();
+      expect(region()?.textContent).toBe('');
+
+      await vi.advanceTimersByTimeAsync(2000); // t=2000
+      fixture.componentRef.setInput('status', runningJob(20));
+      fixture.detectChanges();
+      // A differing update mid-settle restarts the window instead of announcing early.
+      expect(region()?.textContent).toBe('');
+
+      await vi.advanceTimersByTimeAsync(2000); // t=4000: restarts again — new deadline t=10000
+      fixture.componentRef.setInput('status', runningJob(30));
+      fixture.detectChanges();
+      expect(region()?.textContent).toBe('');
+
+      // Prove the restart, not just the final value: crossing the ORIGINAL t=0 deadline (t=6000)
+      // must still be silent — a weaker "keep the original timer, announce whatever's latest when
+      // it fires" implementation would already have announced by t=6000.
+      await vi.advanceTimersByTimeAsync(2000); // t=6000
+      fixture.detectChanges();
+      expect(region()?.textContent).toBe('');
+
+      // Now cross the actually-restarted deadline (t=10000): settles once on the latest value.
+      await vi.advanceTimersByTimeAsync(4000); // t=10000
+      fixture.detectChanges();
+      expect(region()?.textContent).toContain('30% complete');
+      expect(region()?.textContent).not.toContain('10% complete');
+      expect(region()?.textContent).not.toContain('20% complete');
     });
-    const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
-    expect(regionAfter).toBe(region);
-    expect(regionAfter?.textContent).toBe(before);
+  });
+
+  it('leaves the live region text unchanged when the summary itself is unchanged', async () => {
+    await withFakeTimers(async () => {
+      fixture.componentRef.setInput('status', runningJob(47));
+      fixture.detectChanges();
+      await vi.advanceTimersByTimeAsync(6000);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const region = el.querySelector('.visually-hidden[aria-live="polite"]');
+      const before = region?.textContent;
+
+      fixture.componentRef.setInput(
+        'status',
+        runningJob(47, { agents: [agent({ agent_id: 'x', display_name: 'X' })] }),
+      );
+      fixture.detectChanges();
+
+      // An unchanged summary must neither restart nor cancel an in-flight timer — here there is no
+      // timer at all, because the update was a no-op (the degenerate case; see the next test for the
+      // case where a timer IS in flight when the repeat arrives).
+      expect(component.announcementPending).toBe(false);
+      const regionAfter = el.querySelector('.visually-hidden[aria-live="polite"]');
+      expect(regionAfter?.textContent).toBe(before);
+    });
+  });
+
+  it('leaves an in-flight settle timer running (neither cancelled nor restarted) when a repeat of the same summary arrives mid-settle', async () => {
+    await withFakeTimers(async () => {
+      const el = fixture.nativeElement as HTMLElement;
+      const region = () => el.querySelector('.visually-hidden[aria-live="polite"]');
+
+      fixture.componentRef.setInput('status', runningJob(47)); // t=0, deadline t=6000
+      fixture.detectChanges();
+
+      await vi.advanceTimersByTimeAsync(2000); // t=2000, timer still in flight
+      fixture.componentRef.setInput('status', runningJob(47)); // identical summary
+      fixture.detectChanges();
+      // A cancel-on-unchanged regression would clear this to false; a restart-on-unchanged
+      // regression would still show true here but push the deadline out to t=8000.
+      expect(component.announcementPending).toBe(true);
+
+      // Advancing to exactly the ORIGINAL deadline (t=6000) proves neither regression happened: a
+      // cancelled timer would stay silent forever, and a restarted one wouldn't fire until t=8000.
+      await vi.advanceTimersByTimeAsync(4000); // t=6000
+      fixture.detectChanges();
+      expect(region()?.textContent).toContain('47% complete');
+    });
+  });
+
+  it('cancels the summary settle timer on destroy and never announces afterward', async () => {
+    await withFakeTimers(async () => {
+      fixture.componentRef.setInput('status', runningJob(47));
+      fixture.detectChanges();
+      const region = (fixture.nativeElement as HTMLElement).querySelector(
+        '.visually-hidden[aria-live="polite"]',
+      );
+      expect(component.announcementPending).toBe(true);
+      // Nothing has settled yet, so the DOM-observable text is still empty.
+      expect(region?.textContent).toBe('');
+
+      fixture.destroy();
+      expect(component.announcementPending).toBe(false);
+
+      // Advancing time after destroy must not resurrect the timer, throw, or update the DOM.
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(component.announcementPending).toBe(false);
+      expect(region?.textContent).toBe('');
+    });
+  });
+
+  it('clears the announcement immediately (no settle delay) when status is cleared to null', async () => {
+    await withFakeTimers(async () => {
+      fixture.componentRef.setInput('status', runningJob(47));
+      fixture.detectChanges();
+      await vi.advanceTimersByTimeAsync(6000);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const region = el.querySelector('.visually-hidden[aria-live="polite"]');
+      expect(region?.textContent).toContain('47% complete');
+
+      fixture.componentRef.setInput('status', null);
+      fixture.detectChanges();
+
+      // Goes silent right away — no lingering stale percentage for another settle window.
+      expect(region?.textContent).toBe('');
+      expect(component.announcementPending).toBe(false);
+    });
   });
 });
 
