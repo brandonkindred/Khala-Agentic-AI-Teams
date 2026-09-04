@@ -188,10 +188,11 @@ def run_planning_stage(
                             f"[Story for section: {gap.section_title}]\n{result.narrative}"
                         )
                         collected_story_pairs.append((gap, result.narrative))
-
-                covered_sections.update(
-                    gap.section_title for gap, _narrative in collected_story_pairs
-                )
+                        # Recorded per-gap (not derived from collected_story_pairs after
+                        # the loop) so a later gap's failure can't erase sections already
+                        # collected here — the outer try/except below leaves this set
+                        # exactly as it stood at the moment of failure.
+                        covered_sections.add(gap.section_title)
 
                 if collected_narratives:
                     elicited_stories_text = "\n\n".join(collected_narratives)

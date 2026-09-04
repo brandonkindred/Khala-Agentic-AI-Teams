@@ -170,6 +170,27 @@ def test_whitespace_only_narrative_contributes_no_section(monkeypatch) -> None:
     assert ctx.covered_sections == {"Section A"}
 
 
+def test_narrative_mentioning_another_section_does_not_cover_it(monkeypatch) -> None:
+    """Direct derivation from collected_story_pairs, not substring-matching:
+    a narrative that happens to mention another section's title must not
+    cover that section."""
+    from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
+    from agents.blogging.shared import story_bank
+
+    _stub_find_story_gaps(monkeypatch, _story_gaps("Section A", "Section B"))
+    _stub_conduct_interview(
+        monkeypatch,
+        {"Section A": "A narrative that references Section B.", "Section B": "   "},
+    )
+    _stub_find_relevant_stories(monkeypatch, [])
+    monkeypatch.setattr(story_bank, "save_story", lambda **_kw: None)
+
+    ctx = _make_ctx(monkeypatch)
+    assert run_planning_stage(ctx) is None
+
+    assert ctx.covered_sections == {"Section A"}
+
+
 def test_bank_hits_populate_covered_sections(monkeypatch) -> None:
     """A section satisfied only by a story-bank hit (no fresh interview) is included."""
     from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
@@ -208,6 +229,26 @@ def test_whitespace_only_bank_narrative_contributes_no_section(monkeypatch) -> N
     assert run_planning_stage(ctx) is None
 
     assert ctx.covered_sections == {"Section A"}
+
+
+def test_covered_sections_union_of_interview_and_bank_sections(monkeypatch) -> None:
+    """Sections from both sources accumulate into one set; neither source
+    overwrites the other's contributions."""
+    from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
+    from agents.blogging.shared import story_bank
+
+    _stub_find_story_gaps(monkeypatch, _story_gaps("Section A"))
+    _stub_conduct_interview(monkeypatch, {"Section A": "Fresh narrative about A."})
+    _stub_find_relevant_stories(
+        monkeypatch,
+        [{"section_title": "Section B", "narrative": "A banked narrative about B."}],
+    )
+    monkeypatch.setattr(story_bank, "save_story", lambda **_kw: None)
+
+    ctx = _make_ctx(monkeypatch)
+    assert run_planning_stage(ctx) is None
+
+    assert ctx.covered_sections == {"Section A", "Section B"}
 
 
 def test_covered_sections_deduplicated_across_sources(monkeypatch) -> None:
@@ -250,8 +291,18 @@ def test_covered_sections_empty_when_nothing_elicited(monkeypatch) -> None:
 def test_covered_sections_empty_when_elicitation_skipped_without_job_id(monkeypatch) -> None:
     """Without a job_id/job_updater, elicitation is skipped entirely -- the set
     must still come back as an empty ``set[str]``, never undefined or None."""
+    from agents.blogging import ghost_writer_agent
     from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
 
+    calls: list = []
+
+    def _find_story_gaps(self, plan):
+        calls.append(plan)
+        return []
+
+    monkeypatch.setattr(
+        ghost_writer_agent.GhostWriterElicitationAgent, "find_story_gaps", _find_story_gaps
+    )
     _stub_find_relevant_stories(monkeypatch, [])
 
     # job_id=None short-circuits both the interview block and the outline-approval
@@ -260,6 +311,34 @@ def test_covered_sections_empty_when_elicitation_skipped_without_job_id(monkeypa
     assert run_planning_stage(ctx) is None
 
     assert ctx.covered_sections == set()
+    assert calls == []  # the interview block's find_story_gaps never ran
+
+
+def test_mid_interview_failure_keeps_sections_collected_so_far(monkeypatch) -> None:
+    """A non-cancellation failure partway through the interview loop retains
+    sections already collected before the failure."""
+    from agents.blogging import ghost_writer_agent
+    from agents.blogging.agent_implementations.pipeline.planning_stage import run_planning_stage
+    from agents.blogging.shared import story_bank
+
+    _stub_find_story_gaps(monkeypatch, _story_gaps("Section A", "Section B"))
+
+    def _conduct_interview(self, *, gap, **_kw):
+        if gap.section_title == "Section A":
+            return SimpleNamespace(narrative="A narrative about A.", gap=gap)
+        raise RuntimeError("interview boom")
+
+    monkeypatch.setattr(
+        ghost_writer_agent.GhostWriterElicitationAgent, "conduct_interview", _conduct_interview
+    )
+    _stub_find_relevant_stories(monkeypatch, [])
+    monkeypatch.setattr(story_bank, "save_story", lambda **_kw: None)
+
+    ctx = _make_ctx(monkeypatch)
+    assert run_planning_stage(ctx) is None
+
+    assert ctx.covered_sections == {"Section A"}
+    assert ctx.status == "PASS"
 
 
 def test_find_story_gaps_failure_leaves_covered_sections_empty(monkeypatch) -> None:
