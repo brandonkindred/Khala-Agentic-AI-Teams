@@ -96,8 +96,15 @@ class ReferenceEntryFill:
             raise ValueError(f"side must be 'long' or 'short', got {self.side!r}")
 
 
-def _bars_to_frame(symbol_bars: "Sequence[Bar]") -> pd.DataFrame:
+def bars_to_frame(symbol_bars: "Sequence[Bar]") -> pd.DataFrame:
     """Build the OHLCV frame ``PandasHistoryView`` evaluates predicates against.
+
+    Public rather than module-private because the exit side builds its own
+    ``PandasHistoryView`` over the same bars to evaluate ``SignalExitRule``
+    predicates (:mod:`reference_exits`), and both sides must index identical
+    frames: a predicate that fires for an entry on bar ``i`` and one that
+    fires for a signal exit on bar ``i`` have to be reading the same row. One
+    construction site is the only way to keep that true under later edits.
 
     Preconditions: none (``symbol_bars`` may be empty).
     Postconditions: returns a DataFrame with one row per bar, row order
@@ -164,7 +171,7 @@ def replay_entry_rules(
         n = len(symbol_bars)
         if n == 0:
             continue
-        view = PandasHistoryView(_bars_to_frame(symbol_bars), {})
+        view = PandasHistoryView(bars_to_frame(symbol_bars), {})
         for i in range(n):
             match = evaluate_entry_rules(spec.entry_rules, view, i)
             if match is None:

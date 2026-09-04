@@ -18,18 +18,33 @@ here is genuinely shared plumbing:
   simulator (``system_design/reference_ledger_trade_model.md``): reuses
   ``evaluate_entry_rules`` to open a reference position at the next bar's
   open.
-* :mod:`reference_exits` — exit-side replay for the same simulator, currently
-  covering ``StopLossRule`` across all four basis/style variants with
-  resting-order fill semantics (exact level on a through-bar, worse open on a
-  gap). Reuses :mod:`rule_compiler`'s trigger geometry and adds the fill
-  mechanics that geometry deliberately omits.
+* :mod:`reference_exits` — exit-side replay for the same simulator, covering
+  all four exit rule kinds. The three resting-order kinds (``StopLossRule``
+  across all four basis/style variants, standalone ``TakeProfitRule``, and
+  laddered ``ScaledTakeProfitRule``) fill on their own trigger bar — exact
+  level on a through-bar, worse open on a gap for a stop. ``SignalExitRule``
+  deliberately does not: a bar-close predicate fills at the NEXT bar's open,
+  the engine's current and unchanged semantics for that kind. Reuses
+  :mod:`rule_compiler`'s trigger geometry and adds the fill mechanics that
+  geometry deliberately omits.
 """
 
-from .reference_entries import ReferenceEntryFill, replay_entry_rules
+from .reference_entries import ReferenceEntryFill, bars_to_frame, replay_entry_rules
 from .reference_exits import (
+    ReferenceSignalExit,
     ReferenceStopLossExit,
+    ReferenceTakeProfitExit,
+    entry_price_basis,
+    replay_signal_exits,
     replay_stop_loss_exits,
+    replay_take_profit_family_exits,
+    resolve_signal_exit,
     resolve_stop_loss_exit,
+    resolve_take_profit_family_exit,
+    scaled_take_profit_rules,
+    signal_exit_rules,
+    stop_loss_rules_for_side,
+    take_profit_rules,
     working_exit_rules,
 )
 from .rule_compiler import (
@@ -49,15 +64,27 @@ __all__ = [
     "ExitIntent",
     "PositionState",
     "ReferenceEntryFill",
+    "ReferenceSignalExit",
     "ReferenceStopLossExit",
+    "ReferenceTakeProfitExit",
     "StopLimitPrices",
+    "bars_to_frame",
     "build_trade_records",
+    "entry_price_basis",
     "evaluate_exit_rules",
     "replay_entry_rules",
+    "replay_signal_exits",
     "replay_stop_loss_exits",
+    "replay_take_profit_family_exits",
+    "resolve_signal_exit",
     "resolve_stop_loss_exit",
+    "resolve_take_profit_family_exit",
+    "scaled_take_profit_rules",
+    "signal_exit_rules",
     "stop_limit_prices",
     "stop_loss_level",
+    "stop_loss_rules_for_side",
     "stop_loss_triggers",
+    "take_profit_rules",
     "working_exit_rules",
 ]
