@@ -2273,5 +2273,39 @@ describe('CodingTeamPageComponent', () => {
         vi.useRealTimers();
       }
     });
+
+    it('cancelSelection falls back further to the search input when the search matches nothing at all', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        // A search matching zero issues removes .github-issues-list entirely (the template's
+        // "no matches" empty state renders instead), so the first-level fallback is also absent.
+        component.issueSearch = 'zzz-no-match';
+        component.onIssueSearchChange();
+        fixture.detectChanges();
+        const el: HTMLElement = fixture.nativeElement;
+        expect(el.querySelector('.github-issues-list')).toBeNull();
+
+        expect(() => component.cancelSelection()).not.toThrow();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        const searchInput = el.querySelector('.github-search-field input');
+        expect(searchInput).not.toBeNull();
+        expect(document.activeElement).toBe(searchInput);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

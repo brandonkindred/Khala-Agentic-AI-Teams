@@ -761,7 +761,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    *   Cancel button that currently holds focus) on the next change-detection pass; once the row
    *   has re-rendered, focus returns to that issue's `.github-issue-row` button so it never drops
    *   to `<body>`. If the issue search filter has removed that row from the list by the time the
-   *   deferred callback runs, focus falls back to `.github-issues-list` (still never `<body>`).
+   *   deferred callback runs, focus falls back to `.github-issues-list`, or further to the issue
+   *   search input if the search matches nothing at all — never `<body>`.
    */
   cancelSelection(): void {
     const issueNumber = this.selectedIssue?.number ?? null;
@@ -772,26 +773,28 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Repo-scoped id for the confirm panel of `issueNumber` under the currently expanded repo.
-   * Only one repo is ever expanded at a time (see `toggleRepo`), but scoping by repo full name
-   * here means the id/`aria-controls` wiring stays correct even if that invariant ever changes —
-   * a bare issue number is only unique within a repo.
+   * Repo-scope prefix shared by the confirm-panel ids and the row key below. Only one repo is
+   * ever expanded at a time (see `toggleRepo`), but scoping by repo full name here means this
+   * wiring stays correct even if that invariant ever changes — a bare issue number is only
+   * unique within a repo. Extracted to one place so the three sites below can't drift apart.
    */
+  private get repoScope(): string {
+    return this.selectedRepo?.full_name ?? '';
+  }
+
+  /** Repo-scoped id for the confirm panel of `issueNumber` under the currently expanded repo. */
   confirmPanelId(issueNumber: number): string {
-    return `confirm-panel-${this.selectedRepo?.full_name ?? ''}-${issueNumber}`;
+    return `confirm-panel-${this.repoScope}-${issueNumber}`;
   }
 
   /** Id for the confirm panel's heading, referenced by the panel's `aria-labelledby`. */
   confirmPanelHeadingId(issueNumber: number): string {
-    return `confirm-panel-heading-${this.selectedRepo?.full_name ?? ''}-${issueNumber}`;
+    return `confirm-panel-heading-${this.repoScope}-${issueNumber}`;
   }
 
-  /**
-   * Repo-scoped key for a row's `data-issue-number` attribute, matching `confirmPanelId`'s
-   * repo-scoping rationale: a bare issue number is only unique within a repo.
-   */
+  /** Repo-scoped key for a row's `data-issue-number` attribute. */
   issueRowKey(issueNumber: number): string {
-    return `${this.selectedRepo?.full_name ?? ''}#${issueNumber}`;
+    return `${this.repoScope}#${issueNumber}`;
   }
 
   /** Clear any pending focus-move timer, e.g. before scheduling a new one or on destroy. */
@@ -822,14 +825,17 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * (found via `data-issue-number`, which — unlike `aria-controls` — stays on the row regardless
    * of selection state, since `aria-controls` is removed the same tick `selectedIssue` clears).
    * Falls back to `.github-issues-list` when the row isn't found (e.g. filtered out by the issue
-   * search), so focus never drops to `<body>` even in that edge case.
+   * search), and further to the issue search input when the list itself isn't rendered either
+   * (the search matches nothing) — the search input renders whenever the issue list section
+   * does at all, so focus never drops to `<body>` in either edge case.
    */
   private moveFocusToIssueRow(issueNumber: number): void {
     const key = this.issueRowKey(issueNumber);
     this.scheduleFocusMove(
       (root) =>
         root.querySelector<HTMLElement>(`[data-issue-number="${key}"]`) ??
-        root.querySelector<HTMLElement>('.github-issues-list'),
+        root.querySelector<HTMLElement>('.github-issues-list') ??
+        root.querySelector<HTMLElement>('.github-search-field input'),
     );
   }
 
