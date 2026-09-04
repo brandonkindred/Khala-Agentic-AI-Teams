@@ -47,7 +47,7 @@ from agents.blogging.shared.errors import BloggingError, DraftError, PlanningErr
 from agents.blogging.shared.models import BlogPhase, get_phase_progress
 from agents.blogging.shared.planning_config import plan_critic_max_iterations
 from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
-from strands.types.exceptions import EventLoopException
+from agents.blogging.shared.text_parsing import unwrap_llm_cause
 from temporalio.exceptions import CancelledError
 
 from llm_service import LLMClientModel, unwrap_client, with_model_override
@@ -98,26 +98,6 @@ def _research_digest_max_chars_for_consumers(*consumers: Any) -> int:
         context_limits.append(context_tokens)
     smallest_context = min(context_limits, default=_DEFAULT_PLANNING_CONTEXT_TOKENS)
     return max(1, smallest_context - _PLANNING_NON_RESEARCH_RESERVE_TOKENS)
-
-
-def _unwrap_llm_cause(exc: BaseException) -> BaseException:
-    """Return the underlying model error when strands wraps it in EventLoopException.
-
-    Same helper as ``blog_writer_agent``'s (repeated locally rather than shared, per
-    that module's convention — see its own copy's docstring).
-
-    Preconditions:
-        - ``exc`` is the exception caught at an LLM call boundary.
-    Postconditions:
-        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
-          returns that original exception.
-        - Otherwise returns ``exc`` unchanged.
-    """
-    if isinstance(exc, EventLoopException):
-        original = getattr(exc, "original_exception", None)
-        if isinstance(original, BaseException):
-            return original
-    return exc
 
 
 def _wait_for_hitl(
@@ -481,7 +461,7 @@ def run_planning(
     except (BloggingError, LLMRateLimitError, LLMTemporaryError):
         raise
     except Exception as e:
-        cause = _unwrap_llm_cause(e)
+        cause = unwrap_llm_cause(e)
         if isinstance(cause, (BloggingError, LLMRateLimitError, LLMTemporaryError)):
             # ResearchAgent's live Strands call (unlike the planner's, which goes
             # through run_json_gate/call_json_with_retry) doesn't unwrap

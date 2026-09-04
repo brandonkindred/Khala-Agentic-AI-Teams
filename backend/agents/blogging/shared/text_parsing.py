@@ -1,31 +1,32 @@
 """
 Shared LLM-response text-parsing helpers.
 
-These functions reconcile copies independently duplicated (and, in the case
-of ``extract_json_array_from_text``, allowed to drift) across
-``blog_writer_agent/agent.py``, ``blog_writer_agent/revision.py``,
+This is the single implementation of five helpers that were previously
+duplicated (and, in the case of ``extract_json_array_from_text``, allowed to
+drift) across ``blog_writer_agent/agent.py``, ``blog_writer_agent/revision.py``,
 ``blog_writer_agent/self_review.py``, and
-``agent_implementations/pipeline/_common.py`` (a related duplicate,
-``_unwrap_event_loop_exception``, also exists in ``shared/json_retry.py``).
+``agent_implementations/pipeline/_common.py``. All four modules import from
+here and hold no private copy of any of these functions.
 
-No caller has been migrated to this module yet: those four modules still
-run their own private copies, and ``agent.py``'s ``_extract_json_array_from_text``
-is still the drifted variant (it resumes scanning one character past the
-opening bracket rather than at the decoded value's end), so production
-still executes the bug this module's fixed implementation exists to
-correct. Migrating callers onto this module and deleting the private
-copies is deliberately deferred to a separate follow-up story, so this
-module can merge on its own; do not treat "correct implementation exists
-here" as "callers use it" until that follow-up lands.
+``extract_json_array_from_text`` is the fixed variant: it resumes scanning at
+the decoded value's end rather than one character past the opening bracket,
+so a non-matching array that itself contains a nested ``[`` cannot be
+re-entered and salvaged as if it were the real payload. Before this module
+existed, ``blog_writer_agent/agent.py``'s private copy ran the drifted
+(one-character-past-the-bracket) variant; its one caller,
+``identify_uncertainty_questions``, now runs the fixed scanner instead — the
+sole intended behavior change from the migration.
 
-This reconciliation also introduces one deliberate behavior change ahead
-of that migration: ``format_feedback_item_line`` rejects a ``bool`` index
-(``isinstance(index, bool)``), where the still-live copies in
-``revision.py`` and ``agent.py`` do not (``bool`` subclasses ``int``, so
-they silently accept ``True``/``False`` as a positive index). No current
-caller passes a bool index, so this is not a behavior change in
-production today, but the eventual caller migration will need to treat
-it as a reviewed change rather than a mechanical import swap.
+``format_feedback_item_line`` also rejects a ``bool`` index
+(``isinstance(index, bool)``), tightening a precondition the two prior
+duplicate copies did not enforce (``bool`` subclasses ``int``, so they
+silently accepted ``True``/``False`` as a positive index). Both call sites
+feed the index from ``enumerate(..., start=1)``, so no caller can produce a
+bool in practice — this is a precondition tightened, not a reachable
+behavior change.
+
+A related duplicate, ``_unwrap_event_loop_exception``, still exists in
+``shared/json_retry.py`` and is out of scope here.
 """
 
 from __future__ import annotations

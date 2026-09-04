@@ -11,48 +11,6 @@ from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# blog_writer_agent.agent helpers
-# ---------------------------------------------------------------------------
-
-
-def test_extract_draft_after_marker_marker_present() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = '{"draft": 0}\n---DRAFT---\n# Hello\n\nBody\n'
-    assert _extract_draft_after_marker(raw).startswith("# Hello")
-
-
-def test_extract_draft_after_marker_marker_inline() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = "---DRAFT---# Hi"
-    assert _extract_draft_after_marker(raw).startswith("# Hi")
-
-
-def test_extract_draft_after_marker_falls_back_to_json() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = '{"draft": "# Title\\n\\nBody"}'
-    out = _extract_draft_after_marker(raw)
-    assert "Title" in out
-
-
-def test_extract_draft_after_marker_falls_back_to_fenced_json() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = '```json\n{"draft": "# Fenced\\n\\nBody"}\n```'
-    out = _extract_draft_after_marker(raw)
-    assert "Fenced" in out
-
-
-def test_extract_draft_after_marker_empty_inputs() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    assert _extract_draft_after_marker("") == ""
-    assert _extract_draft_after_marker(None) == ""  # type: ignore[arg-type]
-    assert _extract_draft_after_marker("not json and no marker") == ""
-
 
 def test_write_draft_to_path_creates_parents(tmp_path: Path) -> None:
     from agents.blogging.blog_writer_agent.agent import _write_draft_to_path

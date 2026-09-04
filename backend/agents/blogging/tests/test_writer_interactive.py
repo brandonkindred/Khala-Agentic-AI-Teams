@@ -72,7 +72,7 @@ def test_identify_uncertainty_questions_markdown_link_before_array(monkeypatch) 
 
     Regression test: naive first-``[``/last-``]`` slicing would grab the
     Markdown link's brackets and fail to parse; the robust
-    ``_extract_json_array_from_text`` scan skips non-array ``[`` occurrences.
+    ``extract_json_array_from_text`` scan skips non-array ``[`` occurrences.
     """
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 

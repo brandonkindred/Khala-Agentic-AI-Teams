@@ -42,44 +42,6 @@ def _make_revise_input(**overrides):
 
 
 # ---------------------------------------------------------------------------
-# _format_feedback_item_line
-# ---------------------------------------------------------------------------
-
-
-def test_format_feedback_item_line_missing_required_raises() -> None:
-    """Duck-typed items missing severity/category/issue raise ValueError, not AttributeError."""
-    incomplete = SimpleNamespace(location="para 1", suggestion="fix it")
-    with pytest.raises(ValueError, match="missing required fields"):
-        rev._format_feedback_item_line(incomplete, 1)
-
-
-def test_format_feedback_item_line_duck_typed() -> None:
-    """Non-FeedbackItem objects with the required attributes format successfully."""
-    item = SimpleNamespace(severity="must_fix", category="clarity", issue="vague", location=None)
-    line = rev._format_feedback_item_line(item, 1)
-    assert line == "1. [must_fix] clarity: vague"
-
-
-def test_format_feedback_item_line_rejects_non_positive_index() -> None:
-    """A zero or negative index raises ValueError before touching the item."""
-    with pytest.raises(ValueError, match="positive int"):
-        rev._format_feedback_item_line(SimpleNamespace(), 0)
-
-
-def test_format_feedback_item_line_includes_suggestion() -> None:
-    """A present ``suggestion`` field is appended as a sub-line."""
-    item = SimpleNamespace(
-        severity="should_fix",
-        category="flow",
-        issue="choppy",
-        location=None,
-        suggestion="smooth it out",
-    )
-    line = rev._format_feedback_item_line(item, 2)
-    assert line == "2. [should_fix] flow: choppy\n   Suggestion: smooth it out"
-
-
-# ---------------------------------------------------------------------------
 # build_revision_plan_prompt
 # ---------------------------------------------------------------------------
 

@@ -71,6 +71,11 @@ def test_extract_draft_after_marker_falls_back_to_json_draft_key() -> None:
     assert tp.extract_draft_after_marker(raw) == "# Fallback title\n\nFallback body."
 
 
+def test_extract_draft_after_marker_falls_back_to_fenced_json_draft_key() -> None:
+    raw = '```json\n{"draft": "# Fenced\\n\\nBody"}\n```'
+    assert tp.extract_draft_after_marker(raw) == "# Fenced\n\nBody"
+
+
 def test_extract_draft_after_marker_rejects_non_string_draft_sentinel() -> None:
     assert tp.extract_draft_after_marker('{"draft": 0}') == ""
 
@@ -127,6 +132,18 @@ def test_extract_json_array_from_text_resumes_past_nested_bracket_in_non_match()
     text = '[[{"issue": "nested-decoy"}], "filler"] then later: [{"issue": "the real one"}]'
     result = tp.extract_json_array_from_text(text, required_keys=("issue",))
     assert result == [{"issue": "the real one"}]
+
+
+def test_extract_json_array_from_text_does_not_salvage_from_inside_decoded_value() -> None:
+    """After a successful decode of a non-matching array, the scanner must not
+    re-enter that already-decoded span looking for a nested match. The outer
+    array's own top-level elements are a list and a string (neither a dict),
+    so it correctly does not match required_keys — but its first element is
+    itself an array containing a dict with a truthy "issue" key. A real match
+    must not be salvaged from inside an already-rejected value.
+    """
+    text = '[[{"issue": "wrongly-salvaged", "fix": "z"}], "sibling"]'
+    assert tp.extract_json_array_from_text(text, required_keys=("issue",)) is None
 
 
 def test_extract_json_array_from_text_empty_array_fallback() -> None:
