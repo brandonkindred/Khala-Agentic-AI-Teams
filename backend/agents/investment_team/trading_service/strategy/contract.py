@@ -146,6 +146,37 @@ class StopAttachment(BaseModel):
     limit_offset: Optional[float] = None
     limit_offset_kind: Literal["abs", "bps"] = "abs"
     client_order_id: Optional[str] = None
+    # When set, materialization re-derives ``stop_price`` from the parent
+    # entry's ACTUAL fill price (``entry_fill_price * (1 ∓ entry_price_pct)``,
+    # sign per the parent's side) instead of trusting this attachment's
+    # ``stop_price`` preview verbatim. The preview is resolved at
+    # entry-EMISSION time off the signal bar's close (see
+    # ``resolve_exit_leg_attachments``'s ``ref_price``), which is only a
+    # forecast of where the entry will actually fill — on a gap
+    # (``fill_price != signal_close``) the preview and the true
+    # entry-anchored level diverge. This matters specifically for a leg
+    # whose trigger geometry is *also* independently recomputed elsewhere
+    # from the real fill price (e.g. the bar-close stop-loss evaluator's
+    # ``rule_compiler.stop_loss_level``, which the entry_price/market
+    # resting-stop-loss migration leaves active alongside this resting
+    # order) — without re-anchoring here, the two would disagree about
+    # where the stop sits. Unused (``None``) by every other leg kind/source,
+    # including bracket legs, which have no such competing live evaluator.
+    # Precondition: 0 < entry_price_pct < 1.0 (same bound as ExitLegSpec.pct /
+    # _is_resting_stop_loss); enforced in OrderRequest.validate_prices.
+    entry_price_pct: Optional[float] = None
+    # When set, the fill-simulator materializer (``_materialize_attached_exit_children``)
+    # uses this verbatim as the materialized child's ``reason`` instead of deriving
+    # the generic ``engine_exit:exit_leg_{idx}`` label — same override-else-default
+    # idiom as ``client_order_id`` above. Exists so a leg that carries semantic
+    # meaning beyond "generic attached exit" (e.g. a resting stop-loss routed
+    # through this rule-agnostic ``attached_exits`` plumbing rather than the
+    # rule-aware fixed ``attached_stop_loss`` bracket field) can still preserve its
+    # canonical ``engine_exit:<kind>`` attribution — several quality gates
+    # (``alignment_checks``, ``exit_rule_conformance``) match that literal exactly.
+    # Unused (``None``) by every other producer, including bracket legs (which
+    # never go through ``attached_exits`` at all).
+    reason: Optional[str] = None
 
 
 class LimitAttachment(BaseModel):
@@ -302,13 +333,21 @@ class OrderRequest(BaseModel):
     attached_take_profit: Optional[LimitAttachment] = None
     # Additional resting protective/target legs beyond the two fixed bracket
     # fields above, for entries with more than a stop-loss/take-profit pair
-    # (e.g. multiple independently-attached, non-bracket exits — #7509).
-    # Kept as a separate field rather than folding the bracket pair into it
-    # so existing bracket call sites/tests constructing requests via
-    # ``attached_stop_loss=``/``attached_take_profit=`` are unaffected. Not
-    # yet populated by any production dispatcher/DSL path — that migration
-    # is out of scope here; today only tests exercising the fill simulator
-    # directly populate this.
+    # (e.g. multiple independently-attached, non-bracket exits). Kept as a
+    # separate field rather than folding the bracket pair into it so existing
+    # bracket call sites/tests constructing requests via
+    # ``attached_stop_loss=``/``attached_take_profit=`` are unaffected.
+    # Populated in production by ``_EngineEntryDispatcher`` (in
+    # ``trading_service/service.py``) for a resting-eligible ``StopLossRule``
+    # (``basis="entry_price"``, ``style="market"``, ``0 < pct < 1.0`` — the
+    # exact predicate is the module-level ``_is_resting_stop_loss``, not a
+    # method of the dispatcher); other rule kinds/bases are not yet migrated
+    # onto this path and remain bar-close-only. The migrated rule kind is
+    # NOT resting-only, though: the bar-close evaluator still independently
+    # evaluates it too until a tracked follow-up adds the skip
+    # ``OcoBracketRule`` already gets at that chokepoint — see
+    # ``StopLossRule.style``'s docstring for the current, redundant-but-
+    # consistent (see ``StopAttachment.entry_price_pct``) dual-action state.
     attached_exits: List[Union[StopAttachment, LimitAttachment]] = Field(default_factory=list)
     parent_order_id: Optional[str] = None
     oco_group_id: Optional[str] = None
@@ -380,6 +419,11 @@ class OrderRequest(BaseModel):
                         f"{label} cannot set both trail_offset and limit_offset "
                         "(a trailing stop-limit child is not supported)"
                     )
+            if sl.entry_price_pct is not None and not (0.0 < sl.entry_price_pct < 1.0):
+                raise ValueError(
+                    f"{label}.entry_price_pct must satisfy 0 < entry_price_pct < 1.0, "
+                    f"got {sl.entry_price_pct!r}"
+                )
         # ``parent_order_id`` / ``oco_group_id`` are engine-internal: the
         # bracket materializer in ``FillSimulator`` calls
         # ``OrderBook.submit_attached`` which clones the request with these

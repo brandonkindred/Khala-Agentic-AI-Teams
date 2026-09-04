@@ -10,6 +10,9 @@ from agents.blogging.blog_copy_editor_agent import (
     CopyEditorOutput,
     FeedbackItem,
 )
+from agents.blogging.shared.system_prompt_assembly import (
+    build_headed_blogging_system_prompt_content,
+)
 
 from llm_service import CacheBreakpoint, DummyLLMClient
 
@@ -413,6 +416,68 @@ def test_init_includes_brand_spec_in_system_prompt_content() -> None:
     assert "Acme voice" in segment_text
     assert "--- WRITING STYLE GUIDE ---" in segment_text
     assert "Use short sentences." in segment_text
+
+
+def test_system_prompt_content_delegates_to_shared_helper_both_sections() -> None:
+    """agent._system_prompt_content equals build_headed_blogging_system_prompt_content
+    called with the same (stripped) inputs -- pins the constructor's wiring
+    (strip, then pass brand before writing) without re-encoding the helper's
+    own heading/join format, which is already covered by
+    test_system_prompt_assembly.py."""
+    brand, style = "  Acme voice: bold and direct.  \n", "\tUse short sentences.\n"
+
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content=brand,
+        writing_style_guide_content=style,
+    )
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_delegates_to_shared_helper_writing_guide_blank() -> None:
+    """Same wiring check as above, with writing_style_guide_content blank."""
+    brand, style = "Acme voice: bold and direct.", "   "
+
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content=brand,
+        writing_style_guide_content=style,
+    )
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_delegates_to_shared_helper_brand_spec_blank() -> None:
+    """Same wiring check as above, with brand_spec_content blank."""
+    brand, style = "", "Use short sentences."
+
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content=brand,
+        writing_style_guide_content=style,
+    )
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_is_none_when_both_sections_blank() -> None:
+    """Both brand_spec_content and writing_style_guide_content blank/whitespace-only
+    yields None, not an empty-text CacheBreakpoint -- matching
+    build_headed_blogging_system_prompt_content's documented empty-input case."""
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content="",
+        writing_style_guide_content="   ",
+    )
+
+    assert agent._system_prompt_content is None
 
 
 def test_build_editor_prompt_includes_optional_context() -> None:

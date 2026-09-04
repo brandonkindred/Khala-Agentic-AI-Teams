@@ -15,6 +15,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import type { OutOfScopeProposalItem } from '../../../models/integrations.model';
 import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
+import { LoadingSpinnerComponent } from '../../../shared/loading-spinner/loading-spinner.component';
+import { EmptyStateComponent } from '../../../shared/empty-state/empty-state.component';
 
 /**
  * Displays all unfiled out-of-scope issue proposals for a repository.
@@ -36,6 +38,8 @@ import { InlineBannerComponent } from '../../../shared/inline-banner/inline-bann
     MatProgressSpinnerModule,
     MatTooltipModule,
     InlineBannerComponent,
+    LoadingSpinnerComponent,
+    EmptyStateComponent,
   ],
   templateUrl: './out-of-scope-issues.component.html',
   styleUrl: './out-of-scope-issues.component.scss',
