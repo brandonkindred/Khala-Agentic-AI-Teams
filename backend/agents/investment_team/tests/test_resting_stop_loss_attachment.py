@@ -29,11 +29,15 @@ import pytest
 
 from investment_team.execution.bar_safety import BarSafetyAssertion
 from investment_team.execution.risk_filter import RiskFilter, RiskLimits
+from investment_team.models import BacktestConfig, BacktestExecutionDiagnostics
 from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
 )
 from investment_team.strategy_lab.executor.rule_compiler import PositionState, stop_loss_level
+from investment_team.strategy_lab.quality_gates.exit_rule_conformance import (
+    ExitRuleConformanceGate,
+)
 from investment_team.strategy_lab.spec_dsl import (
     BracketStopLeg,
     BracketTakeProfitLeg,
@@ -56,6 +60,7 @@ from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio
 from investment_team.trading_service.service import (
     TradingServiceResult,
+    _apply_fill_outcome_events,
     _EngineEntryDispatcher,
     _is_resting_stop_loss,
     _stop_loss_rule_to_leg_specs,
@@ -799,3 +804,116 @@ def test_resting_stop_matches_bracket_stop_leg_fill_behavior(
 
     assert resting_trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
     assert bracket_trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}bracket_sl"
+
+
+# ---------------------------------------------------------------------------
+# Coexistence with the bar-close evaluator: firing-count reconciliation.
+# The resting leg's materialization must credit its own firing count
+# (independent of whether the bar-close evaluator also fires that bar) so
+# ``exit_rule_conformance.py::_check_stop_loss`` never mistakes a below-floor
+# resting-order-only close for an unreconciled leak. See the migration
+# transitional-state comment on ``_EngineEntryDispatcher.__post_init__`` in
+# ``trading_service.service``.
+# ---------------------------------------------------------------------------
+
+
+def test_resting_stop_materialization_emits_engine_exit_attached_event() -> None:
+    """Acceptance criterion: materializing the resting entry_price/market
+    stop-loss leg emits an ``engine_exit_attached`` diagnostic event at
+    entry-fill time — independent of, and structurally earlier than, any
+    later trigger/fill — so the firing-count telemetry can credit this leg
+    even on a bar where the leg never fires."""
+    sim, order_book, _portfolio = _make_simulator()
+    req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="long", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+
+    # Bar 2: entry fills and the resting STOP child materializes — the
+    # attachment event fires here, not on a later triggering bar.
+    outcome = sim.process_bar(_bar("2024-01-02", open_price=100.0))
+
+    attached = [e for e in outcome.diagnostic_events if e.kind == "engine_exit_attached"]
+    assert len(attached) == 1
+    assert attached[0].symbol == "AAA"
+    assert attached[0].reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+    assert attached[0].order_type == OrderType.STOP.value
+
+
+def test_bracket_stop_leg_materialization_does_not_emit_engine_exit_attached() -> None:
+    """A fixed bracket stop leg (``attached_stop_loss``, no ``entry_price_pct``)
+    must NOT emit ``engine_exit_attached`` — that event is exclusively for the
+    resting entry_price/market stop-loss migration's leg (identified by
+    ``entry_price_pct``, per ``StopAttachment``'s own docstring). Otherwise a
+    bracket's stop would double-credit a firing counter it isn't governed by
+    (bracket rules are excluded from the bar-close evaluator's ``exit_rules``
+    entirely, so they have no reconciliation counterpart to begin with)."""
+    sim, order_book, _portfolio = _make_simulator()
+    bracket = OcoBracketRule(
+        stop_loss=BracketStopLeg(pct=0.05), take_profit=BracketTakeProfitLeg(pct=0.50)
+    )
+    bracket_stop, _take_profit = resolve_bracket_attachments(bracket, OrderSide.LONG, 100.0)
+    req = OrderRequest(
+        client_order_id="bracket-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        attached_stop_loss=bracket_stop,
+    )
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+
+    outcome = sim.process_bar(_bar("2024-01-02", open_price=100.0))
+
+    assert [e for e in outcome.diagnostic_events if e.kind == "engine_exit_attached"] == []
+
+
+def test_gap_through_resting_only_close_does_not_trip_conformance_gate_false_critical() -> None:
+    """The task's literal regression: a below-floor gap-through fill closed
+    entirely by the resting order (no bar-close evaluator involved — this
+    suite never instantiates ``_EngineExitDispatcher``) must not trip
+    ``ExitRuleConformanceGate``'s stop-loss leak critical. Before the
+    ``engine_exit_attached`` fix, this trade would have zero firing credit
+    (the resting path never touched ``exit_rule_firings_by_symbol``) despite
+    correctly carrying ``engine_exit:stop_loss`` (post-#7976) — a false
+    positive. Follows the same gap-through setup as
+    ``test_gap_through_bar_fills_resting_stop_at_worse_of_open_long``.
+    """
+    sim, order_book, _portfolio = _make_simulator()
+    rule = StopLossRule(pct=0.05, basis="entry_price")
+    req = _emit([rule], side="long", close=100.0)
+    order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+
+    # Bar 2: entry fills; resting STOP child materializes at 95 and emits
+    # its own "engine_exit_attached" credit.
+    attach_outcome = sim.process_bar(_bar("2024-01-02", open_price=100.0))
+
+    # Bar 3: open (90) has already gapped below the stop (95) — a
+    # resting-order-only, below-floor close with no bar-close evaluator
+    # in this test's setup to independently re-fire.
+    fill_outcome = sim.process_bar(
+        _bar("2024-01-03", open_price=90.0, high=91.0, low=88.0, close=89.0)
+    )
+    [trade] = fill_outcome.closed_trades
+    assert trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+    assert trade.return_pct < -5.0  # below the pct=0.05 nominal floor
+
+    diagnostics = BacktestExecutionDiagnostics()
+    _apply_fill_outcome_events(diagnostics, attach_outcome)
+    _apply_fill_outcome_events(diagnostics, fill_outcome)
+    assert diagnostics.exit_rule_firings_by_symbol.get("AAA", {}).get("stop_loss") == 1
+
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[rule],
+        trades=[trade],
+        diagnostics=diagnostics,
+        config=BacktestConfig(start_date="2024-01-01", end_date="2024-12-31", slippage_bps=0.0),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == [], [r.details for r in fails]

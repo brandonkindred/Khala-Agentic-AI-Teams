@@ -2044,14 +2044,35 @@ class _EngineEntryDispatcher:
         # transitional state for this migration step. The stale-continuation
         # guard in ``FillSimulator.process_bar`` drops a bar-close close that
         # arrives after the resting child already closed the position, so
-        # this does not double-close in practice, but it does still cost a
-        # redundant evaluator pass and a double-counted
-        # ``exit_rule_firings`` diagnostic on that bar. Deduplicating the two
-        # paths (mirroring the bracket's unconditional skip, or the
+        # this does not double-close in practice.
+        #
+        # The two paths' ``exit_rule_firings``/``exit_rule_firings_by_symbol``
+        # credit is coexistence-safe, not just double-close-safe:
+        # ``FillSimulator._materialize_stop_child`` emits its own
+        # ``"engine_exit_attached"`` diagnostic event at materialization time
+        # (``_apply_fill_outcome_events`` in this module translates it into
+        # the same counters ``_record_emission`` bumps for the bar-close
+        # evaluator), so the resting path now carries its own firing credit
+        # independent of whether the bar-close evaluator also fires that bar.
+        # This closes the gap the bar-close evaluator's zero visibility into
+        # resting orders would otherwise leave: a bar where the resting child
+        # alone closes the position (e.g. the bar-close evaluator skips
+        # evaluation for an unrelated reason) still credits the counter
+        # ``exit_rule_conformance.py::_check_stop_loss`` reconciles against.
+        # On a bar where BOTH paths fire, the counter is intentionally
+        # over-counted — per that gate's own existing tolerance principle
+        # (already applied to a limit-style "fired but unfilled" stop), an
+        # inflated firing count can only make the leak check more lenient,
+        # never trip a false critical. Materialization-time counting is
+        # similarly one-directional-safe: an entry that gets a resting stop
+        # attached but never triggers merely inflates the denominator
+        # without a corresponding trade. Deduplicating the two paths'
+        # *evaluation* (mirroring the bracket's unconditional skip, or the
         # order-book-aware ``exclude_resting_limit_stop`` mechanism the
-        # limit-style stop uses) is reserved for a later step of this same
-        # migration, once the fill-semantics verification step has settled
-        # exactly when the resting child is and isn't in flight.
+        # limit-style stop uses) — as opposed to reconciling their
+        # diagnostics, which this does — is reserved for a later step of
+        # this same migration, once the fill-semantics verification step
+        # has settled exactly when the resting child is and isn't in flight.
         #
         # This redundancy is safe only because the two paths are also kept
         # in PRICE agreement: the resting child's ``stop_price`` is resolved
@@ -2502,7 +2523,10 @@ def _apply_fill_outcome_events(
     - ``rejected`` events + ``orders_rejected`` / ``orders_rejection_reasons``
       bumps for fill-side rejections (``zero_fill_qty``,
       ``risk_gate:<reason>``, ``insufficient_capital``,
-      ``same_side_order_ignored``).
+      ``same_side_order_ignored``);
+    - ``engine_exit_attached`` — a resting stop-loss leg materialized at
+      entry-fill — into ``exit_rule_firings`` / ``exit_rule_firings_by_symbol``
+      / ``exit_rule_firings_by_basis``, mirroring ``_record_emission``.
 
     Fill-side rejections happen *after* the order was accepted, so they
     don't decrement ``orders_accepted``. ``_finalize_diagnostics`` already
@@ -2578,6 +2602,31 @@ def _apply_fill_outcome_events(
             diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
             sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(ev.symbol, {})
             sym_fills[kind] = sym_fills.get(kind, 0) + 1
+        elif ev.kind == "engine_exit_attached":
+            # A resting stop-loss leg (the entry_price/market migration's
+            # exclusive marker — see ``FillSimulator._materialize_stop_child``)
+            # was attached at entry-fill time. The bar-close evaluator's own
+            # ``_record_emission`` never sees this leg (it has zero
+            # visibility into resting orders — see the transitional-state
+            # comment on ``_EngineEntryDispatcher.__post_init__`` below), so
+            # without this branch a resting-order-only close would carry
+            # zero firing credit and could trip
+            # ``exit_rule_conformance.py::_check_stop_loss``'s below-floor
+            # leak check as a false positive. Mirrors ``_record_emission``'s
+            # per-symbol increment shape exactly, just triggered by
+            # materialization instead of bar-close emission — safe even
+            # when the bar-close evaluator *also* fires on the same bar
+            # (a known, deliberate double-count; an inflated firing count
+            # can only make the leak check more lenient, never trip a false
+            # critical).
+            kind = _engine_exit_kind(ev.reason)
+            diagnostics.exit_rule_firings[kind] = diagnostics.exit_rule_firings.get(kind, 0) + 1
+            sym_firings = diagnostics.exit_rule_firings_by_symbol.setdefault(ev.symbol, {})
+            sym_firings[kind] = sym_firings.get(kind, 0) + 1
+            basis_label = f"{kind}:entry_price"
+            diagnostics.exit_rule_firings_by_basis[basis_label] = (
+                diagnostics.exit_rule_firings_by_basis.get(basis_label, 0) + 1
+            )
 
 
 class _StreamingEquityBuffer:

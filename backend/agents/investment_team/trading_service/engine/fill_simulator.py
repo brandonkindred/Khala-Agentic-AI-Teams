@@ -85,7 +85,7 @@ class FillDiagnosticEvent:
     what happened on this bar; the consumer picks the diagnostic shape.
     """
 
-    kind: str  # "entry_filled" | "exit_filled" | "rejected" | "stop_limit_unfilled" | "engine_exit_filled"
+    kind: str  # "entry_filled" | "exit_filled" | "rejected" | "stop_limit_unfilled" | "engine_exit_filled" | "engine_exit_attached"
     order_id: str
     timestamp: str
     symbol: str
@@ -498,12 +498,12 @@ class FillSimulator:
                     continue
 
             if is_partial_entry_continuation:
-                fill, rejection = self._continue_entry(po, bar, terms)
+                fill, rejection = self._continue_entry(po, bar, terms, events)
                 if fill is not None:
                     entry_fills.append(fill)
                 self._record_entry_event(events, po, bar, fill, rejection)
             elif is_entry:
-                fill, rejection = self._fill_entry(po, bar, terms)
+                fill, rejection = self._fill_entry(po, bar, terms, events)
                 if fill is not None:
                     entry_fills.append(fill)
                 self._record_entry_event(events, po, bar, fill, rejection)
@@ -593,6 +593,7 @@ class FillSimulator:
         po: PendingOrder,
         bar: Bar,
         terms: FillTerms,
+        events: List[FillDiagnosticEvent],
     ) -> Tuple[Optional[Fill], Optional[str]]:
         """First fill against an entry order. Opens the Position.
 
@@ -737,7 +738,9 @@ class FillSimulator:
         # mirrored block in ``_continue_entry`` so the children are sized to
         # the *cumulative* position rather than just the first slice.
         if req.has_attached_exits and po.order_id not in self.order_book:
-            self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=filled_qty)
+            self._materialize_attached_exit_children(
+                po=po, bar=bar, filled_qty=filled_qty, events=events
+            )
 
         return (
             Fill(
@@ -761,6 +764,7 @@ class FillSimulator:
         po: PendingOrder,
         bar: Bar,
         terms: FillTerms,
+        events: List[FillDiagnosticEvent],
     ) -> Tuple[Optional[Fill], Optional[str]]:
         """Apply a follow-on entry fill against an already-open position.
 
@@ -915,7 +919,9 @@ class FillSimulator:
         # bracket entry would silently run unprotected once the parent
         # eventually completes.
         if req.has_attached_exits and po.order_id not in self.order_book:
-            self._materialize_attached_exit_children(po=po, bar=bar, filled_qty=pos.original_qty)
+            self._materialize_attached_exit_children(
+                po=po, bar=bar, filled_qty=pos.original_qty, events=events
+            )
 
         return (
             Fill(
@@ -1531,6 +1537,7 @@ class FillSimulator:
         po: PendingOrder,
         bar: Bar,
         filled_qty: float,
+        events: Optional[List[FillDiagnosticEvent]] = None,
     ) -> None:
         """Submit every attached ``StopAttachment`` / ``LimitAttachment`` leg
         (the fixed ``attached_stop_loss``/``attached_take_profit`` bracket
@@ -1586,6 +1593,7 @@ class FillSimulator:
                 entry_fill_price=entry_fill_price,
                 sl=req.attached_stop_loss,
                 reason=f"{ENGINE_EXIT_REASON_PREFIX}bracket_sl",
+                events=events,
             )
         if req.attached_take_profit is not None:
             self._materialize_limit_child(
@@ -1626,6 +1634,7 @@ class FillSimulator:
                     sl=leg,
                     reason=leg.reason or f"{ENGINE_EXIT_REASON_PREFIX}exit_leg_{idx}",
                     default_client_order_id=f"{req.client_order_id}_exit{idx}",
+                    events=events,
                 )
             else:
                 self._materialize_limit_child(
@@ -1653,6 +1662,7 @@ class FillSimulator:
         sl: StopAttachment,
         reason: str,
         default_client_order_id: Optional[str] = None,
+        events: Optional[List[FillDiagnosticEvent]] = None,
     ) -> None:
         """Submit one ``StopAttachment`` leg as a resting OCO child.
 
@@ -1676,7 +1686,15 @@ class FillSimulator:
         ``req.side``, never from ``child_side``.
         Postconditions: exactly one resting STOP/STOP_LIMIT/TRAILING_STOP
         child is submitted to the order book, tagged with ``oco_group_id``
-        and ``parent_order_id=po.order_id``.
+        and ``parent_order_id=po.order_id``. When ``events`` is provided and
+        ``sl.entry_price_pct`` is set (the resting entry_price/market
+        stop-loss migration's exclusive marker — see ``StopAttachment``),
+        an ``"engine_exit_attached"`` diagnostic event is appended so the
+        firing-count telemetry credits this resting leg at materialization
+        time, mirroring the bar-close evaluator's own emission-time credit
+        (``_record_emission`` in ``trading_service.service``) — see
+        ``exit_rule_conformance.py::_check_stop_loss``, which reconciles
+        below-floor ``engine_exit:stop_loss`` trades against that counter.
         """
         # ``sl.entry_price_pct`` set means the preview ``stop_price`` (resolved
         # at entry-emission time off the signal bar's close) may have gapped
@@ -1748,6 +1766,18 @@ class FillSimulator:
             oco_group_id=oco_group_id,
         )
         sl_child.working_against_entry_order_id = po.order_id
+        if events is not None and sl.entry_price_pct is not None:
+            events.append(
+                FillDiagnosticEvent(
+                    kind="engine_exit_attached",
+                    order_id=sl_child.order_id,
+                    timestamp=bar.timestamp,
+                    symbol=req.symbol,
+                    side=child_side.value,
+                    order_type=sl_order_type.value,
+                    reason=reason,
+                )
+            )
         if is_trailing and entry_fill_price is not None:
             # Pre-seed the ratchet so the first eligible bar after
             # entry trails from where we filled (rather than that
