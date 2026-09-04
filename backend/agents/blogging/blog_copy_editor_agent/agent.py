@@ -12,6 +12,10 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.json_retry import run_json_gate
+from agents.blogging.shared.system_prompt_assembly import (
+    build_headed_blogging_system_prompt_content,
+    build_system_prompt_with_content,
+)
 from agents.blogging.shared.word_count import count_words
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
@@ -65,12 +69,12 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         super().__init__(llm_client)
         writing = (writing_style_guide_content or "").strip()
         brand = (brand_spec_content or "").strip()
-        parts: list[str] = []
-        if brand:
-            parts.append("--- BRAND SPEC ---\n" + brand)
-        if writing:
-            parts.append("--- WRITING STYLE GUIDE ---\n" + writing)
-        self._style_prompt = "\n\n".join(parts)
+        # Cacheable system-content segment carrying the (headed) brand spec and
+        # writing style guide, or None when both are blank. Delivered via
+        # run_json_gate's system_prompt (see _invoke_editor_llm) rather than
+        # embedded as plain text in the user prompt, so a stable prefix isn't
+        # re-billed on every turn.
+        self._system_prompt_content = build_headed_blogging_system_prompt_content(brand, writing)
 
     def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> bool:
         """
@@ -105,15 +109,16 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         self,
         copy_editor_input: CopyEditorInput,
         draft: str,
-        style_guide_text: str,
     ) -> str:
         """
         Assemble the per-request editor context from length intent, author/context
-        signals, the style guide, the content plan, and the draft itself.
+        signals, the content plan, and the draft itself.
 
-        The base instructions (``COPY_EDITOR_PROMPT``) are delivered once via the
-        Agent's ``system_prompt`` in :meth:`_invoke_editor_llm`, so they are
-        intentionally not repeated here.
+        The base instructions (``COPY_EDITOR_PROMPT``) and, when a brand/style
+        segment was attached at construction, the brand/style guide text
+        itself are delivered via the Agent's ``system_prompt`` in
+        :meth:`_invoke_editor_llm` (as a cached segment), so neither is
+        repeated here.
 
         Preconditions:
             - draft is the stripped, non-empty draft text to review.
@@ -123,6 +128,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
             - Word count is computed via :func:`count_words`, a naive
               whitespace-token heuristic (not a linguistic word count).
         """
+        has_style_guidance = self._system_prompt_content is not None
         actual_word_count = count_words(draft)
         target_word_count = copy_editor_input.target_word_count
         soft_min = copy_editor_input.soft_min_words
@@ -166,18 +172,14 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         if context_parts:
             context_parts.append("")
 
-        if style_guide_text:
+        if has_style_guidance:
             context_parts.extend(
                 [
                     "---",
                     "EVALUATION INSTRUCTION:",
                     "---",
-                    "Evaluate the draft against the style guide below. Apply every rule in that guide.",
-                    "",
-                    "---",
-                    "STYLE GUIDE (evaluate the draft against these rules):",
-                    "---",
-                    style_guide_text,
+                    "Evaluate the draft against the brand spec and/or writing style guidance "
+                    "provided in your system instructions. Apply every rule present there.",
                     "",
                 ]
             )
@@ -233,7 +235,11 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         this method does not re-implement them.
 
         Args:
-            prompt: Fully assembled per-request editor context (style/brand/draft).
+            prompt: Fully assembled per-request editor context (length intent,
+                guidance signals, content plan, draft). Brand/style guidance is
+                delivered via the system prompt (``self._system_prompt_content``,
+                see the ``build_system_prompt_with_content`` call below), not
+                embedded here.
             on_llm_request: Optional progress callback invoked once before the helper
                 runs (status text: "Reviewing draft for style and clarity...").
 
@@ -263,7 +269,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
 
         data = run_json_gate(
             self._model,
-            COPY_EDITOR_PROMPT,
+            build_system_prompt_with_content(COPY_EDITOR_PROMPT, self._system_prompt_content),
             prompt + COPY_EDITOR_SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
@@ -478,17 +484,17 @@ class BlogCopyEditorAgent(_BlogAgentBase):
                 )
             return output
 
-        style_guide_text = self._style_prompt
+        has_style_guidance = self._system_prompt_content is not None
 
         logger.info(
-            "Copy editing: draft len=%s, style_guide len=%s",
+            "Copy editing: draft len=%s, has_style_guidance=%s",
             len(draft),
-            len(style_guide_text),
+            has_style_guidance,
         )
 
         actual_word_count = count_words(draft)
 
-        prompt = self._build_editor_prompt(copy_editor_input, draft, style_guide_text)
+        prompt = self._build_editor_prompt(copy_editor_input, draft)
         data = self._invoke_editor_llm(prompt, on_llm_request=on_llm_request)
 
         raw_summary = data.get("summary")

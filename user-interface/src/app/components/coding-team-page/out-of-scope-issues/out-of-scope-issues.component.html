@@ -15,19 +15,14 @@
   }
 
   @if (loading) {
-    <div class="oos-issues__loading">
-      <mat-spinner diameter="24"></mat-spinner>
-      <span>Loading out-of-scope issues...</span>
-    </div>
+    <app-loading-spinner [diameter]="24" message="Loading out-of-scope issues…" />
   } @else if (proposals.length === 0) {
-    <div class="oos-issues__empty">
-      <mat-icon>check_circle_outline</mat-icon>
-      <span>No unfiled out-of-scope issues found.</span>
+    <app-empty-state icon="check_circle_outline" title="No unfiled out-of-scope issues found." [headingLevel]="3">
       <button mat-button type="button" (click)="onRefresh()">
         <mat-icon>refresh</mat-icon>
         Refresh
       </button>
-    </div>
+    </app-empty-state>
   } @else {
     <!-- Toolbar: Select All + File button -->
     <div class="oos-issues__toolbar">
@@ -72,22 +67,36 @@
           <mat-checkbox
             [checked]="isSelected(p)"
             (change)="toggleSelection(p)"
-            [attr.aria-label]="'Select: ' + p.description"
+            [aria-label]="'Select: ' + p.description"
             class="oos-issue__checkbox"
           ></mat-checkbox>
 
           <div class="oos-issue__content">
             <div class="oos-issue__meta">
-              <span class="oos-chip oos-chip--sev-{{ p.severity }}" [matTooltip]="'Severity: ' + p.severity">
+              <span
+                class="oos-chip oos-chip--sev-{{ p.severity }}"
+                [attr.aria-label]="'Severity: ' + p.severity"
+                [matTooltip]="'Severity: ' + p.severity"
+              >
                 {{ p.severity }}
               </span>
-              <span class="oos-chip oos-chip--category" [matTooltip]="'Category: ' + p.category">
+              <span
+                class="oos-chip oos-chip--category"
+                [attr.aria-label]="'Category: ' + p.category"
+                [matTooltip]="'Category: ' + p.category"
+              >
                 {{ p.category }}
               </span>
               @if (proposalLocation(p); as loc) {
                 <code class="oos-issue__loc">{{ loc }}</code>
               }
-              <span class="oos-issue__pr" matTooltip="Found during review of this PR">
+              <span
+                class="oos-issue__pr"
+                role="img"
+                tabindex="0"
+                [attr.aria-label]="'PR #' + p.pr_number + ' — Found during review of this PR'"
+                matTooltip="Found during review of this PR"
+              >
                 PR #{{ p.pr_number }}
               </span>
             </div>

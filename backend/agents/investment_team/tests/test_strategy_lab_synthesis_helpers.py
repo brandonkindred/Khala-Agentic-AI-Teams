@@ -449,6 +449,95 @@ def test_reachability_probe_runs_on_changed_signature(monkeypatch) -> None:
     assert any(g.gate_name == "predicate_reachability" for g in all_gate_results)
 
 
+def test_reachability_probe_also_records_starvation_findings_on_changed_signature(
+    monkeypatch,
+) -> None:
+    """A changed signature also runs the pairwise co-occurrence check and
+    records its structurally-starved findings alongside the dead-rule ones —
+    the new finding kind must be visible in the same run's gate results, not
+    require a separate wiring step."""
+    orch = _orch()
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe, "probe", lambda spec, market_data: "reachability"
+    )
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe,
+        "to_gate_results",
+        lambda reachability, spec, phase: [
+            _gate("predicate_reachability", passed=True, severity="info")
+        ],
+    )
+    pair_calls: List[tuple] = []
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe,
+        "probe_pairs",
+        lambda spec, market_data: pair_calls.append((spec, market_data)) or "pairs",
+    )
+    starvation_calls: List[tuple] = []
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe,
+        "to_starvation_gate_results",
+        lambda pairs, spec, phase: (
+            starvation_calls.append((pairs, spec, phase))
+            or [_gate("predicate_reachability_probe", passed=False, severity="critical")]
+        ),
+    )
+    spec = _spec()
+    all_gate_results: List[QualityGateResult] = []
+
+    orch._run_synthesis_reachability_probe(
+        spec=spec,
+        market_data={"QQQ": []},
+        round_num=0,
+        last_reachability_sig=None,
+        all_gate_results=all_gate_results,
+    )
+
+    assert len(pair_calls) == 1
+    assert pair_calls[0] == (spec, {"QQQ": []})
+    assert len(starvation_calls) == 1
+    assert starvation_calls[0][0] == "pairs"
+    assert starvation_calls[0][2] == "synthesis"
+    starved = [g for g in all_gate_results if g.gate_name == "predicate_reachability_probe"]
+    assert starved and starved[0].severity == "critical"
+    # Still recorded alongside the (distinct) dead-rule gate name from this round.
+    assert any(g.gate_name == "predicate_reachability" for g in all_gate_results)
+
+
+def test_reachability_probe_noop_cases_never_call_pairwise_collaborators(monkeypatch) -> None:
+    """The two existing no-op guards (no market data yet / unchanged
+    signature) must short-circuit before EITHER collaborator pair runs —
+    dead-rule and starvation reporting share one signature-gated re-probe."""
+    orch = _orch()
+    for name in ("probe", "probe_pairs"):
+
+        def _forbidden(*_a, _name=name, **_k):
+            raise AssertionError(f"{_name} must not be called")
+
+        monkeypatch.setattr(orch.predicate_reachability_probe, name, _forbidden)
+
+    orch._run_synthesis_reachability_probe(
+        spec=_spec(),
+        market_data=None,
+        round_num=0,
+        last_reachability_sig=None,
+        all_gate_results=[],
+    )
+
+    spec = _spec()
+    prior_sig = (
+        tuple(str(getattr(r, "when", r)) for r in (spec.entry_rules or [])),
+        bool(spec.requires_custom_code),
+    )
+    orch._run_synthesis_reachability_probe(
+        spec=spec,
+        market_data={"QQQ": []},
+        round_num=0,
+        last_reachability_sig=prior_sig,
+        all_gate_results=[],
+    )
+
+
 # ---------------------------------------------------------------------------
 # _run_synthesis_execution
 # ---------------------------------------------------------------------------

@@ -98,18 +98,6 @@ def test_writer_agent_raises_on_none_llm() -> None:
         BlogWriterAgent(llm_client=None)
 
 
-def test_writer_agent_style_prompt_merge() -> None:
-    from .conftest import make_writer_agent
-
-    a = make_writer_agent(
-        writing_style_guide_content="Style A",
-        brand_spec_content="Brand B",
-    )
-    assert "BRAND SPEC" in a._style_prompt
-    assert "Brand B" in a._style_prompt
-    assert "WRITING STYLE GUIDE" in a._style_prompt
-
-
 def test_writer_agent_deterministic_self_check() -> None:
     from .conftest import make_writer_agent
 

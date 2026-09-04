@@ -33,7 +33,7 @@ def _make_agent(style: str = "Style", brand: str = "Brand") -> BlogCopyEditorAge
 
 def test_build_prompt_includes_band_and_context_signals() -> None:
     """Soft band, audience, tone, human feedback, and prior feedback all land in the prompt."""
-    agent = _make_agent()
+    agent = _make_agent(style="SENTINEL_STYLE_TEXT", brand="SENTINEL_BRAND_TEXT")
     prev = [
         FeedbackItem(
             category="clarity",
@@ -55,7 +55,7 @@ def test_build_prompt_includes_band_and_context_signals() -> None:
         length_guidance="aim for ~1000 words",
     )
 
-    prompt = agent._build_editor_prompt(inp, draft="Real draft body.", style_guide_text="Style")
+    prompt = agent._build_editor_prompt(inp, draft="Real draft body.")
 
     assert "soft band ~800–1200 words" in prompt
     assert "CONTENT PROFILE / LENGTH GUIDANCE" in prompt
@@ -65,11 +65,14 @@ def test_build_prompt_includes_band_and_context_signals() -> None:
     assert "Make it punchier" in prompt
     assert "PREVIOUS PASS FEEDBACK" in prompt
     assert "1. [should_fix] clarity [intro]: Opening is vague" in prompt
-    # Style-guide branch present, draft appended at the end.
-    assert "STYLE GUIDE (evaluate the draft against these rules):" in prompt
+    # Style-guide branch present (guide text itself lives in the system prompt, not here).
+    assert "Evaluate the draft against the brand spec and/or writing style guidance" in prompt
     assert prompt.rstrip().endswith("Real draft body.")
     # Base instructions live only in the Agent system prompt — not duplicated here.
     assert COPY_EDITOR_PROMPT not in prompt
+    # Brand/style text itself is delivered via the system prompt, not embedded here.
+    assert "SENTINEL_STYLE_TEXT" not in prompt
+    assert "SENTINEL_BRAND_TEXT" not in prompt
 
 
 def test_build_prompt_no_band_uses_plain_target_line() -> None:
@@ -77,21 +80,21 @@ def test_build_prompt_no_band_uses_plain_target_line() -> None:
     agent = _make_agent()
     inp = CopyEditorInput(draft="ignored", target_word_count=750)
 
-    prompt = agent._build_editor_prompt(inp, draft="Body.", style_guide_text="Style")
+    prompt = agent._build_editor_prompt(inp, draft="Body.")
 
     assert "Target word count: 750 words (draft is currently 1 words)." in prompt
     assert "soft band" not in prompt
 
 
 def test_build_prompt_no_style_guide_branch() -> None:
-    """Empty style guide yields the 'No style guidelines were provided' instruction."""
+    """No style guide yields the 'No style guidelines were provided' instruction."""
     agent = _make_agent(style="", brand="")
     inp = CopyEditorInput(draft="ignored")
 
-    prompt = agent._build_editor_prompt(inp, draft="Body.", style_guide_text="")
+    prompt = agent._build_editor_prompt(inp, draft="Body.")
 
     assert "No style guidelines were provided." in prompt
-    assert "STYLE GUIDE (evaluate the draft against these rules):" not in prompt
+    assert "Evaluate the draft against the brand spec and/or writing style guidance" not in prompt
 
 
 def test_build_prompt_content_plan_is_included_in_full() -> None:
@@ -100,7 +103,7 @@ def test_build_prompt_content_plan_is_included_in_full() -> None:
     plan = "P" * 13000
     inp = CopyEditorInput(draft="ignored", content_plan_context=plan)
 
-    prompt = agent._build_editor_prompt(inp, draft="Body.", style_guide_text="Style")
+    prompt = agent._build_editor_prompt(inp, draft="Body.")
 
     assert "CONTENT PLAN (align feedback with this structure and section intent):" in prompt
     assert plan in prompt
@@ -280,8 +283,22 @@ def test_invoke_llm_success_and_calls_progress_hook(monkeypatch) -> None:
 
 
 def test_invoke_llm_delivers_base_instructions_as_system_prompt(monkeypatch) -> None:
-    """The base instructions reach the model once, via the Agent's system prompt."""
+    """The base instructions reach the model, combined with the cached brand/style segment."""
     agent = _make_agent()
+    captured = _patch_agent(
+        monkeypatch, lambda p: json.dumps({"summary": "ok", "feedback_items": []})
+    )
+
+    agent._invoke_editor_llm("just the context")
+
+    assert (
+        captured["system_prompt"] == [{"text": COPY_EDITOR_PROMPT}] + agent._system_prompt_content
+    )
+
+
+def test_invoke_llm_system_prompt_is_plain_string_without_style_guide(monkeypatch) -> None:
+    """With no brand/style configured, the system prompt stays a plain string."""
+    agent = _make_agent(style="", brand="")
     captured = _patch_agent(
         monkeypatch, lambda p: json.dumps({"summary": "ok", "feedback_items": []})
     )

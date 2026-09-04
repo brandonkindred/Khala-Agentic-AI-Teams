@@ -1,9 +1,11 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
+import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { provideRouter } from '@angular/router';
+import { MatTooltip } from '@angular/material/tooltip';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
@@ -110,5 +112,36 @@ describe('CodeReviewDashboardComponent a11y', () => {
     expect(host.querySelector('.cr-pull-detail')).toBeTruthy();
     expect(host.querySelectorAll('.cr-reviews-table tbody tr').length).toBe(1);
     await expectNoAxeViolations(host);
+  }, 15000);
+
+  it('exposes the repo description as a tooltip on the repo row button, with no nested tab stops', async () => {
+    const fixture = await createFixture();
+    const component = fixture.componentInstance;
+    component.toggleRepo(component.repos[0]);
+    fixture.detectChanges();
+
+    const rowDebugEl = fixture.debugElement.query(By.css('.cr-repo-row'));
+    expect((rowDebugEl.nativeElement as HTMLElement).tagName).toBe('BUTTON');
+    // Pinned to the literal description string (not repo.description) so this
+    // assertion independently catches a wrongly hoisted tooltip rather than trivially
+    // agreeing with whatever the fixture currently returns.
+    expect(rowDebugEl.injector.get(MatTooltip).message).toBe('Widget factory');
+    expect((rowDebugEl.nativeElement as HTMLElement).querySelectorAll('[tabindex]').length).toBe(0);
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('binds no tooltip message on the repo row button when the repo has no description', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([{ ...REPO, description: null }]));
+    const fixture = await createFixture();
+
+    const rowDebugEl = fixture.debugElement.query(By.css('.cr-repo-row'));
+    // The button still carries the matTooltip binding (coalesced from null to ''), and
+    // MatTooltip's own empty-message handling is what keeps this a no-op tooltip rather
+    // than a separate guard on the binding itself.
+    expect(rowDebugEl.injector.get(MatTooltip).message).toBe('');
+    expect((rowDebugEl.nativeElement as HTMLElement).querySelectorAll('[tabindex]').length).toBe(0);
+
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });

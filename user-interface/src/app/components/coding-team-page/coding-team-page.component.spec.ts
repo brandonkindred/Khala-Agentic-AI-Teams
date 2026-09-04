@@ -282,6 +282,31 @@ describe('CodingTeamPageComponent', () => {
     });
   });
 
+  describe('empty states render in a role="status" region (no repo access / no open issues)', () => {
+    it('renders "no repository access" in a role="status" region with its icon hidden from AT', async () => {
+      integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      const empty = fixture.nativeElement.querySelector('.github-empty');
+      expect(empty).not.toBeNull();
+      expect(empty?.getAttribute('role')).toBe('status');
+      expect(empty?.textContent).toContain('The personal access token has no repository access.');
+      expect(empty?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    it('renders "no open issues" in a role="status" region with its icon hidden from AT', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      const empty = fixture.nativeElement.querySelector('.github-empty');
+      expect(empty).not.toBeNull();
+      expect(empty?.getAttribute('role')).toBe('status');
+      expect(empty?.textContent).toContain('No open issues found.');
+      expect(empty?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
+    });
+  });
+
   it('auto-loads the accessible repositories on init when GitHub is configured', async () => {
     await setup();
     expect(integrationsSpy.getGitHubConfig).toHaveBeenCalled();
@@ -819,8 +844,9 @@ describe('CodingTeamPageComponent', () => {
       const rows = Array.from(el.querySelectorAll('.github-issue-row')) as HTMLElement[];
       const selectedRow = rows.find((r) => r.getAttribute('aria-expanded') === 'true');
       expect(selectedRow?.textContent).toContain('Issue 2');
-      expect(selectedRow?.getAttribute('aria-controls')).toBe('confirm-panel-2');
-      const panel = el.querySelector('#confirm-panel-2');
+      const expectedId = component.confirmPanelId(2);
+      expect(selectedRow?.getAttribute('aria-controls')).toBe(expectedId);
+      const panel = el.querySelector(`[id="${expectedId}"]`);
       expect(panel).not.toBeNull();
       expect(panel?.classList.contains('github-confirm-panel')).toBe(true);
     });
@@ -1135,6 +1161,20 @@ describe('CodingTeamPageComponent', () => {
       );
       expect(component.repoRowTooltip({ ...REPO, description: '  Padded widget factory.  ' })).toBe(
         'Padded widget factory. — Open issues and pull requests reported by GitHub'
+      );
+    });
+  });
+
+  describe('issueRowTooltip', () => {
+    it('returns the title alone when the issue is not in progress', async () => {
+      await setup();
+      expect(component.issueRowTooltip({ title: 'Fix the thing', inProgress: false })).toBe('Fix the thing');
+    });
+
+    it('appends the in-progress clause when the issue is in progress', async () => {
+      await setup();
+      expect(component.issueRowTooltip({ title: 'Fix the thing', inProgress: true })).toBe(
+        'Fix the thing — The coding team is already working on this issue'
       );
     });
   });
@@ -1558,11 +1598,14 @@ describe('CodingTeamPageComponent', () => {
   // -------------------------------------------------------------------------
 
   describe('runs panel', () => {
-    it('renders an empty state when there are no runs', async () => {
+    it('renders an empty state when there are no runs, in a role="status" region', async () => {
       await setup();
       await flushAsync();
       showView('jobs');
-      expect(fixture.nativeElement.querySelector('.jobs-panel__empty')).not.toBeNull();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('app-empty-state')).not.toBeNull();
+      const statusRegions = Array.from(el.querySelectorAll('[role="status"]'));
+      expect(statusRegions.some((r) => r.textContent?.includes('No runs yet'))).toBe(true);
     });
 
     it('renders Running and Recent sections without a delete button', async () => {
@@ -2365,6 +2408,151 @@ describe('CodingTeamPageComponent', () => {
       component.addressPrComments(ghPull(7));
       expect(component.pullError).toBe('nope');
       expect(component.isAddressingPr(ghPull(7))).toBe(false);
+    });
+  });
+
+  describe('focus management (issue #7918)', () => {
+    it('selectIssue moves focus into the confirm panel, not left on the row button', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+        const el: HTMLElement = fixture.nativeElement;
+        const row = el.querySelector<HTMLButtonElement>('.github-issue-row');
+        expect(row).not.toBeNull();
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        const panel = el.querySelector('.github-confirm-panel');
+        expect(panel).not.toBeNull();
+        expect(panel?.contains(document.activeElement)).toBe(true);
+        expect(document.activeElement).not.toBe(row);
+
+        // The panel's accessible name comes from its heading via aria-labelledby, not subtree
+        // fallback on a plain div — assert the wiring actually points at the rendered heading.
+        const labelledBy = panel?.getAttribute('aria-labelledby');
+        expect(labelledBy).toBe(component.confirmPanelHeadingId(issue.number));
+        const heading = el.querySelector(`[id="${labelledBy}"]`);
+        expect(heading?.tagName).toBe('H3');
+        expect(heading?.textContent).toContain('Start AI coding on this issue?');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancelSelection returns focus to the originating issue row button', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+        const el: HTMLElement = fixture.nativeElement;
+        // Capture the row before selecting — aria-controls is only present on the selected row,
+        // so it can't be used to relocate the row once cancelSelection() deselects it.
+        const row = el.querySelector<HTMLButtonElement>('.github-issue-row');
+        expect(row).not.toBeNull();
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        component.cancelSelection();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        expect(document.activeElement).toBe(row);
+        expect(row?.getAttribute('aria-controls')).toBeNull();
+        expect(el.querySelector('.github-confirm-panel')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancels the pending focus timer on destroy', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      component.selectIssue(component.issues[0]);
+      expect(component['focusTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['focusTimer']).toBeNull();
+    });
+
+    it('cancelSelection falls back to the issue list when the originating row has been filtered out', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0]; // "Issue 1"
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        // Narrow the search to a term that excludes the selected issue's own row, mirroring
+        // what a real keystroke does (component.onIssueSearchChange()).
+        component.issueSearch = 'Issue 2';
+        component.onIssueSearchChange();
+        fixture.detectChanges();
+        const el: HTMLElement = fixture.nativeElement;
+        expect(el.querySelector(`[data-issue-number="${component.issueRowKey(issue.number)}"]`)).toBeNull();
+
+        // The row lookup can't find its target, so focus falls back to .github-issues-list
+        // rather than dropping to <body> — this pins that fallback, not just a non-throw.
+        expect(() => component.cancelSelection()).not.toThrow();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        expect(el.querySelector('.github-confirm-panel')).toBeNull();
+        expect(document.activeElement).toBe(el.querySelector('.github-issues-list'));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancelSelection falls back further to the search input when the search matches nothing at all', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        // A search matching zero issues removes .github-issues-list entirely (the template's
+        // "no matches" empty state renders instead), so the first-level fallback is also absent.
+        component.issueSearch = 'zzz-no-match';
+        component.onIssueSearchChange();
+        fixture.detectChanges();
+        const el: HTMLElement = fixture.nativeElement;
+        expect(el.querySelector('.github-issues-list')).toBeNull();
+
+        expect(() => component.cancelSelection()).not.toThrow();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        const searchInput = el.querySelector('.github-search-field input');
+        expect(searchInput).not.toBeNull();
+        expect(document.activeElement).toBe(searchInput);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

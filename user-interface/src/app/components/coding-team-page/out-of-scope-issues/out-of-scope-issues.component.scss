@@ -18,29 +18,6 @@
     font-size: 0.875rem;
   }
 
-  &__loading {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 24px 0;
-    color: var(--kh-text-secondary);
-  }
-
-  &__empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 32px 0;
-    color: var(--kh-text-secondary);
-
-    mat-icon {
-      font-size: 32px;
-      width: 32px;
-      height: 32px;
-    }
-  }
-
   &__toolbar {
     display: flex;
     align-items: center;

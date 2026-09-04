@@ -9,6 +9,9 @@ import pytest
 from agents.blogging.blog_research_agent.models import ResearchReference
 from agents.blogging.blog_writer_agent import WriterInput, WriterOutput
 from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
+from agents.blogging.shared.system_prompt_assembly import (
+    build_headed_blogging_system_prompt_content,
+)
 
 from llm_service import DummyLLMClient, LLMJsonParseError
 
@@ -225,7 +228,10 @@ def test_blog_writer_agent_run_with_research_references() -> None:
 
 
 def test_draft_prompt_includes_provided_brand_spec() -> None:
-    """When brand_spec_content is provided, the draft prompt includes it in the BRAND AND STYLE section."""
+    """When brand_spec_content is provided, it reaches the cached system-prompt
+    segment (not the user-turn draft prompt, which no longer embeds it)."""
+    from llm_service import CacheBreakpoint
+
     llm = _PromptCapturingLLM()
     agent = make_writer_agent(
         llm_client=llm,
@@ -237,10 +243,62 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
         content_plan=_minimal_plan(),
     )
     agent.run(draft_input)
-    # First prompt is the draft generation; subsequent ones are self-review
+
+    assert len(agent._system_prompt_content) == 1
+    segment = agent._system_prompt_content[0]
+    assert isinstance(segment, CacheBreakpoint)
+    assert "MyBrand: Test brand." in segment.text
+    assert "--- BRAND SPEC ---" in segment.text
+    # The user-turn draft prompt no longer embeds the brand spec.
     draft_prompt = llm.all_prompts[0]
-    assert "MyBrand: Test brand." in draft_prompt
-    assert "BRAND AND STYLE" in draft_prompt
+    assert "MyBrand: Test brand." not in draft_prompt
+    assert "BRAND AND STYLE" not in draft_prompt
+
+
+def test_system_prompt_content_delegates_to_shared_helper_both_sections() -> None:
+    """agent._system_prompt_content equals build_headed_blogging_system_prompt_content
+    called with the same (stripped) inputs -- pins the constructor's wiring
+    (strip, then pass brand before writing) without re-encoding the helper's
+    own heading/join format, which is already covered by
+    test_system_prompt_assembly.py."""
+    brand, style = "  MyBrand: Test brand.  \n", "\tUse concise, natural sentences.\n"
+
+    agent = make_writer_agent(brand_spec_content=brand, writing_style_guide_content=style)
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_delegates_to_shared_helper_writing_guide_blank() -> None:
+    """Same wiring check as above, with writing_style_guide_content blank."""
+    brand, style = "MyBrand: Test brand.", "   "
+
+    agent = make_writer_agent(brand_spec_content=brand, writing_style_guide_content=style)
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_delegates_to_shared_helper_brand_spec_blank() -> None:
+    """Same wiring check as above, with brand_spec_content blank."""
+    brand, style = "", "Use concise, natural sentences."
+
+    agent = make_writer_agent(brand_spec_content=brand, writing_style_guide_content=style)
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_is_none_when_both_sections_blank() -> None:
+    """Both brand_spec_content and writing_style_guide_content blank/whitespace-only
+    yields None, not an empty-text CacheBreakpoint -- matching
+    build_headed_blogging_system_prompt_content's documented empty-input case."""
+    agent = make_writer_agent(brand_spec_content="", writing_style_guide_content="   ")
+
+    assert agent._system_prompt_content is None
 
 
 def test_outline_for_prompt_includes_section_titles() -> None:

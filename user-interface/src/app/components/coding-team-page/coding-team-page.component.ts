@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnDestroy, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, ElementRef, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
@@ -20,6 +20,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
+import { EmptyStateComponent } from '../../shared/empty-state/empty-state.component';
 import { CodingTeamMonitorComponent } from '../coding-team-monitor/coding-team-monitor.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { OutOfScopeIssuesComponent } from './out-of-scope-issues/out-of-scope-issues.component';
@@ -43,6 +44,7 @@ import type {
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { deferFocus } from '../../shared/defer-focus';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
 import { NotificationService } from '../../core/notification.service';
@@ -168,6 +170,7 @@ interface IssueRowVm {
     RouterLink,
     HealthIndicatorComponent,
     LoadingSpinnerComponent,
+    EmptyStateComponent,
     CodingTeamMonitorComponent,
     TeamAssistantChatComponent,
     OutOfScopeIssuesComponent,
@@ -182,6 +185,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly integrationsApi = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly notifications = inject(NotificationService);
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   /** Which single view is visible. The page opens on the job Runs panel. */
   private _activeView: CodingTeamPageView = 'jobs';
@@ -467,6 +471,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private initialRunsLoad = true;
   /** Handle for the copy-confirmation reset, cleared on destroy so it never fires on a dead view. */
   private copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Handle for the pending confirm-panel/row focus move, cleared on destroy so it never fires on a dead view. */
+  private focusTimer: ReturnType<typeof setTimeout> | null = null;
 
   ngOnInit(): void {
     this.checkGitHubConfig();
@@ -490,6 +496,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       clearTimeout(this.thinkingAnnounceTimer);
       this.thinkingAnnounceTimer = null;
     }
+    this.clearFocusTimer();
     this.refreshTrigger$.complete();
   }
 
@@ -789,14 +796,106 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.onIssueSearchChange();
   }
 
-  /** Select an issue, surfacing the run-confirmation affordance inline under its row. */
+  /**
+   * Select an issue, surfacing the run-confirmation affordance inline under its row.
+   *
+   * Preconditions: none enforced — selecting a different issue while one is already selected
+   *   simply moves the confirmation panel to the new row.
+   * Postconditions: `selectedIssue` (and its derived `selectedIssueOpenDepsText`) is set, which
+   *   renders `.github-confirm-panel` under this issue's row on the next change-detection pass;
+   *   once rendered, focus moves into that panel (named via `aria-labelledby` pointing at its
+   *   `<h3>`) so AT users hear the confirmation heading — and the blocked-dependency warning,
+   *   when present — instead of focus staying on the row button they just activated.
+   */
   selectIssue(issue: GitHubIssueItem): void {
     this.selectedIssue = issue;
+    this.moveFocusToConfirmPanel(issue.number);
   }
 
-  /** Clear the issue selection, collapsing the inline confirmation panel. */
+  /**
+   * Clear the issue selection, collapsing the inline confirmation panel.
+   *
+   * Preconditions: none enforced.
+   * Postconditions: `selectedIssue` is cleared, unmounting `.github-confirm-panel` (including the
+   *   Cancel button that currently holds focus) on the next change-detection pass; once the row
+   *   has re-rendered, focus returns to that issue's `.github-issue-row` button so it never drops
+   *   to `<body>`. If the issue search filter has removed that row from the list by the time the
+   *   deferred callback runs, focus falls back to `.github-issues-list`, or further to the issue
+   *   search input if the search matches nothing at all — never `<body>`.
+   */
   cancelSelection(): void {
+    const issueNumber = this.selectedIssue?.number ?? null;
     this.selectedIssue = null;
+    if (issueNumber !== null) {
+      this.moveFocusToIssueRow(issueNumber);
+    }
+  }
+
+  /**
+   * Repo-scope prefix shared by the confirm-panel ids and the row key below. Only one repo is
+   * ever expanded at a time (see `toggleRepo`), but scoping by repo full name here means this
+   * wiring stays correct even if that invariant ever changes — a bare issue number is only
+   * unique within a repo. Extracted to one place so the three sites below can't drift apart.
+   */
+  private get repoScope(): string {
+    return this.selectedRepo?.full_name ?? '';
+  }
+
+  /** Repo-scoped id for the confirm panel of `issueNumber` under the currently expanded repo. */
+  confirmPanelId(issueNumber: number): string {
+    return `confirm-panel-${this.repoScope}-${issueNumber}`;
+  }
+
+  /** Id for the confirm panel's heading, referenced by the panel's `aria-labelledby`. */
+  confirmPanelHeadingId(issueNumber: number): string {
+    return `confirm-panel-heading-${this.repoScope}-${issueNumber}`;
+  }
+
+  /** Repo-scoped key for a row's `data-issue-number` attribute. */
+  issueRowKey(issueNumber: number): string {
+    return `${this.repoScope}#${issueNumber}`;
+  }
+
+  /** Clear any pending focus-move timer, e.g. before scheduling a new one or on destroy. */
+  private clearFocusTimer(): void {
+    if (this.focusTimer !== null) {
+      clearTimeout(this.focusTimer);
+      this.focusTimer = null;
+    }
+  }
+
+  /**
+   * Supersede any pending focus move with a new one, deferred until the next render tick.
+   * `find` resolves the target element within this component's host once rendered.
+   */
+  private scheduleFocusMove(find: (root: HTMLElement) => HTMLElement | null): void {
+    this.clearFocusTimer();
+    this.focusTimer = deferFocus(this.host.nativeElement, find);
+  }
+
+  /** After the confirm panel for `issueNumber` renders, move focus into it. */
+  private moveFocusToConfirmPanel(issueNumber: number): void {
+    const id = this.confirmPanelId(issueNumber);
+    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[id="${id}"]`));
+  }
+
+  /**
+   * After the confirm panel for `issueNumber` unmounts, move focus back to its row's button
+   * (found via `data-issue-number`, which — unlike `aria-controls` — stays on the row regardless
+   * of selection state, since `aria-controls` is removed the same tick `selectedIssue` clears).
+   * Falls back to `.github-issues-list` when the row isn't found (e.g. filtered out by the issue
+   * search), and further to the issue search input when the list itself isn't rendered either
+   * (the search matches nothing) — the search input renders whenever the issue list section
+   * does at all, so focus never drops to `<body>` in either edge case.
+   */
+  private moveFocusToIssueRow(issueNumber: number): void {
+    const key = this.issueRowKey(issueNumber);
+    this.scheduleFocusMove(
+      (root) =>
+        root.querySelector<HTMLElement>(`[data-issue-number="${key}"]`) ??
+        root.querySelector<HTMLElement>('.github-issues-list') ??
+        root.querySelector<HTMLElement>('.github-search-field input'),
+    );
   }
 
   /** True when the issue is blocked by, or depends on, one or more other issues. */
@@ -839,6 +938,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const clarification = 'Open issues and pull requests reported by GitHub';
     const description = repo.description?.trim();
     return description ? `${description} — ${clarification}` : clarification;
+  }
+
+  /**
+   * Composed tooltip for an issue row button: the issue title, plus a clause noting the coding
+   * team is already working the issue when it is in progress.
+   *
+   * Preconditions: `vm.title` is the issue's full (untruncated) title and is non-empty (GitHub
+   *   issue titles cannot be blank).
+   * Postconditions: returns `vm.title` alone when `vm.inProgress` is false; otherwise returns
+   *   `"<title> — The coding team is already working on this issue"`. The returned string is
+   *   always non-empty. Pure — no side effects.
+   */
+  issueRowTooltip(vm: { title: string; inProgress: boolean }): string {
+    const clause = 'The coding team is already working on this issue';
+    return vm.inProgress ? `${vm.title} — ${clause}` : vm.title;
   }
 
   /**

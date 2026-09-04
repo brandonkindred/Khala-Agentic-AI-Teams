@@ -101,8 +101,8 @@
 
       @if (reposLoaded) {
         @if (repos.length === 0) {
-          <div class="github-empty">
-            <mat-icon>folder_off</mat-icon>
+          <div class="github-empty" role="status">
+            <mat-icon aria-hidden="true">folder_off</mat-icon>
             <span>The personal access token has no repository access.</span>
           </div>
         } @else {
@@ -199,8 +199,8 @@
                   }
                   @if (issuesLoaded) {
                     @if (issues.length === 0) {
-                      <div class="github-empty">
-                        <mat-icon>check_circle_outline</mat-icon>
+                      <div class="github-empty" role="status">
+                        <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
                         <span>No open issues found.</span>
                       </div>
                     } @else {
@@ -237,23 +237,29 @@
                           </button>
                         </div>
                       } @else {
-                      <div class="github-issues-list">
+                      <div class="github-issues-list" tabindex="-1">
                         @for (vm of pagedIssueVms; track vm.number) {
+                          <!--
+                            No tabindex on the nested title/chip spans below: a focusable
+                            descendant of a <button> is invalid per the HTML interactive-content
+                            model and would add a second tab stop to every issue row. Both
+                            messages are composed into issueRowTooltip() and bound on the button
+                            itself instead.
+                          -->
                           <button
                             class="github-issue-row"
                             type="button"
                             [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
-                            [attr.aria-controls]="'confirm-panel-' + vm.number"
+                            [attr.aria-controls]="selectedIssue?.number === vm.number ? confirmPanelId(vm.number) : null"
+                            [attr.data-issue-number]="issueRowKey(vm.number)"
+                            [matTooltip]="issueRowTooltip(vm)"
                             (click)="selectIssue(vm.issue)"
                           >
                             <span class="github-issue-row__number">#{{ vm.number }}</span>
-                            <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
+                            <span class="github-issue-row__title">{{ vm.title }}</span>
                             @if (vm.inProgress) {
-                              <span
-                                class="github-label-chip github-label-chip--active"
-                                matTooltip="The coding team is already working on this issue"
-                              >
+                              <span class="github-label-chip github-label-chip--active">
                                 <mat-icon aria-hidden="true">engineering</mat-icon>
                                 In progress
                               </span>
@@ -283,8 +289,14 @@
 
                           <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
                           @if (selectedIssue?.number === vm.number) {
-                            <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
-                              <h3>Start AI coding on this issue?</h3>
+                            <div
+                              class="github-confirm-panel"
+                              role="region"
+                              [id]="confirmPanelId(vm.number)"
+                              [attr.aria-labelledby]="confirmPanelHeadingId(vm.number)"
+                              tabindex="-1"
+                            >
+                              <h3 [id]="confirmPanelHeadingId(vm.number)">Start AI coding on this issue?</h3>
                               <div class="github-confirm-panel__issue">
                                 <span class="issue-number">{{ repo.full_name }}#{{ vm.number }}</span>
                                 <span class="issue-title">{{ vm.title }}</span>
@@ -491,11 +503,12 @@
     }
 
     @if (runs.length === 0) {
-      <div class="kh-empty-state jobs-panel__empty">
-        <mat-icon class="kh-empty-icon" aria-hidden="true">rocket_launch</mat-icon>
-        <span class="kh-empty-title">No runs yet</span>
-        <span class="kh-empty-message">Open the GitHub view, pick an issue, and start a run to watch live progress here.</span>
-      </div>
+      <app-empty-state
+        icon="rocket_launch"
+        title="No runs yet"
+        description="Open the GitHub view, pick an issue, and start a run to watch live progress here."
+        [headingLevel]="3"
+      />
     } @else {
       @if (runningRunVms.length > 0) {
         <div class="runs-section">
@@ -531,12 +544,22 @@
 
     <!-- Shared run row (bound to a precomputed view-model) used by both lists. Clicking toggles its detail. -->
     <ng-template #runRow let-vm>
+      <!--
+        No tabindex on the nested detail span below: a focusable descendant of a
+        <button> is invalid per the HTML interactive-content model and would add a
+        second tab stop to every run row. The tooltip is bound on the button itself
+        instead, using vm.detail directly (coalesced to '' only to satisfy
+        MatTooltip's non-nullable input type) — MatTooltip already treats an empty
+        message as "no tooltip", so the existing @if guard below is only needed to
+        keep the visible span out of the DOM when there's nothing to show.
+      -->
       <button
         class="coding-run-item"
         type="button"
         [class.selected]="selectedRunId === vm.run.job_id"
         [attr.aria-expanded]="selectedRunId === vm.run.job_id"
         [attr.aria-controls]="'run-detail-' + vm.run.job_id"
+        [matTooltip]="vm.detail ?? ''"
         (click)="toggleRun(vm.run)"
       >
         <div class="coding-run-item__top">
@@ -549,7 +572,7 @@
           <mat-icon class="coding-run-item__chevron" aria-hidden="true">{{ selectedRunId === vm.run.job_id ? 'expand_less' : 'expand_more' }}</mat-icon>
         </div>
         @if (vm.detail) {
-          <span class="coding-run-item__detail" [matTooltip]="vm.detail">
+          <span class="coding-run-item__detail">
             {{ vm.detail }}
           </span>
         }
