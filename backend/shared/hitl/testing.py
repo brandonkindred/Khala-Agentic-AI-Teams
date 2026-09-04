@@ -1,10 +1,14 @@
-"""Shared test-assertion helper for verifying a workflow class registers the
-``submit_answers`` signal from :mod:`shared.hitl.temporal_signal`.
+"""Shared test-only assertion helper for verifying a workflow class registers
+the ``submit_answers`` signal from :mod:`shared.hitl.temporal_signal`.
 
-Extracted so ``planning_team/tests/test_temporal_workflow_signal.py`` and
-``software_engineering_team/tests/test_shared_infra_gap_coverage.py`` -- which
-both need this exact assertion (see each file's module docstring for why the
-check is duplicated across two CI-collection boundaries) -- share one
+Not part of ``shared.hitl``'s production public API (see
+``shared/hitl/__init__.py``, which deliberately does not re-export this or
+``temporal_signal`` so ``temporalio`` stays out of the package's transitive
+import graph for non-Temporal consumers) -- this module is imported only
+from test files. Extracted so ``planning_team/tests/test_temporal_workflow_signal.py``
+and ``software_engineering_team/tests/test_shared_infra_gap_coverage.py`` --
+which both need this exact assertion (see each file's module docstring for
+why the check is duplicated across two CI-collection boundaries) -- share one
 implementation instead of two hand-maintained copies that could silently
 drift on a temporalio upgrade.
 """

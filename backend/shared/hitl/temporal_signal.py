@@ -240,8 +240,8 @@ class HitlAnswerSignalMixin:
           for the far more common ordering, not a substitute for it.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
         # Guards the module docstring's "do not compose with PlanningAnswerSignalMixin"
         # warning: that mixin owns the identical attribute names and also chains
         # super().__init__(), so a conflicting sibling anywhere in the MRO that ran
@@ -398,12 +398,14 @@ class HitlAnswerSignalMixin:
             return
         if resume_token != self._active_resume_token:
             _log_signal_diagnostic(
-                "submit_answers rejected: resume_token mismatch (received=%s, active=%r)",
+                "submit_answers rejected: resume_token mismatch (received=%s, active=%s)",
                 _bounded_repr(resume_token),
-                self._active_resume_token,
+                _bounded_repr(self._active_resume_token),
             )
             return
         if self._submitted_answers is not None:
-            _log_signal_diagnostic("submit_answers rejected: duplicate submission for resume_token=%r", resume_token)
+            _log_signal_diagnostic(
+                "submit_answers rejected: duplicate submission for resume_token=%s", _bounded_repr(resume_token)
+            )
             return
         self._submitted_answers = answers

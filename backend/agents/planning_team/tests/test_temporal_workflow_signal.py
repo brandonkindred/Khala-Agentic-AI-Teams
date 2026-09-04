@@ -14,21 +14,21 @@ state machine is live on it, not just present in isolation.
 from __future__ import annotations
 
 from planning_team.temporal.workflows import PlanningWorkflow
-from shared.hitl.temporal_signal_checks import (
+from shared.hitl.testing import (
     assert_workflow_registers_submit_answers,
     get_workflow_definition,
 )
 
 
 def test_planning_workflow_registers_submit_answers_signal() -> None:
-    # Shared assertion body lives in shared/hitl/temporal_signal_checks.py --
-    # this test and its CI-collected mirror in
-    # software_engineering_team/tests/test_shared_infra_gap_coverage.py both
-    # call it, so there is one implementation instead of two hand-maintained
-    # copies of the temporalio private-API specifics. The extra name/run_fn
-    # checks below route through the same module's get_workflow_definition
-    # accessor rather than touching temporalio.workflow._Definition directly,
-    # so the private-API touchpoint stays in exactly one place.
+    """Shared assertion body lives in shared/hitl/testing.py -- this test and
+    its CI-collected mirror in
+    software_engineering_team/tests/test_shared_infra_gap_coverage.py both
+    call it, so there is one implementation instead of two hand-maintained
+    copies of the temporalio private-API specifics. The extra name/run_fn
+    checks below route through the same module's get_workflow_definition
+    accessor rather than touching temporalio.workflow._Definition directly,
+    so the private-API touchpoint stays in exactly one place."""
     assert_workflow_registers_submit_answers(PlanningWorkflow)
 
     defn = get_workflow_definition(PlanningWorkflow)

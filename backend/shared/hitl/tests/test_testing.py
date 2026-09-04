@@ -1,4 +1,4 @@
-"""Unit tests for shared.hitl.temporal_signal_checks -- the shared
+"""Unit tests for shared.hitl.testing -- the shared
 ``assert_workflow_registers_submit_answers`` helper both
 ``planning_team/tests/test_temporal_workflow_signal.py`` and
 ``software_engineering_team/tests/test_shared_infra_gap_coverage.py`` call.
@@ -10,7 +10,7 @@ import pytest
 from temporalio import workflow
 
 from shared.hitl.temporal_signal import HitlAnswerSignalMixin
-from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
+from shared.hitl.testing import assert_workflow_registers_submit_answers
 
 
 @workflow.defn(name="_ChecksTestWorkflow")

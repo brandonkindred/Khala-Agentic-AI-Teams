@@ -485,7 +485,7 @@ def test_hitl_signal_mixin_drops_early_signal_with_no_usable_resume_token() -> N
 
 
 def test_planning_workflow_registers_submit_answers_signal() -> None:
-    # Shared assertion body lives in shared/hitl/temporal_signal_checks.py --
+    # Shared assertion body lives in shared/hitl/testing.py --
     # this is the CI-collected call to it (see module docstring); the mirror
     # in planning_team/tests/test_temporal_workflow_signal.py calls the same
     # helper, so there is one implementation instead of two hand-maintained
@@ -494,7 +494,7 @@ def test_planning_workflow_registers_submit_answers_signal() -> None:
     # file's other tests don't pay for importing planning_team/temporalio
     # when only exercising the standalone mixin.
     from planning_team.temporal.workflows import PlanningWorkflow
-    from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
+    from shared.hitl.testing import assert_workflow_registers_submit_answers
 
     assert_workflow_registers_submit_answers(PlanningWorkflow)
 
@@ -502,7 +502,7 @@ def test_planning_workflow_registers_submit_answers_signal() -> None:
 def test_assert_workflow_registers_submit_answers_rejects_undecorated_class() -> None:
     """Negative path for the shared helper: a class with no @workflow.defn has
     no temporalio _Definition at all -- must fail before touching .signals."""
-    from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
+    from shared.hitl.testing import assert_workflow_registers_submit_answers
 
     class NotADefn:
         pass
@@ -514,7 +514,7 @@ def test_assert_workflow_registers_submit_answers_rejects_undecorated_class() ->
 def test_assert_workflow_registers_submit_answers_rejects_missing_signal() -> None:
     """Negative path for the shared helper: a @workflow.defn class that never
     registers submit_answers must fail the signal check, not silently pass."""
-    from shared.hitl.temporal_signal_checks import assert_workflow_registers_submit_answers
+    from shared.hitl.testing import assert_workflow_registers_submit_answers
 
     with pytest.raises(AssertionError):
         assert_workflow_registers_submit_answers(_WorkflowWithoutSignal)
