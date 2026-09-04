@@ -129,6 +129,18 @@ class ResearchAgent(_BlogAgentBase):
             - Returns ResearchAgentOutput with query_plan (list), references (list,
               length <= brief_input.max_results), notes (str or None), and
               compiled_document (formatted document of most relevant links with summaries).
+            - Checkpoint resume for the merged scoring/summarization step (Step 5):
+              if cache is set and a loaded checkpoint has both "scored_docs" and
+              "references" populated (including as empty lists), _evaluate_documents
+              is not called; scored_docs entries are read back supporting both the
+              current 5-element (doc, relevance, authority, accuracy, type_label)
+              shape and the legacy 3-element (doc, score, type_label) shape written
+              before per-document authority/accuracy scoring existed. A checkpoint
+              with "scored_docs" but no "references" (an interrupted run, or a write
+              failure between the two sequential save_checkpoint calls below) is not
+              treated as resumable for this step: _evaluate_documents runs exactly
+              once, recomputing scored_docs and references together rather than
+              reusing the partial scored_docs.
         """
 
         def _report(status: str, sub: float) -> None:

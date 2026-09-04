@@ -317,6 +317,181 @@ def test_research_agent_run_resumes_from_empty_documents_checkpoint(monkeypatch,
     mock_fetcher.fetch.assert_not_called()
 
 
+def test_research_agent_run_skips_evaluation_when_scored_docs_and_references_cached(
+    monkeypatch, tmp_path
+) -> None:
+    """A checkpoint with both scored_docs and references populated (the shape any
+    pre- or post-merge checkpoint uses) must skip _evaluate_documents entirely on
+    resume.
+
+    Regression test: the tail-steps resume tests cache scored_docs=[]/references=[]
+    alongside documents=[], so _evaluate_documents([], ...) would return ([], [])
+    immediately even if the skip-check were broken (e.g. reverted to truthiness, or
+    requiring only one of the two fields) — those tests can't actually catch that
+    regression. Using non-empty, distinguishable cached data can.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="both cached", max_results=3)
+    doc_dict = {"url": "https://example.com/cached-doc", "title": "Cached", "content": "c"}
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[doc_dict])
+    cache.save_checkpoint(
+        brief,
+        "scored_docs",
+        scored_docs=[(doc_dict, 0.9, 0.8, 0.7, "primary")],
+    )
+    cache.save_checkpoint(
+        brief,
+        "references",
+        references=[
+            {
+                "title": "Cached Ref",
+                "url": "https://example.com/cached-doc",
+                "domain": "example.com",
+                "summary": "cached summary",
+                "key_points": ["cached point"],
+            }
+        ],
+    )
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", lambda self, b, refs: [])
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", lambda self, b, refs: "notes")
+
+    eval_spy = MagicMock(side_effect=AssertionError("should not re-evaluate cached documents"))
+    monkeypatch.setattr(ResearchAgent, "_evaluate_documents", eval_spy)
+
+    out = a.run(brief)
+
+    eval_spy.assert_not_called()
+    assert [r.title for r in out.references] == ["Cached Ref"]
+
+
+def test_research_agent_run_resumes_legacy_three_element_scored_docs_checkpoint(
+    monkeypatch, tmp_path
+) -> None:
+    """A scored_docs checkpoint predating per-document authority/accuracy scoring
+    -- each item shaped [doc_dict, score, type_label] instead of the current
+    5-element [doc_dict, relevance, authority, accuracy, type_label] -- must still
+    resume without _evaluate_documents re-running, converting the legacy items to
+    the 5-tuple shape (authority/accuracy defaulted to 0.5) instead of raising.
+    """
+    import json
+
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="legacy scored_docs", max_results=3)
+    doc_dict = {"url": "https://example.com/legacy-doc", "title": "Legacy", "content": "c"}
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[doc_dict])
+
+    # AgentCache.save_checkpoint always normalizes scored_docs to the current
+    # 5-element shape on save, so a true legacy 3-element item can now only exist
+    # as literal on-disk data predating this format -- write it directly rather
+    # than through save_checkpoint to reproduce that.
+    cache_file = cache._cache_file(cache._cache_key(brief))
+    state_data = json.loads(cache_file.read_text())
+    state_data["scored_docs"] = [[doc_dict, 0.9, "primary"]]
+    state_data["last_completed_step"] = "scored_docs"
+    cache_file.write_text(json.dumps(state_data))
+
+    cache.save_checkpoint(
+        brief,
+        "references",
+        references=[
+            {
+                "title": "Legacy Ref",
+                "url": "https://example.com/legacy-doc",
+                "domain": "example.com",
+                "summary": "legacy summary",
+                "key_points": [],
+            }
+        ],
+    )
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", lambda self, b, refs: [])
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", lambda self, b, refs: "notes")
+
+    eval_spy = MagicMock(side_effect=AssertionError("should not re-evaluate cached documents"))
+    monkeypatch.setattr(ResearchAgent, "_evaluate_documents", eval_spy)
+
+    out = a.run(brief)  # must not raise reconstructing the legacy scored_docs shape
+
+    eval_spy.assert_not_called()
+    assert [r.title for r in out.references] == ["Legacy Ref"]
+
+
+def test_research_agent_run_reevaluates_once_when_only_scored_docs_cached(
+    monkeypatch, tmp_path
+) -> None:
+    """A checkpoint that completed scored_docs but not references (interrupted
+    between the two sequential save_checkpoint calls in Step 5, or a pre-merge
+    checkpoint from when scoring and summarizing were still separate steps) is not
+    treated as resumable for Step 5: _evaluate_documents must run exactly once,
+    recomputing both scored_docs and references together, rather than reusing the
+    cached scored_docs or running evaluation more than once.
+    """
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput, ResearchReference
+
+    cache = AgentCache(tmp_path / "cache")
+    brief = ResearchBriefInput(brief="partial step 5 checkpoint", max_results=3)
+    doc_dict = {"url": "https://example.com/partial-doc", "title": "Partial", "content": "c"}
+    cache.save_checkpoint(brief, "normalized", normalized={"topic": "cached"})
+    cache.save_checkpoint(brief, "queries", queries=[{"query_text": "q", "intent": "overview"}])
+    cache.save_checkpoint(brief, "candidates", candidates=[])
+    cache.save_checkpoint(brief, "documents", documents=[doc_dict])
+    cache.save_checkpoint(
+        brief,
+        "scored_docs",
+        scored_docs=[(doc_dict, 0.9, 0.8, 0.7, "primary")],
+    )
+    # references intentionally left unset.
+
+    a = _make_agent(monkeypatch, [])
+    a.cache = cache
+    monkeypatch.setattr(ResearchAgent, "_fetch_academic_papers", lambda self, b: [])
+    monkeypatch.setattr(ResearchAgent, "_get_similar_topics", lambda self, b, refs: [])
+    monkeypatch.setattr(ResearchAgent, "_synthesize_overview", lambda self, b, refs: "notes")
+
+    calls: list = []
+
+    def fake_evaluate_one(self, doc, brief_input):
+        calls.append(doc)
+        ref = ResearchReference(
+            title="Freshly evaluated", url=doc.url, domain=doc.domain, summary="s", key_points=[]
+        )
+        return (doc, 1.0, 1.0, 1.0, "primary", ref)
+
+    monkeypatch.setattr(ResearchAgent, "_evaluate_one_document", fake_evaluate_one)
+
+    out = a.run(brief)
+
+    assert len(calls) == 1  # exactly one fresh evaluation pass, not zero and not two
+    assert [r.title for r in out.references] == ["Freshly evaluated"]
+
+    checkpoint = cache.load_checkpoint(brief)
+    assert checkpoint.references is not None
+    assert len(checkpoint.references) == 1
+
+
 def test_research_agent_run_resumes_academic_papers_and_similar_topics(
     monkeypatch, tmp_path
 ) -> None:
