@@ -21,19 +21,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from software_engineering_team.metrics._stats import median as _median
 from software_engineering_team.shared import se_events
-
-
-def _median(values: list[float]) -> Optional[float]:
-    """Median of ``values``; ``None`` for an empty list."""
-    if not values:
-        return None
-    ordered = sorted(values)
-    n = len(ordered)
-    mid = n // 2
-    if n % 2 == 1:
-        return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 @dataclass
