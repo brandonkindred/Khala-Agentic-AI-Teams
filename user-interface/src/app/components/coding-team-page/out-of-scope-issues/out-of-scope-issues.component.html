@@ -17,14 +17,12 @@
   @if (loading) {
     <app-loading-spinner [diameter]="24" message="Loading out-of-scope issues…" />
   } @else if (proposals.length === 0) {
-    <div class="oos-issues__empty">
-      <mat-icon>check_circle_outline</mat-icon>
-      <span>No unfiled out-of-scope issues found.</span>
+    <app-empty-state icon="check_circle_outline" title="No unfiled out-of-scope issues found." [headingLevel]="3">
       <button mat-button type="button" (click)="onRefresh()">
         <mat-icon>refresh</mat-icon>
         Refresh
       </button>
-    </div>
+    </app-empty-state>
   } @else {
     <!-- Toolbar: Select All + File button -->
     <div class="oos-issues__toolbar">

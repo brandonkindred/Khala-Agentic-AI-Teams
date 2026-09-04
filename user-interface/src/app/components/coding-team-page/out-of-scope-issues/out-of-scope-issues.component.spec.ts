@@ -102,7 +102,7 @@ describe('OutOfScopeIssuesComponent', () => {
       await setup([proposal('p0')]);
       fixture.componentRef.setInput('loading', true);
       fixture.detectChanges();
-      expect(host().querySelector('.oos-issues__empty')).toBeNull();
+      expect(host().querySelector('app-empty-state')).toBeNull();
       expect(host().querySelector('.oos-issues__list')).toBeNull();
     });
   });
@@ -123,9 +123,14 @@ describe('OutOfScopeIssuesComponent', () => {
 
     it('renders the empty state with a Refresh button when there are no proposals', async () => {
       await setup([]);
-      expect(host().querySelector('.oos-issues__empty')).not.toBeNull();
+      expect(host().querySelector('app-empty-state')).not.toBeNull();
       expect(host().textContent).toContain('No unfiled out-of-scope issues found.');
-      expect(buttonWithText('Refresh')).toBeTruthy();
+      const statuses = Array.from(host().querySelectorAll('[role="status"]'));
+      expect(statuses.some((el) => el.textContent?.includes('No unfiled out-of-scope issues found.'))).toBe(true);
+      const refreshButton = buttonWithText('Refresh');
+      expect(refreshButton).toBeTruthy();
+      // Projected via <ng-content>, which sits outside app-empty-state's role="status" region.
+      expect(refreshButton?.closest('[role="status"]')).toBeNull();
     });
 
     it('renders one list item per proposal with its severity, category, PR, and text', async () => {

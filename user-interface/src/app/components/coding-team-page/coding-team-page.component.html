@@ -97,8 +97,8 @@
 
       @if (reposLoaded) {
         @if (repos.length === 0) {
-          <div class="github-empty">
-            <mat-icon>folder_off</mat-icon>
+          <div class="github-empty" role="status">
+            <mat-icon aria-hidden="true">folder_off</mat-icon>
             <span>The personal access token has no repository access.</span>
           </div>
         } @else {
@@ -195,8 +195,8 @@
                   }
                   @if (issuesLoaded) {
                     @if (issues.length === 0) {
-                      <div class="github-empty">
-                        <mat-icon>check_circle_outline</mat-icon>
+                      <div class="github-empty" role="status">
+                        <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
                         <span>No open issues found.</span>
                       </div>
                     } @else {
@@ -381,11 +381,12 @@
     }
 
     @if (runs.length === 0) {
-      <div class="kh-empty-state jobs-panel__empty">
-        <mat-icon class="kh-empty-icon" aria-hidden="true">rocket_launch</mat-icon>
-        <span class="kh-empty-title">No runs yet</span>
-        <span class="kh-empty-message">Open the GitHub view, pick an issue, and start a run to watch live progress here.</span>
-      </div>
+      <app-empty-state
+        icon="rocket_launch"
+        title="No runs yet"
+        description="Open the GitHub view, pick an issue, and start a run to watch live progress here."
+        [headingLevel]="3"
+      />
     } @else {
       @if (runningRunVms.length > 0) {
         <div class="runs-section">

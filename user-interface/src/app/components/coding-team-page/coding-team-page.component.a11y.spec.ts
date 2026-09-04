@@ -287,6 +287,25 @@ describe('CodingTeamPageComponent a11y', () => {
     reposSubject.complete();
   }, 15000);
 
+  it('has no axe violations on the GitHub view with no repository access', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+    await setup();
+    showView('github');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.github-empty')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('has no axe violations on the GitHub view with no open issues', async () => {
+    integrationsSpy.getGitHubIssues.mockReturnValue(of([]));
+    await setup();
+    showView('github');
+    expandFirstRepo();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.github-empty')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
   // NOTE: MatTooltip's overlay open-on-focus behavior relies on FocusMonitor's
   // keyboard-origin detection, which is not reliably exercisable under jsdom
   // (no real focus/paint pipeline). These tests assert the static, DOM-level
