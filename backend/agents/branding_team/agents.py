@@ -979,11 +979,10 @@ def make_ownership_definer() -> Agent:
         matrix. The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="ownership_definer",
         description="Defines brand ownership model and decision authority matrix.",
-        system_prompt=render_agent_prompt(_OWNERSHIP_DEFINER_PROMPT),
-        structured_output=OwnershipOutput,
+        prompt=_OWNERSHIP_DEFINER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1003,11 +1002,10 @@ def make_approval_workflow_designer() -> Agent:
         protocols. The agent is routed through the
         ``branding_governance`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="approval_workflow_designer",
         description="Designs approval workflows and agency briefing protocols.",
-        system_prompt=render_agent_prompt(_APPROVAL_WORKFLOW_DESIGNER_PROMPT),
-        structured_output=ApprovalWorkflowsOutput,
+        prompt=_APPROVAL_WORKFLOW_DESIGNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1027,11 +1025,10 @@ def make_asset_wiki_planner() -> Agent:
         The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="asset_wiki_planner",
         description="Plans asset management and brand wiki backlog.",
-        system_prompt=render_agent_prompt(_ASSET_WIKI_PLANNER_PROMPT),
-        structured_output=AssetWikiOutput,
+        prompt=_ASSET_WIKI_PLANNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1050,11 +1047,10 @@ def make_training_planner() -> Agent:
         defines the brand training and onboarding plan. The agent is
         routed through the ``branding_governance`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="training_planner",
         description="Plans brand training and onboarding programmes.",
-        system_prompt=render_agent_prompt(_TRAINING_PLANNER_PROMPT),
-        structured_output=TrainingOnboardingOutput,
+        prompt=_TRAINING_PLANNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1074,11 +1070,10 @@ def make_kpi_designer() -> Agent:
         points. The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="kpi_designer",
         description="Designs brand health KPIs with tracking methodology.",
-        system_prompt=render_agent_prompt(_KPI_DESIGNER_PROMPT),
-        structured_output=BrandHealthKPIsOutput,
+        prompt=_KPI_DESIGNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1098,11 +1093,10 @@ def make_evolution_framer() -> Agent:
         cadence. The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="evolution_framer",
         description="Defines the brand evolution framework and version control cadence.",
-        system_prompt=render_agent_prompt(_EVOLUTION_FRAMER_PROMPT),
-        structured_output=EvolutionFrameworkOutput,
+        prompt=_EVOLUTION_FRAMER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1129,11 +1123,10 @@ def make_brand_rules_codifier() -> Agent:
         ``BRAND_GUIDELINES_MIN``/``BRAND_GUIDELINES_MAX``). The agent is
         routed through the ``branding_governance`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_rules_codifier",
         description="Codifies top-level brand governance rules.",
-        system_prompt=render_agent_prompt(_BRAND_RULES_CODIFIER_PROMPT),
-        structured_output=BrandGuidelinesOutput,
+        prompt=_BRAND_RULES_CODIFIER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
