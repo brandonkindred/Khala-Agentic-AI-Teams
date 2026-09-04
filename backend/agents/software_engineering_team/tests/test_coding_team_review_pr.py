@@ -7,10 +7,11 @@ GitHubClient and a stubbed CodeReviewAgent — no network, no LLM).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Callable, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -784,15 +785,7 @@ class _FakeReviewClient:
 
 @pytest.fixture
 def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    """Build a wired-up PR-review test environment.
-
-    Returns a dictionary used by the integration tests:
-    - ``client``: FastAPI ``TestClient``
-    - ``api``: the monkeypatched ``coding_team_main`` module
-    - ``repo_path``: temporary directory path used as ``repo_path``
-    - ``github``: dict holding the ``_FakeReviewClient`` under ``client``
-    - ``jobs``: fake job service client recording job-store calls
-    """
+    """Build a wired-up PR-review test environment."""
     _stub_heavy_modules(monkeypatch)
 
     from job_service_client_fake import FakeJobServiceClient
@@ -808,11 +801,38 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     holder: dict[str, Any] = {"client": _FakeReviewClient()}
     monkeypatch.setattr(api_main, "GitHubClient", lambda **_kw: holder["client"])
+    
+    # --- THE ARCHITECTURALLY CORRECT MOCK ---
+    # 1. Define the side effect
+    async def start_workflow_side_effect(workflow, args=None, id=None, task_queue=None, **kwargs):
+        from software_engineering_team.api.coding_team_models import ReviewPrRequest
+        
+        if args and len(args) > 0:
+            # 1. Unpack the new single-dictionary payload
+            review_input = args[0]
+            job_id = review_input["job_id"]
+            request_obj = ReviewPrRequest(**review_input["request"])
+            
+            # 2. Since we aren't passing the token to Temporal anymore (security fix!),
+            test_token = "fake-token"
+            
+            # 3. Use to_thread so the synchronous local runner doesn't block the test loop!
+            await asyncio.to_thread(api_main._run_pr_review, job_id, request_obj, test_token)
+        else:
+            await asyncio.to_thread(api_main._run_pr_review)
+
+    # 2. Setup our AsyncMocks for start_workflow
+    mock_start = AsyncMock(side_effect=start_workflow_side_effect)
+    mock_client = AsyncMock()
+    mock_client.start_workflow = mock_start
+
+    # 3. Patch the imported client directly in pr_review
     monkeypatch.setattr(
-        api_main,
-        "_start_pr_review_thread",
-        lambda *a, **kw: api_main._run_pr_review(*a, **kw),
+        "software_engineering_team.api.pr_review.get_temporal_client",
+        AsyncMock(return_value=mock_client)
     )
+
+    monkeypatch.setattr(api_main, "stash_github_token", lambda j, t: None, raising=False)
 
     # Install a fake engine provider so no LLM stack loads. The PR-review path
     # calls provider.run_pr_code_review(...) via coding_team.engine_provider; the
@@ -844,8 +864,9 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         "repo_path": str(tmp_path),
         "github": holder,
         "jobs": fake_jobs,
+        "temporal_execute": mock_start,
     }
-
+    
 
 def _review_body(**overrides: Any) -> dict[str, Any]:
     """Return a default PR-review request body, merged with caller overrides.
