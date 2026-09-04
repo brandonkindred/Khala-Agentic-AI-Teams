@@ -83,4 +83,46 @@ describe('OutOfScopeIssuesComponent a11y', () => {
     expect(host.querySelector('app-inline-banner')).not.toBeNull();
     await expectNoAxeViolations(host);
   }, 15000);
+
+  // NOTE: MatTooltip's overlay open-on-focus behavior relies on FocusMonitor's
+  // keyboard-origin detection, which is not reliably exercisable under jsdom
+  // (no real focus/paint pipeline). These tests assert the static, DOM-level
+  // preconditions for that behavior — an aria-label carrying the tooltip's
+  // content, and (for the PR chip) a focusable host — not that the tooltip
+  // overlay actually opens. Tooltip-opens-on-Tab is verified manually in
+  // Chrome (see PR description).
+
+  it('exposes severity and category as aria-labels without adding new tab stops', async () => {
+    const fixture = await createFixture([
+      proposal('p0', { severity: 'critical', category: 'security' }),
+    ]);
+    const host: HTMLElement = fixture.nativeElement;
+    const severity = host.querySelector<HTMLElement>('.oos-chip--sev-critical');
+    const category = host.querySelector<HTMLElement>('.oos-chip--category');
+    expect(severity?.getAttribute('aria-label')).toBe('Severity: critical');
+    expect(category?.getAttribute('aria-label')).toBe('Category: security');
+    // Deliberately not focusable: aria-label alone replaces the computed accessible
+    // name regardless of role, so it already satisfies WCAG 1.3.1 here. Adding
+    // tabindex would cost two extra tab stops per proposal in a list that can be long.
+    expect(severity?.hasAttribute('tabindex')).toBe(false);
+    expect(category?.hasAttribute('tabindex')).toBe(false);
+    await expectNoAxeViolations(host);
+  }, 15000);
+
+  it('exposes the PR chip as a focusable, labeled element and adds exactly one new tab stop', async () => {
+    const fixture = await createFixture([proposal('p0', { pr_number: 123 })]);
+    const host: HTMLElement = fixture.nativeElement;
+    const prChip = host.querySelector<HTMLElement>('.oos-issue__pr');
+    expect(prChip?.tabIndex).toBe(0);
+    expect(prChip?.getAttribute('role')).toBe('img');
+    // role="img" makes descendant text presentational to AT, so the visible
+    // "PR #123" text has to be folded into the label too, not just the
+    // tooltip's provenance sentence.
+    expect(prChip?.getAttribute('aria-label')).toBe('PR #123 — Found during review of this PR');
+    // Confirms the severity/category "no tabindex" decision holds structurally: the
+    // PR chip is the only focusable element this row adds.
+    const meta = host.querySelector('.oos-issue__meta');
+    expect(meta?.querySelectorAll('[tabindex]').length).toBe(1);
+    await expectNoAxeViolations(host);
+  }, 15000);
 });
