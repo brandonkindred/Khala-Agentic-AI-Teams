@@ -931,13 +931,20 @@ def test_fill_qty_rel_tol_is_a_local_constant_not_imported_from_order_book():
 
     assert reference_exits._FILL_QTY_REL_TOL == 1e-12
     tree = ast.parse(inspect.getsource(reference_exits))
-    import_module_names = [
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    ] + [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
-    assert not any("order_book" in name for name in import_module_names)
+    import_names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            import_names.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                import_names.append(node.module)
+            # ``from <package> import order_book`` / ``from . import
+            # order_book`` name the forbidden module as the IMPORTED alias,
+            # not the ``module`` (the package it's imported from) — this
+            # codebase's own dominant import idiom (see this file's own
+            # imports above), so the alias names must be checked too.
+            import_names.extend(alias.name for alias in node.names)
+    assert not any("order_book" in name for name in import_names)
 
 
 def test_fill_qty_rel_tol_value_matches_production_source():
@@ -1361,6 +1368,8 @@ def test_step_returns_none_on_any_call_after_the_position_has_fully_closed():
 
 
 def _record_tp(**overrides) -> ReferenceTakeProfitExit:
+    """Build a valid standalone take-profit record; ``overrides`` replace any
+    field so each validation test below violates exactly one invariant."""
     kwargs = {
         "symbol": "AAA",
         "entry_bar": 1,

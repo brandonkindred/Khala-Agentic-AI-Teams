@@ -1148,10 +1148,12 @@ def resolve_take_profit_family_exit(
         - Returns the position's FINAL closing record — the first bar at or
           after ``entry.entry_bar + 1`` whose winning candidate's fill fully
           closes the position (within :data:`_FILL_QTY_REL_TOL`) — or ``None``
-          when the position is still open (never touched, or only partially
-          reduced by earlier rungs) when ``symbol_bars`` runs out. Mirrors
-          production reporting a still-open position rather than a synthetic
-          force-close.
+          in either of two cases: the position is still open (never touched,
+          or only partially reduced by earlier rungs) when ``symbol_bars``
+          runs out (mirrors production reporting a still-open position rather
+          than a synthetic force-close), or ``rules`` contains no
+          ``TakeProfitRule``/``ScaledTakeProfitRule`` at all, returned
+          immediately before any bar walk.
         - The returned record's ``exit_price`` is the qty-weighted average of
           every partial fill plus the final closing fill, rounded once to
           production's own bid-price bucket; its ``exit_rule_index`` indexes
