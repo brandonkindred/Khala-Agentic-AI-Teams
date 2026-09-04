@@ -774,17 +774,27 @@ def resolve_remote_branch_sha(
     they have nothing coding-team-specific about them.
 
     Preconditions:
-        - repo_path is a git checkout; remote/branch are ref-shaped names
-          the caller trusts enough to fetch (this helper does not itself
-          validate them via ``_is_safe_ref`` -- callers that accept these
-          names from an untrusted source must validate first).
+        - repo_path is a git checkout.
     Postconditions:
+        - ``remote`` and ``branch`` are validated HERE, with ``_is_safe_ref``,
+          before any network call. This is the choke point every caller of the
+          authenticated fetch passes through, and the fetch carries the GitHub
+          PAT in ``http.extraHeader``: ``--`` stops git reading the value as an
+          option but not as a URL or an ``ext::`` transport, so an unvalidated
+          name could send the token to an arbitrary host or run a command.
+          Validating per-caller instead left whichever call site was added last
+          uncovered, which is exactly what happened. Returns
+          ``(False, "unsafe ...")`` without fetching.
         - On success returns ``(True, <full sha>)`` for ``<remote>/<branch>``
           exactly as fetched -- callers use this as a freshness anchor to
           compare against a later re-fetch of the same branch.
         - On failure (fetch or rev-parse error) returns ``(False, message)``,
           scrubbed of any credential.
     """
+    if not _is_safe_ref(remote):
+        return False, f"unsafe remote name: {remote!r}"
+    if not _is_safe_ref(branch):
+        return False, f"unsafe branch ref: {branch!r}"
     auth_env = _git_auth_env(token) if token else None
     ok, msg = _shared_resolve_remote_branch_sha(repo_path, remote, branch, env=auth_env)
     if not ok:

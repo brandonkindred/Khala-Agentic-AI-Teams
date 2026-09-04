@@ -1,29 +1,27 @@
-"""Multi-leg resting-exit materialization tests (issue #7509 step 2, extended
-for issue #7524 step 3 of 3).
+"""Multi-leg resting-exit materialization tests.
 
-Step 1 (#7494) generalized the pure ``resolve_exit_leg_attachments`` helper
-to resolve an arbitrary ordered list of leg specs into ``StopAttachment`` /
-``LimitAttachment`` objects. Step 2 (#7509) extends ``OrderRequest`` with a
-generic ``attached_exits`` list and the fill simulator's materialization
-step (``FillSimulator._materialize_attached_exit_children``) to submit an
-arbitrary number of those as resting OCO children — not just the two fixed
-``attached_stop_loss``/``attached_take_profit`` bracket fields. Step 3
-(#7524) closes the remaining coverage on that plumbing: every leg *kind*
-(not just LIMIT) independently firing and cancelling its siblings, an
-all-stop-family group with no LIMIT leg at all, and the ``"bps"``
-``trail_offset_kind`` pre-seed path for a generalized trailing leg (the
-shape ``resolve_exit_leg_attachments`` actually produces for a
-``TRAILING_STOP`` leg, as opposed to the ``"abs"`` default used by earlier
-tests in this file).
+Covers the generalized ``resolve_exit_leg_attachments`` resolver (an arbitrary
+ordered list of leg specs into ``StopAttachment`` / ``LimitAttachment``
+objects), ``OrderRequest.attached_exits``, and the fill simulator's
+materialization step (``FillSimulator._materialize_attached_exit_children``)
+submitting an arbitrary number of those as resting OCO children — not just the
+two fixed ``attached_stop_loss``/``attached_take_profit`` bracket fields.
+
+Specifically: every leg *kind* (not just LIMIT) independently firing and
+cancelling its siblings, an all-stop-family group with no LIMIT leg at all, and
+the ``"bps"`` ``trail_offset_kind`` pre-seed path for a generalized trailing leg
+(the shape ``resolve_exit_leg_attachments`` actually produces for a
+``TRAILING_STOP`` leg, as opposed to the ``"abs"`` default used by earlier tests
+in this file).
 
 No DSL/dispatcher wiring is exercised here (that's out of scope until the
-rule-kind migration issues); every request below is constructed directly,
-the same way ``test_exit_leg_attachments.py`` exercises the Step 1 resolver
-directly. The arm/latch/gap-through/trailing *lifecycle* itself is not
-touched by these steps — these tests exist to prove that lifecycle, and OCO
-sibling cancellation, already work unchanged for N > 2 independently
-attached children; ``test_bracket_orders.py`` / ``test_bracket_stop_limit.py``
-cover the 2-leg bracket path and must keep passing unmodified.
+rule-kind migration); every request below is constructed directly, the same way
+``test_exit_leg_attachments.py`` exercises ``resolve_exit_leg_attachments``
+directly. The arm/latch/gap-through/trailing *lifecycle* itself is untouched —
+these tests exist to prove that lifecycle, and OCO sibling cancellation, already
+work unchanged for N > 2 independently attached children;
+``test_bracket_orders.py`` / ``test_bracket_stop_limit.py`` cover the 2-leg
+bracket path and must keep passing unmodified.
 """
 
 from __future__ import annotations
@@ -436,7 +434,7 @@ def test_twap_age_out_materializes_attached_exits_legs_for_open_position() -> No
 
 
 # ---------------------------------------------------------------------------
-# Issue #7524, step 3: independent fill/cancel for every leg kind, an
+# Independent fill/cancel for every leg kind, an
 # all-stop-family group with no LIMIT sibling, and the "bps" trailing
 # pre-seed path.
 # ---------------------------------------------------------------------------

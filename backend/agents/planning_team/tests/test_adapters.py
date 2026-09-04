@@ -3,6 +3,8 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 
 def test_product_analysis_run_returns_job_id():
     from planning_team.adapters.product_analysis import run_product_analysis
@@ -70,6 +72,65 @@ def test_product_analysis_wait_invokes_answer_callback():
         "job_id": "pa-123",
         "answers": [{"question_id": "q1", "selected_option_id": "o1"}],
     }
+
+
+def test_product_analysis_wait_lets_a_planning_pause_signal_through():
+    """The durable-HITL answer_callback signals "no answer yet" by raising, for a
+    Temporal activity boundary to catch and turn into a paused result.
+
+    ``poll_until_terminal`` folds any on_poll exception into
+    ``{"status": "failed", "error": "Progress callback failed"}``, so without the
+    explicit passthrough the signal never escapes: no pause is ever returned, the
+    sub-job is logged as "did not complete", and the whole HITL feature is inert
+    with nothing to show for it.
+    """
+    from planning_team.adapters.product_analysis import wait_for_product_analysis_completion
+    from planning_team.exceptions import PlanningAnswerPauseSignal
+
+    def _answer_callback(pending):
+        raise PlanningAnswerPauseSignal("tok-1", list(pending))
+
+    with patch(
+        "planning_team.adapters.product_analysis.get_product_analysis_status",
+        return_value={
+            "status": "running",
+            "waiting_for_answers": True,
+            "pending_questions": [{"id": "q1"}],
+        },
+    ):
+        with patch("shared.http.job_polling.time.sleep", return_value=None):
+            with pytest.raises(PlanningAnswerPauseSignal) as exc:
+                wait_for_product_analysis_completion("pa-123", answer_callback=_answer_callback)
+
+    assert exc.value.resume_token == "tok-1"
+    assert exc.value.pending_questions == [{"id": "q1"}]
+
+
+def test_product_analysis_wait_still_fails_closed_on_an_unexpected_callback_error():
+    """Only the declared control-flow signal passes through; a genuinely broken
+    callback must still degrade to a failed status rather than escaping into
+    Planning as an unhandled exception."""
+    from planning_team.adapters.product_analysis import wait_for_product_analysis_completion
+
+    def _answer_callback(pending):
+        raise RuntimeError("boom")
+
+    with patch(
+        "planning_team.adapters.product_analysis.get_product_analysis_status",
+        return_value={
+            "status": "running",
+            "waiting_for_answers": True,
+            "pending_questions": [{"id": "q1"}],
+        },
+    ):
+        with patch("shared.http.job_polling.time.sleep", return_value=None):
+            out = wait_for_product_analysis_completion("pa-123", answer_callback=_answer_callback)
+
+    assert out["status"] == "failed"
+    # Pin the error too: "failed" alone does not distinguish a broken callback
+    # from an unreadable job status, and poll_until_terminal keeps those two
+    # messages distinct precisely so a caller can tell them apart.
+    assert out["error"] == "Progress callback failed"
 
 
 def test_run_product_analysis_no_base_url():

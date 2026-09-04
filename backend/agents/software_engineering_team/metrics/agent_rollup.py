@@ -1,17 +1,18 @@
 """Result shape for the per-``agent_key``/per-``phase`` cost, token, and latency rollup.
 
-Defines only the data shape the rollup computation (a later step) will fill in and
-that consumers (model-tiering, cache-breakpoint adoption work) will read. No
-computation lives here — grouping over ``se_agent_traces`` rows is a separate, pure
-function added later, mirroring how :mod:`dora`'s ``DoraMetrics`` dataclass predates
-and is filled in by ``compute_from_events``.
+Defines the data shape the rollup computation fills in and that consumers
+(model-tiering, cache-breakpoint adoption work) will read. Grouping over
+``se_agent_traces`` rows is done by the pure :func:`compute_from_traces`, mirroring how
+:mod:`dora` keeps its ``DoraMetrics`` dataclass and pure ``compute_from_events`` in one
+module.
 
 **Grouping keys** — three views are reported, not a subset:
 
 - ``by_agent`` — one :class:`CallRollup` per ``agent_key``, ignoring phase.
 - ``by_phase`` — one :class:`CallRollup` per ``phase``, ignoring agent_key.
-- ``by_agent_phase`` — ``by_agent_phase[agent_key][phase]``, the full cross product.
-  A nested ``dict[str, dict[str, CallRollup]]`` is used rather than a tuple key
+- ``by_agent_phase`` — ``by_agent_phase[agent_key][phase]``, one entry per distinct
+  (agent_key, phase) pair observed; combinations that never co-occur are absent, not
+  an empty ``CallRollup``. A nested ``dict[str, dict[str, CallRollup]]`` is used rather than a tuple key
   (breaks ``asdict()``/JSON serialization) or a composite string key like
   ``"agent::phase"`` (risks delimiter collisions with real identifiers). Nesting is
   a direct extension of ``dora.py``'s existing ``dict[str, ...]`` idiom and stays
@@ -50,9 +51,11 @@ own sample set is empty (e.g. the ratio's denominator is 0 — no prompt-side to
 processed at all). A ``0.0`` ratio, by contrast, means calls existed, tokens were
 processed, and genuinely none were served from cache.
 
-**Latency percentiles** — ``latency_ms_median`` follows :func:`dora._median`'s
-pure-Python, no-numpy, "empty sample → ``None``" convention. ``latency_ms_p95`` is
-this repo's first percentile precedent (no existing convention to match), defined by
+**Latency percentiles** — ``latency_ms_median`` and ``latency_ms_p95`` are computed by
+:func:`_stats.median`/:func:`_stats.p95`, the pure-Python, no-numpy helpers shared with
+:mod:`dora` (which uses ``median`` for its own lead-time/MTTR medians) so the two
+modules can't drift on "empty sample → ``None``" or percentile semantics.
+``latency_ms_p95`` follows this repo's first percentile precedent, defined by
 nearest-rank on the sorted sample ``ordered`` of length ``n > 0``::
 
     rank = max(1, min(n, ceil(0.95 * n)))
@@ -66,8 +69,14 @@ of the two, since p95 of two samples is intuitively "the worse one." An empty sa
 
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
+
+from software_engineering_team.metrics._stats import median as _median
+from software_engineering_team.metrics._stats import p95 as _p95
 
 
 @dataclass
@@ -82,9 +91,9 @@ class CallRollup:
     reason.
 
     These invariants are documented, not enforced here: this dataclass has no
-    ``__post_init__`` validation. The future pure computation step is this shape's
-    single producer and is responsible for upholding them (and asserting them in
-    its tests) — e.g. ``cache_read_ratio`` in ``[0, 1]`` when not ``None``, and
+    ``__post_init__`` validation. :func:`compute_from_traces` is this shape's single
+    producer and is responsible for upholding them (and asserting them in its tests)
+    — e.g. ``cache_read_ratio`` in ``[0, 1]`` when not ``None``, and
     ``latency_ms_sample_count == 0`` implying both percentiles are ``None``.
     """
 
@@ -124,4 +133,118 @@ class AgentRollupMetrics:
         return asdict(self)
 
 
-__all__ = ["CallRollup", "AgentRollupMetrics"]
+def _rollup_for_group(rows: list[dict[str, Any]]) -> CallRollup:
+    """Aggregate one grouping bucket's rows into a :class:`CallRollup`.
+
+    Preconditions:
+        - Every row carries ``cost_usd``, ``input_tokens``, ``output_tokens``,
+          ``cache_read_tokens``, ``cache_creation_tokens``, and ``latency_ms`` —
+          the numeric ``se_agent_traces`` columns — with non-negative values.
+    Postconditions:
+        - ``call_count == len(rows)``; every row contributes exactly one latency
+          sample, so ``latency_ms_sample_count == call_count``.
+        - ``cache_read_ratio`` is ``None`` iff the summed cache-read + cache-creation +
+          input tokens are all zero; otherwise it is the ratio defined in the module
+          docstring, rounded to 4 decimal places, in ``[0, 1]``.
+        - ``latency_ms_median``/``latency_ms_p95`` follow :func:`_stats.median`/
+          :func:`_stats.p95`.
+        - ``total_cost_usd`` is order-independent (``math.fsum``, not repeated
+          float addition), so the sum is exact regardless of row order, not just
+          approximately so under ``round``.
+    """
+    costs: list[float] = []
+    total_input = 0
+    total_output = 0
+    total_cache_read = 0
+    total_cache_creation = 0
+    latencies: list[float] = []
+
+    for row in rows:
+        costs.append(float(row.get("cost_usd") or 0.0))
+        total_input += int(row.get("input_tokens") or 0)
+        total_output += int(row.get("output_tokens") or 0)
+        total_cache_read += int(row.get("cache_read_tokens") or 0)
+        total_cache_creation += int(row.get("cache_creation_tokens") or 0)
+        latencies.append(float(row.get("latency_ms") or 0))
+
+    denom = total_cache_read + total_cache_creation + total_input
+    cache_read_ratio = round(total_cache_read / denom, 4) if denom > 0 else None
+
+    return CallRollup(
+        call_count=len(rows),
+        total_cost_usd=round(math.fsum(costs), 6),
+        total_input_tokens=total_input,
+        total_output_tokens=total_output,
+        total_cache_read_tokens=total_cache_read,
+        total_cache_creation_tokens=total_cache_creation,
+        cache_read_ratio=cache_read_ratio,
+        latency_ms_median=_median(latencies),
+        latency_ms_p95=_p95(latencies),
+        latency_ms_sample_count=len(latencies),
+    )
+
+
+def compute_from_traces(rows: list[dict[str, Any]], window_days: float) -> AgentRollupMetrics:
+    """Compute the per-``agent_key``/per-``phase`` rollup from a list of trace rows.
+
+    A pure computation over already-fetched ``se_agent_traces``-shaped row dicts — it
+    does not mutate ``rows`` and has no database dependency, mirroring
+    :func:`dora.compute_from_events`. The sole non-deterministic output is
+    ``computed_at``, stamped from the UTC wall clock at call time; every other field is
+    a deterministic function of ``rows`` and ``window_days``. ``window_days`` is not
+    used to filter rows (callers are expected to have already scoped ``rows`` to the
+    window); it is only carried onto the returned :class:`AgentRollupMetrics`.
+
+    Preconditions:
+        - ``window_days > 0``.
+        - Each element of ``rows`` is a dict shaped like an ``se_agent_traces`` record:
+          ``agent_key``/``phase`` (strings, ``""`` permitted and treated as a real
+          group) plus the numeric fields :func:`_rollup_for_group` requires.
+    Postconditions:
+        - Raises ``ValueError`` if ``window_days <= 0``; never raises for an empty
+          ``rows`` list, returning an ``AgentRollupMetrics`` with empty
+          ``by_agent``/``by_phase``/``by_agent_phase`` dicts instead.
+        - ``by_agent`` has one entry per distinct ``agent_key`` seen in ``rows``;
+          ``by_phase`` one per distinct ``phase``; ``by_agent_phase`` has one entry per
+          distinct (agent_key, phase) pair seen — combinations that never co-occur are
+          absent, not an empty ``CallRollup``. No observed group is dropped, including
+          the ``""`` group.
+        - Keys within each of the three dicts (and within each inner ``by_agent_phase``
+          dict) are sorted ascending, so the result is deterministic for a fixed row
+          *set* regardless of input row order — not just for a fixed row sequence.
+        - Every ``CallRollup`` it produces satisfies the invariants documented on that
+          class and this module (``None`` vs. ``0`` rule, ratio/percentile math).
+    """
+    if window_days <= 0:
+        raise ValueError("window_days must be > 0")
+
+    by_agent_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_phase_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_agent_phase_rows: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+
+    for row in rows:
+        agent_key = row.get("agent_key") or ""
+        phase = row.get("phase") or ""
+        by_agent_rows[agent_key].append(row)
+        by_phase_rows[phase].append(row)
+        by_agent_phase_rows[agent_key][phase].append(row)
+
+    metrics = AgentRollupMetrics(
+        window_days=window_days,
+        computed_at=datetime.now(tz=timezone.utc).isoformat(),
+    )
+    metrics.by_agent = {k: _rollup_for_group(by_agent_rows[k]) for k in sorted(by_agent_rows)}
+    metrics.by_phase = {k: _rollup_for_group(by_phase_rows[k]) for k in sorted(by_phase_rows)}
+    metrics.by_agent_phase = {
+        agent_key: {
+            phase: _rollup_for_group(by_agent_phase_rows[agent_key][phase])
+            for phase in sorted(by_agent_phase_rows[agent_key])
+        }
+        for agent_key in sorted(by_agent_phase_rows)
+    }
+    return metrics
+
+
+__all__ = ["CallRollup", "AgentRollupMetrics", "compute_from_traces"]

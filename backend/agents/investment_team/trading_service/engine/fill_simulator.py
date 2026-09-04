@@ -1541,7 +1541,7 @@ class FillSimulator:
     ) -> None:
         """Submit every attached ``StopAttachment`` / ``LimitAttachment`` leg
         (the fixed ``attached_stop_loss``/``attached_take_profit`` bracket
-        fields, plus any additional legs in ``attached_exits`` — #7509) as
+        fields, plus any additional legs in ``attached_exits``) as
         OCO children.
 
         Called once per parent on a successful terminal-fill entry slice.
@@ -1606,7 +1606,7 @@ class FillSimulator:
                 tp=req.attached_take_profit,
                 reason=f"{ENGINE_EXIT_REASON_PREFIX}bracket_tp",
             )
-        # Generalized non-bracket legs (#7509): reuses the exact same
+        # Generalized non-bracket legs: reuses the exact same
         # per-kind materializers as the two fixed bracket fields above, so
         # arm/latch/gap-through/trailing behavior for these legs is
         # identical to a bracket leg's — nothing about the fill-simulator

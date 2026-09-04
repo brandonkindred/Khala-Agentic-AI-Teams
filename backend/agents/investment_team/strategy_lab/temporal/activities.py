@@ -768,18 +768,27 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
 
 
 def _cross_attempt_resume_from_params(
-    params: Dict[str, Any], *, run_id: Optional[str], design_attempt_index: int
+    params: Dict[str, Any],
+    *,
+    run_id: Optional[str],
+    design_attempt_index: int,
+    probe_only: bool = False,
 ) -> "Tuple[Optional[StrategySpec], Optional[str], Optional[_DesignPersistContext]]":
     """Reconstruct ``run_design_attempt_activity``'s cross-attempt resume state from ``params``.
 
     Temporal-mode parity with thread mode's gated cross-attempt resume
-    (``orchestrator.py::run_cycle``). Only ever called from
-    ``run_design_attempt_activity`` when the ADR-012 same-attempt checkpoint
-    lookup found nothing -- the two never actually collide, since an
-    ADR-012 checkpoint is keyed to the exact ``design_attempt_index``
-    crashing mid-execution, while ``params["resume_spec"]`` is supplied by
-    the calling workflow for a ``design_attempt_index`` that has never run
-    yet. The workflow is the sole source of truth for whether resuming is
+    (``orchestrator.py::run_cycle``). Called from
+    ``run_design_attempt_activity`` (via ``_resolve_resume_state``) in two
+    shapes: as a real cross-attempt resume when the ADR-012 same-attempt
+    checkpoint lookup found nothing and the workflow supplied
+    ``params["resume_spec"]``, and with ``probe_only=True`` when an ADR-012
+    checkpoint WAS found and the caller only re-derives whether the
+    cross-attempt seed was ever adopted. The two resume sources never both
+    drive Phase 1, since an ADR-012 checkpoint is keyed to the exact
+    ``design_attempt_index`` crashing mid-execution, while
+    ``params["resume_spec"]`` is supplied by the calling workflow for a
+    ``design_attempt_index`` that has never run yet. The workflow is the sole
+    source of truth for whether resuming is
     sound (gated on the prior attempt's
     ``SpecImplementabilityError.spec_implicated`` being ``False`` -- see
     ``checkpoints.py`` and ``orchestrator.py::run_cycle`` for the full
@@ -789,7 +798,10 @@ def _cross_attempt_resume_from_params(
 
     Preconditions:
         ``params["resume_spec"]`` is not ``None`` (the caller's own
-        precondition for calling this at all).
+        precondition for calling this at all). ``probe_only`` is ``True``
+        only when the caller discards the reconstruction and keeps just
+        whether it succeeded (``_resolve_resume_state``'s ADR-012 branch),
+        which changes nothing but the log level of a failure.
     Postconditions:
         Reconstructs into temporaries first and only returns them together
         on success -- mirrors the ADR-012 block's own fail-open discipline
@@ -815,14 +827,32 @@ def _cross_attempt_resume_from_params(
                 "resume without a valid design context"
             )
     except Exception as exc:  # noqa: BLE001 -- fail open, see docstring above
-        logger.warning(
-            "cross-attempt resume params for run %s attempt %s failed to "
-            "reconstruct (treating as no resume): %s",
-            run_id,
-            design_attempt_index,
-            exc,
-            exc_info=True,
-        )
+        # A probe is not resuming from these params: ADR-012 already supplied
+        # the resume state and this call only re-derives whether the seed was
+        # ever adopted. A failure there changes nothing about what this run
+        # does, so it is logged as information rather than as a warning with a
+        # traceback — that pairing reads as "this run just lost its resume",
+        # which is exactly what did NOT happen.
+        if probe_only:
+            logger.info(
+                "cross-attempt resume params for run %s attempt %s do not "
+                "reconstruct (%s); ADR-012 resume is in effect, so this only "
+                "marks the cross-attempt seed as unadopted",
+                run_id,
+                design_attempt_index,
+                exc,
+            )
+        else:
+            # No inline %s for the exception: exc_info=True already puts its
+            # message on the first line of the attached traceback, and repeating
+            # it inline prints the same text twice in one record.
+            logger.warning(
+                "cross-attempt resume params for run %s attempt %s failed to "
+                "reconstruct (treating as no resume)",
+                run_id,
+                design_attempt_index,
+                exc_info=True,
+            )
         return None, None, None
     return spec, params.get("resume_rationale"), design_context
 
@@ -880,7 +910,12 @@ def _resolve_resume_state(
         # adoption is checked on its first element, not the tuple itself.
         would_be_spec, _would_be_rationale, _would_be_design_context = (
             _cross_attempt_resume_from_params(
-                params, run_id=run_id, design_attempt_index=design_attempt_index
+                params,
+                run_id=run_id,
+                design_attempt_index=design_attempt_index,
+                # Only the adoption boolean is consumed here; this run resumes
+                # from the ADR-012 checkpoint either way.
+                probe_only=True,
             )
         )
         return resume_spec, resume_rationale, resume_design_context, would_be_spec is None

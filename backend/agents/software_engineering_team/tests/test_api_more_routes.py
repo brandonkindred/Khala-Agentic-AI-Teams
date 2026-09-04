@@ -271,6 +271,43 @@ def test_submit_pending_answers_clamps_progress_in_response(client, fake_job_cli
     assert resp.json()["progress"] == 100
 
 
+def _seed_temporal_native_pause(fake_job_client, job_id: str, question: dict) -> str:
+    """Seed a job with the pause envelope a Temporal-native pause persists.
+
+    Returns the resume token so callers echo the value the route will validate
+    rather than re-deriving it.
+    """
+    token = f"{job_id}:tok-1"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        resume_token=token,
+        pending_questions=[question],
+    )
+    return token
+
+
+def _patch_temporal_native_route(monkeypatch, hitl_mod, *, on_append=None, on_signal=None) -> None:
+    """Install the three patches every Temporal-native route test needs.
+
+    The ``store_submit_answers`` guard is the point: it pins the route's
+    temporal-native/thread-mode discriminator, so a regression there fails by
+    name instead of running the real store against the fake client and surfacing
+    as an opaque store error. Living in one helper means a change to the patched
+    names, or to the discriminator, is edited once rather than in every test.
+    """
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
+
+    monkeypatch.setattr(
+        hitl_mod, "store_append_submitted_answers", on_append or (lambda *_a, **_k: None)
+    )
+    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", on_signal or (lambda *_a, **_k: None))
+    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+
+
 # ---------------------------------------------------------------------------
 # submit_pending_answers — Temporal-native pause (resume_token present)
 # ---------------------------------------------------------------------------
@@ -286,19 +323,15 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
     import software_engineering_team.api.routes.hitl as hitl_mod
 
     job_id = "job-signal-1"
-    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
-    fake_job_client.update_job(
+    token = _seed_temporal_native_pause(
+        fake_job_client,
         job_id,
-        waiting_for_answers=True,
-        resume_token=f"{job_id}:tok-1",
-        pending_questions=[
-            {
-                "id": "q1",
-                "question_text": "Which auth provider?",
-                "required": True,
-                "options": [{"id": "okta", "label": "Okta"}],
-            }
-        ],
+        {
+            "id": "q1",
+            "question_text": "Which auth provider?",
+            "required": True,
+            "options": [{"id": "okta", "label": "Okta"}],
+        },
     )
 
     appended: dict = {}
@@ -310,18 +343,15 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
     def _fake_signal(workflow_id, signal, payload):
         signaled.update(workflow_id=workflow_id, signal=signal, payload=payload)
 
-    def _must_not_run(*_a, **_k):  # pragma: no cover
-        raise AssertionError("thread-mode path must not run for a Temporal-native pause")
-
-    monkeypatch.setattr(hitl_mod, "store_append_submitted_answers", _fake_append)
-    monkeypatch.setattr(hitl_mod, "signal_workflow_sync", _fake_signal)
-    monkeypatch.setattr(hitl_mod, "store_submit_answers", _must_not_run)
+    _patch_temporal_native_route(
+        monkeypatch, hitl_mod, on_append=_fake_append, on_signal=_fake_signal
+    )
 
     resp = client.post(
         f"/run-team/{job_id}/answers",
         json={
             "answers": [{"question_id": "q1", "selected_option_id": "okta"}],
-            "resume_token": f"{job_id}:tok-1",
+            "resume_token": token,
         },
     )
 
@@ -330,9 +360,115 @@ def test_submit_pending_answers_temporal_native_signals_workflow(
     assert appended["answers"][0]["question_id"] == "q1"
     assert signaled["workflow_id"] == f"se-run-team-{job_id}"
     assert signaled["signal"] == "submit_planning_answers"
-    assert signaled["payload"]["resume_token"] == f"{job_id}:tok-1"
+    assert signaled["payload"]["resume_token"] == token
     assert signaled["payload"]["answers"] == appended["answers"]
-    assert resp.json()["resume_token"] == f"{job_id}:tok-1"
+    # The answered pause is no longer advertised back at the client (see below).
+    assert resp.json()["resume_token"] is None
+
+
+def test_submit_pending_answers_temporal_native_stops_advertising_the_answered_pause(
+    client, fake_job_client, monkeypatch
+):
+    """A valid submission must not come back saying the job is still waiting for the
+    questions it just answered.
+
+    The pause envelope is the activity's to clear atomically on re-entry, never the
+    answers route's, so the record keeps advertising the pause for the minutes until
+    the activity runs. Reporting that verbatim tells the client its answers did not
+    land: a polling UI keeps rendering the banner, and a re-submit is either rejected
+    as a duplicate or silently dropped by the workflow's first-wins signal rule. The
+    projection reports the pause resolved; the raw envelope stays put, because
+    ``_check_pending_pause_reentry`` classifies the resume from it.
+    """
+    import software_engineering_team.api.routes.hitl as hitl_mod
+
+    job_id = "job-signal-projected"
+    token = _seed_temporal_native_pause(
+        fake_job_client,
+        job_id,
+        {
+            "id": "q1",
+            "question_text": "Which auth provider?",
+            "required": True,
+            "options": [{"id": "okta", "label": "Okta"}],
+        },
+    )
+
+    _patch_temporal_native_route(monkeypatch, hitl_mod)
+
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={
+            "answers": [{"question_id": "q1", "selected_option_id": "okta"}],
+            "resume_token": token,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["waiting_for_answers"] is False
+    assert body["pending_questions"] == []
+    assert body["resume_token"] is None
+
+    # A follow-up status poll agrees — otherwise the banner just comes back.
+    status = client.get(f"/run-team/{job_id}")
+    assert status.status_code == 200
+    assert status.json()["waiting_for_answers"] is False
+
+    # ...and the envelope the activity classifies its re-entry from is untouched.
+    record = fake_job_client.get_job(job_id)
+    assert record["waiting_for_answers"] is True
+    assert record["resume_token"] == token
+    assert record["pending_questions"]
+
+
+def test_submit_pending_answers_temporal_native_still_advertises_a_later_pause(
+    client, fake_job_client, monkeypatch
+):
+    """The marker is scoped to the token it answered: a NEW pause round must show
+    through, or a resumed run's next question would never reach the user."""
+    import software_engineering_team.api.routes.hitl as hitl_mod
+
+    job_id = "job-signal-round2"
+    token = _seed_temporal_native_pause(
+        fake_job_client,
+        job_id,
+        {
+            "id": "q1",
+            "question_text": "Q1?",
+            "required": True,
+            "options": [{"id": "a", "label": "A"}],
+        },
+    )
+
+    _patch_temporal_native_route(monkeypatch, hitl_mod)
+
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={
+            "answers": [{"question_id": "q1", "selected_option_id": "a"}],
+            "resume_token": token,
+        },
+    )
+    # Assert the submission landed, and that the marker it set is visible.
+    # Without this the test proves nothing: a rejected POST sets no marker, the
+    # projection falls back to the raw envelope, and the round-2 assertions
+    # below would pass for the opposite reason.
+    assert resp.status_code == 200
+    assert client.get(f"/run-team/{job_id}").json()["waiting_for_answers"] is False
+
+    # The activity consumed round 1 and paused again on a fresh token.
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        resume_token=f"{job_id}:tok-2",
+        pending_questions=[{"id": "q2", "question_text": "Q2?", "required": True}],
+    )
+
+    status = client.get(f"/run-team/{job_id}").json()
+    assert status["waiting_for_answers"] is True
+    assert status["resume_token"] == f"{job_id}:tok-2"
+    assert [q["id"] for q in status["pending_questions"]] == ["q2"]
 
 
 def test_submit_pending_answers_temporal_native_rejects_stale_resume_token(

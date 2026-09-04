@@ -389,7 +389,7 @@ class OrderRequest(BaseModel):
         # standalone TRAILING_STOP; non-negative ``trail_offset``).
         # Applies to every ``StopAttachment`` leg — the fixed
         # ``attached_stop_loss`` field and each ``StopAttachment`` in the
-        # generalized ``attached_exits`` list (#7509) — so a leg attached
+        # generalized ``attached_exits`` list — so a leg attached
         # via the list can't skip the offset checks the fixed field
         # enforces. ``label`` names the offending leg in the error so a
         # bad ``attached_exits`` entry is as easy to locate as a bad
