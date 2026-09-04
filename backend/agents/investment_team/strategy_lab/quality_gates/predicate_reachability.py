@@ -446,11 +446,70 @@ class PredicateReachabilityProbe(GateResultsMixin):
                     )
             return results
 
+    def to_starvation_gate_results(
+        self, pairs: List[_PairCooccurrence], spec: Any, *, phase: StrategyLabPhase = "synthesis"
+    ) -> List[QualityGateResult]:
+        """Render a :meth:`probe_pairs` tally into phase-tagged starvation findings.
+
+        Pre: ``pairs`` is the output of :meth:`probe_pairs` for ``spec``.
+        Post: one result per pair where the later rule is judged, fires, and
+        never fires independently of that earlier rule
+        (``pair.later_never_independent``) — ``critical`` on the compiled
+        path, ``warning`` on the custom path, mirroring
+        :meth:`to_gate_results`'s severity model exactly. A pair that is
+        unjudged, dead (``pair.later_dead``), or independently reachable
+        emits NOTHING: a dead later rule is already reported once, per rule,
+        by :meth:`to_gate_results` — this is a DISTINCT finding kind, so it
+        must not also report that rule as starved (``later_never_independent``
+        is defined to be False whenever ``later_dead`` is True, so this falls
+        out of the dataclass without extra branching); and repeating an
+        "info" per O(entry_rules^2) pair would drown out the existing O(entry_rules)
+        per-rule reporting. A rule starved independently by more than one
+        earlier rule yields one finding per qualifying pair, each naming a
+        genuinely sufficient, distinct cause.
+        """
+        custom = bool(getattr(spec, "requires_custom_code", False))
+        with self._using_phase(phase):
+            results: List[QualityGateResult] = []
+            for pair in pairs:
+                if not pair.later_never_independent:
+                    continue
+                rule_id = f"entry[{pair.later_index}]"
+                earlier_id = f"entry[{pair.earlier_index}]"
+                detail = (
+                    f"Entry rule {rule_id} (side={pair.later_side}) is structurally starved by "
+                    f"{earlier_id} (side={pair.earlier_side}): it fires on {pair.later_fires}/"
+                    f"{pair.evaluated} post-warmup bar(s) also evaluated against {earlier_id}, "
+                    f"but never on a bar {earlier_id} doesn't also fire on — first-match-wins "
+                    f"priority means {rule_id} can never actually be selected. "
+                    f"{_pair_leg_diagnostic(pair)}"
+                )
+                if custom:
+                    results.append(
+                        self._warning(
+                            detail
+                            + " (custom-code path: the executed code may differ from the spec, "
+                            "but the authored entry logic is unreachable on this data.)",
+                            rule_id=rule_id,
+                        )
+                    )
+                else:
+                    results.append(self._critical(detail, rule_id=rule_id))
+            return results
+
     def check(
         self, spec: Any, market_data: Any, *, phase: StrategyLabPhase = "synthesis"
     ) -> List[QualityGateResult]:
         """Convenience: :meth:`probe` then :meth:`to_gate_results` (used in tests)."""
         return self.to_gate_results(self.probe(spec, market_data), spec, phase=phase)
+
+    def check_pairs(
+        self, spec: Any, market_data: Any, *, phase: StrategyLabPhase = "synthesis"
+    ) -> List[QualityGateResult]:
+        """Convenience: :meth:`probe_pairs` then :meth:`to_starvation_gate_results`."""
+        return self.to_starvation_gate_results(
+            self.probe_pairs(spec, market_data), spec, phase=phase
+        )
 
 
 def _leg_diagnostic(r: _RuleReachability) -> str:
@@ -470,4 +529,30 @@ def _leg_diagnostic(r: _RuleReachability) -> str:
     return (
         "Every condition holds on its own but they never co-occur on the same bar "
         "(the all_of conjunction is unsatisfiable on this data)."
+    )
+
+
+def _pair_leg_diagnostic(pair: _PairCooccurrence) -> str:
+    """Human diagnostic for a starved pair, naming the bottleneck leg(s).
+
+    Pre: ``pair.later_never_independent`` is True — the later rule fires but
+    never independently of ``pair.earlier_index``.
+    Post: for a single-condition rule, states it never fires independently of
+    the earlier rule; for a conjunction, names the leaf(ves) that never fire
+    independently on their own, or — when every leaf CAN fire independently
+    on its own — reports that they only co-occur with each other on bars the
+    earlier rule also covers (mirrors :func:`_leg_diagnostic`'s two branches,
+    keyed on ``independent_fires`` instead of ``fires``). Empty legs → a
+    generic message.
+    """
+    if not pair.legs:
+        return "The predicate never fires independently of the earlier rule."
+    never = [leg.predicate for leg in pair.legs if leg.fires > 0 and leg.independent_fires == 0]
+    if never:
+        return (
+            f"These condition(s) never fire independently of entry[{pair.earlier_index}]: {never}."
+        )
+    return (
+        f"Every condition can fire independently of entry[{pair.earlier_index}] on its own, "
+        f"but they only co-occur with each other on bars entry[{pair.earlier_index}] also covers."
     )

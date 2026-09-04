@@ -770,8 +770,11 @@ class SynthesisMixin:
         twice. Otherwise runs the probe and records its gate results (critical
         on the compiled path where zero fires ⇒ zero entries; warning on the
         custom path where the executed code may differ) onto
-        ``all_gate_results`` in place; findings never short-circuit the
-        round — the post-backtest zero-trade path still owns routing.
+        ``all_gate_results`` in place, plus the distinct structurally-starved
+        findings from the pairwise co-occurrence check (same severity model;
+        a later rule that fires only on bars an earlier rule also fires on).
+        Findings never short-circuit the round — the post-backtest zero-trade
+        path still owns routing.
         """
         reachability_sig = (
             tuple(str(getattr(r, "when", r)) for r in (spec.entry_rules or [])),
@@ -783,6 +786,14 @@ class SynthesisMixin:
         self.record_gates(
             self.predicate_reachability_probe.to_gate_results(
                 reachability, spec, phase="synthesis"
+            ),
+            all_gate_results,
+            refinement_round=round_num,
+        )
+        pairs = self.predicate_reachability_probe.probe_pairs(spec, market_data)
+        self.record_gates(
+            self.predicate_reachability_probe.to_starvation_gate_results(
+                pairs, spec, phase="synthesis"
             ),
             all_gate_results,
             refinement_round=round_num,
