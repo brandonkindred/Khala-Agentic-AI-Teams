@@ -15,6 +15,7 @@ import pytest
 
 from branding_team import store as store_mod
 from branding_team.store import BrandingStore, get_default_store
+from shared.concurrency import LazySingleton
 
 
 @pytest.fixture(autouse=True)
@@ -28,11 +29,11 @@ def _reset_singleton():
     test in the same process that expects ``get_default_store()`` to keep
     returning that same cached instance would silently get a fresh,
     unpatched one instead. Restoring the pre-test value (rather than always
-    resetting to ``None``) keeps this file's tests isolated without leaking
-    that state into the rest of the session.
+    resetting to a fresh ``LazySingleton``) keeps this file's tests isolated
+    without leaking that state into the rest of the session.
     """
     original = store_mod._default_store
-    store_mod._default_store = None
+    store_mod._default_store = LazySingleton()
     yield
     store_mod._default_store = original
 
@@ -49,11 +50,12 @@ def test_get_default_store_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The first thread's ``__init__`` is held open (simulating slow construction)
     while several other threads call ``get_default_store()`` concurrently. With
-    correct double-checked locking those threads block on ``_store_lock`` until
-    the first construction finishes, so exactly one ``BrandingStore`` is ever
-    built. An unsynchronized ``if _default_store is None`` check would let them
-    all pass while the first thread is still constructing, building more than
-    one instance — this test fails in that case.
+    correct double-checked locking those threads block on the singleton's
+    internal lock until the first construction finishes, so exactly one
+    ``BrandingStore`` is ever built. An unsynchronized ``if _default_store is
+    None`` check would let them all pass while the first thread is still
+    constructing, building more than one instance — this test fails in that
+    case.
     """
     build_count = 0
     build_count_lock = threading.Lock()
@@ -84,8 +86,8 @@ def test_get_default_store_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     assert started.wait(timeout=5), "first thread never entered __init__"
     for t in threads[1:]:
         t.start()
-    # Give the other threads a chance to reach (and block on) _store_lock
-    # before releasing the first thread to finish construction.
+    # Give the other threads a chance to reach (and block on) the singleton's
+    # internal lock before releasing the first thread to finish construction.
     time.sleep(0.1)
     release.set()
     for t in threads:

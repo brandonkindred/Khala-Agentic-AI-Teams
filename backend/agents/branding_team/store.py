@@ -25,7 +25,6 @@ Note for maintainers:
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -34,6 +33,7 @@ from uuid import uuid4
 from psycopg import Cursor
 from psycopg.types.json import Json
 
+from shared.concurrency import LazySingleton
 from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
@@ -578,8 +578,7 @@ class BrandingStore(PostgresHelperMixin):
 # Lazy singleton
 # ---------------------------------------------------------------------------
 
-_store_lock = threading.Lock()
-_default_store: Optional[BrandingStore] = None
+_default_store: LazySingleton[BrandingStore] = LazySingleton()
 
 
 def get_default_store() -> BrandingStore:
@@ -587,12 +586,8 @@ def get_default_store() -> BrandingStore:
 
     Postconditions:
         Returns the singleton ``BrandingStore``. Concurrent first calls race
-        safely (double-checked locking under ``_store_lock``) — exactly one
-        instance is constructed and every caller observes the same object.
+        safely — ``LazySingleton.get_or_create`` serializes them under its
+        own internal lock — so exactly one instance is constructed and every
+        caller observes the same object.
     """
-    global _default_store
-    if _default_store is None:
-        with _store_lock:
-            if _default_store is None:
-                _default_store = BrandingStore()
-    return _default_store
+    return _default_store.get_or_create(BrandingStore)
