@@ -37,6 +37,7 @@ import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.
 import { deferFocus } from '../../shared/defer-focus';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
+import { resultCountAnnouncement } from '../../shared/result-count-announcement';
 import { NotificationService } from '../../core/notification.service';
 import {
   appendActivityNarrative,
@@ -591,6 +592,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return this.repos.filter((repo) => repo.full_name.toLowerCase().includes(query));
   }
 
+  /**
+   * Polite live-region text for how many repos `filteredRepos` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before `repos` has loaded or when the token has no repo access
+   * at all (`repos.length === 0`) — in both cases the search field isn't rendered, so there's
+   * nothing to announce and announcing "0 repositories shown" would contradict the no-access
+   * empty state. Otherwise returns
+   * `resultCountAnnouncement(filteredRepos.length, 'repository', 'repositories')`.
+   */
+  get repoCountAnnouncement(): string {
+    if (!this.reposLoaded || this.repos.length === 0) return '';
+    return resultCountAnnouncement(this.filteredRepos.length, 'repository', 'repositories');
+  }
+
   /** True when there are repos to show but the search excludes every one. */
   get hasFilteredOutRepos(): boolean {
     return this.repos.length > 0 && this.filteredRepos.length === 0;
@@ -685,6 +701,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const query = this.issueSearch.trim().toLowerCase();
     if (!query) return this.issues;
     return this.issues.filter((issue) => issue.title.toLowerCase().includes(query));
+  }
+
+  /**
+   * Polite live-region text for how many issues `filteredIssues` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before the expanded repo's issues have loaded or when it has no
+   * open issues at all (`issues.length === 0`) — in both cases the search field isn't rendered, so
+   * there's nothing to announce and announcing "0 issues shown" would contradict the no-open-issues
+   * empty state. Otherwise returns
+   * `resultCountAnnouncement(filteredIssues.length, 'issue', 'issues')`.
+   */
+  get issueCountAnnouncement(): string {
+    if (!this.issuesLoaded || this.issues.length === 0) return '';
+    return resultCountAnnouncement(this.filteredIssues.length, 'issue', 'issues');
   }
 
   /** True when there are issues to show but the search excludes every one. */
