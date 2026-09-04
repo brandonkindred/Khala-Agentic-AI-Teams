@@ -79,7 +79,7 @@ describe('OutOfScopeIssuesComponent a11y', () => {
   it('has no axe violations in the empty state with an error banner', async () => {
     const fixture = await createFixture([], { error: 'proposals fetch failed' });
     const host: HTMLElement = fixture.nativeElement;
-    expect(host.querySelector('.oos-issues__empty')).not.toBeNull();
+    expect(host.querySelector('app-empty-state')).not.toBeNull();
     expect(host.querySelector('app-inline-banner')).not.toBeNull();
     await expectNoAxeViolations(host);
   }, 15000);

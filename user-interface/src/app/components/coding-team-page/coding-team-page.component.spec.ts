@@ -256,6 +256,31 @@ describe('CodingTeamPageComponent', () => {
     });
   });
 
+  describe('empty states render in a role="status" region (no repo access / no open issues)', () => {
+    it('renders "no repository access" in a role="status" region with its icon hidden from AT', async () => {
+      integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      const empty = fixture.nativeElement.querySelector('.github-empty');
+      expect(empty).not.toBeNull();
+      expect(empty?.getAttribute('role')).toBe('status');
+      expect(empty?.textContent).toContain('The personal access token has no repository access.');
+      expect(empty?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    it('renders "no open issues" in a role="status" region with its icon hidden from AT', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      const empty = fixture.nativeElement.querySelector('.github-empty');
+      expect(empty).not.toBeNull();
+      expect(empty?.getAttribute('role')).toBe('status');
+      expect(empty?.textContent).toContain('No open issues found.');
+      expect(empty?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
+    });
+  });
+
   it('auto-loads the accessible repositories on init when GitHub is configured', async () => {
     await setup();
     expect(integrationsSpy.getGitHubConfig).toHaveBeenCalled();
@@ -1546,11 +1571,14 @@ describe('CodingTeamPageComponent', () => {
   // -------------------------------------------------------------------------
 
   describe('runs panel', () => {
-    it('renders an empty state when there are no runs', async () => {
+    it('renders an empty state when there are no runs, in a role="status" region', async () => {
       await setup();
       await flushAsync();
       showView('jobs');
-      expect(fixture.nativeElement.querySelector('.jobs-panel__empty')).not.toBeNull();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('app-empty-state')).not.toBeNull();
+      const statusRegions = Array.from(el.querySelectorAll('[role="status"]'));
+      expect(statusRegions.some((r) => r.textContent?.includes('No runs yet'))).toBe(true);
     });
 
     it('renders Running and Recent sections without a delete button', async () => {
