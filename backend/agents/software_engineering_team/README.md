@@ -166,6 +166,10 @@ How a case positively declares false-positive resistance — a
 labels — and how that plays out against the matching rule, with worked
 `must_find`/`must_not_find` examples, are specified in
 [`docs/CORPUS_FALSE_POSITIVE_RESISTANCE.md`](docs/CORPUS_FALSE_POSITIVE_RESISTANCE.md).
+The selection plan that fixes the corpus's defect-class distribution,
+per-class case counts, and backend/frontend proportion the case-authoring
+stories fill — justified against that inventory and format — is specified
+in [`docs/CORPUS_SELECTION_PLAN.md`](docs/CORPUS_SELECTION_PLAN.md).
 
 ## Plan folder
 
