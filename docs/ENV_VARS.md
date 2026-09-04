@@ -854,6 +854,25 @@ calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
 dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
+### CODE_REVIEW_AGENT_TOOL_CALL_CAP
+Int (default `50`, floor `1`). Hard cap on the total tool calls a single
+code-review Strands agent run may make (`tool_call_budget.ToolCallBudgetModel`,
+applied by `run_agent_via_reasoning` to every tool-using pass: false-positive
+verification, scope filtering, and the architecture / side-effect submission
+passes). This is the backstop for the budget baked into the tools themselves
+(40 calls, `false_positive_filter._MAX_TOTAL_TOOL_CALLS`), which only *asks*
+the model to stop and answer — a model that ignores that directive keeps
+emitting the same tool call forever, and nothing caps the iterations (Strands
+applies a turn budget only when the caller passes `limits`, which these callers
+do not), so the run never terminates. Once this cap is reached, every further
+tool-use block is dropped before Strands can execute it and a `tool_use` stop
+reason is rewritten to `end_turn`, so the loop always ends: the run finishes with
+whatever conclusion the model can state from what it already inspected (each
+pass then fails safe on an unusable answer — verification keeps its findings,
+a submission-pass batch degrades to no findings). Keep it above the tools'
+own budget so a cooperating model gets its nudge and a few turns to act on it;
+lower it to bound cost harder on a model that habitually over-investigates.
+
 ### CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP
 Int (default `40`, floor `1`). Cap on how many findings the false-positive
 verification phase inlines into a single per-file LLM call

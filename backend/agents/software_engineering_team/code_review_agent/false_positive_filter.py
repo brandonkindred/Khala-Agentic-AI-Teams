@@ -1320,10 +1320,14 @@ def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
 # pressure -- instead of converging on a verdict.
 _MAX_DUPLICATE_TOOL_CALLS = 2
 
-# Hard cap on total tool calls (of any kind) a single verification run may
+# Budget on total tool calls (of any kind) a single verification run may
 # make before every further call skips its real lookup entirely and returns
 # a stop directive instead, bounding the cost of a verifier that never
-# converges regardless of how varied its calls are.
+# converges regardless of how varied its calls are. This is advisory -- the
+# directive only *asks* the model to stop, and a model that ignores it keeps
+# calling. The unilateral stop is ``tool_call_budget.ToolCallBudgetModel``
+# (``CODE_REVIEW_AGENT_TOOL_CALL_CAP``), which ends the agent loop itself;
+# this budget stays lower so a cooperating model converges on its own first.
 _MAX_TOTAL_TOOL_CALLS = 40
 
 

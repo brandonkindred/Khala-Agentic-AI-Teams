@@ -23,6 +23,8 @@ class will use it.
 
 from __future__ import annotations
 
+import logging
+import math
 from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import workflow
@@ -36,6 +38,8 @@ __all__ = [
     "PlanningAnswerSignalMixin",
 ]
 
+logger = logging.getLogger(__name__)
+
 # Wire shape fixed by system_design/planning_hitl_temporal_contract.md.
 SUBMIT_PLANNING_ANSWERS_SIGNAL = "submit_planning_answers"
 
@@ -45,13 +49,103 @@ SUBMIT_PLANNING_ANSWERS_SIGNAL = "submit_planning_answers"
 # where existing callers already look for it.
 
 
+def _option_confidence(option: Dict[str, Any]) -> float:
+    """``option``'s confidence as a float, 0.0 when absent or unusable.
+
+    Postconditions: never raises; a ``confidence`` that is missing, non-numeric,
+        bool, non-finite, or too large to convert to a float scores 0.0, so a
+        malformed option can never outrank a well-formed one. Three exclusions
+        are not obvious:
+
+        - ``bool`` is an ``int`` subclass, so ``True`` would otherwise score
+          1.0 -- ahead of every real option.
+        - ``NaN`` passes the numeric check but loses every ``>`` comparison, so
+          ``max`` KEEPS a leading NaN option over later, higher-confidence
+          ones. That is a malformed option outranking well-formed ones, which
+          is exactly what this postcondition rules out. ``json.loads`` accepts
+          a bare ``NaN`` token, and these dicts originate from LLM-parsed
+          output, so it is reachable rather than theoretical.
+        - An ``int`` beyond float range raises ``OverflowError`` from
+          ``float()`` rather than producing a value; ``json.loads`` parses
+          integer tokens into unbounded ints, so the same source can supply
+          one. It is caught, not allowed to escape.
+    """
+    value = option.get("confidence")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    try:
+        confidence = float(value)
+    except OverflowError:
+        # An int beyond ~1e308. ``json.loads`` parses integer tokens into
+        # unbounded Python ints, so this is reachable from the same LLM-parsed
+        # output the exclusions below guard against -- and letting it raise
+        # would crash the resumed activity on the final round instead of
+        # defaulting, which is the one thing this path must not do.
+        return 0.0
+    return confidence if math.isfinite(confidence) else 0.0
+
+
+def _default_answer(question: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a submittable answer for a question nobody answered.
+
+    The selection policy is deliberately identical to
+    ``product_requirements_analysis_agent.user_communication.get_default_option``,
+    which thread mode's auto-answer path uses: the ``is_default`` option, else the
+    highest-confidence one, else ``None``. Only the input shape differs -- that
+    function takes an ``OpenQuestion``, this one the wire dicts
+    ``convert_to_pending_questions`` emits, which carry ``confidence`` on every
+    option. Diverging here (e.g. falling back to list order) would mean the SAME
+    question gets a different defaulted answer depending on which runtime mode
+    spent its pause budget.
+
+    Preconditions:
+        - ``question`` is a dict whose ``"id"`` is a str (the caller filters).
+    Postconditions:
+        - Returns an ``{"question_id", "selected_option_id", "other_text"}`` dict
+          shaped for ``shared.hitl.models.AnswerSubmission``.
+        - The option chosen is the first flagged ``is_default``; failing that the
+          highest-confidence well-formed option (ties broken by list order, since
+          ``max`` returns the first maximal element -- matching
+          ``get_default_option``'s stable sort); failing that ``None``.
+          ``selected_option_id`` is Optional on that model, and a question with no
+          options carries a free-text placeholder anyway.
+        - Malformed options (non-dict, or a non-str ``id``) are skipped rather
+          than raising, so a garbled batch still yields a submittable answer.
+    """
+    options = question.get("options")
+    chosen: Optional[Dict[str, Any]] = None
+    if isinstance(options, list):
+        well_formed = [
+            opt for opt in options if isinstance(opt, dict) and isinstance(opt.get("id"), str)
+        ]
+        chosen = next((opt for opt in well_formed if opt.get("is_default")), None)
+        if chosen is None and well_formed:
+            chosen = max(well_formed, key=_option_confidence)
+    return {
+        "question_id": question["id"],
+        "selected_option_id": chosen["id"] if chosen else None,
+        "other_text": None,
+    }
+
+
 def build_temporal_planning_answer_callback(
     resume_token: str,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
+    next_resume_token: Optional[Callable[[], str]] = None,
+    allow_repause: bool = True,
 ) -> Callable[[list], list]:
     """Build a ``Callable[[list], list]`` satisfying Planning's ``answer_callback``
     contract (``planning_team.orchestrator.resolve_pra_answers``), backed by the
     durable signal-wait mechanism instead of thread-mode's blocking poll loop.
+
+    The shape of the result is dictated by what the consumer can actually act on.
+    Planning's PRA path feeds it to ``adapters.product_analysis``, which POSTs it to
+    the product-analysis answers route -- and that route rejects (400) any batch
+    missing an answer for a question marked ``required``, which
+    ``user_communication.convert_to_pending_questions`` stamps on every question it
+    emits. So a partial answer set is not a weaker success than a full one: it is
+    indistinguishable from silence, leaving the sub-job waiting until it times out.
+    This callback therefore returns a COMPLETE set or does not return at all.
 
     Preconditions:
         - ``resume_token`` is a non-empty str uniquely identifying this pause
@@ -59,33 +153,88 @@ def build_temporal_planning_answer_callback(
           ``PlanningAnswerSignalMixin.wait_for_planning_answers``).
         - ``submitted_answers``, when not ``None``, is the exact list already
           resolved for this ``resume_token`` (e.g. via a validated
-          ``submit_planning_answers`` signal) — dicts shaped
+          ``submit_planning_answers`` signal) -- dicts shaped
           ``{"question_id": ..., "selected_option_id": ...}``, matching what
           thread-mode's ``_build_planning_answer_callback`` already returns.
+        - ``next_resume_token``, when given, mints a FRESH token per call (see
+          ``pause_cycle.mint_resume_token``: a token is unique per pause round
+          and never reused), for the case below where a resumed run has to
+          pause again. Omitted, a re-pause reuses ``resume_token``, which is
+          still preferable to answering a batch silently but leaves the two
+          rounds sharing one token.
+        - ``allow_repause`` is a bool. ``False`` forbids a further pause: when
+          ``submitted_answers`` is provided, the callback resolves whatever it is
+          handed, defaulting any unmatched question. It does NOT make the
+          no-answers callback resolve -- with ``submitted_answers=None`` there is
+          nothing to resolve with, so that callback still raises the initial pause
+          on ``resume_token`` regardless of this flag (see the postcondition
+          below). A caller that loops on
+          pauses MUST bound that loop and pass ``False`` on its final round,
+          because nothing here guarantees convergence on its own: a resume replays
+          Planning from scratch, and an ``OpenQuestion.id`` reaches the model
+          straight from LLM output
+          (``product_requirements_analysis_agent.question_processing.parse_open_question``),
+          so a re-run can mint fresh ids for questions the user has already
+          answered and each round would then pause on the next batch forever.
     Postconditions:
         - Returns a callable ``cb(questions) -> list``.
-        - When ``submitted_answers`` is ``None``: calling ``cb`` never returns —
+        - When ``submitted_answers`` is ``None``: calling ``cb`` never returns --
           it raises ``PlanningAnswerPauseSignal(resume_token, questions)``,
           carrying the exact ``questions`` passed in verbatim as
           ``pending_questions`` for a caller to persist/relay.
-        - When ``submitted_answers`` is provided: calling ``cb`` returns the
-          subset of ``submitted_answers`` whose ``question_id`` matches one of
-          ``questions``' ``id`` values, preserving ``submitted_answers``'
-          order. Never fabricates an answer for a question with no matching
-          entry, and never returns a default — a question with no matching
-          submitted answer is simply absent from the result. A non-dict entry
-          in ``submitted_answers`` (a malformed signal's ``answers`` list is
-          validated as a list, not as a list-of-dicts) is skipped rather than
-          raising — fails closed instead of an ``AttributeError`` surfacing
-          from a resumed activity. Matching requires both ``id``/``question_id``
-          to be ``str`` (the codebase's own convention for these fields,
-          e.g. ``resolve_pra_answers``) rather than merely hashable — a
-          malformed signal could otherwise supply an unhashable
-          ``question_id`` (e.g. a list) and crash the set-membership test
-          instead of simply never matching.
+        - When ``submitted_answers`` is provided and every well-formed question in
+          the batch has a matching submitted answer, ``cb`` returns those matches
+          in ``submitted_answers``' order and nothing else. It never fabricates an
+          answer for a question the submitter did answer, and never overrides one
+          with a default.
+        - When any well-formed question has no matching answer and ``allow_repause``
+          is true, ``cb`` raises ``PlanningAnswerPauseSignal`` rather than submitting
+          a set the route would reject -- on a freshly minted token when
+          ``next_resume_token`` was given, else on the original ``resume_token``
+          (see that parameter's precondition). That covers
+          both "the submitter skipped this one" and "the replay opened a question
+          nobody has seen"; either way the answer that would let Planning proceed
+          does not exist yet, and inventing one is the silent auto-answer both
+          runtime modes exist to prevent.
+        - When any well-formed question has no matching answer and ``allow_repause``
+          is false, ``cb`` returns the matches plus a defaulted answer per unmatched
+          question (see :func:`_default_answer`) and logs a warning naming them.
+          The pause budget is spent, so the choice is between a defaulted answer and
+          a sub-job that waits until it times out; a default that is announced beats
+          a hang. The option it picks follows the same policy
+          ``user_communication.get_default_option`` applies on the thread-mode
+          auto-answer path -- is_default, else highest confidence -- so the two
+          runtime modes default a given question identically.
+        - A malformed question entry (non-dict, or an ``id`` that is not a str)
+          carries nothing a submitter could ever answer and nothing the route would
+          accept, so it neither matches, blocks, nor gets a default -- it is skipped
+          entirely. Likewise a non-dict entry in ``submitted_answers`` (a malformed
+          signal's ``answers`` list is validated as a list, not a list-of-dicts) is
+          skipped rather than raising ``AttributeError`` out of a resumed activity,
+          and matching requires ``question_id`` to be a ``str`` so an unhashable one
+          never crashes the set-membership test.
+        - At most ONE answer is returned per question. That list is validated as a
+          list, so it can carry the same ``question_id`` twice, and nothing
+          downstream catches it: the product-analysis route compares sets of ids,
+          so a duplicate satisfies both its required-coverage and unknown-id
+          checks and is then stored verbatim. The first entry per id wins, in
+          ``submitted_answers`` order.
     """
     assert isinstance(resume_token, str) and resume_token, (
         "build_temporal_planning_answer_callback requires a non-empty resume_token"
+    )
+    assert isinstance(allow_repause, bool), (
+        "build_temporal_planning_answer_callback requires a bool allow_repause"
+    )
+    # Checked here, not at the re-pause site: a non-callable (a token string
+    # mistaken for ``resume_token``) would otherwise stay silent until a batch
+    # actually re-pauses, and surface as ``TypeError: 'str' object is not
+    # callable`` from inside a resumed activity -- the one place a clear message
+    # is hardest to come by.
+    assert next_resume_token is None or callable(next_resume_token), (
+        "build_temporal_planning_answer_callback requires next_resume_token to be a "
+        "zero-argument callable that mints a FRESH token (e.g. pause_cycle."
+        "mint_resume_token), or None"
     )
 
     if submitted_answers is None:
@@ -98,16 +247,42 @@ def build_temporal_planning_answer_callback(
     resolved = list(submitted_answers)
 
     def _resolved_cb(questions: list) -> list:
-        question_ids = {
-            q.get("id") for q in questions if isinstance(q, dict) and isinstance(q.get("id"), str)
-        }
-        return [
-            a
-            for a in resolved
-            if isinstance(a, dict)
-            and isinstance(a.get("question_id"), str)
-            and a.get("question_id") in question_ids
-        ]
+        askable = [q for q in questions if isinstance(q, dict) and isinstance(q.get("id"), str)]
+        question_ids = {q["id"] for q in askable}
+        # First-wins dedup, not a plain filter: a signal's ``answers`` is
+        # validated as a list, not a list of distinct answers, so two entries
+        # can carry the same question_id. Nothing downstream rejects that --
+        # the product-analysis route compares SETS of ids, so duplicates pass
+        # its required/unknown checks and are stored verbatim -- which leaves
+        # which answer actually applies decided by iteration order.
+        matched_by_id: Dict[str, Dict[str, Any]] = {}
+        for a in resolved:
+            if (
+                isinstance(a, dict)
+                and isinstance(a.get("question_id"), str)
+                and a["question_id"] in question_ids
+                and a["question_id"] not in matched_by_id
+            ):
+                matched_by_id[a["question_id"]] = a
+        matched = list(matched_by_id.values())
+        answered_ids = set(matched_by_id)
+        missing = [q for q in askable if q["id"] not in answered_ids]
+        if not missing:
+            return matched
+        if allow_repause:
+            raise PlanningAnswerPauseSignal(
+                next_resume_token() if next_resume_token is not None else resume_token,
+                list(questions),
+            )
+        logger.warning(
+            "Planning pause budget exhausted; defaulting %d unanswered question(s) so the "
+            "product-analysis sub-job can resume instead of waiting out its poll timeout "
+            "(ids: %s). Planning question ids are LLM-minted and can differ across a replay, "
+            "so a further pause is not guaranteed to converge.",
+            len(missing),
+            ", ".join(q["id"] for q in missing),
+        )
+        return matched + [_default_answer(q) for q in missing]
 
     return _resolved_cb
 
