@@ -452,7 +452,7 @@ def test_reachability_probe_runs_on_changed_signature(monkeypatch) -> None:
 def test_reachability_probe_also_records_starvation_findings_on_changed_signature(
     monkeypatch,
 ) -> None:
-    """A changed signature also runs the pairwise co-occurrence check and
+    """A changed signature also runs the union-based starvation check and
     records its structurally-starved findings alongside the dead-rule ones —
     the new finding kind must be visible in the same run's gate results, not
     require a separate wiring step."""
@@ -467,18 +467,18 @@ def test_reachability_probe_also_records_starvation_findings_on_changed_signatur
             _gate("predicate_reachability", passed=True, severity="info")
         ],
     )
-    pair_calls: List[tuple] = []
+    verdict_calls: List[tuple] = []
     monkeypatch.setattr(
         orch.predicate_reachability_probe,
-        "probe_pairs",
-        lambda spec, market_data: pair_calls.append((spec, market_data)) or "pairs",
+        "probe_starvation",
+        lambda spec, market_data: verdict_calls.append((spec, market_data)) or "verdicts",
     )
     starvation_calls: List[tuple] = []
     monkeypatch.setattr(
         orch.predicate_reachability_probe,
         "to_starvation_gate_results",
-        lambda pairs, spec, phase: (
-            starvation_calls.append((pairs, spec, phase))
+        lambda verdicts, spec, phase: (
+            starvation_calls.append((verdicts, spec, phase))
             or [_gate("predicate_reachability_probe", passed=False, severity="critical")]
         ),
     )
@@ -493,10 +493,10 @@ def test_reachability_probe_also_records_starvation_findings_on_changed_signatur
         all_gate_results=all_gate_results,
     )
 
-    assert len(pair_calls) == 1
-    assert pair_calls[0] == (spec, {"QQQ": []})
+    assert len(verdict_calls) == 1
+    assert verdict_calls[0] == (spec, {"QQQ": []})
     assert len(starvation_calls) == 1
-    assert starvation_calls[0][0] == "pairs"
+    assert starvation_calls[0][0] == "verdicts"
     assert starvation_calls[0][2] == "synthesis"
     starved = [g for g in all_gate_results if g.gate_name == "predicate_reachability_probe"]
     assert starved and starved[0].severity == "critical"
@@ -509,7 +509,7 @@ def test_reachability_probe_noop_cases_never_call_pairwise_collaborators(monkeyp
     signature) must short-circuit before EITHER collaborator pair runs —
     dead-rule and starvation reporting share one signature-gated re-probe."""
     orch = _orch()
-    for name in ("probe", "probe_pairs"):
+    for name in ("probe", "probe_starvation"):
 
         def _forbidden(*_a, _name=name, **_k):
             raise AssertionError(f"{_name} must not be called")
