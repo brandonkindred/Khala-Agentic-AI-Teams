@@ -464,8 +464,12 @@ def pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
 
     Preconditions:
         - ``payload`` is a decoded GitHub pull-request object carrying at
-          least ``number`` (the one field with no default; a payload without
-          it raises ``KeyError``/``ValueError`` rather than inventing a PR).
+          least ``number`` (the one field with no default). A payload without
+          a usable one raises rather than inventing a PR, and the exception
+          names the defect exactly: ``KeyError`` when the key is absent,
+          ``TypeError`` when it is present but not int-convertible (``null``,
+          a list, an object — the shape a truncated or non-PR payload takes),
+          and ``ValueError`` when it is a string that is not a number.
     Postconditions:
         - Returns a fully populated :class:`PullRequestDetail`; every field
           other than ``number`` falls back to its empty/false default when

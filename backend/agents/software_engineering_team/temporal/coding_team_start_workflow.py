@@ -145,6 +145,34 @@ def _is_token_key(key: Any) -> bool:
     return any(marker in lowered for marker in _TOKEN_KEY_MARKERS)
 
 
+def _reject_credential_named_key(candidate: Any, *, message_prefix: str) -> None:
+    """Raise when ``candidate`` carries a CREDENTIAL-named key at any depth.
+
+    The single implementation of the credential screen the two argument
+    validators and the serialization-boundary re-check in
+    :func:`_build_workflow_payload` all apply. Kept as one helper so the guard
+    condition and the canonical marker phrasing (``"a credential-named key
+    (any _TOKEN_KEY_MARKERS substring)"``) cannot drift between the three
+    sites; only the message PREFIX differs per site, so each keeps the
+    distinguishable error text its callers and tests already rely on.
+
+    Preconditions:
+        - ``message_prefix`` names the offending argument (and, where the site
+          has one, the caller), and reads as a sentence continued by
+          "a credential-named key ..." — it is interpolated verbatim.
+    Postconditions:
+        - Returns None for a falsy ``candidate`` (nothing to leak) or one whose
+          keys contain no marker. Never mutates ``candidate``.
+    Raises:
+        ValueError: ``candidate`` is truthy and :func:`_contains_token_key`
+            reports a marker key at any nesting depth.
+    """
+    if candidate and _contains_token_key(candidate):
+        raise ValueError(
+            f"{message_prefix} a credential-named key (any _TOKEN_KEY_MARKERS substring)"
+        )
+
+
 def _validate_common_args(job_id: str, repo_path: str, *, caller: str) -> None:
     """Shared job_id/repo_path presence validation for both dispatchers.
 
@@ -196,11 +224,9 @@ def _validate_plan_input_arg(plan_input: Optional[Dict[str, Any]], *, caller: st
     # for "no plan".
     if plan_input is not None and not isinstance(plan_input, dict):
         raise ValueError(f"{caller} requires plan_input to be a dict when provided")
-    if plan_input and _contains_token_key(plan_input):
-        raise ValueError(
-            f"{caller} requires plan_input to not include a credential-named key "
-            "(any _TOKEN_KEY_MARKERS substring)"
-        )
+    _reject_credential_named_key(
+        plan_input, message_prefix=f"{caller} requires plan_input to not include"
+    )
 
 
 def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, required: bool) -> None:
@@ -239,11 +265,9 @@ def _validate_github_arg(github: Optional[Dict[str, Any]], *, caller: str, requi
             raise ValueError(f"{caller} requires a non-empty github dict")
     elif github and not isinstance(github, dict):
         raise ValueError(f"{caller} requires github to be a dict when provided")
-    if github and _contains_token_key(github):
-        raise ValueError(
-            f"{caller} github workflow payload must not include a credential-named key "
-            "(any _TOKEN_KEY_MARKERS substring)"
-        )
+    _reject_credential_named_key(
+        github, message_prefix=f"{caller} github workflow payload must not include"
+    )
 
 
 def _workflow_id(job_id: str) -> str:
@@ -288,11 +312,9 @@ def _build_workflow_payload(
             :func:`_contains_token_key`).
     """
     for name, candidate in (("github", github), ("plan_input", plan_input)):
-        if candidate and _contains_token_key(candidate):
-            raise ValueError(
-                f"{name} workflow payload must not include a credential-named key "
-                "(any _TOKEN_KEY_MARKERS substring)"
-            )
+        _reject_credential_named_key(
+            candidate, message_prefix=f"{name} workflow payload must not include"
+        )
     payload: Dict[str, Any] = {
         "job_id": job_id,
         "repo_path": repo_path,

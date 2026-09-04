@@ -1213,7 +1213,11 @@ def _prepare_issue_branch(
           including ``""`` -- means "provided" and is compared against the live
           ref. A SHA is never legitimately empty, so an empty string is a caller
           bug that fails the job closed rather than silently disabling the
-          freshness check the caller asked for.
+          freshness check the caller asked for. Both comparisons are
+          case-insensitive (``casefold`` on both sides): git SHAs are hex, and
+          nothing guarantees a caller's snapshotted SHA and ``rev-parse``'s
+          output agree on letter case, so a same-commit comparison must not
+          fail merely because of that.
     Postconditions (success):
         - integration_branch is checked out with a clean working tree;
           khala.active-issue records issue_number when provided; every commit
@@ -1291,7 +1295,7 @@ def _prepare_issue_branch(
     # This freshness check must also precede dirty-tree recovery, same as the
     # unsafe-ref checks above: a job whose plan is already known stale must
     # not commit WIP or create rescue branches on its way to being rejected.
-    if expected_base_sha is not None and base_ref != expected_base_sha:
+    if expected_base_sha is not None and base_ref.casefold() != expected_base_sha.casefold():
         return (
             False,
             f"base branch `{default_branch}` moved from `{expected_base_sha}` to "

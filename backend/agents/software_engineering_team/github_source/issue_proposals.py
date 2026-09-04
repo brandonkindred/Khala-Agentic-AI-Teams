@@ -973,12 +973,16 @@ def find_similar_open_issue_via_llm(proposal: dict[str, Any], open_issues: list[
           error) degrades to ``None`` — "create a new issue" is the safe
           default, since a duplicate issue is recoverable and a lost finding is
           not.
-        - Costs at most one LLM call per invocation: exactly one when
-          ``open_issues`` is non-empty AND an LLM is configured, and zero when
+        - Costs at most TWO provider round-trips per invocation: zero when
           ``open_issues`` is empty or the LLM is not configured (that failure
           is raised by ``generate_structured`` before any provider round-trip
           and is caught by the degrade-to-``None`` handler above, so it costs
-          no call).
+          no call); otherwise one on the ordinary path, plus at most one more
+          self-correction call, since the call below passes
+          ``correction_attempts=1`` and ``complete_validated`` issues one
+          corrective follow-up call per attempt on a parse/validation failure.
+          It never fans out beyond that -- a single question, asked once and at
+          most re-asked once.
         - Every value interpolated into the prompt -- the proposal's own fields
           AND each existing issue's title/body (see
           :func:`_format_existing_issues`) -- is passed through

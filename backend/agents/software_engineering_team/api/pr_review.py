@@ -297,6 +297,13 @@ def _running_sibling_on_checkout(
           a sibling registered under a different spelling of the same
           checkout still matches. The caller's own job (``own_job_id``) is
           never reported.
+        - A candidate whose own ``repo_path`` cannot be resolved at all
+          (``TypeError``/``ValueError`` from ``realpath``) is logged and
+          SKIPPED -- this one failure mode fails open, and the inline comment
+          at that site records why it differs from the fail-closed choices
+          around it: the defect is permanent per stored row, so fail-closed
+          would wedge the checkout's admission indefinitely, and an
+          unresolvable path cannot be shown to name this checkout anyway.
         - When ``list_jobs`` itself raises (job service unreachable, etc.),
           logs a scrubbed warning and returns a synthetic sibling so the
           caller fail-closes instead of mutating a checkout whose liveness
@@ -354,6 +361,18 @@ def _running_sibling_on_checkout(
                 repo_path,
                 scrub_token_from_text(str(exc)),
             )
+            # Deliberately fails OPEN, unlike the parent lookup below (which
+            # fails closed). The difference is whether the failure can clear:
+            # a parent lookup failing is a TRANSIENT service condition, so
+            # blocking now and admitting on a later retry costs nothing. A
+            # ``repo_path`` that cannot be resolved at all is a PERMANENT
+            # property of that stored row (a non-str value, an embedded null
+            # byte), so failing closed would wedge this checkout's admission
+            # forever -- for every future job, not just this one -- until an
+            # operator purged the row by hand. The corrupt row also cannot be
+            # shown to name THIS checkout: the caller's own path resolved
+            # cleanly into ``target``, and an unresolvable one matches no
+            # spelling of it. Skipping it, loudly, is the recoverable choice.
             continue
         if not same_checkout:
             continue

@@ -199,6 +199,8 @@ def test_has_recorded_resolve_failure_degrades_on_mid_query_error(monkeypatch, f
 
 
 def test_has_recorded_resolve_failure_true_when_matching_row_exists(monkeypatch) -> None:
+    """A matching row reads back as True, and the lookup is keyed on the full
+    (owner, repo, pr, thread, reply-comment) tuple."""
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
     cursor = _FakeCursor(fetchone_result=(1,))
     monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
@@ -210,6 +212,8 @@ def test_has_recorded_resolve_failure_true_when_matching_row_exists(monkeypatch)
 
 
 def test_has_recorded_resolve_failure_false_when_no_row(monkeypatch) -> None:
+    """No row means False -- "no recorded failure", the answer that lets the
+    caller take the ordinary path."""
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
     cursor = _FakeCursor(fetchone_result=None)
     monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
@@ -235,6 +239,8 @@ def test_has_recorded_resolve_failure_uses_null_safe_comparison(monkeypatch) -> 
 
 
 def test_record_resolve_failure_upserts_with_expected_params(monkeypatch) -> None:
+    """Recording a failure issues exactly one UPSERT (INSERT ... ON CONFLICT),
+    so a repeated failure updates the ledger row instead of duplicating it."""
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
     cursor = _FakeCursor()
     monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
@@ -249,6 +255,7 @@ def test_record_resolve_failure_upserts_with_expected_params(monkeypatch) -> Non
 
 
 def test_clear_resolve_attempt_deletes_with_expected_params(monkeypatch) -> None:
+    """Clearing one thread issues a single DELETE bound to that thread's key."""
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
     cursor = _FakeCursor()
     monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))
@@ -263,6 +270,8 @@ def test_clear_resolve_attempt_deletes_with_expected_params(monkeypatch) -> None
 
 
 def test_clear_resolve_attempts_for_pr_deletes_with_expected_params(monkeypatch) -> None:
+    """The PR-wide clear deletes by (owner, repo, pr) only -- ``thread_id`` must
+    NOT appear in the query, or it would clear one thread instead of the PR."""
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
     cursor = _FakeCursor()
     monkeypatch.setattr(store, "get_conn", lambda: _FakeConn(cursor))

@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterator, Optional
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -1705,7 +1706,12 @@ class TestEndpointHappyPath:
             "cleanup_checkout_on_success": True,
         }
         assert "token" not in started["github"]
-        persisted = patched_app["jobs"].get_job(resp.json()["job_id"])["github_context"]
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        # Assert-then-subscript, like the failure-path sibling below: a missing
+        # row would otherwise fail as a TypeError on ``None[...]`` instead of
+        # naming what actually went wrong.
+        assert job is not None
+        persisted = job["github_context"]
         assert persisted.items() <= started["github"].items()
         assert gh.get_repo_calls == 1
 
@@ -1772,6 +1778,43 @@ class TestEndpointHappyPath:
         assert job is not None
         assert job["status"] == "failed"
         assert "Temporal dispatch failed" in job["error"]
+
+    def test_fail_new_job_without_cause_keeps_implicit_exception_context(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """Omitting ``cause`` must not SUPPRESS the exception being handled.
+
+        ``raise ... from None`` is not "leave chaining alone" -- it sets
+        ``__suppress_context__``, so a caller that invokes this helper from
+        inside an ``except`` block without passing an explicit ``cause`` would
+        lose the original traceback from the rendered chain, which is precisely
+        the diagnostic an operator needs for an unanticipated failure.
+        """
+        import software_engineering_team.api.routes.github as gh_routes
+
+        monkeypatch.setattr(gh_routes._main, "update_job", lambda *a, **kw: None)
+
+        original = RuntimeError("original failure")
+        with pytest.raises(HTTPException) as excinfo:
+            try:
+                raise original
+            except RuntimeError:
+                gh_routes._fail_new_job("job-1", 503, "sanitized summary")
+
+        assert excinfo.value.__suppress_context__ is False
+        assert excinfo.value.__context__ is original
+
+    def test_fail_new_job_with_cause_chains_it_explicitly(self, patched_app, monkeypatch) -> None:
+        """The explicit-``cause`` path still chains, unchanged."""
+        import software_engineering_team.api.routes.github as gh_routes
+
+        monkeypatch.setattr(gh_routes._main, "update_job", lambda *a, **kw: None)
+
+        cause = RuntimeError("dispatch blew up")
+        with pytest.raises(HTTPException) as excinfo:
+            gh_routes._fail_new_job("job-1", 503, "sanitized summary", cause=cause)
+
+        assert excinfo.value.__cause__ is cause
 
     def test_run_from_github_returns_502_when_base_sha_unresolvable(
         self, patched_app, monkeypatch, caplog
@@ -2686,6 +2729,31 @@ class TestPrepareIssueBranch:
         )
         assert ok is True, msg
 
+    def test_uppercase_expected_base_sha_matches_same_commit(self, api, tmp_path) -> None:
+        """A case-mismatched but IDENTICAL base SHA is not "moved".
+
+        Git SHAs are hex and case-insensitive, and the caller's snapshotted
+        SHA does not come from this module's ``rev-parse``, so comparing them
+        case-sensitively would abort a perfectly fresh plan. The
+        ``expected_head_sha`` check already compares with ``casefold``; this
+        pins the base check to the same rule.
+        """
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        import subprocess
+
+        head_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha=head_sha.upper()
+        )
+        assert ok is True, msg
+
     def test_empty_expected_base_sha_is_treated_as_provided(self, api, tmp_path) -> None:
         """``""`` means "provided", not "absent" -- the same convention
         ``expected_head_sha`` uses.
@@ -3254,16 +3322,28 @@ class TestBusyCheckoutGuard:
     during branch prep (the old post-hoc dirty-guard behavior). Crashed-job
     leftovers (no running sibling) still recover during prep, unaffected."""
 
-    def _stub_blocked_admission(self, patched_app, monkeypatch, prep_calls: list) -> None:
+    def _stub_blocked_admission(self, patched_app, monkeypatch, reached_calls: list) -> None:
         """Stub the two hooks a blocked-admission test must never actually reach:
         `_prepare_issue_branch` (would mutate the sibling's working tree if the
         409 guard ever failed open) and `_clear_active_issue_if_matches` (the
-        publish-time marker clear, irrelevant to admission itself)."""
+        publish-time marker clear, irrelevant to admission itself).
+
+        BOTH stubs append to ``reached_calls``, so ``reached_calls == []``
+        enforces the claim this docstring makes about both of them. A silent
+        stub for the second hook would have left it merely neutralized, not
+        guarded: a regression that reached it would have gone unnoticed.
+        Entries are ``(hook_name, args)`` so a failure names which one ran."""
         api = patched_app["api"]
         monkeypatch.setattr(
-            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
+            api,
+            "_prepare_issue_branch",
+            lambda *a, **kw: reached_calls.append(("_prepare_issue_branch", a)) or (True, None, []),
         )
-        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        monkeypatch.setattr(
+            api,
+            "_clear_active_issue_if_matches",
+            lambda *a: reached_calls.append(("_clear_active_issue_if_matches", a)),
+        )
 
     def test_running_sibling_on_same_checkout_blocks_admission(
         self, patched_app, monkeypatch
@@ -3277,8 +3357,8 @@ class TestBusyCheckoutGuard:
             status="running",
             github_context={"owner": "o", "repo": "r", "issue_number": 99},
         )
-        prep_calls: list = []
-        self._stub_blocked_admission(patched_app, monkeypatch, prep_calls)
+        reached_calls: list = []
+        self._stub_blocked_admission(patched_app, monkeypatch, reached_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
         jobs_before = len(patched_app["jobs"].list_jobs())
@@ -3288,7 +3368,7 @@ class TestBusyCheckoutGuard:
         # No new job row was ever created for the blocked request, and the
         # sibling's own working tree was never touched.
         assert len(patched_app["jobs"].list_jobs()) == jobs_before
-        assert prep_calls == []
+        assert reached_calls == []
 
     def test_sibling_under_alias_spelling_still_blocks(self, patched_app, monkeypatch) -> None:
         """The guard compares canonical paths: a sibling registered under a
@@ -3306,8 +3386,8 @@ class TestBusyCheckoutGuard:
             status="running",
             github_context={"owner": "o", "repo": "r", "issue_number": 99},
         )
-        prep_calls: list = []
-        self._stub_blocked_admission(patched_app, monkeypatch, prep_calls)
+        reached_calls: list = []
+        self._stub_blocked_admission(patched_app, monkeypatch, reached_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
         jobs_before = len(patched_app["jobs"].list_jobs())
@@ -3315,7 +3395,7 @@ class TestBusyCheckoutGuard:
         assert resp.status_code == 409
         assert "sibling-3" in resp.json()["detail"]
         assert len(patched_app["jobs"].list_jobs()) == jobs_before
-        assert prep_calls == []
+        assert reached_calls == []
 
     def test_terminal_sibling_does_not_block(self, patched_app, monkeypatch) -> None:
         from software_engineering_team.job_store import create_job, update_job
@@ -3353,8 +3433,8 @@ class TestBusyCheckoutGuard:
         # ever fails to block, this must fail cleanly on the status-code
         # assertion below rather than actually run the real issue workflow
         # against the sibling's working tree.
-        prep_calls: list = []
-        self._stub_blocked_admission(patched_app, monkeypatch, prep_calls)
+        reached_calls: list = []
+        self._stub_blocked_admission(patched_app, monkeypatch, reached_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
         jobs_before = len(patched_app["jobs"].list_jobs())
@@ -3364,7 +3444,7 @@ class TestBusyCheckoutGuard:
         assert "PR #42" in resp.json()["detail"]
         assert len(patched_app["jobs"].list_jobs()) == jobs_before
         # The sibling's own working tree was never touched.
-        assert prep_calls == []
+        assert reached_calls == []
 
 
 class TestPublishWindowLiveness:
@@ -3627,11 +3707,23 @@ class TestEphemeralCheckoutCleanup:
         An operator traces a cleanup by grepping the checkout path; a skip
         message naming only the lock file (which lives in the parent directory
         under a different name) is invisible to that search.
+
+        The skip must also LEAVE the checkout intact: a regression that logged
+        the skip and then deleted anyway would satisfy the message assertion
+        alone, so the survival of both the directory and its ``.git`` marker is
+        pinned here too.
         """
         import logging
 
         api = patched_app["api"]
+        # Pin the ephemeral roots to this tmp_path: an ambient SE_WORKSPACE_DIR
+        # or AGENT_CACHE would add roots this test does not control, which can
+        # steer the cleanup down the unsafe-path branch instead of the flock
+        # one it means to exercise (same hermeticity the sibling
+        # resolved-path test establishes).
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
         target = tmp_path / "issue-7"
         target.mkdir()
         (target / ".git").mkdir()
@@ -3644,6 +3736,9 @@ class TestEphemeralCheckoutCleanup:
             api._cleanup_issue_checkout(str(target))
         skips = [r.getMessage() for r in caplog.records if "Skipping checkout cleanup" in r.getMessage()]
         assert skips and all(str(target.resolve()) in m for m in skips)
+        # Skipped means SKIPPED: the checkout survives, .git and all.
+        assert target.is_dir()
+        assert (target / ".git").is_dir()
 
     def test_cleanup_deletes_resolved_path_not_raw_symlinked_string(
         self, patched_app, tmp_path, monkeypatch

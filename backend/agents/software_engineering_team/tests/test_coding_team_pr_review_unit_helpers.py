@@ -8,6 +8,14 @@ only reaches indirectly (or not at all): heartbeat liveness, duplicate-review
 and sibling-checkout detection, language inference, the diff-first focus
 note, author resolution, and the reviewer-dispatch/merge logic in
 ``_run_reviewer``. Self-contained: no imports from other test modules.
+
+It also carries ``TestGitHubNameValidation``, which pins the ``owner``/``repo``
+constraints on the ``coding_team_models`` REQUEST models rather than on a
+``pr_review`` helper. That belongs here because those constraints exist for
+this flow: an unconstrained name reached GitHub URLs and the checkout-origin
+comparison and surfaced as the address-comments route's misleading "origin
+remote names a different repository" 400, and the models are covered nowhere
+else.
 """
 
 from __future__ import annotations
@@ -1114,13 +1122,14 @@ class TestBuildChangeSurfaceForReviewable:
 
 
 class TestGitHubNameValidation:
-    """owner/repo are identifiers, not free text.
+    """``owner``/``repo`` are identifiers, not free text.
 
-    A whitespace-only or path-like value used to satisfy ``min_length=1`` and
-    flow into GitHub API URLs and checkout-origin comparisons before failing
-    downstream -- for an address-comments run, as the route's "origin remote
-    names a different repository" 400, blaming the checkout for what is really
-    a malformed identifier.
+    Before these constraints existed, a whitespace-only or path-like value
+    satisfied ``min_length=1`` and flowed into GitHub API URLs and
+    checkout-origin comparisons, failing only downstream -- for an
+    address-comments run, as the route's "origin remote names a different
+    repository" 400, which blamed the checkout for what was really a
+    malformed identifier.
     """
 
     @staticmethod

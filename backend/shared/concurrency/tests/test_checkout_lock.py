@@ -36,6 +36,13 @@ class _SlowLock:
           rather than wedging the suite), simulating acquisition still in
           flight in the executor thread.
     Postconditions:
+        - ``started`` is set the instant ``__enter__`` begins, BEFORE it blocks
+          on ``proceed``. A test that must cancel while acquisition is provably
+          in flight waits on this signal instead of sleeping a fixed interval:
+          under load the executor thread may not have been scheduled yet, and a
+          cancellation that lands before the callable starts cancels the future
+          outright, so ``__enter__`` never runs and the ``entered_calls == [1]``
+          assertion fails without any lock having leaked.
         - ``entered_calls``/``exited_calls`` gain one entry per completed
           ``__enter__``/``__exit__``. ``__exit__`` returns False, so it never
           suppresses an exception propagating through the ``with`` body.
@@ -43,10 +50,12 @@ class _SlowLock:
 
     def __init__(self, proceed: threading.Event) -> None:
         self._proceed = proceed
+        self.started = threading.Event()
         self.entered_calls: list[int] = []
         self.exited_calls: list[int] = []
 
     def __enter__(self) -> "_SlowLock":
+        self.started.set()
         self._proceed.wait(timeout=5)
         self.entered_calls.append(1)
         return self
@@ -67,6 +76,25 @@ def _install_slow_lock(monkeypatch: pytest.MonkeyPatch, proceed: threading.Event
     lock = _SlowLock(proceed)
     monkeypatch.setattr(checkout_lock_module, "flock_lock", lambda _path: lock)
     return lock
+
+
+async def _await_entry_started(lock: _SlowLock, timeout_s: float = 5.0) -> None:
+    """Await, without blocking the loop, until ``lock.__enter__`` has begun.
+
+    Preconditions:
+        - ``lock`` was installed via :func:`_install_slow_lock` and the task
+          that acquires it has already been scheduled.
+    Postconditions:
+        - Returns once ``lock.started`` is set. Fails the test if that has not
+          happened within ``timeout_s``, rather than letting the caller proceed
+          to cancel a task whose executor callable never started (which would
+          cancel the future outright and produce a spurious failure).
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not lock.started.is_set():
+        if asyncio.get_running_loop().time() >= deadline:
+            pytest.fail("the executor thread never entered __enter__")
+        await asyncio.sleep(0.001)
 
 
 def _assert_flock_is_held(lock_path: Path) -> None:
@@ -278,9 +306,10 @@ def test_cancellation_during_acquisition_does_not_leak_the_lock(
 
     async def _drive() -> None:
         task = asyncio.ensure_future(_run())
-        # Give the executor thread a beat to actually call __enter__ and
-        # block on proceed.wait() before cancelling.
-        await asyncio.sleep(0.05)
+        # Wait on the stand-in's own signal (not a fixed sleep) for proof the
+        # executor thread is INSIDE __enter__ before cancelling: a cancellation
+        # that lands first would cancel the future before the callable ran.
+        await _await_entry_started(lock)
         task.cancel()
         # Give the cancellation a moment to actually reach the task's
         # awaited shield() point. Do NOT await `task` yet: its `finally`
@@ -336,8 +365,10 @@ def test_second_cancellation_during_cleanup_await_does_not_leak_the_lock(
 
     async def _drive() -> None:
         task = asyncio.ensure_future(_run())
-        # Let the executor thread actually start __enter__ and block.
-        await asyncio.sleep(0.05)
+        # Deterministic proof the executor thread is inside __enter__ (see
+        # ``_await_entry_started``) -- a fixed sleep can lose this race under
+        # load and cancel the future before the callable ever starts.
+        await _await_entry_started(lock)
         # First cancellation: reaches the initial (shielded) acquisition
         # await, unwinds into the `finally` block, which starts its own
         # (also shielded) await of the still in-flight acquisition future.

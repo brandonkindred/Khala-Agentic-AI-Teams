@@ -218,7 +218,11 @@ def test_502_on_unreachable(mock_cfg, mock_cred, mock_path, mock_clone, monkeypa
     assert resp.status_code == 502
     # Distinguishable from the malformed-body 502 below, which is the whole
     # point of asserting the detail: both are 502 from the same handler.
-    assert resp.json()["detail"] == "Could not reach coding team service: refused"
+    # The detail is CURATED, not `str(e)`: this file's other paths deliberately
+    # avoid echoing upstream/transport error text to the client, and a connect
+    # error's own message can name the internal service host and port.
+    assert resp.json()["detail"] == "Could not reach coding team service."
+    assert "refused" not in resp.text
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)

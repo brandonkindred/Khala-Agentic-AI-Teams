@@ -10,6 +10,7 @@ so no Temporal server is needed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 
@@ -320,14 +321,16 @@ def test_execute_rejects_non_positive_timeout(bad_timeout):
     ``future.result(timeout=<=0)`` expires immediately and the helper's
     ``while True`` loop spins as a tight busy loop -- burning a CPU and
     emitting one INFO line per iteration -- for the workflow's whole remaining
-    lifetime. Asserting up front is what keeps that unreachable.
+    lifetime. Rejecting up front is what keeps that unreachable, and it is an
+    explicit ``raise`` rather than an ``assert`` so ``python -O`` cannot strip
+    the guard that prevents it.
 
-    The assert must precede the client wait (like the id/task-queue asserts
+    The check must precede the client wait (like the id/task-queue asserts
     above), so this needs no worker: reaching the client would instead raise
     ``RuntimeError`` after the ready timeout, which ``pytest.raises`` would
     report as a failure rather than pass.
     """
-    with pytest.raises(AssertionError, match="execute_timeout_s"):
+    with pytest.raises(ValueError, match="execute_timeout_s"):
         runner.execute_workflow_sync(
             object(),
             workflow_id="wid",
@@ -634,6 +637,45 @@ def test_execute_workflow_sync_reattach_polls_multiple_windows(running_loop):
     # wait, no matter how many client-side polling windows it spanned.
     assert captured["get_workflow_handle_calls"] == 1
     assert captured["handle_result_calls"] == 1
+
+
+def test_execute_workflow_sync_reattach_warns_once_after_threshold(
+    running_loop, monkeypatch, caplog
+):
+    """A wait that spans many reattach windows emits exactly ONE warning.
+
+    The reattach wait is deliberately unbounded (a HITL pause may last a long
+    time and must still complete when the answer arrives), but each such wait
+    pins a caller's background thread, so a workflow that never terminates
+    would otherwise be invisible in the logs among the per-window INFO lines.
+    One WARNING at the threshold gives operators that signal; making it
+    one-shot is what keeps a multi-day wait from flooding the log, and the
+    workflow itself is never cancelled or terminated -- ``out is sentinel``
+    pins that the warning is purely observational.
+    """
+    monkeypatch.setattr(runner, "REATTACH_WARN_AFTER_WINDOWS", 2)
+    captured: dict = {}
+    sentinel = {"ok": True}
+    handle = _FakeReattachHandle(captured, delay_s=0.2, result=sentinel)
+    client_mod.set_temporal_client(_FakeReattachClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    with caplog.at_level(logging.WARNING, logger=runner.logger.name):
+        out = _run_execute_sync_bounded(
+            workflow_id="wid",
+            task_queue="q",
+            execute_timeout_s=0.02,
+            reattach_on_timeout=True,
+        )
+
+    assert out is sentinel
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "has not reached a terminal state" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "wid" in warnings[0].getMessage()
 
 
 def test_execute_workflow_sync_reattach_propagates_workflow_failure(running_loop):

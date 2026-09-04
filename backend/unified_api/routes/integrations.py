@@ -2862,8 +2862,10 @@ async def _forward_to_coding_team(
         - Returns the upstream response's parsed JSON body on a 200. Every
           failure path raises ``HTTPException`` instead of letting an ``httpx``
           error (or a malformed response body) escape unhandled: a timeout
-          raises 504 with ``timeout_detail``, an unreachable service raises 502,
-          and a non-200 response re-raises the upstream status code with a
+          raises 504 with ``timeout_detail``, an unreachable service raises 502
+          with a fixed, cause-free detail (the underlying transport error is
+          logged server-side rather than returned, since it can name the
+          internal service host/port), and a non-200 response re-raises the upstream status code with a
           bounded copy of its detail for a 4xx or ``generic_failure_detail`` for
           a 5xx (never echoing a possible stack trace to the client).
     """
@@ -2880,7 +2882,13 @@ async def _forward_to_coding_team(
         raise HTTPException(status_code=504, detail=timeout_detail) from e
     except httpx.HTTPError as e:
         logger.warning("%s: cannot reach coding team service at %s: %s", log_prefix, coding_team_url, e)
-        raise HTTPException(status_code=502, detail=f"Could not reach coding team service: {e}") from e
+        # Curated, cause-free detail: `str(httpx.ConnectError)` and its siblings
+        # can carry the internal target URL, host/port, or a transport-level
+        # message, and this detail is returned to the API caller. The raw error
+        # is logged immediately above -- server-side is where it belongs -- and
+        # the wording still distinguishes this 502 from the other 502s this
+        # helper raises (upstream 5xx, malformed response body).
+        raise HTTPException(status_code=502, detail="Could not reach coding team service.") from e
 
     if resp.status_code != 200:
         # The upstream body can carry internal detail (a stack trace on an unhandled

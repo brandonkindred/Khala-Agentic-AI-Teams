@@ -39,6 +39,12 @@ START_WORKFLOW_TIMEOUT_S = 30
 # the workflow's result) blocks for the whole workflow to finish. Generous because
 # the workflow may include LLM calls; per-activity timeouts bound each phase.
 EXECUTE_WORKFLOW_TIMEOUT_S = 300
+# How many elapsed reattach windows a `reattach_on_timeout=True` wait may pass
+# through before one (and only one) WARNING is emitted. The wait itself stays
+# unbounded on purpose — a HITL pause may legitimately last a long time — but a
+# caller pins a background thread per such wait, so operators need one signal
+# that a particular workflow has stopped looking like a normal long pause.
+REATTACH_WARN_AFTER_WINDOWS = 12
 
 # Dedicated pool for the blocking client-ready poll `execute_workflow_async`
 # runs on behalf of async callers. Sized well below the default executor's
@@ -240,6 +246,9 @@ def execute_workflow_sync(
           ``run_coroutine_threadsafe`` — it never creates a second loop.
 
     Raises:
+        - ``ValueError`` if ``execute_timeout_s`` is not strictly positive.
+          Checked with an explicit raise rather than ``assert`` so the guard
+          survives ``python -O``.
         - ``RuntimeError`` if the worker's client never becomes available within
           ``client_ready_timeout_s`` (defaulting to ``CLIENT_READY_TIMEOUT_S``).
         - ``concurrent.futures.TimeoutError`` if the workflow does not finish within
@@ -255,7 +264,14 @@ def execute_workflow_sync(
     """
     assert workflow_id, "workflow_id must be non-empty"
     assert task_queue, "task_queue must be non-empty"
-    assert execute_timeout_s > 0, "execute_timeout_s must be positive"
+    # Raised, not asserted: `python -O` strips asserts, and a non-positive
+    # window here degrades `_reattach_and_wait_sync`'s `while True` into an
+    # infinite busy loop that logs once per iteration for the workflow's
+    # remaining lifetime. The two asserts above stay asserts — Temporal itself
+    # rejects an empty workflow_id/task_queue, so a stripped guard there still
+    # fails fast at the server.
+    if execute_timeout_s <= 0:
+        raise ValueError(f"execute_timeout_s must be positive, got {execute_timeout_s!r}")
     client, loop = _await_client(client_ready_timeout_s)
     coro = client.execute_workflow(
         workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
@@ -299,8 +315,8 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
         - ``poll_timeout_s`` is strictly positive — the ``while True`` loop
           below re-polls on exactly this window, so a non-positive value turns
           it into a tight busy loop. :func:`execute_workflow_sync` guarantees
-          this by asserting its own ``execute_timeout_s``, which it passes
-          through here unchanged.
+          this by validating its own ``execute_timeout_s`` (raising
+          ``ValueError``), which it passes through here unchanged.
         - ``workflow_id`` names the workflow the caller started before the
           timed-out wait, on ``client``'s namespace — with ONE documented
           exception its only caller knowingly hits: if the wait timeout
@@ -329,6 +345,16 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
           of warnings that masks genuinely actionable ones) — this function
           only returns (or raises the workflow's own failure) once Temporal
           reports a terminal state; it never itself times out.
+        - Emits exactly ONE WARNING, on the
+          :data:`REATTACH_WARN_AFTER_WINDOWS`-th elapsed window, naming the
+          workflow id and the cumulative wait. Because a caller can pin one
+          background thread per never-terminating workflow (e.g. one paused on
+          an answer signal nobody sends), operators need a signal that such a
+          wait has become abnormal — but the wait itself is deliberately
+          unbounded, so this observes rather than intervenes: nothing is
+          cancelled, terminated or abandoned, and a workflow whose answer
+          arrives late still completes normally. The warning is one-shot so a
+          multi-day wait cannot flood the log.
         - Schedules exactly ONE ``handle.result()`` coroutine on ``loop`` for
           the whole wait, re-polling that SAME future's ``.result(timeout=...)``
           on every window. Scheduling a fresh coroutine per window (via a new
@@ -341,10 +367,22 @@ def _reattach_and_wait_sync(client: Any, loop: Any, workflow_id: str, poll_timeo
     """
     handle = client.get_workflow_handle(workflow_id)
     future = asyncio.run_coroutine_threadsafe(handle.result(), loop)
+    windows = 0
     while True:
         try:
             return future.result(timeout=poll_timeout_s)
         except futures.TimeoutError:
+            windows += 1
+            if windows == REATTACH_WARN_AFTER_WINDOWS:
+                logger.warning(
+                    "execute_workflow_sync: workflow id=%s has not reached a terminal "
+                    "state after %s reattach windows (~%ss total); this thread stays "
+                    "blocked until the workflow finishes — if it is paused awaiting an "
+                    "answer nobody will send, resolve or terminate it in Temporal",
+                    workflow_id,
+                    windows,
+                    windows * poll_timeout_s,
+                )
             logger.info(
                 "execute_workflow_sync: still waiting on workflow id=%s after another "
                 "%ss; reattaching again",

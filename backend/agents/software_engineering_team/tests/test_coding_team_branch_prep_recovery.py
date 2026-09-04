@@ -1280,7 +1280,7 @@ class TestEnsureNamedRemote:
         name, err = api._ensure_named_remote(clone, fork_url)
         assert _must(clone, "remote", "get-url", "khala-pr-head") == fork_url
 
-    def test_malformed_port_does_not_escape_as_an_exception(self, api, fork_pair) -> None:
+    def test_malformed_port_does_not_escape_as_an_exception(self, api, repo_pair) -> None:
         """An out-of-range port must still come back as ``(remote, error)``.
 
         Deriving the authority from ``urlsplit(...).port`` raises ValueError for
@@ -1290,7 +1290,7 @@ class TestEnsureNamedRemote:
         must not be the one that breaks the contract -- and the credential must
         still be gone from whatever is returned.
         """
-        _, clone, _fork = fork_pair
+        _, clone = repo_pair
         not_a_real_credential = "placeholder"
         bad_port = f"https://x-access-token:{not_a_real_credential}@example.invalid:99999/o/r.git"
 
@@ -1305,14 +1305,14 @@ class TestEnsureNamedRemote:
         config = (Path(clone) / ".git" / "config").read_text(encoding="utf-8")
         assert not_a_real_credential not in config
 
-    def test_host_case_survives_userinfo_stripping(self, api, fork_pair) -> None:
+    def test_host_case_survives_userinfo_stripping(self, api, repo_pair) -> None:
         """The docstring promises the host is "preserved exactly".
 
         ``urlsplit(...).hostname`` lowercases, so building the authority from it
         silently rewrites a mixed-case host -- a change to the registered URL
         that has nothing to do with removing the credential.
         """
-        _, clone, _fork = fork_pair
+        _, clone = repo_pair
         not_a_real_credential = "placeholder"
         mixed = f"https://x-access-token:{not_a_real_credential}@Example.INVALID/o/r.git"
 
@@ -1324,10 +1324,10 @@ class TestEnsureNamedRemote:
         )
 
     def test_bracketed_ipv6_authority_survives_userinfo_stripping(
-        self, api, fork_pair
+        self, api, repo_pair
     ) -> None:
         """A bracketed IPv6 authority keeps its brackets and port."""
-        _, clone, _fork = fork_pair
+        _, clone = repo_pair
         not_a_real_credential = "placeholder"
         v6 = f"https://x-access-token:{not_a_real_credential}@[::1]:8443/o/r.git"
 
@@ -1344,7 +1344,7 @@ class TestEnsureNamedRemote:
         ],
     )
     def test_malformed_bracketed_authority_is_reported_not_raised(
-        self, api, fork_pair, malformed: str
+        self, api, repo_pair, malformed: str
     ) -> None:
         """`urlsplit` itself raises on a malformed bracketed authority.
 
@@ -1355,7 +1355,7 @@ class TestEnsureNamedRemote:
         the userinfo has NOT been stripped at that point, so neither returned
         element may carry any part of the original authority.
         """
-        _, clone, _fork = fork_pair
+        _, clone = repo_pair
 
         name, err = api._ensure_named_remote(clone, malformed)
 

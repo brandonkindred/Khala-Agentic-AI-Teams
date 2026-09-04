@@ -21,6 +21,33 @@ def expected_basic_header(token: str) -> str:
     return f"Authorization: Basic {encoded}"
 
 
+def _run_git(repo: str, *args: str) -> str:
+    """Run ``git -C repo <args>`` and return stdout, stripped.
+
+    The one git invocation every helper in this module goes through. Unlike a
+    bare ``subprocess.run(..., check=True)``, a failure raises an
+    ``AssertionError`` naming the full command and git's stderr — a plain
+    ``CalledProcessError`` carries only the exit code, which says nothing about
+    WHY, and a failing git helper in CI is nearly always diagnosed from that
+    output alone.
+
+    Preconditions:
+        - ``repo`` is a path to an on-disk git checkout; ``args`` are the git
+          subcommand and its arguments (no ``-C``, supplied here).
+    Postconditions:
+        - Returns the command's stdout with surrounding whitespace stripped.
+    Raises:
+        AssertionError: git exited non-zero; the message names the command,
+            the exit code and stderr.
+    """
+    result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(
+            f"git -C {repo} {' '.join(args)} failed (exit {result.returncode}): {result.stderr}"
+        )
+    return result.stdout.strip()
+
+
 def current_branch(repo: str) -> str:
     """Return ``repo``'s currently checked-out branch name.
 
@@ -33,23 +60,10 @@ def current_branch(repo: str) -> str:
     Postconditions:
         - Returns the abbreviated branch name, whitespace-stripped.
         - Raises ``AssertionError`` naming the checkout and git's stderr if
-          ``rev-parse`` fails — the same failure reporting ``commit_on_branch``'s
-          ``_run`` uses, rather than a bare ``CalledProcessError`` whose message
-          carries only an exit code. A failing helper in a git test is nearly
-          always diagnosed from CI output alone, where the exit code says
-          nothing about WHY.
+          ``rev-parse`` fails (see :func:`_run_git`, which both helpers in this
+          module share so that reporting cannot diverge between them).
     """
-    result = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise AssertionError(
-            f"git -C {repo} rev-parse --abbrev-ref HEAD failed "
-            f"(exit {result.returncode}): {result.stderr}"
-        )
-    return result.stdout.strip()
+    return _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD")
 
 
 def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> str:
@@ -119,19 +133,8 @@ def commit_on_branch(repo: str, branch: str, filename: str, contents: str) -> st
     """
 
     def _run(*args: str) -> str:
-        """Run ``git -C repo <args>``, returning stdout stripped.
-
-        Unlike a bare ``subprocess.run(..., check=True)``, a failure raises an
-        ``AssertionError`` that includes the command and stderr — a plain
-        ``CalledProcessError`` only shows the exit code, which makes a failing
-        test hard to diagnose from CI output alone.
-        """
-        result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise AssertionError(
-                f"git -C {repo} {' '.join(args)} failed (exit {result.returncode}): {result.stderr}"
-            )
-        return result.stdout.strip()
+        """This repo's binding of :func:`_run_git` (same failure reporting)."""
+        return _run_git(repo, *args)
 
     _run("checkout", "-q", "-B", branch)
     # try/finally, not a trailing call: the "leaves the checkout back on main"

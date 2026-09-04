@@ -72,7 +72,11 @@ def _fail_new_job(
           response body.
         - ``cause``, when given, is chained onto the raised ``HTTPException``
           via ``raise ... from cause``, matching the original site's own
-          exception-chaining.
+          exception-chaining. When omitted, the raise is UNCHAINED so Python's
+          implicit context still applies: ``raise ... from None`` sets
+          ``__suppress_context__``, which would discard the traceback of
+          whatever exception a caller inside an ``except`` block was handling
+          -- exactly the callers that pass no explicit ``cause``.
     Postconditions:
         - The job is marked ``FAILED`` with ``error`` and ``current_activity``
           cleared, then raises ``HTTPException(status_code=http_status,
@@ -90,7 +94,12 @@ def _fail_new_job(
         error=error,
         current_activity=None,
     )
-    raise HTTPException(status_code=http_status, detail=detail or error) from cause
+    exc = HTTPException(status_code=http_status, detail=detail or error)
+    # `from cause` only when there IS a cause: `from None` is not "no chaining",
+    # it actively SUPPRESSES the implicit context (see the precondition above).
+    if cause is not None:
+        raise exc from cause
+    raise exc
 
 
 @router.post("/run-from-github", response_model=RunFromGitHubResponse)
@@ -308,7 +317,16 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         except Exception as e:
             # Dispatch failed (worker not ready, start timeout, bad config). Mark
             # the freshly-created row failed so it is not orphaned in 'pending',
-            # and surface a retryable error instead of an opaque 500.
+            # and surface a 503 instead of an opaque 500.
+            # The message is deliberately CAUSE-NEUTRAL. This `except` catches
+            # every dispatch failure, and only some of them clear on their own:
+            # a worker that has not come up yet does, an invalid task queue or
+            # a misconfigured Temporal address does not. Naming "worker
+            # unavailable" and instructing "Retry." asserted a diagnosis this
+            # handler cannot make, and sent operators into a retry loop that
+            # can never succeed. Say what is known -- dispatch failed, the row
+            # is terminal, the detail is in the server log -- and let the log
+            # supply the cause.
             # The stored `error` is deliberately sanitized, not `str(e)`: the
             # generic `GET /api/jobs/{team}` route echoes a job's error verbatim,
             # so raw dispatch-exception text (host names, connection strings,
@@ -320,8 +338,12 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             _fail_new_job(
                 job_id,
                 503,
-                "Temporal dispatch failed (worker unavailable)",
-                detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
+                "Temporal dispatch failed; job marked failed",
+                detail=(
+                    "Temporal dispatch failed; job marked failed. The cause is in the "
+                    "server log -- a worker that is not up yet is retryable, a dispatch "
+                    "configuration error is not."
+                ),
                 cause=e,
             )
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
