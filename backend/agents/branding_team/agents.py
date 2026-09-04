@@ -814,11 +814,10 @@ def make_brand_experience_principler() -> Agent:
         journey moments, and sensory elements. The agent is routed
         through the ``branding_channel_activation`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_experience_principler",
         description="Defines brand experience principles, signature moments, and sensory elements.",
-        system_prompt=render_agent_prompt(_BRAND_EXPERIENCE_PRINCIPLER_PROMPT),
-        structured_output=BrandExperiencePrinciplesOutput,
+        prompt=_BRAND_EXPERIENCE_PRINCIPLER_PROMPT,
         agent_key=_PHASE4_AGENT_KEY,
     )
 
@@ -923,11 +922,10 @@ def make_brand_architecture_builder() -> Agent:
         and a terminology glossary. The agent is routed through the
         ``branding_channel_activation`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_architecture_builder",
         description="Defines brand architecture rules, naming conventions, and terminology.",
-        system_prompt=render_agent_prompt(_BRAND_ARCHITECTURE_BUILDER_PROMPT),
-        structured_output=BrandArchitectureOutput,
+        prompt=_BRAND_ARCHITECTURE_BUILDER_PROMPT,
         agent_key=_PHASE4_AGENT_KEY,
     )
 
@@ -951,11 +949,10 @@ def make_brand_in_action_illustrator() -> Agent:
         agent is routed through the ``branding_channel_activation``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_in_action_illustrator",
         description="Creates brand-in-action do/don't examples.",
-        system_prompt=render_agent_prompt(_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT),
-        structured_output=BrandInActionOutput,
+        prompt=_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT,
         agent_key=_PHASE4_AGENT_KEY,
     )
 
