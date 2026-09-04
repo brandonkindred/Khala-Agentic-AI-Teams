@@ -704,7 +704,10 @@ def test_resting_stop_fill_carries_engine_exit_stop_loss_reason() -> None:
 def test_resting_stop_trade_record_exit_price_shape_matches_bracket_field_names() -> None:
     """Acceptance criterion: the realized exit price is recorded on the trade
     record in the same shape a bracket stop's is, so downstream consumers
-    need no special case — same field names, all populated."""
+    need no special case — the same fields a bracket stop's trade record
+    carries are populated here with the expected values. The actual
+    cross-path field-by-field comparison against a real bracket-stop trade
+    lives in ``test_resting_stop_matches_bracket_stop_leg_fill_behavior``."""
     sim, order_book, _portfolio = _make_simulator()
     req = _emit([StopLossRule(pct=0.05, basis="entry_price")], side="long", close=100.0)
     order_book.submit(
@@ -790,6 +793,9 @@ def test_resting_stop_matches_bracket_stop_leg_fill_behavior(
     assert resting_trade.exit_price == pytest.approx(bracket_trade.exit_price)
     assert resting_trade.net_pnl == pytest.approx(bracket_trade.net_pnl)
     assert resting_trade.return_pct == pytest.approx(bracket_trade.return_pct)
+    assert resting_trade.exit_fill_price == pytest.approx(bracket_trade.exit_fill_price)
+    assert resting_trade.exit_bid_price == pytest.approx(bracket_trade.exit_bid_price)
+    assert resting_trade.exit_order_type == bracket_trade.exit_order_type
 
     assert resting_trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
     assert bracket_trade.exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}bracket_sl"

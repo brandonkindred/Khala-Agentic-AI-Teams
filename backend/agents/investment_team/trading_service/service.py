@@ -126,13 +126,16 @@ _MAX_ORDER_EVENTS = 20
 # is re-exported here for the many call sites and external importers that read it
 # off this module.
 
-#: The ``engine_exit:stop_loss`` literal, defined once. Every engine-owned
-#: stop-loss attribution site stamps this exact string — ``_EngineExitDispatcher.
+#: The ``engine_exit:stop_loss`` literal, defined once — unlike
+#: ``ENGINE_EXIT_REASON_PREFIX`` above, this one is NOT engine-layer-canonical
+#: and re-exported; it is defined directly in this module because every site
+#: that stamps it also lives in this module: ``_EngineExitDispatcher.
 #: _build_close_order`` on the bar-close path, ``resolve_resting_stop_loss_attachment``
 #: on the resting-order path, and ``_build_exit_reconciler``'s closure for a
-#: reconciled strategy close — and the ``alignment_checks`` /
-#: ``exit_rule_conformance`` quality gates match it byte-exactly. A single named
-#: source means an edit to the suffix can't desynchronize one site from another.
+#: reconciled strategy close. The ``alignment_checks`` / ``exit_rule_conformance``
+#: quality gates match it byte-exactly. Referencing this one constant from all
+#: three same-module sites means an edit to the suffix can't desynchronize one
+#: from another.
 ENGINE_EXIT_REASON_STOP_LOSS = f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
 
 
@@ -1255,6 +1258,9 @@ class _EngineExitDispatcher:
         if intent.rule_kind == "signal_exit":
             reason = f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
         elif intent.rule_kind == "stop_loss":
+            # Must be the byte-stable ENGINE_EXIT_REASON_STOP_LOSS literal, not
+            # folded into the generic branch below — alignment_checks /
+            # exit_rule_conformance match it exactly (no [index] suffix).
             reason = ENGINE_EXIT_REASON_STOP_LOSS
         else:
             reason = f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
