@@ -174,6 +174,44 @@ describe('CodingTeamPageComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
+  it('has no axe violations on the GitHub view with an issue selected (confirm panel open)', async () => {
+    await setup();
+    showView('github');
+    expandFirstRepo();
+    component.selectIssue(component.issues[0]);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.github-confirm-panel')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('has no axe violations on the GitHub view with a blocked issue selected', async () => {
+    await setup();
+    // Set after setup() (which installs its own default) and before expandFirstRepo() (which
+    // triggers the fetch this override needs to win), so this mock can never be clobbered.
+    integrationsSpy.getGitHubIssues.mockReturnValue(
+      of([
+        {
+          number: 1,
+          title: 'Blocked issue',
+          body_preview: 'body',
+          labels: [],
+          html_url: 'https://example.com/1',
+          dependencies: [{ number: 2, title: 'Dep', state: 'open' }],
+          open_dependencies: [2],
+          blocked: true,
+        },
+      ]),
+    );
+    showView('github');
+    expandFirstRepo();
+    component.selectIssue(component.issues[0]);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-inline-banner[variant="warning"]')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
   it('exposes the composed repo description and issue-count tooltip on the row button, with no nested tab stops', async () => {
     await setup();
     showView('github');

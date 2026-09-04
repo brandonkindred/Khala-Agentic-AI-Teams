@@ -233,7 +233,7 @@
                           </button>
                         </div>
                       } @else {
-                      <div class="github-issues-list">
+                      <div class="github-issues-list" tabindex="-1">
                         @for (vm of pagedIssueVms; track vm.number) {
                           <!--
                             No tabindex on the nested title/chip spans below: a focusable
@@ -247,7 +247,8 @@
                             type="button"
                             [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
-                            [attr.aria-controls]="'confirm-panel-' + vm.number"
+                            [attr.aria-controls]="selectedIssue?.number === vm.number ? confirmPanelId(vm.number) : null"
+                            [attr.data-issue-number]="issueRowKey(vm.number)"
                             [matTooltip]="issueRowTooltip(vm)"
                             (click)="selectIssue(vm.issue)"
                           >
@@ -284,8 +285,14 @@
 
                           <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
                           @if (selectedIssue?.number === vm.number) {
-                            <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
-                              <h3>Start AI coding on this issue?</h3>
+                            <div
+                              class="github-confirm-panel"
+                              role="region"
+                              [id]="confirmPanelId(vm.number)"
+                              [attr.aria-labelledby]="confirmPanelHeadingId(vm.number)"
+                              tabindex="-1"
+                            >
+                              <h3 [id]="confirmPanelHeadingId(vm.number)">Start AI coding on this issue?</h3>
                               <div class="github-confirm-panel__issue">
                                 <span class="issue-number">{{ repo.full_name }}#{{ vm.number }}</span>
                                 <span class="issue-title">{{ vm.title }}</span>
