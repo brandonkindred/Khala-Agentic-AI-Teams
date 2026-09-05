@@ -33,6 +33,7 @@ from investment_team.trading_service.engine.execution_model import (
     RealisticExecutionModel,
 )
 from investment_team.trading_service.engine.fill_simulator import (
+    FillDiagnosticEvent,
     FillSimulator,
     FillSimulatorConfig,
 )
@@ -842,6 +843,81 @@ def test_reconciled_strategy_close_is_not_counted_as_engine_fill() -> None:
 
     assert diag.exit_rule_fills == {}
     assert diag.exit_rule_fills_by_symbol == {}
+
+
+# ---------------------------------------------------------------------------
+# Firing counter (engine_exit_attached) in _apply_fill_outcome_events.
+# Counted off ``engine_exit_attached`` diagnostic events — emitted at
+# entry-fill materialization time by the resting entry_price/market
+# stop-loss leg (``FillSimulator._materialize_stop_child``), independent of
+# the bar-close evaluator's own emission-time ``_record_emission`` credit.
+# See ``exit_rule_conformance.py::_check_stop_loss``, which reconciles
+# below-floor ``engine_exit:stop_loss`` trades against this counter.
+# ---------------------------------------------------------------------------
+
+
+def _engine_exit_attached_event(*, symbol: str, reason: str) -> FillDiagnosticEvent:
+    return FillDiagnosticEvent(
+        kind="engine_exit_attached",
+        order_id="sl1",
+        timestamp="2024-01-02T00:00:00",
+        symbol=symbol,
+        side="short",
+        order_type="stop",
+        reason=reason,
+    )
+
+
+def test_engine_exit_attached_bumps_firing_counter() -> None:
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.engine.fill_simulator import (
+        ENGINE_EXIT_REASON_PREFIX,
+    )
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = _outcome(
+        diagnostic_events=[
+            _engine_exit_attached_event(
+                symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+            )
+        ]
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    assert diag.exit_rule_firings.get("stop_loss") == 1
+    assert diag.exit_rule_firings_by_symbol.get("AAA", {}).get("stop_loss") == 1
+    assert diag.exit_rule_firings_by_basis.get("stop_loss:entry_price") == 1
+
+
+def test_engine_exit_attached_accumulates_per_symbol() -> None:
+    """Two attachments on different symbols each credit their own symbol,
+    without cross-symbol leakage — the same per-symbol shape
+    ``_record_emission`` uses for the bar-close evaluator's own credit."""
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.service import (
+        ENGINE_EXIT_REASON_PREFIX,
+        _apply_fill_outcome_events,
+    )
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = _outcome(
+        diagnostic_events=[
+            _engine_exit_attached_event(
+                symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+            ),
+            _engine_exit_attached_event(
+                symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+            ),
+            _engine_exit_attached_event(
+                symbol="BBB", reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+            ),
+        ]
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    assert diag.exit_rule_firings.get("stop_loss") == 3
+    assert diag.exit_rule_firings_by_symbol.get("AAA", {}).get("stop_loss") == 2
+    assert diag.exit_rule_firings_by_symbol.get("BBB", {}).get("stop_loss") == 1
 
 
 _ENTRY_ONLY_STRATEGY_CODE = textwrap.dedent('''\

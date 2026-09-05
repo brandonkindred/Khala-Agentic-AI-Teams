@@ -905,6 +905,59 @@ def test_stop_loss_passes_when_firings_cover_below_floor_count() -> None:
     assert fails == []
 
 
+def test_stop_loss_passes_when_resting_attachment_credits_firing_via_apply_fill_outcome_events() -> (
+    None
+):
+    """A below-floor, ``engine_exit:stop_loss``-attributed trade closed
+    entirely by the resting entry_price/market stop-loss leg (no bar-close
+    evaluator emission on that symbol) must not trip a false leak critical.
+    Wires the real translation path — a synthetic
+    ``engine_exit_attached`` diagnostic event through
+    ``_apply_fill_outcome_events`` — rather than hand-building
+    ``BacktestExecutionDiagnostics`` directly, so this exercises the same
+    counter-population code the fill simulator's materialization hook
+    drives in production. The full end-to-end version (real
+    ``FillSimulator``/gap-through bar) lives in
+    ``test_resting_stop_loss_attachment.py``.
+    """
+    from investment_team.trading_service.engine.fill_simulator import (
+        ENGINE_EXIT_REASON_PREFIX,
+        FillDiagnosticEvent,
+        FillOutcome,
+    )
+    from investment_team.trading_service.service import _apply_fill_outcome_events
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = FillOutcome(
+        entry_fills=[],
+        exit_fills=[],
+        closed_trades=[],
+        diagnostic_events=[
+            FillDiagnosticEvent(
+                kind="engine_exit_attached",
+                order_id="sl1",
+                timestamp="2024-01-01T00:00:00",
+                symbol="AAA",
+                side="short",
+                order_type="stop",
+                reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
+            )
+        ],
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    gate = ExitRuleConformanceGate()
+    trades = [_trade(trade_num=1, return_pct=-9.0)]  # below the pct=0.05 floor
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == [], [r.details for r in fails]
+
+
 def test_take_profit_alone_passes_on_firings_even_with_short_realized_return() -> None:
     """Realized return below the rule's raw target is expected when the
     engine fires take-profit on bar N's high but the synthetic close
