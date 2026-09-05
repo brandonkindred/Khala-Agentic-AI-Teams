@@ -124,6 +124,7 @@
                 </button>
               }
             </mat-form-field>
+            <p class="visually-hidden" role="status" aria-live="polite">{{ repoCountAnnouncement }}</p>
           </div>
           @if (hasFilteredOutRepos) {
             <div class="github-empty">
@@ -223,6 +224,7 @@
                             </button>
                           }
                         </mat-form-field>
+                        <p class="visually-hidden" role="status" aria-live="polite">{{ issueCountAnnouncement }}</p>
                       </div>
                       @if (hasFilteredOutIssues) {
                         <div class="github-empty">
