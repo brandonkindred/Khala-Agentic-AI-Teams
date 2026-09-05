@@ -5,13 +5,17 @@ from __future__ import annotations
 import itertools
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
 
+from software_engineering_team.api import address_comments as _address
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
+    AddressCommentsAdmissionResponse,
+    AddressCommentsRequest,
+    AddressCommentsResponse,
     CreateEnhancedIssuesRequest,
     CreateEnhancedIssuesResponse,
     CreateReviewIssuesRequest,
@@ -25,169 +29,22 @@ from software_engineering_team.api.coding_team_models import (
     TranscriptEntry,
     TranscriptResponse,
 )
-from software_engineering_team.api.routes._common import resolve_github_token
+from software_engineering_team.api.routes._common import (
+    raise_if_checkout_occupied,
+    resolve_github_token,
+)
 from software_engineering_team.code_review_agent import transcript
 from software_engineering_team.github_source import (
     GitHubAPIError,
-    Issue,
+    ReviewThreadsUnavailableError,
     build_enhanced_issue_from_proposal,
     compute_complexity_score,
     duplicate_check_max_open_issues,
+    find_similar_open_issue_via_llm,
     scrub_token_from_text,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# LLM-based duplicate detection for filing out-of-scope issues
-# ---------------------------------------------------------------------------
-
-
-class _SimilarityVerdict(BaseModel):
-    """LLM response schema for issue-similarity determination."""
-
-    is_duplicate: bool = Field(
-        description="True if the proposed issue is substantially the same problem as one of the "
-        "existing issues — i.e., filing it would create a duplicate."
-    )
-    matched_issue_number: Optional[int] = Field(
-        default=None,
-        description="The issue number of the existing issue that matches, or null if no match.",
-    )
-    reasoning: str = Field(
-        description="Brief explanation of why this is or is not a duplicate.",
-    )
-
-
-_SIMILARITY_SYSTEM_PROMPT = """\
-You are a GitHub issue triage agent. Your job is to determine whether a proposed \
-new issue is a duplicate of any existing open issue in the repository.
-
-Two issues are duplicates if they describe substantially the same underlying \
-problem, bug, or improvement — even if they use different wording, different \
-levels of detail, or are discovered in different files. Focus on the semantic \
-meaning, not surface-level text similarity.
-
-Consider issues as duplicates when:
-- They describe the same bug or defect (even if found in different locations)
-- They request the same enhancement or fix
-- One is a more specific instance of a broader issue already filed
-- They would be resolved by the same code change
-
-Do NOT consider issues as duplicates when:
-- They happen to be in the same file but describe different problems
-- They share a category (e.g., both are "security") but address different concerns
-- They have superficially similar titles but describe distinct issues
-"""
-
-_SIMILARITY_PROMPT_TEMPLATE = """\
-## Proposed Issue
-
-**Description:** {description}
-**File:** {file_path}
-**Category:** {category}
-**Severity:** {severity}
-**Suggestion:** {suggestion}
-
-## Existing Open Issues
-
-{existing_issues_text}
-
-## Task
-
-Is the proposed issue a duplicate of any of the existing open issues listed above? \
-If yes, which issue number is it a duplicate of? Respond with JSON.
-"""
-
-
-def _format_existing_issues(issues: list[Issue], max_issues: int = 30) -> str:
-    """Format existing issues into a text block for the LLM prompt."""
-    if not issues:
-        return "(no existing open issues)"
-    lines: list[str] = []
-    for issue in issues[:max_issues]:
-        title = (issue.title or "").strip()
-        # Truncate body to avoid blowing up the context window
-        body = (issue.body or "").strip()
-        if len(body) > 500:
-            body = body[:500] + "..."
-        labels_str = ", ".join(issue.labels) if issue.labels else "none"
-        lines.append(
-            f"### Issue #{issue.number}: {title}\n"
-            f"**Labels:** {labels_str}\n"
-            f"**Body:** {body}\n"
-        )
-    return "\n".join(lines)
-
-
-def _find_similar_issue_via_llm(
-    proposal: dict[str, Any], open_issues: list[Issue]
-) -> Issue | None:
-    """Use an LLM to determine if a proposal duplicates an existing open issue.
-
-    Makes a single structured LLM call with the proposal details and a summary
-    of existing open issues. The LLM decides whether the proposal is a duplicate
-    and, if so, which existing issue it matches.
-
-    Returns the matched Issue object, or None if no duplicate is found.
-    Falls back to None (create new issue) on any LLM error.
-    """
-    if not open_issues:
-        return None
-
-    description = str(proposal.get("description") or "")
-    file_path = str(proposal.get("file_path") or "")
-    category = str(proposal.get("category") or "general")
-    severity = str(proposal.get("severity") or "info")
-    suggestion = str(proposal.get("suggestion") or "")
-
-    existing_issues_text = _format_existing_issues(open_issues)
-
-    prompt = _SIMILARITY_PROMPT_TEMPLATE.format(
-        description=description,
-        file_path=file_path,
-        category=category,
-        severity=severity,
-        suggestion=suggestion,
-        existing_issues_text=existing_issues_text,
-    )
-
-    try:
-        from llm_service import generate_structured
-
-        verdict = generate_structured(
-            prompt,
-            schema=_SimilarityVerdict,
-            objective="determine if out-of-scope issue duplicates an existing GitHub issue",
-            system_prompt=_SIMILARITY_SYSTEM_PROMPT,
-            agent_key="code_review",
-            temperature=0.0,
-            correction_attempts=1,
-        )
-    except Exception:  # noqa: BLE001
-        # Any LLM failure (not configured, parse error, etc.) degrades to
-        # "no match found" — the issue will be created as new, which is the
-        # safe default (a duplicate is better than a lost finding).
-        logger.warning(
-            "LLM similarity check failed; treating as no duplicate", exc_info=True
-        )
-        return None
-
-    if not verdict.is_duplicate or verdict.matched_issue_number is None:
-        return None
-
-    # Find the matched issue object by number
-    for issue in open_issues:
-        if issue.number == verdict.matched_issue_number:
-            return issue
-
-    # LLM returned a number that doesn't match any issue we gave it — treat as no match
-    logger.warning(
-        "LLM returned issue #%d but it was not in the candidate list",
-        verdict.matched_issue_number,
-    )
-    return None
 
 
 router = APIRouter()
@@ -249,12 +106,374 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     # The returned server-clock start time is surfaced on the response so the UI computes
     # a live duration on one clock (this start + the completion from job status).
     created_at = _main.record_review_start(
-        job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main._review_author()
+        job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main.review_author()
     )
     _main._start_pr_review_thread(job_id, request, token)
     return ReviewPrResponse(
         job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url, created_at=created_at
     )
+
+
+@router.post("/pulls/{pr_number}/address-comments", response_model=AddressCommentsResponse)
+def post_address_comments(
+    pr_number: int, request: AddressCommentsRequest
+) -> AddressCommentsResponse:
+    """Address & respond to every unresolved review comment on an OPEN pull request.
+
+    Gathers the PR's unresolved review comments and, in a background job, hands each
+    to the software-engineering team: triage (false positive vs. real issue), then
+    plan, implement, review, and push each real fix to the existing PR branch before
+    replying and resolving its thread. When every comment is handled without failure
+    the PR is moved to "waiting for review".
+
+    Reuses the PR-review admission lock so a single PR cannot have overlapping
+    comment-addressing jobs (and cannot run alongside a plain review, since both are
+    keyed on ``owner/repo#pr``).
+
+    Preconditions:
+        - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
+        - ``pr_number`` names an existing pull request in ``owner/repo``; the path
+          ``pr_number`` is authoritative (the body's is coerced to match it).
+        - The PR is OPEN (enforced below — a closed/merged PR is rejected with 400).
+    Postconditions:
+        - Creates a job, records the review start, and starts the address-comments
+          hook — all while holding the admission lock, so a persisted job can never be
+          left without a running worker (which would otherwise block future requests
+          for the PR). Returns the job id, PR URL, and ``unresolved_comment_count`` —
+          the combined count of unresolved comments AND retry-eligible resolved
+          threads (one already replied to but whose resolve mutation is on record as
+          failed), both from this same admission-time snapshot (the background
+          worker re-snapshots when it starts, so the actual set processed may
+          differ). Poll ``GET /status/{job_id}`` for progress.
+        - A 400 is returned when the PR is not open, when ``request.repo_path`` is
+          blank or not an existing git checkout (a real-issue fix — even one from
+          feedback posted after this admission-time snapshot — needs a checkout
+          to implement and push to, so this is required unconditionally, not only
+          when comments are ALREADY unresolved here), or when the checkout's
+          ``origin`` remote does not match ``owner``/``repo`` (an existing
+          checkout of a different repository would otherwise let this PR's
+          remediation get pushed there instead); a 409 when a job is already
+          running for the PR, OR when another active
+          job (any PR) is already using the SAME ``request.repo_path`` — the
+          latter matters for an operator-pinned checkout, which is shared
+          (unnamespaced) across every PR of that repo, so two DIFFERENT PRs'
+          jobs would otherwise race on the same working tree for each job's
+          entire run, not just at admission. A 502 for a GitHub API error,
+          including when the PR's review-thread state cannot be reliably retrieved
+          (the flow fails closed rather than acting on unknown state). A 500 is
+          returned when the job could not be started (job creation, review-record
+          creation, or worker-thread launch failed); any partially persisted
+          job/review record is terminalized as failed before the 500 is raised,
+          so it will not block future admissions.
+    """
+    # The path is authoritative; keep the body consistent so downstream code (which
+    # reads request.pr_number) and the job's github_context agree with the URL.
+    request = request.model_copy(update={"pr_number": pr_number})
+    token = resolve_github_token(request)
+
+    # Hoisted ABOVE the GitHub round-trips below: this check reads only the
+    # request and the local filesystem, so a request naming a missing or
+    # non-git checkout is rejected without spending GitHub rate-limit budget
+    # or network latency first. Only the `_checkout_remote_matches` half
+    # (which needs `expected_host` from the client) stays after them.
+    # repo_path defaults to "" (documented as accepted "for parity with
+    # /review-pr", which genuinely never touches a checkout). Earlier this was
+    # only required when THIS snapshot already had unresolved comments — but
+    # the background worker takes its OWN, later snapshot (`_run_address_
+    # comments`), and a reviewer can add genuinely new feedback in the gap
+    # between this admission-time snapshot and that one. A job admitted with
+    # no repo_path because nothing was unresolved YET would then discover a
+    # real issue it cannot implement a fix for. Require a usable checkout
+    # unconditionally instead of guessing from a snapshot that can go stale.
+    stripped = request.repo_path.strip()
+    has_git = False
+    if stripped:
+        try:
+            has_git = (Path(stripped) / ".git").exists()
+        except (ValueError, OSError):
+            # An embedded null byte raises ValueError, other unusable paths
+            # (e.g. one exceeding the platform's path-length limit) can raise
+            # OSError -- both mean "not a usable checkout", same as `.git`
+            # genuinely not existing, so this falls into the 400 branch below
+            # instead of surfacing as an unhandled 500.
+            has_git = False
+    if stripped and has_git:
+        # Coerce the VALIDATED spelling back onto the request, exactly as
+        # pr_number is coerced from the path above and for the same reason:
+        # everything downstream (create_job, the checkout admission lock,
+        # raise_if_checkout_occupied, the worker's own repo_path) reads
+        # request.repo_path, so the value that was validated and the value
+        # that is consumed must not be allowed to diverge. Without this a
+        # whitespace-padded path passes admission on its stripped form and
+        # then fails in the worker against the unstripped one -- a job that
+        # admits cleanly and dies later with a confusing path error.
+        request = request.model_copy(update={"repo_path": stripped})
+    if not stripped or not has_git:
+        # A non-empty path naming a non-existent directory or an ordinary
+        # (non-git) folder is exactly as unusable to every real-issue child as
+        # an empty one — `(path / ".git").exists()` matches this codebase's
+        # existing git-checkout test (see `_is_deletable_ephemeral_checkout`),
+        # and also accepts a worktree-style `.git` FILE, not just a directory.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "repo_path is required and must be an existing git checkout: a "
+                "real-issue fix needs one to implement and push to."
+            ),
+        )
+
+    # Validate the PR exists, is open, and gather the unresolved-comment count BEFORE
+    # taking the admission lock (the GitHub round-trips are the slow part).
+    with _main.GitHubClient(token=token) as client:
+        try:
+            pr = client.get_pull_request(request.owner, request.repo, pr_number)
+            if pr.state != "open":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"PR {request.owner}/{request.repo}#{pr_number} is {pr.state}; "
+                        "only open PRs can be addressed."
+                    ),
+                )
+            # This route needs the unresolved-comment count AND the
+            # retry-resolve count for its response (see the return below);
+            # the snapshot's other three fields (thread_by_comment_id,
+            # thread_history_by_comment_id, ambiguous_threads) exist only for
+            # the background worker's own retry-resolve/re-triage logic
+            # (address_comments._run_address_comments), not this admission
+            # check. Read by NAME off the ``UnresolvedCommentsResult``
+            # NamedTuple rather than unpacked positionally, so this call site
+            # and the worker's cannot silently disagree about field order.
+            snapshot = _address.unresolved_comments(
+                client, request.owner, request.repo, pr_number
+            )
+            unresolved = snapshot.comments
+            retry_resolve = snapshot.retry_resolve_threads
+            # Captured INSIDE the ``with`` block: ``client.web_host`` is read
+            # again further below, after the context manager has exited. That
+            # happens to work today only because ``GitHubClient.__exit__``
+            # leaves instance attributes intact — a contract this module does
+            # not own — so bind it to a local while the client is still live.
+            expected_host = client.web_host
+        except ReviewThreadsUnavailableError as e:
+            # Fail closed: without reliable resolved/unresolved state the flow would
+            # re-triage resolved discussions and post duplicate replies.
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not determine review-thread state: {e}",
+            ) from e
+        except GitHubAPIError as e:
+            raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
+
+    if not _main._checkout_remote_matches(
+        stripped, request.owner, request.repo, expected_host=expected_host
+    ):
+        # `.git` existing alone doesn't rule out a checkout of a COMPLETELY
+        # DIFFERENT repository — without this, this PR's remediation plan
+        # could get committed and pushed to that unrelated repo's origin if
+        # the token happens to have access to it.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"repo_path is a git checkout, but its origin remote does not match "
+                f"{request.owner}/{request.repo}."
+            ),
+        )
+    # Use the STRIPPED path from here on, not the original possibly-padded
+    # request.repo_path: everything below (the checkout admission lock, the
+    # sibling-checkout scan, the persisted job record, and the background
+    # worker request carries this SAME object) must agree on one canonical
+    # spelling of the path, or two requests for the same logical checkout
+    # that differ only in surrounding whitespace would fail to conflict
+    # under the admission lock, and the job record would persist a padded
+    # path the background worker then uses directly for git subprocess calls.
+    request = request.model_copy(update={"repo_path": stripped})
+
+    # Hold the admission lock across the WHOLE start sequence (create + record + launch)
+    # so a persisted job always has a running worker: if record_review_start or the
+    # thread launch raised after we released the lock, an orphaned "running" job would
+    # block every future address-comments request for this PR.
+    with _main._pr_review_admission(request.owner, request.repo, pr_number):
+        running = _main._running_review_for_pr(request.owner, request.repo, pr_number)
+        if running:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"job {running} already running for {request.owner}/{request.repo}#{pr_number}"
+                ),
+            )
+        # An operator-pinned repo_path is shared (unnamespaced) across every PR
+        # of that repo, so the PR-scoped check above cannot see a running job
+        # for a DIFFERENT PR on the SAME checkout. `_running_sibling_on_checkout`
+        # closes that: called with no `own_job_id` (no job has been created yet
+        # to exclude), so any running job found on the checkout is a genuine
+        # conflicting sibling. But the outer `_pr_review_admission` lock
+        # alone is keyed per-PR, so it does NOT serialize this scan against a
+        # concurrent request for a DIFFERENT PR sharing the same checkout — both
+        # could take their own per-PR lock, both see nothing running yet, and
+        # both admit a job onto the same checkout. `_checkout_admission`, keyed
+        # by the checkout path itself, closes that: nested inside the SAME
+        # admission section — before the job (and its non-terminal job-store
+        # row) exists — so once a job IS created here, this blocks a sibling
+        # for that job's ENTIRE run, not just a momentary admission window.
+        with _main._checkout_admission(request.repo_path):
+            raise_if_checkout_occupied(request.repo_path)
+
+            job_id = str(uuid.uuid4())
+            job_fields: dict[str, Any] = {
+                "github_context": {
+                    "owner": request.owner,
+                    "repo": request.repo,
+                    "pr_number": pr_number,
+                    "pr_url": pr.html_url,
+                },
+            }
+            # Temporal GitHub activities run outside this request and resolve their
+            # credential from the durable job record. Persist ciphertext only, matching
+            # /run-from-github; never put the plaintext PAT in a workflow payload.
+            encrypted = _main.encrypt_token(token)
+            if encrypted:
+                job_fields["github_token_encrypted"] = encrypted
+            try:
+                # ONE write, not create-then-update, matching
+                # ``post_run_from_github``. A create followed by an update to
+                # attach the context leaves a window — an exception, but also a
+                # hard crash (SIGKILL, OOM, deploy restart) between two adjacent
+                # job-service calls — in which the row exists as 'pending'
+                # carrying ``repo_path`` but no ``github_context``. Such a row is
+                # invisible to ``_running_review_for_pr`` (no pr_number to match
+                # on) yet IS matched by the path-based
+                # ``_running_sibling_on_checkout``, so it wedges checkout-wide
+                # admission — every other PR/issue on that checkout 409s — with
+                # nothing left to terminalize it. Both fields are computable
+                # before the write, so creating the row already complete removes
+                # the window entirely; if this call raises, no row exists to
+                # orphan.
+                _main.create_job(
+                    job_id=job_id,
+                    repo_path=request.repo_path,
+                    extra_fields=job_fields,
+                )
+                created_at = _main.record_review_start(
+                    job_id,
+                    request.owner,
+                    request.repo,
+                    pr_number,
+                    pr.html_url,
+                    _main.review_author(),
+                )
+                _address.start_address_comments_thread(job_id, request, token)
+            except Exception as e:
+                # Creation is not transactional across the job service, review store,
+                # and Python thread launcher — and covers create_job as well as
+                # record_review_start/thread launch: a failure at ANY point in this
+                # create -> record -> launch sequence must still terminalize whatever
+                # was persisted, or an orphaned non-terminal job would block the PR
+                # admission guard indefinitely. The terminalizing update_job below is
+                # itself best-effort: if create_job never actually wrote a row, that
+                # call harmlessly targets a job_id the job service has never seen.
+                error = f"Could not start address-comments worker: {scrub_token_from_text(str(e))}"
+                # Each terminalization gets its OWN try/except: sequencing both in
+                # one try means an update_job failure skips update_review entirely,
+                # leaving the review row non-terminal — precisely the orphan state
+                # this cleanup exists to prevent. They terminalize independent
+                # stores, so neither may gate the other.
+                try:
+                    _main.update_job(
+                        job_id,
+                        status="failed",
+                        phase="completed",
+                        status_text="Failed to start address-comments worker",
+                        error=error,
+                    )
+                except Exception:
+                    logger.exception("Could not terminalize address-comments job %s", job_id)
+                try:
+                    _main.update_review(
+                        job_id,
+                        status="failed",
+                        status_text="Failed to start address-comments worker",
+                        error=error,
+                        completed=True,
+                    )
+                except Exception:
+                    logger.exception("Could not terminalize address-comments review row %s", job_id)
+                raise HTTPException(status_code=500, detail=error) from e
+
+    return AddressCommentsResponse(
+        job_id=job_id,
+        pr_number=pr_number,
+        pr_url=pr.html_url,
+        # Includes retry-resolve threads (a Khala reply already landed but its
+        # own resolve mutation is on record as failed) alongside genuinely
+        # unresolved comments: both represent real work the background job
+        # will do, and a count excluding the former under-reports it.
+        unresolved_comment_count=len(unresolved) + len(retry_resolve),
+        # The model's own default carries an unsubstituted "{job_id}"
+        # placeholder (it has no job id to fill in at class-definition time);
+        # mirroring the pattern other routes already use to format one
+        # (e.g. user_agent_founder's StartRunResponse), substitute the real
+        # id here so the message is directly actionable rather than a
+        # literal, un-fillable placeholder.
+        message=f"Addressing unresolved comments. Poll GET /status/{job_id} for progress.",
+        created_at=created_at,
+    )
+
+
+@router.get(
+    "/pulls/{pr_number}/address-comments/running",
+    response_model=AddressCommentsAdmissionResponse,
+)
+def get_address_comments_running(
+    pr_number: int,
+    owner: str = Query(..., min_length=1),
+    repo: str = Query(..., min_length=1),
+    repo_path: Optional[str] = Query(default=None),
+) -> AddressCommentsAdmissionResponse:
+    """Lightweight pre-check: is a review/address-comments job already running for this PR?
+
+    Lets a caller that owns a shared, mutable resource for the PR (the unified
+    API's local git checkout) skip touching that resource when a job is
+    already in flight, rather than discovering the conflict only after the
+    ``POST`` route's own admission check rejects the request with 409 — by
+    which point an unguarded caller may already have mutated the checkout
+    (e.g. ``git fetch``) concurrently with the running job's own git
+    operations on it.
+
+    Preconditions:
+        - ``owner``/``repo`` are non-empty repository coordinates.
+    Postconditions:
+        - Returns the job_id of a live, non-terminal review or
+          address-comments job for ``owner/repo#pr_number`` (heartbeat-checked,
+          via :func:`_main.get_running_review_for_pr`, the public wrapper over
+          the same ``_running_review_for_pr`` the POST route's own admission
+          uses), or ``running_job_id=None`` when none is running.
+        - When ``repo_path`` is given AND the PR-scoped check above found
+          nothing (``running_job_id is None``), ALSO checks for another active
+          job (any PR) already using that SAME checkout
+          (:func:`_main.get_running_job_on_checkout`, the public wrapper over
+          the same ``_running_sibling_on_checkout`` the POST route's own
+          admission check uses) and returns its job_id if found — an
+          operator-pinned ``repo_path`` is shared, unnamespaced, across every
+          PR of that repo, so the plain PR-scoped check above cannot see a
+          DIFFERENT PR's job already working that same checkout. This
+          checkout-scoped check is SKIPPED entirely once the PR-scoped check
+          already found a job — the PR-scoped result always takes precedence
+          and is returned as-is. Omitting ``repo_path`` skips this half of
+          the check.
+        - Read-only: takes no lock, creates no job. Best-effort only — a job can
+          start or finish between this call returning and the caller's next
+          action, the same TOCTOU window every other admission check in this
+          codebase already lives with; callers needing a stronger guarantee
+          must still rely on the POST route's own admission lock as the
+          authority.
+    """
+    running_job_id = _main.get_running_review_for_pr(owner, repo, pr_number)
+    if running_job_id is None and repo_path:
+        sibling = _main.get_running_job_on_checkout(repo_path)
+        if sibling is not None:
+            running_job_id = sibling.get("job_id")
+    return AddressCommentsAdmissionResponse(running_job_id=running_job_id)
 
 
 @router.get("/reviews", response_model=List[ReviewRunItem])
@@ -535,7 +754,7 @@ def post_file_out_of_scope_issues(
 
                     try:
                         # Check for similar existing issue
-                        match = _find_similar_issue_via_llm(proposal, open_issues)
+                        match = find_similar_open_issue_via_llm(proposal, open_issues)
 
                         if match is not None:
                             # Similar issue exists — update it with the new proposal's details.
@@ -556,9 +775,20 @@ def post_file_out_of_scope_issues(
                                 for loc in locations:
                                     fp = str(loc.get("file_path") or "unknown")
                                     ln = loc.get("line")
-                                    loc_text = f"`{fp}:{ln}`" if isinstance(ln, int) and ln > 0 else f"`{fp}`"
+                                    # `bool` subclasses `int`, so a payload carrying
+                                    # `{"line": true}` would otherwise render as
+                                    # `x.py:True`; exclude it explicitly.
+                                    loc_text = (
+                                        f"`{fp}:{ln}`"
+                                        if isinstance(ln, int)
+                                        and not isinstance(ln, bool)
+                                        and ln > 0
+                                        else f"`{fp}`"
+                                    )
                                     loc_desc = str(loc.get("description") or "").strip()
-                                    update_section += f"  - {loc_text} — {loc_desc or '_No description._'}\n"
+                                    update_section += (
+                                        f"  - {loc_text} — {loc_desc or '_No description._'}\n"
+                                    )
                             update_section += (
                                 f"\n**Description:** {proposal.get('description', '')}\n\n"
                                 f"**Suggested fix:** {proposal.get('suggestion', 'N/A')}"
@@ -566,7 +796,9 @@ def post_file_out_of_scope_issues(
                             updated_body = existing_body + update_section
 
                             client.update_issue(
-                                request.owner, request.repo, match.number,
+                                request.owner,
+                                request.repo,
+                                match.number,
                                 body=scrub_token_from_text(updated_body),
                             )
                             # Mark the proposal as filed (merged into existing)

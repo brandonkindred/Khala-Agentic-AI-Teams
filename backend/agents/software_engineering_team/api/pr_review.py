@@ -12,6 +12,7 @@ import itertools
 import logging
 import os
 import threading
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
@@ -58,6 +59,7 @@ from software_engineering_team.github_source.review_submit import (
     _submit_review,
 )
 from software_engineering_team.job_store import (
+    NON_TERMINAL_STATUSES,
     heartbeat_job,
 )
 from software_engineering_team.models import JobStatus
@@ -66,6 +68,16 @@ logger = logging.getLogger(__name__)
 
 _REVIEW_GUARD_HEARTBEAT_STALE_S = 300.0
 _REVIEW_HEARTBEAT_INTERVAL_S = 30.0
+
+# The confirmed-terminal subset of JobStatus -- derived from the canonical
+# NON_TERMINAL_STATUSES rather than an ad-hoc list, so it always stays in
+# sync with the JobStatus enum. Used to distinguish "parent status
+# CONFIRMED terminal" from "parent status unrecognized/unverifiable", which
+# must fail closed (treated as still live) rather than orphan-kill a child
+# whose parent's liveness could not actually be established.
+_RECOGNIZED_TERMINAL_STATUSES = frozenset(s.value for s in JobStatus) - frozenset(
+    NON_TERMINAL_STATUSES
+)
 
 
 def _review_job_heartbeat_live(job: Dict[str, Any]) -> bool:
@@ -97,7 +109,8 @@ def _review_job_heartbeat_live(job: Dict[str, Any]) -> bool:
 
 
 def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[str]:
-    """Return the job_id of a live non-terminal code-review job already reviewing this PR.
+    """Return the job_id of a live non-terminal review or address-comments job already
+    working this PR.
 
     Preconditions: ``owner``/``repo`` are non-empty repository coordinates; ``pr_number``
         is a positive PR number.
@@ -109,9 +122,23 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
         exists. A matching job whose heartbeat went stale (its worker crashed before
         terminalizing it) is NOT returned — it must not block new reviews of the PR
         forever — and is best-effort marked ``failed`` so it stops surfacing as a
-        zombie running review; a failure to mark it never propagates. Only review
-        jobs carry ``pr_number`` in ``github_context`` (issue runs carry
-        ``issue_number``), so matching on it never collides with an issue run.
+        zombie running review; a failure to mark it never propagates. Review jobs
+        AND address-comments jobs carry ``pr_number`` in ``github_context`` (issue
+        runs carry ``issue_number`` instead), so matching on it never collides
+        with an issue run.
+        A job carrying ``parent_job_id`` (an address-comments child implementation
+        job) is EXCLUDED from the scan entirely, live-heartbeat check included —
+        it carries the same PR-identifying ``github_context`` as its parent but
+        is never independently heartbeated, so treating it as a candidate here
+        would eventually mark a still-running child ``failed`` as a false
+        zombie. Only the parent job represents this PR's admission state.
+        Excluding a child from the SCAN does not abandon it: when this sweep
+        terminalizes a stale parent it also best-effort terminalizes every child
+        naming that parent (via :func:`_mark_orphaned_child_failed`), because the
+        parent's lifecycle was that child's only terminalizer and a child left
+        non-terminal lingers forever as a phantom active job. That cascade runs
+        inside the same swallow-and-log block, so a cleanup failure still never
+        blocks admission.
         Raises only if the job-service scan itself fails.
 
     Cross-worker by construction: the scan reads the shared central job service (the same
@@ -123,7 +150,14 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     ``_running_job_for_issue``); add an owner/repo/pr filter to ``list_jobs`` if that set
     ever grows materially.
     """
-    for j in _main.list_jobs(active_only=True):
+    active_jobs = list(_main.list_jobs(active_only=True))
+    for j in active_jobs:
+        if (j or {}).get("parent_job_id"):
+            # Child implementation job: never independently heartbeated, so it
+            # must not be scanned or zombie-marked here. Full rationale in the
+            # docstring paragraph above -- kept in ONE place so the two cannot
+            # drift apart.
+            continue
         ctx = (j or {}).get("github_context") or {}
         try:
             stored_pr = int(ctx.get("pr_number"))
@@ -162,6 +196,18 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
                     error="review worker heartbeat went stale (process died mid-review)",
                     completed=True,
                 )
+                # Cascade to this parent's child implementation jobs. They are
+                # skipped by the scan above (they never heartbeat on their own),
+                # and their only other terminalizer -- the parent's own
+                # lifecycle -- just died with it, so without this they stay
+                # non-terminal forever and surface as phantom active jobs to
+                # every other list_jobs(active_only=True) consumer.
+                for child in active_jobs:
+                    if (child or {}).get("parent_job_id") != job_id:
+                        continue
+                    child_id = child.get("job_id")
+                    if child_id:
+                        _mark_orphaned_child_failed(child_id, job_id, str(child.get("repo_path") or ""))
             except Exception as exc:  # noqa: BLE001 - unblocking admission must not depend on cleanup
                 logger.warning(
                     "could not mark stale review job %s failed: %s",
@@ -171,7 +217,52 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     return None
 
 
-def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Dict[str, Any]]:
+def _mark_orphaned_child_failed(
+    child_job_id: str, parent_job_id: Optional[str], repo_path: str
+) -> None:
+    """Best-effort mark a crash-orphaned address-comments child job FAILED.
+
+    A child implementation job is only ever terminalized by its parent's
+    heartbeat-driven lifecycle; when the parent is gone or already terminal,
+    nothing else will ever unstick the child, so unblocking admission on this
+    checkout (see :func:`_running_sibling_on_checkout`) requires terminalizing
+    it here instead.
+
+    Preconditions:
+        - ``child_job_id`` is the orphaned child job's id.
+        - ``parent_job_id``/``repo_path`` are used only for the warning log.
+    Postconditions:
+        - Logs a warning describing the orphan, then calls ``_main.update_job``
+          to mark ``child_job_id`` ``FAILED``. Mirrors the same best-effort,
+          swallow-and-log philosophy as :func:`_running_review_for_pr`'s own
+          zombie cleanup: unblocking admission matters, this cleanup is
+          cosmetic, so a failure to update the job is logged and swallowed,
+          never raised.
+    """
+    logger.warning(
+        "child job %s on checkout %s has no live parent (parent_job_id=%s); "
+        "treating as orphaned and marking failed",
+        child_job_id,
+        repo_path,
+        parent_job_id,
+    )
+    try:
+        _main.update_job(
+            child_job_id,
+            status=JobStatus.FAILED.value,
+            error="parent job terminalized or missing (orphaned child)",
+        )
+    except Exception as exc:  # noqa: BLE001 - unblocking admission must not depend on cleanup
+        logger.warning(
+            "could not mark orphaned child job %s failed: %s",
+            child_job_id,
+            scrub_token_from_text(str(exc)),
+        )
+
+
+def _running_sibling_on_checkout(
+    repo_path: str, own_job_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """Return another non-terminal job using this checkout, if any.
 
     Branch prep mutates the working tree (dirty-tree recovery commits files,
@@ -181,6 +272,24 @@ def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Di
     job store can answer liveness (a deleted job is not running) even though
     it cannot answer leftover attribution — that remains the marker's job.
 
+    Preconditions:
+        - ``own_job_id``, when given, is the calling job's OWN id (excluded
+          from the scan so a job never reports itself as its own sibling).
+          Omit it (``None``) for a pre-check with no job created yet —
+          there is nothing to exclude, so callers no longer need a sentinel
+          string like ``"<not-yet-created>"`` to stand in for one, and NO
+          active job is excluded in that mode (not even one whose own
+          ``job_id`` is missing or ``None``, which is unidentifiable rather
+          than the caller's). Note this
+          is a pre-check, NOT a side-effect-free one: EVERY invocation,
+          ``own_job_id=None`` included, may best-effort mark a
+          crash-orphaned child job ``failed`` via
+          :func:`_mark_orphaned_child_failed` — see the Postconditions'
+          orphan branch below.
+        - Callers needing atomicity against a concurrent admission (another
+          worker starting a job on the same checkout between this scan and
+          the caller's own job creation) must hold :func:`_checkout_admission`
+          around scan + job creation, mirroring :func:`_running_review_for_pr`.
     Postconditions:
         - Returns the sibling job dict when one exists with a non-terminal
           status and the same checkout; None otherwise. Paths are compared
@@ -188,10 +297,32 @@ def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Di
           a sibling registered under a different spelling of the same
           checkout still matches. The caller's own job (``own_job_id``) is
           never reported.
+        - A candidate whose own ``repo_path`` cannot be resolved at all
+          (``TypeError``/``ValueError`` from ``realpath``) is logged and
+          SKIPPED -- this one failure mode fails open, and the inline comment
+          at that site records why it differs from the fail-closed choices
+          around it: the defect is permanent per stored row, so fail-closed
+          would wedge the checkout's admission indefinitely, and an
+          unresolvable path cannot be shown to name this checkout anyway.
         - When ``list_jobs`` itself raises (job service unreachable, etc.),
           logs a scrubbed warning and returns a synthetic sibling so the
           caller fail-closes instead of mutating a checkout whose liveness
           cannot be verified. Never raises.
+        - A candidate job carrying ``parent_job_id`` (an address-comments
+          child implementation job — see :func:`_running_review_for_pr`,
+          which excludes it from ITS OWN scan for the same reason) is only
+          reported as a sibling while its PARENT is still non-terminal. It
+          is also reported as a sibling when the PARENT LOOKUP ITSELF fails
+          (job service unreachable, etc.) — fail-closed, since a lookup
+          failure does not prove the parent is gone. A child whose parent
+          has terminalized or no longer exists (and whose lookup actually
+          succeeded) is
+          crash-orphaned — nothing will ever terminalize the child itself,
+          since only the parent runs a heartbeat — so treating it as a live
+          sibling would wedge this checkout's admission forever. Such an
+          orphan is skipped (best-effort marked ``failed`` first, mirroring
+          :func:`_running_review_for_pr`'s own zombie cleanup) rather than
+          reported.
     """
     target = os.path.realpath(repo_path)
     try:
@@ -210,11 +341,81 @@ def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Di
             "github_context": {},
         }
     for j in jobs:
-        if not j or j.get("job_id") == own_job_id:
+        # ``own_job_id is not None`` guard, not plain equality: in a PRE-CHECK
+        # (``own_job_id=None``) there is no caller job, so a malformed active
+        # job whose ``job_id`` is missing or None is NOT "the caller's own" --
+        # plain equality would silently skip it and let admission proceed to
+        # mutate a working tree an unidentifiable job may still be using, the
+        # exact outcome this scan exists to prevent.
+        if not j or (own_job_id is not None and j.get("job_id") == own_job_id):
             continue
         sibling_path = j.get("repo_path")
-        if sibling_path and os.path.realpath(sibling_path) == target:
-            return j
+        if not sibling_path:
+            # Same class of event as the unresolvable-path branch below, and
+            # skipped for the same reason -- so it is skipped just as loudly.
+            # A row with no repo_path cannot be shown to name THIS checkout,
+            # but if a collision ever does slip past this scan, the warning is
+            # the only record of which row the scan declined to consider.
+            logger.warning(
+                "job %s has no repo_path; skipping during sibling scan on checkout %s",
+                j.get("job_id"),
+                repo_path,
+            )
+            continue
+        try:
+            same_checkout = os.path.realpath(sibling_path) == target
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "could not resolve repo_path for job %s during sibling scan on checkout %s: %s",
+                j.get("job_id"),
+                repo_path,
+                scrub_token_from_text(str(exc)),
+            )
+            # Deliberately fails OPEN, unlike the parent lookup below (which
+            # fails closed). The difference is whether the failure can clear:
+            # a parent lookup failing is a TRANSIENT service condition, so
+            # blocking now and admitting on a later retry costs nothing. A
+            # ``repo_path`` that cannot be resolved at all is a PERMANENT
+            # property of that stored row (a non-str value, an embedded null
+            # byte), so failing closed would wedge this checkout's admission
+            # forever -- for every future job, not just this one -- until an
+            # operator purged the row by hand. The corrupt row also cannot be
+            # shown to name THIS checkout: the caller's own path resolved
+            # cleanly into ``target``, and an unresolvable one matches no
+            # spelling of it. Skipping it, loudly, is the recoverable choice.
+            continue
+        if not same_checkout:
+            continue
+        parent_job_id = j.get("parent_job_id")
+        if parent_job_id:
+            try:
+                parent = _main.get_job(parent_job_id)
+            except Exception as exc:  # noqa: BLE001 - fail-closed: cannot verify parent is gone
+                logger.warning(
+                    "could not look up parent job %s for sibling check on checkout %s: %s",
+                    parent_job_id,
+                    repo_path,
+                    scrub_token_from_text(str(exc)),
+                )
+                # Lookup failure does not prove the parent is gone; treat the
+                # child as a live sibling (fail closed / checkout busy) rather
+                # than risk marking a still-live child's job failed.
+                return j
+            if parent is None or parent.get("status") in _RECOGNIZED_TERMINAL_STATUSES:
+                # Crash-orphaned child: the parent that alone could terminalize
+                # it is CONFIRMED gone or already done (a recognized terminal
+                # status, not merely "not in NON_TERMINAL_STATUSES" -- an
+                # unrecognized/missing status is unverifiable, not confirmed
+                # terminal, and must fail closed as a live sibling below
+                # rather than orphan-kill a possibly-still-running child).
+                # Unblock the checkout and best-effort mark the child failed,
+                # same as the parent-side zombie cleanup in
+                # _running_review_for_pr.
+                child_job_id = j.get("job_id")
+                if child_job_id:
+                    _mark_orphaned_child_failed(child_job_id, parent_job_id, repo_path)
+                continue
+        return j
     return None
 
 
@@ -507,6 +708,47 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
         _REVIEW_ADMISSION_LOCK,
         "coding_team_review_pr",
         f"{owner}/{repo}#{pr_number}".casefold(),
+    ):
+        yield
+
+
+# Serializes checkout-wide admission (the `_running_sibling_on_checkout` scan plus the
+# job creation that follows it) keyed by the checkout path itself, not by PR — closing
+# the gap `_pr_review_admission` alone leaves open: that lock is keyed per-PR, so two
+# DIFFERENT PRs sharing the same operator-pinned repo_path each take their OWN per-PR
+# lock, each run the sibling scan seeing nothing yet (neither job exists), and both
+# proceed to admit a job onto the same checkout concurrently. Same process-lock +
+# Postgres-advisory-lock mechanism as `_pr_review_admission`, just keyed differently.
+_CHECKOUT_ADMISSION_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _checkout_admission(repo_path: str) -> Iterator[None]:
+    """Mutual exclusion for checkout-wide admission (sibling scan + job creation).
+
+    Preconditions:
+        - ``repo_path`` is the checkout path about to be scanned via
+          :func:`_running_sibling_on_checkout` and then, if free, used by a job
+          this call site is about to create.
+    Postconditions:
+        - Serializes callers keyed on ``repo_path``'s CASEFOLDED CANONICAL form
+          (:func:`os.path.realpath` then :meth:`str.casefold`), so two
+          different spellings of the same checkout (a trailing slash, a
+          symlink, or — on a case-insensitive filesystem — a different case)
+          still serialize against each other, matching how
+          :func:`_running_sibling_on_checkout` itself compares paths and how
+          the sibling :func:`_pr_review_admission` key is casefolded.
+          Delegates to :func:`advisory_lock` — see its
+          docstring for the full locking contract (degradation, invariants,
+          exception behavior). A caller that also holds a per-PR
+          :func:`_pr_review_admission` lock must acquire this one INSIDE it
+          (this call site is the only one nesting both today, so lock
+          ordering is trivially consistent).
+    """
+    with advisory_lock(
+        _CHECKOUT_ADMISSION_LOCK,
+        "coding_team_checkout_admission",
+        os.path.realpath(repo_path).casefold(),
     ):
         yield
 

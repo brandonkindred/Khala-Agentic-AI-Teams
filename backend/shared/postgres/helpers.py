@@ -14,12 +14,38 @@ copied into every mixin implementation.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 from shared.postgres.client import pg_cursor
 
+logger = logging.getLogger(__name__)
+
 _DISABLED_MSG = "POSTGRES_HOST is not set; cannot open a Postgres connection."
+
+
+def best_effort_write(log_prefix: str, op_name: str, write_fn: Callable[[], None]) -> None:
+    """Run ``write_fn``, logging and swallowing any failure.
+
+    Shared by team stores (``review_history_store``, ``resolve_attempt_store``,
+    …) whose writes are a safety net rather than a prerequisite for the run
+    they support: persistence failing must never fail the caller's larger
+    operation.
+
+    Preconditions:
+        - ``write_fn`` takes no arguments and performs the Postgres write.
+          Callers check ``is_postgres_enabled()`` first when they need to skip
+          other work (e.g. building a query) on top of the write itself.
+    Postconditions:
+        - ``write_fn`` is invoked. Any exception it raises is logged as a
+          warning tagged ``"{log_prefix}: {op_name} failed"`` and swallowed.
+          Never raises.
+    """
+    try:
+        write_fn()
+    except Exception:  # noqa: BLE001 - persistence must never break the caller's operation
+        logger.warning("%s: %s failed", log_prefix, op_name, exc_info=True)
 
 
 class PostgresHelperMixin:

@@ -11,6 +11,7 @@ from software_engineering_team.clone_workspace import (
     clone_lock_path,
     ephemeral_workspace_roots,
     is_per_issue_dir,
+    is_per_pr_dir,
     is_within_ephemeral_workspace,
 )
 
@@ -69,6 +70,26 @@ def test_clone_lock_path_distinct_issues_distinct_locks() -> None:
 def test_is_per_issue_dir(name, expected) -> None:
     """is_per_issue_dir matches exactly the auto-derived 'issue-<digits>' shape and nothing broader."""
     assert is_per_issue_dir(name) is expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("pr-7", True),
+        ("pr-12345", True),
+        ("pr-", False),
+        ("pr-7a", False),
+        ("pr-7/extra", False),
+        ("issue-7", False),
+        ("acme_widget", False),
+        ("widget", False),
+        ("", False),
+    ],
+)
+def test_is_per_pr_dir(name, expected) -> None:
+    """is_per_pr_dir matches exactly the auto-derived 'pr-<digits>' shape and nothing broader —
+    and never an 'issue-<digits>' checkout, since the two namespaces must never collide."""
+    assert is_per_pr_dir(name) is expected
 
 
 @pytest.mark.parametrize("root", ["/", ""])

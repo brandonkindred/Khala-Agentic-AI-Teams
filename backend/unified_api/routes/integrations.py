@@ -31,16 +31,22 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from shared.concurrency import flock_lock
+from shared.concurrency import CloneLockAcquisitionError, flock_lock, held_checkout_lock
+from shared.git.git_utils import remote_url_matches
 from shared.postgres import bounded_probe
 from software_engineering_team.clone_workspace import (
     PER_ISSUE_DIR_TEMPLATE,
+    PER_PR_DIR_TEMPLATE,
     agent_cache_dir,
     clone_lock_path,
 )
-from software_engineering_team.github_source.client import _pr_detail_from_payload
+from software_engineering_team.github_source.client import (
+    configured_web_host,
+    default_api_base,
+    pr_detail_from_payload,
+)
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -1305,7 +1311,29 @@ async def medium_clear_session() -> MediumConfigResponse:
 # ---------------------------------------------------------------------------
 
 _GITHUB_SERVICE = "github"
-_GITHUB_API_BASE = "https://api.github.com"
+
+
+def _github_api_base() -> str:
+    """Return the configured GitHub API base URL (GHES-aware).
+
+    Thin module-local alias for :func:`default_api_base`, which owns the whole
+    derivation (``GITHUB_API_URL`` env var, else ``https://api.github.com``,
+    trailing slashes stripped) for ``GitHubClient.__init__`` and
+    ``configured_web_host`` alike. Re-deriving that expression here is exactly
+    how the env var name, the fallback constant, and the trailing-slash
+    normalization drift apart between modules, so this delegates rather than
+    duplicates.
+
+    Postconditions:
+        - Returns exactly :func:`default_api_base`'s result, so every GitHub
+          API call in this module targets the same configured host the
+          coding-team client does — never a hardcoded one — and callers
+          building ``f"{_github_api_base()}/repos/..."`` never produce a double
+          slash from an operator's trailing-slash env var.
+    """
+    return default_api_base()
+
+
 # GitHub's issues endpoint returns at most 100 items per page; we request the max
 # and follow the Link header so the panel shows every open issue, not just page one.
 _GITHUB_ISSUES_PER_PAGE = 100
@@ -1339,6 +1367,43 @@ _GITHUB_HTTP_TIMEOUT = 15.0
 # ``\Z`` (not ``$``) so the anchor can't match before a trailing newline — a value like
 # "name\n" must be rejected even if it ever reached here un-stripped.
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
+
+
+def _validate_base_branch_field(value: str | None) -> str | None:
+    """Reject a caller-supplied ``base_branch`` shaped to look like a git option.
+
+    Unlike ``owner``/``repo`` (validated by :func:`_validate_repo_component`
+    against an allowlist), ``base_branch`` is a real ref name and can
+    legitimately contain characters outside that allowlist (e.g. ``feature/x``),
+    so this is a narrower blocklist: it only rejects shapes that could be
+    misparsed once this value reaches a git subprocess call downstream (this
+    file's own doctrine — see ``_resolve_repo_path`` — validates every
+    externally-influenced value before it reaches git/filesystem ops).
+
+    Preconditions: ``value`` is the raw field value pydantic is validating
+        (``None`` when the field was explicitly set to ``null`` — in Pydantic
+        v2, a field validator does not run at all when the field is simply
+        omitted from the request; this only sees ``None`` for an explicit
+        ``null``).
+    Postconditions: returns ``value`` unchanged when it is ``None`` or passes
+        every check. Raises ``ValueError`` (pydantic wraps this as a 422) for:
+        a value that is empty/whitespace-only after stripping, one whose
+        stripped form differs from the original (leading/trailing whitespace,
+        rejected outright rather than silently normalized), one starting with
+        ``-`` (would be parsed as a git option/flag instead of a ref name,
+        e.g. ``--upload-pack=...`` argument injection), or one containing a
+        NUL, CR, or LF byte.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or stripped != value:
+        raise ValueError("base_branch must not be blank or have leading/trailing whitespace")
+    if stripped.startswith("-"):
+        raise ValueError("base_branch must not start with '-'")
+    if any(ch in stripped for ch in ("\x00", "\r", "\n")):
+        raise ValueError("base_branch must not contain control characters")
+    return stripped
 
 
 def _parse_dependency_concurrency(raw: str | None) -> int:
@@ -1449,13 +1514,15 @@ class RunGitHubIssueRequest(BaseModel):
     owner: str = ""
     repo: str = ""
 
+    _validate_base_branch = field_validator("base_branch")(_validate_base_branch_field)
+
 
 class RunGitHubIssueResponse(BaseModel):
     job_id: str
     issue_number: int
     issue_url: str
     status: str = "pending"
-    message: str = "Job started. Poll GET /api/coding-team/status/{job_id} for progress."
+    message: str = "Job started. Poll the job status endpoint for progress."
 
 
 class GitHubPullRequestItem(BaseModel):
@@ -1479,6 +1546,8 @@ class RunPrReviewRequest(BaseModel):
     owner: str = ""
     repo: str = ""
 
+    _validate_base_branch = field_validator("base_branch")(_validate_base_branch_field)
+
 
 class RunPrReviewResponse(BaseModel):
     """Response for ``POST /github/review-pr``: identifies the started review job
@@ -1489,9 +1558,40 @@ class RunPrReviewResponse(BaseModel):
     pr_number: int
     pr_url: str
     status: str = "pending"
-    message: str = "Review started. Poll GET /api/coding-team/status/{job_id} for progress."
+    message: str = "Review started. Poll the job status endpoint for progress."
     # ISO-8601 server-clock start time, forwarded from the coding team so the UI can
     # compute a live review duration on server timestamps at both ends. Optional.
+    created_at: str | None = None
+
+
+class AddressPrCommentsRequest(BaseModel):
+    """Request body for ``POST /github/pulls/{pr_number}/address-comments``.
+
+    Kicks off the flow that addresses & responds to every unresolved review comment
+    on the PR. Target repository: blank ``owner``/``repo`` falls back to the legacy
+    configured default; the PAT's own authorization decides reachability.
+
+    ``base_branch`` names the branch the PR targets (used when preparing the local
+    checkout); when omitted, the repository's default branch is resolved instead.
+    """
+
+    base_branch: str | None = None
+    owner: str = ""
+    repo: str = ""
+
+    _validate_base_branch = field_validator("base_branch")(_validate_base_branch_field)
+
+
+class AddressPrCommentsResponse(BaseModel):
+    """Response for ``POST /github/pulls/{pr_number}/address-comments``: identifies
+    the started job and reports how many unresolved comments it will work through."""
+
+    job_id: str
+    pr_number: int
+    pr_url: str
+    unresolved_comment_count: int = 0
+    status: str = "pending"
+    message: str = "Addressing unresolved comments. Poll the job status endpoint for progress."
     created_at: str | None = None
 
 
@@ -1803,7 +1903,7 @@ async def _fetch_blocked_by(
     """
     # The blocked_by endpoint returns standard issue objects, so the default
     # ``application/vnd.github+json`` Accept header (already in ``headers``) is correct.
-    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
+    url = f"{_github_api_base()}/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
     params: dict[str, Any] | None = {"per_page": _GITHUB_DEPENDENCY_PER_PAGE}
     out: list[dict[str, Any]] = []
     try:
@@ -2042,7 +2142,7 @@ async def _assert_pat_can_reach_repo(owner: str, repo: str, token: str) -> None:
           invalid/expired token, 502 for any other upstream status, and 504/502 for a
           timeout/transport error. No ``httpx`` error escapes unhandled.
     """
-    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}"
+    url = f"{_github_api_base()}/repos/{owner}/{repo}"
     headers = _github_api_headers(token)
     try:
         async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
@@ -2162,7 +2262,7 @@ async def list_github_repos() -> list[GitHubRepoItem]:
 
     params: dict[str, Any] = {"per_page": _GITHUB_REPOS_PER_PAGE, "sort": "pushed"}
     headers = _github_api_headers(token)
-    base_url = f"{_GITHUB_API_BASE}/user/repos"
+    base_url = f"{_github_api_base()}/user/repos"
 
     async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_repos, has_more = await _collect_github_pages(
@@ -2233,7 +2333,7 @@ async def list_github_issues(
     if use_label:
         params["labels"] = use_label
     headers = _github_api_headers(token)
-    base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
+    base_url = f"{_github_api_base()}/repos/{owner}/{repo}/issues"
 
     async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pages, has_more = await _collect_github_pages(
@@ -2281,11 +2381,23 @@ async def list_github_issues(
 def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
     """Map a raw GitHub pull-request payload onto the panel's PR model.
 
-    Field extraction is delegated to the coding team's ``_pr_detail_from_payload`` so
+    Field extraction is delegated to the coding team's ``pr_detail_from_payload`` so
     GitHub's PR payload shape is parsed in exactly one place; this only adapts the
-    parsed detail to the panel's response model (truncating the body for preview).
+    parsed detail to the panel's response model.
+
+    Preconditions:
+        - ``raw`` is a decoded GitHub pull-request object carrying at least
+          ``number`` (``pr_detail_from_payload``'s own precondition).
+    Postconditions:
+        - Returns a :class:`GitHubPullRequestItem` whose fields are exactly the
+          parsed detail's. ``body_preview`` carries the PR body IN FULL, unlike
+          the issue list's 200-character preview: a PR body is rendered whole in
+          the review-detail panel, and truncating it here would silently drop
+          the tail of every PR description the panel shows. The field keeps its
+          ``_preview`` name for wire compatibility with the panel's model.
+        - Pure — no network, no mutation of ``raw``.
     """
-    detail = _pr_detail_from_payload(raw)
+    detail = pr_detail_from_payload(raw)
     return GitHubPullRequestItem(
         number=detail.number,
         title=detail.title,
@@ -2323,7 +2435,7 @@ async def list_github_pulls(
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_PRS_PER_PAGE}
     headers = _github_api_headers(token)
-    base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
+    base_url = f"{_github_api_base()}/repos/{owner}/{repo}/pulls"
 
     async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pulls, has_more = await _collect_github_pages(
@@ -2372,7 +2484,9 @@ def _repo_path_override(cfg: dict[str, Any], owner: str, repo: str) -> str:
     return ""
 
 
-def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number: int | None = None) -> str:
+def _resolve_repo_path(
+    cfg: dict[str, Any], owner: str, repo: str, issue_number: int | None = None, pr_number: int | None = None
+) -> str:
     """Resolve the local checkout path for the coding team.
 
     Priority: config override (default repo only) > SE_WORKSPACE_DIR env >
@@ -2386,15 +2500,29 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
     When ``issue_number`` is given and the path is auto-derived (no operator
     override), the checkout is namespaced per-issue with an ``issue-{N}`` segment
     so multiple coding-team jobs can run on different issues of the same
-    repository in true filesystem isolation, concurrently. An operator override
-    is returned verbatim — the operator manages that checkout themselves, so it
-    is neither per-issue-namespaced nor auto-cleaned.
+    repository in true filesystem isolation, concurrently. ``pr_number`` is the
+    equivalent namespacing for the address-comments flow, using a distinct
+    ``pr-{N}`` segment — a separate prefix is required, not stylistic. GitHub
+    issues and pull requests actually share one numbering sequence per
+    repository, so ``issue-42`` and PR #42 can never simultaneously exist —
+    the risk a distinct prefix guards against is not a same-number collision.
+    It is (a) classification/cleanup logic downstream needing to tell an
+    issue checkout from a PR checkout apart by path alone, and (b) a GitHub
+    issue-to-PR conversion, which keeps the issue's original number: without
+    a distinct prefix, PR #42 (converted from issue #42) could otherwise
+    resolve to the SAME path as the stale ``issue-42`` checkout left behind
+    by the issue-driven run, reusing (and potentially corrupting) it instead
+    of getting its own isolated checkout. An operator override is returned
+    verbatim — the operator manages that checkout themselves, so it is
+    neither namespaced nor auto-cleaned.
 
     Preconditions:
         - ``owner`` and ``repo`` are the non-empty target repository (the run
           routes resolve this via ``_resolve_github_target`` before calling).
-        - ``issue_number`` is a positive issue number or ``None`` (the PR-review
-          path passes ``None`` and gets the repo-level path; it never clones).
+        - ``issue_number`` is a positive issue number or ``None``; ``pr_number``
+          is a positive PR number or ``None``. At most one of the two is set (the
+          PR-review path passes neither and gets the repo-level path; it never
+          clones).
     Postconditions:
         - Returns the override verbatim when set and applicable to this target
           (see :func:`_repo_path_override`). The override is trusted operator
@@ -2403,21 +2531,26 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
           config source ever accepts untrusted input it must be sanitized by the
           caller.
         - Otherwise returns an absolute derived path; with ``issue_number`` set
-          the path ends in ``issue-{issue_number}`` and two distinct issue
-          numbers map to two distinct paths.
+          the path ends in ``issue-{issue_number}``, with ``pr_number`` set it
+          ends in ``pr-{pr_number}``, and two distinct numbers (of the same kind)
+          map to two distinct paths.
         - Raises ``HTTPException(400)`` when ``owner``/``repo`` are missing or
-          carry a path separator, ``..`` segment, or null byte, or when
-          ``issue_number`` is non-positive — defense-in-depth so this path
-          builder can't be coerced into escaping the workspace root or building
-          a degenerate ``issue-0`` segment even if a caller skipped validation.
+          carry a path separator, ``..`` segment, null byte, or leading/trailing
+          whitespace, when ``issue_number`` or ``pr_number`` is non-positive, or
+          when both are set — defense-in-depth (applied on the auto-derived path
+          only; the operator-override branch above returns before these checks
+          run) so this path builder can't be coerced into escaping the workspace
+          root, building a degenerate ``issue-0``/``pr-0`` segment, or building
+          an ambiguous path, even if a caller skipped validation.
 
     Note:
         The auto-derived layout differs by source: a workspace-root env var gives
-        ``{root}/{owner}_{repo}[/issue-N]`` while the ``AGENT_CACHE`` fallback
-        gives ``{cache}/github_workspaces/{owner}/{repo}[/issue-N]``. This is
-        intentional (``AGENT_CACHE`` is a shared multi-team cache namespaced under
-        ``github_workspaces``; a dedicated workspace root is not), and
-        ``ephemeral_workspace_roots`` mirrors both shapes for the cleanup guard.
+        ``{root}/{owner}_{repo}[/issue-N|/pr-N]`` while the ``AGENT_CACHE``
+        fallback gives ``{cache}/github_workspaces/{owner}/{repo}[/issue-N|/pr-N]``.
+        This is intentional (``AGENT_CACHE`` is a shared multi-team cache
+        namespaced under ``github_workspaces``; a dedicated workspace root is
+        not), and ``ephemeral_workspace_roots`` mirrors both shapes for the
+        cleanup guard.
     """
     override = _repo_path_override(cfg, owner, repo)
     if override:
@@ -2443,13 +2576,23 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
         _validate_repo_component(label, value)
 
-    # Enforce the documented precondition: a non-positive issue_number would yield
-    # a degenerate ``issue-0`` / ``issue--1`` segment (and never names a real
-    # GitHub issue), so reject it here rather than build a bad path.
+    if issue_number is not None and pr_number is not None:
+        raise HTTPException(status_code=400, detail="issue_number and pr_number are mutually exclusive")
+
+    # Enforce the documented precondition: a non-positive issue_number/pr_number
+    # would yield a degenerate ``issue-0``/``pr-0`` segment (and never names a
+    # real GitHub issue or PR), so reject it here rather than build a bad path.
     if issue_number is not None and issue_number < 1:
         raise HTTPException(status_code=400, detail=f"issue_number must be positive: {issue_number!r}")
+    if pr_number is not None and pr_number < 1:
+        raise HTTPException(status_code=400, detail=f"pr_number must be positive: {pr_number!r}")
 
-    issue_segment = PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
+    if issue_number is not None:
+        namespace_segment = PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number)
+    elif pr_number is not None:
+        namespace_segment = PER_PR_DIR_TEMPLATE.format(pr_number=pr_number)
+    else:
+        namespace_segment = None
 
     # Auto-derived paths are resolved to absolute so they are stable regardless
     # of the process working directory at clone vs. cleanup time, and so the
@@ -2458,13 +2601,13 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
         val = os.environ.get(env_var, "").strip()
         if val:
             base = Path(val) / f"{owner}_{repo}"
-            target = base / issue_segment if issue_segment else base
+            target = (base / namespace_segment) if namespace_segment else base
             return str(target.resolve())
 
     # Shared AGENT_CACHE resolver (single source of truth) so the derived path
     # and the cleanup safety root in ephemeral_workspace_roots never diverge.
     base = Path(agent_cache_dir()) / "github_workspaces" / owner / repo
-    target = base / issue_segment if issue_segment else base
+    target = (base / namespace_segment) if namespace_segment else base
     return str(target.resolve())
 
 
@@ -2530,31 +2673,15 @@ def _redact_url_userinfo(url: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
 
 
-def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
-    """True iff ``remote_url``'s final ``owner/repo`` segments match exactly.
-
-    A substring check (``f"{owner}/{repo}" in url``) gives false positives — e.g.
-    ``acme/widget`` matches ``acme/widget-extra``, and ``acme/widget`` is also a
-    suffix of ``notacme/widget``. This compares the last two path segments
-    exactly (case-insensitively, since GitHub treats owner/repo that way) after
-    stripping a trailing ``.git``/slash, and normalizes the ``git@host:owner/repo``
-    scp form to ``/``-separated so both URL styles work.
-
-    Postconditions:
-        - Returns True iff the remote's last two segments equal ``owner``/``repo``
-          case-insensitively; False otherwise (including malformed/short URLs).
-    """
-    cleaned = remote_url.strip().rstrip("/")
-    if cleaned.endswith(".git"):
-        cleaned = cleaned[:-4]
-    parts = [seg for seg in cleaned.replace(":", "/").split("/") if seg]
-    if len(parts) < 2:
-        return False
-    got_owner, got_repo = parts[-2], parts[-1]
-    return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
-
-
-def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True) -> str | None:
+def _ensure_repo_clone(
+    repo_path: str,
+    owner: str,
+    repo: str,
+    token: str,
+    *,
+    platform_owned: bool = True,
+    acquire_lock: bool = True,
+) -> str | None:
     """Clone or fetch the repository.
 
     Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
@@ -2582,6 +2709,14 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
           doesn't apply) and may live under a parent the service cannot write,
           where creating a sibling lock would wrongly fail an otherwise-valid
           fetch.
+        - ``acquire_lock`` (platform-owned only) controls whether this call
+          acquires the sibling lock itself. Pass False when the caller ALREADY
+          HOLDS that SAME lock (:func:`clone_lock_path` on this ``repo_path``)
+          around a wider critical section — re-acquiring it here via a second
+          file descriptor would self-deadlock (``flock`` mutual exclusion is
+          per open file description, not per process/thread, so a second
+          ``open()`` of the same path blocks against the first even within one
+          process).
     """
     env = _git_auth_env(token)
     path = Path(repo_path)
@@ -2595,7 +2730,13 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
 
     def _clone_or_fetch() -> str | None:
         try:
-            if path.is_dir() and (path / ".git").is_dir():
+            # `.git` is a DIRECTORY for an ordinary clone but a FILE for a git
+            # worktree checkout (it contains a `gitdir:` pointer to the real
+            # one elsewhere) — an `.is_dir()`-only check rejects a perfectly
+            # valid worktree checkout, falling through to the clone branch
+            # below and attempting `git clone` into a non-empty directory,
+            # which fails. `.exists()` accepts both shapes.
+            if path.is_dir() and (path / ".git").exists():
                 url_check = subprocess.run(
                     ["git", "-C", repo_path, "remote", "get-url", "origin"],
                     capture_output=True,
@@ -2603,15 +2744,30 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                     timeout=10,
                 )
                 url_out = url_check.stdout.strip()
-                if url_check.returncode != 0 or not _remote_matches(url_out, owner, repo):
+                if url_check.returncode != 0:
+                    return (
+                        f"could not read the existing checkout's remote origin at {repo_path}: "
+                        f"{_scrub_git_secret(url_check.stderr, token)}"
+                    )
+                if not remote_url_matches(url_out, owner, repo, expected_host=configured_web_host()):
                     # Redact any embedded credentials before surfacing the remote in the error.
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "
                         f"(remote origin: {_redact_url_userinfo(url_out)})"
                     )
 
+                # Fetch only "origin", never "--all": a fork PR's branch prep
+                # registers a temporary named remote (khala-pr-head, see
+                # _ensure_named_remote) that can persist on a long-lived
+                # operator-pinned checkout after that run finishes. If the
+                # fork is later deleted or becomes inaccessible, "--all" would
+                # make EVERY future clone-or-fetch on this checkout fail here
+                # — before branch prep even runs — over a remote nothing
+                # currently needs fetched this early. Branch prep does its own
+                # explicit `git fetch -- <remote> <branch>` for whichever
+                # remote (origin or a fork) it actually needs.
                 result = subprocess.run(
-                    ["git", "-C", repo_path, "fetch", "--all"],
+                    ["git", "-C", repo_path, "fetch", "origin"],
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -2621,7 +2777,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                     return f"git fetch failed: {_scrub_git_secret(result.stderr, token)}"
                 return None
 
-            clone_url = f"https://github.com/{owner}/{repo}.git"
+            clone_url = f"https://{configured_web_host()}/{owner}/{repo}.git"
             result = subprocess.run(
                 ["git", "clone", clone_url, repo_path],
                 capture_output=True,
@@ -2642,6 +2798,11 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
 
     # Operator-pinned checkout: fetch directly, no sibling lock (see Postconditions).
     if not platform_owned:
+        return _clone_or_fetch()
+
+    # A caller already holding this checkout's lock around a wider critical
+    # section (see `acquire_lock`'s contract above) must not have it re-acquired here.
+    if not acquire_lock:
         return _clone_or_fetch()
 
     # Platform-owned per-issue checkout: serialize via an exclusive flock on a
@@ -2701,8 +2862,10 @@ async def _forward_to_coding_team(
         - Returns the upstream response's parsed JSON body on a 200. Every
           failure path raises ``HTTPException`` instead of letting an ``httpx``
           error (or a malformed response body) escape unhandled: a timeout
-          raises 504 with ``timeout_detail``, an unreachable service raises 502,
-          and a non-200 response re-raises the upstream status code with a
+          raises 504 with ``timeout_detail``, an unreachable service raises 502
+          with a fixed, cause-free detail (the underlying transport error is
+          logged server-side rather than returned, since it can name the
+          internal service host/port), and a non-200 response re-raises the upstream status code with a
           bounded copy of its detail for a 4xx or ``generic_failure_detail`` for
           a 5xx (never echoing a possible stack trace to the client).
     """
@@ -2719,7 +2882,13 @@ async def _forward_to_coding_team(
         raise HTTPException(status_code=504, detail=timeout_detail) from e
     except httpx.HTTPError as e:
         logger.warning("%s: cannot reach coding team service at %s: %s", log_prefix, coding_team_url, e)
-        raise HTTPException(status_code=502, detail=f"Could not reach coding team service: {e}") from e
+        # Curated, cause-free detail: `str(httpx.ConnectError)` and its siblings
+        # can carry the internal target URL, host/port, or a transport-level
+        # message, and this detail is returned to the API caller. The raw error
+        # is logged immediately above -- server-side is where it belongs -- and
+        # the wording still distinguishes this 502 from the other 502s this
+        # helper raises (upstream 5xx, malformed response body).
+        raise HTTPException(status_code=502, detail="Could not reach coding team service.") from e
 
     if resp.status_code != 200:
         # The upstream body can carry internal detail (a stack trace on an unhandled
@@ -2760,6 +2929,33 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           middleware, so the browser receives it without an ``Access-Control-Allow-Origin``
           header, drops the response, and the UI can only report an opaque
           "0 Unknown Error" — useless for diagnosis.
+        - Before touching the checkout, checks the coding-team service's
+          generic ``GET /checkout/running`` pre-check (any active job, any
+          kind, on this ``repo_path``) and raises 409 immediately when one is
+          found — this route has no PR-scoped admission of its own to
+          piggyback on (unlike ``address_github_pr_comments``), so without
+          this an issue run on an operator-pinned ``repo_path`` could clone/
+          fetch against a PR-remediation job's live working tree. The
+          admission pre-check, clone/fetch, and forward all run under ONE
+          exclusive lock on the checkout (:func:`clone_lock_path`), same
+          pattern and same lock file :func:`address_github_pr_comments` uses, so
+          the two routes correctly serialize against each other too. For an
+          operator-pinned ``repo_path`` this serialization is best-effort
+          only: if the lock cannot be acquired, the request proceeds without
+          it (logged as a warning) rather than failing the run.
+        - Failing to acquire that lock on a PLATFORM-OWNED checkout raises
+          :class:`CloneLockAcquisitionError` and maps to 503 (a local,
+          retryable serialization problem). Any OTHER ``OSError`` escaping the
+          locked section — a missing git binary, a permission error or full
+          disk during clone/fetch — maps to 500 with an operation-neutral
+          detail instead: it is not a lock failure and is not necessarily
+          transient, so reporting it as a retryable 503 "could not acquire
+          clone lock" would mislead both API consumers and on-call debugging.
+          The forward contributes nothing to that handler: it runs through
+          :func:`_forward_to_coding_team`, which converts every
+          ``httpx.TimeoutException``/``httpx.HTTPError`` (none of which
+          subclasses ``OSError``) into an ``HTTPException`` before it could
+          reach here.
     """
     # Centralized validation (enabled + PAT + target repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".
@@ -2776,40 +2972,132 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     # published to a PR; an operator-managed override is never auto-cleaned.
     repo_path = _resolve_repo_path(cfg, owner, repo, issue_number=body.issue_number)
     cleanup_checkout_on_success = not _repo_path_override(cfg, owner, repo)
+    platform_owned = cleanup_checkout_on_success
 
     loop = asyncio.get_running_loop()
-    clone_err = await loop.run_in_executor(
-        None,
-        functools.partial(
-            _ensure_repo_clone, repo_path, owner, repo, token, platform_owned=cleanup_checkout_on_success
-        ),
-    )
-    if clone_err:
-        logger.warning("github run-issue: repository preparation failed: %s", clone_err)
-        raise HTTPException(status_code=502, detail=clone_err)
+    lock_path = clone_lock_path(repo_path)
+    try:
+        async with held_checkout_lock(
+            loop,
+            lock_path,
+            platform_owned=platform_owned,
+            owner=owner,
+            repo=repo,
+            log_prefix="github run-issue",
+        ):
+            running = await _forward_to_coding_team(
+                coding_team_url,
+                "checkout/running",
+                method="GET",
+                params={"repo_path": repo_path},
+                log_prefix="github run-issue admission check",
+                timeout_detail="Coding team service timed out while checking for a running job.",
+                generic_failure_detail="Coding team service failed the admission pre-check.",
+            )
+            if isinstance(running, dict) and "running_job_id" in running:
+                running_job_id = running.get("running_job_id")
+            else:
+                # This pre-check is the ONLY admission guard this route has (see the
+                # docstring above); a malformed response means this checkout's
+                # freedom was never actually confirmed, so fail closed instead of
+                # silently proceeding unblocked. A legitimate idle response is
+                # {"running_job_id": None} -- the coding-team route has no
+                # response_model_exclude_none, so the key is always present even
+                # when null; only a response missing the key entirely (or not a
+                # dict) is malformed.
+                logger.warning(
+                    "github run-issue: admission pre-check returned unexpected payload %r for "
+                    "%s; refusing to start a job without a confirmed-free checkout",
+                    running,
+                    repo_path,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Coding team service returned an unexpected admission pre-check "
+                        "response; refusing to start a job without a confirmed-free checkout."
+                    ),
+                )
+            if running_job_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"job {running_job_id} already running on checkout {repo_path}",
+                )
 
-    payload: dict[str, Any] = {
-        "owner": owner,
-        "repo": repo,
-        "repo_path": repo_path,
-        "issue_number": body.issue_number,
-        "github_token": token,
-        "cleanup_checkout_on_success": cleanup_checkout_on_success,
-    }
-    if body.base_branch:
-        payload["base_branch"] = body.base_branch
+            clone_err = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _ensure_repo_clone,
+                    repo_path,
+                    owner,
+                    repo,
+                    token,
+                    platform_owned=platform_owned,
+                    acquire_lock=False,
+                ),
+            )
+            if clone_err:
+                logger.warning("github run-issue: repository preparation failed: %s", clone_err)
+                # 502, deliberately, even though the `except OSError` handler
+                # below maps superficially similar repo-preparation failures to
+                # 500. The two are different kinds of event. `clone_err` is a
+                # RETURN VALUE: `_ensure_repo_clone` anticipated this failure,
+                # scrubbed it and reported it cleanly, and every cause it
+                # reports this way (a clone/fetch that git itself rejected, a
+                # timeout reaching the remote, a checkout pointing at a
+                # different origin) is an upstream/dependency outcome rather
+                # than a fault in this service -- so it is not a 500, and it is
+                # not the retryable-local-serialization case that owns 503. An
+                # OSError ESCAPING that function is the opposite: an
+                # unanticipated failure of this host (missing git binary,
+                # unwritable path, full disk), which is genuinely ours and
+                # correctly a 500. `address_github_pr_comments` maps its own
+                # `clone_err` to 502 on the same reasoning, so the two routes
+                # agree.
+                raise HTTPException(status_code=502, detail=clone_err)
 
-    # connect fast-fails an unreachable service; the longer read budget covers the
-    # coding team's synchronous GitHub API round-trips inside /run-from-github.
-    data = await _forward_to_coding_team(
-        coding_team_url,
-        "run-from-github",
-        json_body=payload,
-        log_prefix="github run-issue",
-        timeout_detail="Coding team service timed out while starting the job.",
-        # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
-        generic_failure_detail="Failed to start the coding job.",
-    )
+            payload: dict[str, Any] = {
+                "owner": owner,
+                "repo": repo,
+                "repo_path": repo_path,
+                "issue_number": body.issue_number,
+                "github_token": token,
+                "cleanup_checkout_on_success": cleanup_checkout_on_success,
+            }
+            if body.base_branch:
+                payload["base_branch"] = body.base_branch
+
+            # connect fast-fails an unreachable service; the longer read budget covers the
+            # coding team's synchronous GitHub API round-trips inside /run-from-github.
+            data = await _forward_to_coding_team(
+                coding_team_url,
+                "run-from-github",
+                json_body=payload,
+                log_prefix="github run-issue",
+                timeout_detail="Coding team service timed out while starting the job.",
+                # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
+                generic_failure_detail="Failed to start the coding job.",
+            )
+    except CloneLockAcquisitionError as e:
+        # ONLY a genuine lock-acquisition failure maps to 503: a local
+        # serialization problem the client can usefully retry. Must precede the
+        # generic OSError handler below -- it is a subclass.
+        raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
+    except OSError as e:
+        # Any OTHER OSError escaping the locked section -- a missing git binary,
+        # a permission error or full disk during clone/fetch -- is not a lock
+        # problem and is not necessarily transient, so it must not claim to be
+        # either. The forward itself contributes nothing here: it goes through
+        # `_forward_to_coding_team`, which is httpx-based and converts every
+        # `httpx.HTTPError` (none of which subclasses OSError) into an
+        # HTTPException before it can reach this handler. Note the deliberate
+        # asymmetry with the 502 above: that path handles a failure
+        # `_ensure_repo_clone` RETURNED (anticipated, upstream), this one a
+        # failure that ESCAPED it (unanticipated, ours).
+        raise HTTPException(
+            status_code=500,
+            detail=f"github run-issue failed while preparing {owner}/{repo}: {e}",
+        ) from e
     try:
         return RunGitHubIssueResponse(
             job_id=data["job_id"],
@@ -2818,7 +3106,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             status=data.get("status", "pending"),
             message=data.get("message", ""),
         )
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, ValidationError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
@@ -2898,7 +3186,7 @@ async def _start_pr_review(
             message=data.get("message", ""),
             created_at=data.get("created_at"),
         )
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, ValidationError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
@@ -2921,6 +3209,193 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
         whole contract to that function.
     """
     return await _start_pr_review(body.pr_number, body.base_branch, owner=body.owner, repo=body.repo)
+
+
+@router.post("/github/pulls/{pr_number}/address-comments", response_model=AddressPrCommentsResponse)
+async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequest) -> AddressPrCommentsResponse:
+    """Start the flow that addresses & responds to a PR's unresolved review comments.
+
+    Resolves the GitHub target (PAT + owner/repo), then forwards to the coding-team
+    service's ``POST /pulls/{pr_number}/address-comments`` — the same proxy shape as
+    ``POST /github/review-pr``. The token is injected server-side (never sent by the
+    browser).
+
+    Preconditions:
+        - GitHub integration is enabled with a stored PAT; the target repository is the
+          body's ``owner``/``repo`` (or the configured default), reachable by the PAT.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - On success returns the started job's id, PR url, unresolved-comment count, and
+          initial status. Every failure path this function's own code anticipates (lock
+          acquisition, the coding-team admission pre-check, the clone/fetch, and the
+          forward-and-validate call) raises ``HTTPException`` with an explanatory detail.
+          An unexpected exception from an earlier helper (``_resolve_github_target``,
+          ``_require_coding_team_url``, ``_resolve_repo_path``, ``_repo_path_override``)
+          is NOT converted here and propagates as-is (a 500).
+        - The checkout is namespaced per-PR (``pr-{pr_number}``, unless the operator
+          pins an explicit ``repo_path`` override) and cloned/fetched here before the
+          job is forwarded, mirroring ``run_github_issue``: unlike a plain PR review
+          (API-only), this flow implements and pushes fixes, so it needs a real local
+          checkout, and per-PR namespacing keeps concurrent address-comments jobs on
+          different PRs of the same repo from racing on the same working tree.
+        - Before touching that checkout, checks the coding-team service's own
+          best-effort admission pre-check (``GET .../address-comments/running``,
+          passed this ``repo_path``) and raises 409 immediately when a job is
+          already running for this PR OR for a DIFFERENT PR sharing this SAME
+          checkout (an operator-pinned ``repo_path`` is shared, unnamespaced,
+          across every PR of that repo) — never mutating the checkout
+          underneath a job that may be actively committing/pushing to it.
+        - The admission pre-check, the clone/fetch, and the forward to the
+          coding-team's admitting ``POST`` all run under ONE exclusive lock on
+          this checkout (:func:`clone_lock_path`), held for the request's whole
+          duration. This closes the window where two simultaneous requests could
+          each observe "nothing running" and then both mutate the shared checkout
+          concurrently. For an operator-pinned ``repo_path`` (shared, unnamespaced,
+          across every PR of that repo) the SAME lock file naturally serializes
+          every PR's request through this route, not just same-PR requests;
+          acquiring it there is best-effort (the path may live under a parent this
+          service cannot write) and degrades to no additional locking on the
+          ``OSError`` that failure mode raises (:func:`flock_lock`'s complete
+          raise contract — mkdir/open/flock failures only), same operator-pinned
+          fallback pattern ``run_github_issue`` uses. The lock
+          still cannot reach into the coding-team service's own long-running
+          remediation once this request returns — the coding-team service's own
+          admission lock remains the authority for that window.
+        - Failing to acquire that lock on a PLATFORM-OWNED checkout raises
+          :class:`CloneLockAcquisitionError` and maps to 503 (a local,
+          retryable serialization problem). Any OTHER ``OSError`` escaping the
+          locked section maps to 500 with an operation-neutral detail —
+          identical split to ``run_github_issue``'s. A failed FORWARD (by which
+          point the coding-team job may already have started) must not be
+          reported as "could not acquire clone lock", i.e. as though nothing
+          had happened at all. Today no forward failure can reach the
+          ``OSError`` handler at all: ``_forward_to_coding_team`` is
+          httpx-based and converts every ``httpx.HTTPError`` into an
+          ``HTTPException`` (see the comment at its call site below). The split
+          is kept because it is what makes that property a local, checkable one
+          rather than a transport detail this handler silently depends on — a
+          future transport whose errors DO subclass ``OSError`` would otherwise
+          reintroduce the misreport.
+    """
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
+
+    coding_team_url = _require_coding_team_url()
+
+    repo_path = _resolve_repo_path(cfg, owner, repo, pr_number=pr_number)
+    # An operator-pinned repo_path override is not per-PR-namespaced and is never
+    # auto-cleaned by this service — mirrors run_github_issue's
+    # cleanup_checkout_on_success computation. It IS still lock-guarded: the
+    # `held_checkout_lock` below runs for both kinds of checkout, differing only
+    # in that a pinned one takes the lock BEST-EFFORT (an acquisition OSError
+    # degrades to a warning and proceeds, since a pinned path may live under a
+    # parent this service cannot write to) rather than fail-closed.
+    platform_owned = not _repo_path_override(cfg, owner, repo)
+
+    loop = asyncio.get_running_loop()
+    lock_path = clone_lock_path(repo_path)
+    try:
+        async with held_checkout_lock(
+            loop,
+            lock_path,
+            platform_owned=platform_owned,
+            owner=owner,
+            repo=repo,
+            log_prefix="github address-comments",
+        ):
+            running = await _forward_to_coding_team(
+                coding_team_url,
+                f"pulls/{pr_number}/address-comments/running",
+                method="GET",
+                # repo_path lets the pre-check also catch a DIFFERENT PR's job already
+                # active on this SAME checkout (operator-pinned repo_path is shared,
+                # unnamespaced, across every PR) — not just a job for this exact PR.
+                params={"owner": owner, "repo": repo, "repo_path": repo_path},
+                log_prefix="github address-comments admission check",
+                timeout_detail="Coding team service timed out while checking for a running job.",
+                generic_failure_detail="Coding team service failed the admission pre-check.",
+            )
+            running_job_id = running.get("running_job_id") if isinstance(running, dict) else None
+            if running_job_id:
+                # The pre-check is checkout-scoped, not PR-scoped: with repo_path
+                # passed, a hit can be a DIFFERENT PR's job sharing this same
+                # operator-pinned checkout (see get_address_comments_running's own
+                # docstring) — never claim it belongs to the current PR.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"job {running_job_id} already running on the checkout for {owner}/{repo}",
+                )
+
+            clone_err = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _ensure_repo_clone,
+                    repo_path,
+                    owner,
+                    repo,
+                    token,
+                    platform_owned=platform_owned,
+                    acquire_lock=False,
+                ),
+            )
+            if clone_err:
+                logger.warning("github address-comments: repository preparation failed: %s", clone_err)
+                raise HTTPException(
+                    status_code=502,
+                    detail="Failed to prepare the repository clone for this pull request.",
+                )
+
+            payload: dict[str, Any] = {
+                "owner": owner,
+                "repo": repo,
+                "repo_path": repo_path,
+                "pr_number": pr_number,
+                "github_token": token,
+                "cleanup_checkout_on_success": platform_owned,
+            }
+            if body.base_branch:
+                payload["base_branch"] = body.base_branch
+
+            data = await _forward_to_coding_team(
+                coding_team_url,
+                f"pulls/{pr_number}/address-comments",
+                json_body=payload,
+                log_prefix="github address-comments",
+                timeout_detail="Coding team service timed out while starting the comment-addressing job.",
+                generic_failure_detail="Failed to start addressing the PR comments.",
+            )
+    except CloneLockAcquisitionError as e:
+        # Same split as run_github_issue's (kept deliberately identical): only a
+        # genuine lock-acquisition failure is a retryable 503. Must precede the
+        # generic OSError handler below -- it is a subclass.
+        raise HTTPException(status_code=503, detail=f"could not acquire clone lock for {owner}/{repo}: {e}") from e
+    except OSError as e:
+        # Any OTHER OSError from the locked section is not a lock problem and
+        # must not be reported as "the lock could not be acquired", i.e. as
+        # though nothing had happened at all. What lands here is clone/fetch
+        # preparation failing (a missing git binary, a permission error, a full
+        # disk) -- NOT the forward: `_forward_to_coding_team` is httpx-based and
+        # converts every `httpx.HTTPError` (none of which subclasses OSError)
+        # into an HTTPException, so the "while preparing" wording below is
+        # accurate for every error that can actually arrive.
+        raise HTTPException(
+            status_code=500,
+            detail=f"github address-comments failed while preparing {owner}/{repo}: {e}",
+        ) from e
+    try:
+        return AddressPrCommentsResponse(
+            job_id=data["job_id"],
+            pr_number=data["pr_number"],
+            pr_url=data["pr_url"],
+            unresolved_comment_count=data.get("unresolved_comment_count", 0),
+            status=data.get("status", "pending"),
+            message=data.get("message", ""),
+            created_at=data.get("created_at"),
+        )
+    except (KeyError, TypeError, ValidationError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
 
 
 @router.get("/github/reviews", response_model=list[CodeReviewRunItem])

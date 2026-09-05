@@ -31,6 +31,7 @@ import shutil  # noqa: F401  (patched via main.shutil.rmtree in tests)
 import subprocess  # noqa: F401  (patched via main.subprocess.run in tests)
 import threading  # noqa: F401  (patched via main.threading.Thread/Timer in tests)
 
+from llm_service import generate_structured  # noqa: F401
 from shared.app import create_team_app
 from shared.git.git_utils import (  # noqa: F401
     DEVELOPMENT_BRANCH,
@@ -78,11 +79,15 @@ from software_engineering_team.api.coding_team_state import (  # noqa: F401
     _validate_answers,
 )
 from software_engineering_team.api.git_ops import (  # noqa: F401
+    _FORK_REMOTE_NAME,
     ACTIVE_ISSUE_CONFIG_KEY,
+    INTEGRATION_BRANCH_PREFIX,
     RESCUE_BRANCH_PREFIX,
+    _checkout_remote_matches,
     _cleanup_issue_checkout,
     _clear_active_issue,
     _clear_active_issue_if_matches,
+    _ensure_named_remote,
     _ephemeral_checkout_target,
     _fast_forward,
     _git,
@@ -101,6 +106,7 @@ from software_engineering_team.api.git_ops import (  # noqa: F401
     _utc_timestamp,
     _working_tree_dirty,
     _write_active_issue,
+    integration_branch_for,
     resolve_remote_branch_sha,
 )
 from software_engineering_team.api.orchestration import (  # noqa: F401
@@ -122,6 +128,7 @@ from software_engineering_team.api.pr_review import (  # noqa: F401
     _REVIEW_HEARTBEAT_INTERVAL_S,
     ReviewCode,
     _build_review_code,
+    _checkout_admission,
     _infer_review_language,
     _pr_review_admission,
     _review_author,
@@ -190,6 +197,12 @@ from software_engineering_team.models import (  # noqa: F401
     CodingTeamPlanInput,
 )
 from software_engineering_team.postgres import SCHEMA as SE_POSTGRES_SCHEMA
+from software_engineering_team.resolve_attempt_store import (  # noqa: F401
+    clear_resolve_attempt,
+    clear_resolve_attempts_for_pr,
+    has_recorded_resolve_failure,
+    record_resolve_failure,
+)
 from software_engineering_team.review_history_store import (  # noqa: F401
     get_review,
     get_review_transcript,
@@ -197,12 +210,96 @@ from software_engineering_team.review_history_store import (  # noqa: F401
     record_review_start,
     update_review,
 )
+from software_engineering_team.temporal.coding_team_start_workflow import (  # noqa: F401
+    execute_coding_team_workflow,
+    start_coding_team_workflow,
+)
 from software_engineering_team.token_crypto import (  # noqa: F401
     decrypt_token,
     encrypt_token,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_running_job_on_checkout(repo_path: str) -> dict[str, object] | None:
+    """Public service-layer seam for "is any job already using this checkout?".
+
+    Thin wrapper over the private :func:`_running_sibling_on_checkout` (a
+    pr_review.py implementation detail this module re-exports for internal
+    use), so a route module can depend on a stable, documented public
+    function instead of reaching across module boundaries into another
+    module's underscore-prefixed helper.
+
+    Preconditions:
+        - ``repo_path`` is the checkout path to check; non-empty. Enforced
+          here rather than left implicit: ``os.path.realpath("")`` resolves
+          to the server process's OWN current working directory, so a silent
+          empty-string precondition violation would not fail loudly — it
+          would canonicalize to an unrelated real path and report a
+          plausible-looking (and almost certainly wrong) answer instead.
+    Postconditions:
+        - Returns the sibling job dict when a live, non-terminal job (any
+          kind) is using this EXACT checkout (canonical-path compared), or
+          ``None`` when none is running. No job is excluded from the scan —
+          this is a pure pre-check, not called by a job checking against its
+          own already-created row. Raises ``ValueError`` when ``repo_path``
+          is empty; otherwise never raises (see
+          :func:`_running_sibling_on_checkout`'s own fail-closed contract).
+    """
+    if not repo_path:
+        raise ValueError("get_running_job_on_checkout requires a non-empty repo_path")
+    return _running_sibling_on_checkout(repo_path)
+
+
+def review_author() -> str:
+    """Return the author handle to stamp on a review row.
+
+    The third of this module's public wrappers over a ``pr_review.py``
+    underscore-prefixed helper (alongside :func:`get_running_job_on_checkout`
+    and :func:`get_running_review_for_pr`), for the same reason: a route module
+    should depend on a stable, documented public function rather than reach
+    across a module boundary into another module's private symbol.
+
+    Postconditions:
+        - Returns :func:`_review_author`'s handle verbatim, which is the
+          resolved author or ``"anonymous"`` when author resolution is
+          unavailable or fails. Never raises.
+    """
+    return _review_author()
+
+
+def get_running_review_for_pr(owner: str, repo: str, pr_number: int) -> str | None:
+    """Return the id of a review/address-comments job already running for this PR.
+
+    The PR-scoped counterpart to :func:`get_running_job_on_checkout`, and a
+    thin wrapper over the private :func:`_running_review_for_pr` (a
+    pr_review.py implementation detail this module re-exports for internal
+    use), so a route module can depend on a stable, documented public
+    function instead of reaching across module boundaries into another
+    module's underscore-prefixed helper — the same heartbeat-checked
+    definition the POST admission path uses.
+
+    Preconditions:
+        - ``owner`` and ``repo`` are non-empty repository coordinates and
+          ``pr_number`` is a positive PR number. Enforced here rather than left
+          implicit — mirroring :func:`get_running_job_on_checkout` — because a
+          degenerate value can never match any stored ``github_context`` and so
+          would silently return ``None``, which every caller reads as the
+          load-bearing "no job is running for this PR" and acts on by touching
+          the PR's shared checkout.
+    Postconditions:
+        - Returns the job_id of a live, non-terminal review/address-comments
+          job for ``owner/repo#pr_number``, or ``None`` when none is running.
+          See :func:`_running_review_for_pr` for the full heartbeat/zombie-
+          cleanup contract. Raises ``ValueError`` on a degenerate argument.
+    """
+    if not owner or not repo:
+        raise ValueError("get_running_review_for_pr requires non-empty owner and repo")
+    if pr_number <= 0:
+        raise ValueError("get_running_review_for_pr requires a positive pr_number")
+    return _running_review_for_pr(owner, repo, pr_number)
+
 
 app = create_team_app(
     service_name="coding-team",

@@ -31,6 +31,34 @@ from temporalio import activity
 _REQUIRED_FIELDS = ("job_id", "repo_path", "remote", "default_branch", "integration_branch")
 
 
+def _redact(message: str, token: str | None) -> str:
+    """Redact the activity's resolved GitHub token from an exception message.
+
+    Every ``raise`` in this module lands in Temporal's PERMANENT event history
+    (and in the workflow failure surfaced to operators), so this module's
+    contract is that no exception message may carry a secret. Most raises here
+    satisfy that trivially -- they name only missing FIELD NAMES. The
+    exceptions are the two that interpolate git's own stderr, which can echo a
+    credential embedded in a remote URL or handed to a helper.
+
+    Preconditions:
+        - ``message`` is the text about to be interpolated into an exception.
+          ``token`` is the credential resolved by
+          :func:`_require_activity_github_token`, or ``None`` when none is in
+          scope.
+    Postconditions:
+        - Returns ``message`` with the literal ``token`` removed and any other
+          GitHub credential shape pattern-scrubbed (see
+          ``github_source.redact_secret``). Pure; never raises -- a redaction
+          helper that could itself throw would convert a reportable failure
+          into an opaque one.
+    """
+    from software_engineering_team.github_source import redact_secret
+
+    return redact_secret(str(message), token)
+
+
+
 def _require_activity_github_token(request: dict[str, Any]) -> str:
     """Resolve a GitHub token for a Temporal GitHub-hook activity.
 
@@ -78,20 +106,24 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
     ``api/coding_team_main.py``) as a Temporal activity, so a GitHub-issue
     workflow run can execute the same branch-recovery/continuation logic the
     thread-mode ``_run_with_github_hooks`` orchestrator calls today, on a
-    worker rather than a caller thread. Not yet called by ``CodingTeamWorkflow``
-    (workflow wiring is a separate, later follow-up) and does not publish
-    comments (that is the sibling publish/failure-notice activity work).
+    worker rather than a caller thread. Called by ``CodingTeamWorkflow.run``
+    before ``run_pipeline_activity`` whenever the request carries GitHub
+    metadata; does not publish comments (that is the sibling publish/
+    failure-notice activity work).
 
     Preconditions:
         - ``request`` carries non-empty string values for ``job_id``, ``repo_path``,
           ``remote``, ``default_branch``, and ``integration_branch``. Must NOT
           include a ``token`` field -- the activity resolves the GitHub token
           from the job's ``github_token_encrypted`` or ``GITHUB_TOKEN``.
-        - May also carry ``issue_number`` (Optional[int]) and
-          ``expected_base_sha`` (Optional[str]) -- the ``default_branch`` HEAD
-          SHA observed at triage time; when present, branch prep fails closed
-          if the freshly-fetched ``default_branch`` no longer matches it
-          (the base moved between triage and this activity running).
+        - May also carry ``issue_number`` (Optional[int]), ``expected_head_sha``
+          (Optional[str]), and ``expected_base_sha`` (Optional[str]) -- see
+          ``_prepare_issue_branch``'s own contract for both SHA fields; passed
+          through unchanged and ``None`` when absent. ``expected_base_sha`` is
+          the ``default_branch`` HEAD SHA observed at triage time; when
+          present, branch prep fails closed if the freshly-fetched
+          ``default_branch`` no longer matches it (the base moved between
+          triage and this activity running).
         - ``repo_path`` names a git checkout the calling process can write
           to; ``remote``/``default_branch``/``integration_branch`` may be
           untrusted ref-shaped strings -- ``_prepare_issue_branch`` rejects
@@ -103,7 +135,9 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
           ``integration_branch`` is checked out with a clean working tree;
           ``notes`` describes any recovery/continuation actions taken.
           ``ok=False`` means no uncommitted work was deleted and no
-          previously-reachable commit became unreachable; ``error`` says why.
+          previously-reachable commit became unreachable; ``error`` says why
+          (including when ``expected_head_sha`` was given and no longer
+          matches the branch's live remote tip).
         - Raises ``ValueError`` (not a discriminated return) when ``request``
           is missing a required field -- a caller-wiring bug, not a git
           failure, so it must not be conflated with the ``ok=False`` outcome.
@@ -130,6 +164,7 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
         request["integration_branch"],
         token,
         issue_number=request.get("issue_number"),
+        expected_head_sha=request.get("expected_head_sha"),
         expected_base_sha=request.get("expected_base_sha"),
     )
     return {"ok": ok, "error": err, "notes": notes}
@@ -247,6 +282,123 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
             )
 
     return _main.get_job(job_id) or {"job_id": job_id, "status": "unknown"}
+
+
+_PR_PUBLISH_REQUIRED_FIELDS = (
+    "job_id",
+    "repo_path",
+    "pr_number",
+    "integration_branch",
+)
+
+
+@activity.defn(name="coding_team_github_pr_publish")
+def github_pr_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Push a successful remediation run back to an existing PR branch.
+
+    Unlike :func:`github_publish_activity`, this does not create or update a PR
+    from issue metadata. It fast-forwards the existing PR head from the coding
+    team's development branch and pushes that same head branch.
+
+    Preconditions:
+        - ``request`` contains every field in ``_PR_PUBLISH_REQUIRED_FIELDS``
+          (``job_id``, ``repo_path``, ``pr_number``, ``integration_branch``);
+          ``remote`` and ``pr_url`` are optional (``remote`` defaults to
+          ``"origin"``).
+        - The job row for ``job_id`` already exists (its task-graph state,
+          read via ``_main.get_job`` and ``_main._failed_tasks``, decides the
+          terminal status below).
+        - ``repo_path`` is a git checkout containing both ``integration_branch``
+          and ``_main.DEVELOPMENT_BRANCH``.
+        - Must NOT include a ``token`` field — the activity resolves the
+          GitHub token from the job's ``github_token_encrypted`` or
+          ``GITHUB_TOKEN`` (via ``_require_activity_github_token``), which
+          runs before the required-fields check below.
+    Postconditions:
+        - The job's terminal status is ``JobStatus.COMPLETED.value`` only when
+          every task in ``task_graph_snapshot`` landed; a run with any
+          ``failed`` task ends ``JobStatus.COMPLETED_WITH_FAILURES.value``
+          instead — mirroring ``_publish_merged_work``'s
+          ``failed = _failed_tasks(...)`` check for the issue-driven flow.
+          Some tasks may have merged while others failed; the branch is still
+          pushed (partial progress is real progress).
+        - Returns the job row (:func:`_main.get_job`) after that status update;
+          when the job service does not return one, falls back to a dict
+          carrying the SAME just-computed ``status``/``status_text`` (never a
+          hardcoded ``"completed"``, which would misreport a partial run).
+    Raises:
+        ValueError: ``pr_number`` is present but not a positive integer
+            (checked FIRST, so a present-but-falsy ``0`` is rejected as a bad
+            value rather than misreported as a missing field), or ``request``
+            is missing any field in ``_PR_PUBLISH_REQUIRED_FIELDS``.
+        RuntimeError: The git fast-forward or the push to ``remote`` fails. The
+            git diagnostic is interpolated into the message only after
+            :func:`_redact` strips the resolved token, since activity exception
+            messages are recorded permanently in Temporal history.
+    """
+    token = _require_activity_github_token(request)
+    # `pr_number` is validated BEFORE the missing-fields sweep, which is
+    # truthiness-based: a PRESENT but falsy 0 would otherwise be reported as a
+    # MISSING field rather than getting this precise rejection. A wrong TYPE
+    # (e.g. the string "7") is caught here too, since the sweep accepts any
+    # non-empty value and the value is later interpolated straight into
+    # status_text — producing a nonsensical "Published fix to PR #abc" instead
+    # of a clear error. An absent/None pr_number deliberately falls through to
+    # the sweep below, which names it correctly as missing.
+    pr_number = request.get("pr_number")
+    if pr_number is not None and (
+        not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1
+    ):
+        raise ValueError(
+            f"github_pr_publish_activity requires a positive integer pr_number, got {pr_number!r}"
+        )
+    missing = [f for f in _PR_PUBLISH_REQUIRED_FIELDS if not request.get(f)]
+    if missing:
+        raise ValueError(f"github_pr_publish_activity missing required fields: {missing!r}")
+
+    from software_engineering_team.api import coding_team_main as _main
+    from software_engineering_team.models import JobStatus
+
+    job_id = request["job_id"]
+    repo_path = request["repo_path"]
+    branch = request["integration_branch"]
+    remote = request.get("remote") or "origin"
+
+    ff_ok, ff_err = _main._fast_forward(repo_path, branch, _main.DEVELOPMENT_BRANCH)
+    if not ff_ok:
+        raise RuntimeError(f"fast-forward failed: {_redact(ff_err, token)}")
+    push_ok, push_err = _main._push_branch(repo_path, remote, branch, token)
+    if not push_ok:
+        raise RuntimeError(f"git push failed: {_redact(push_err, token)}")
+
+    failed = _main._failed_tasks(_main.get_job(job_id) or {})
+    status = JobStatus.COMPLETED_WITH_FAILURES.value if failed else JobStatus.COMPLETED.value
+    status_text = (
+        f"Published fix to PR #{request['pr_number']} with {len(failed)} failed task(s)"
+        if failed
+        else f"Published fix to PR #{request['pr_number']}"
+    )
+
+    # The branch is now durable on the existing PR. Clear the prep marker and
+    # make the child job terminal before the parent resolves the review thread.
+    # Despite its name, the marker is keyed generically by "the driving number"
+    # (issue or PR share one number sequence per repo) — branch prep for this
+    # PR-remediation flow wrote it with this same pr_number, so clearing by
+    # pr_number here matches the write side. See _clear_active_issue_if_matches.
+    _main._clear_active_issue_if_matches(repo_path, request["pr_number"])
+    update_fields: dict[str, Any] = {
+        "status": status,
+        "phase": "completed",
+        "status_text": status_text,
+        "integration_branch": branch,
+    }
+    # pr_url is documented optional (see Preconditions) — only pass github_pr_url
+    # when a value is actually present, so an omitted pr_url can never be read as
+    # "explicitly clear this job's previously-stored PR URL" by update_job.
+    if request.get("pr_url"):
+        update_fields["github_pr_url"] = request["pr_url"]
+    _main.update_job(job_id, **update_fields)
+    return _main.get_job(job_id) or {"job_id": job_id, "status": status, "status_text": status_text}
 
 
 _FAILURE_NOTICE_REQUIRED_FIELDS = ("job_id", "owner", "repo", "number", "message", "kind")

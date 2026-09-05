@@ -239,6 +239,26 @@ export interface RunPrReviewResponse {
   created_at?: string;
 }
 
+/** Request body for POST /api/integrations/github/pulls/{pr_number}/address-comments. */
+export interface AddressPrCommentsRequest {
+  /** Target repository; omitted falls back to the legacy configured default. */
+  owner?: string;
+  repo?: string;
+}
+
+/** Response from POST /api/integrations/github/pulls/{pr_number}/address-comments. */
+export interface AddressPrCommentsResponse {
+  job_id: string;
+  pr_number: number;
+  pr_url: string;
+  /** Number of unresolved review comments the started job will work through. */
+  unresolved_comment_count: number;
+  status: string;
+  message: string;
+  /** ISO-8601 server-clock start time of the job. */
+  created_at?: string;
+}
+
 /** TradingView MCP config response (GET/PUT/DELETE /api/integrations/tradingview). */
 export interface TradingViewConfigResponse {
   enabled: boolean;

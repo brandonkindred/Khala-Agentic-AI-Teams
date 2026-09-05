@@ -28,7 +28,7 @@ from unified_api.main import app  # noqa: E402
 from unified_api.routes.integrations import (  # noqa: E402
     _ensure_repo_clone,
     _git_auth_env,
-    _remote_matches,
+    _github_api_base,
     _resolve_repo_path,
 )
 
@@ -78,19 +78,37 @@ class _FakeAsyncClient:
 
     ``calls`` records every ``post`` as a ``(url, json_payload)`` tuple; use
     ``last_payload()`` to read the JSON body of the most recent request rather
-    than indexing the tuple structure directly. ``get`` handles the
-    ``_assert_pat_can_reach_repo`` reachability probe (any ``/repos/...`` URL),
-    answering with ``repo_access_status`` (200 by default, i.e. "reachable") so
-    routes that don't exercise that gate are unaffected; the probe's own calls
-    are recorded separately in ``repo_checks``, not ``calls``.
+    than indexing the tuple structure directly. ``get`` branches on the URL:
+    a URL ending in ``/checkout/running`` is the admission pre-check, answered
+    with ``checkout_running_job_id`` (``None`` by default, i.e. nothing
+    running) and its URL/params recorded in ``checkout_checks`` -- unless
+    ``checkout_running_malformed=True``, which instead answers 200 with a body
+    that omits ``running_job_id`` entirely, the shape
+    ``test_run_issue_502_on_malformed_admission_precheck`` needs to drive the
+    route's fail-closed branch; every OTHER
+    ``get`` is treated as the ``_assert_pat_can_reach_repo`` reachability
+    probe — answered with ``repo_access_status`` (200 by default, i.e.
+    "reachable") so routes that don't exercise that gate are unaffected —
+    and its URL is recorded separately in ``repo_checks``, not ``calls``.
     """
 
-    def __init__(self, *, result=None, exc=None, repo_access_status=200):
+    def __init__(
+        self,
+        *,
+        result=None,
+        exc=None,
+        repo_access_status=200,
+        checkout_running_job_id=None,
+        checkout_running_malformed=False,
+    ):
         self._result = result
         self._exc = exc
         self._repo_access_status = repo_access_status
+        self._checkout_running_job_id = checkout_running_job_id
+        self._checkout_running_malformed = checkout_running_malformed
         self.calls = []
         self.repo_checks = []
+        self.checkout_checks = []
 
     def last_payload(self):
         """Return the JSON payload of the most recent post (the tuple's [1])."""
@@ -103,6 +121,11 @@ class _FakeAsyncClient:
         return False
 
     async def get(self, url, params=None, headers=None):
+        if url.endswith("/checkout/running"):
+            self.checkout_checks.append((url, params))
+            if self._checkout_running_malformed:
+                return _FakeResp(200, json_data={"status": "ok"})
+            return _FakeResp(200, json_data={"running_job_id": self._checkout_running_job_id})
         self.repo_checks.append(url)
         return _FakeResp(self._repo_access_status, json_data={"full_name": "acme/widget"})
 
@@ -189,9 +212,58 @@ def test_run_issue_returns_502_on_clone_failure(mock_cfg, mock_status, mock_clon
     mock_cfg.return_value = dict(_GH_CFG)
     mock_clone.return_value = "git executable not found on the server; install git in the API image."
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
-    resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    fake = _FakeAsyncClient(result=_ok_resp())
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 502
     assert "git executable not found" in resp.json()["detail"]
+
+
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta")
+def test_run_issue_409_and_no_checkout_touched_when_already_running(
+    mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch
+):
+    """run_github_issue has no PR-scoped admission of its own to piggyback on
+    (unlike address_github_pr_comments), so it relies entirely on the generic
+    GET /checkout/running pre-check: when a job is already active on this
+    checkout, the route must reject with 409 and never touch the checkout."""
+    mock_cfg.return_value = dict(_GH_CFG)
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_ok_resp(), checkout_running_job_id="existing-job")
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    assert resp.status_code == 409
+    assert "existing-job" in resp.json()["detail"]
+    mock_clone.assert_not_called()
+    assert fake.calls == []  # never forwarded to run-from-github
+    # The route actually queried the admission pre-check against THIS checkout,
+    # not merely got lucky with a default fake response.
+    assert len(fake.checkout_checks) == 1
+    checkout_url, checkout_params = fake.checkout_checks[0]
+    assert checkout_url.endswith("/checkout/running")
+    assert checkout_params == {"repo_path": "/tmp/acme_widget"}
+
+
+@patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta")
+def test_run_issue_502_on_malformed_admission_precheck(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
+    """A malformed GET /checkout/running response (missing running_job_id) is the ONLY
+    admission guard this route has -- it must fail closed with a 502 and never proceed
+    to clone/dispatch, rather than silently treating the checkout as free."""
+    mock_cfg.return_value = dict(_GH_CFG)
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_ok_resp(), checkout_running_malformed=True)
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    assert resp.status_code == 502
+    assert "admission pre-check" in resp.json()["detail"]
+    mock_clone.assert_not_called()
+    assert fake.calls == []  # never forwarded to run-from-github
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +563,50 @@ def test_ensure_repo_clone_fetch_success_on_existing_checkout(tmp_path):
     assert err is None
 
 
+def test_ensure_repo_clone_fetch_success_on_existing_worktree_checkout(tmp_path):
+    """A git worktree checkout's `.git` is a FILE (a `gitdir:` pointer to the
+    real one elsewhere), not a directory. An `.is_dir()`-only existing-
+    checkout test would miss this, fall through to the clone branch, and
+    attempt `git clone` into a non-empty directory — which fails. Must be
+    recognized and fetched like an ordinary checkout instead."""
+    repo = tmp_path / "checkout"
+    repo.mkdir(parents=True)
+    (repo / ".git").write_text("gitdir: /elsewhere/.git/worktrees/checkout\n")
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="https://github.com/acme/widget\n", stderr=""
+    )
+    fetch_ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+    with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]) as mock_run:
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is None
+    # Fetched (the existing-checkout branch), never attempted a clone. The argv
+    # assertion is what actually pins that: a regression that fell through to
+    # `git clone` would still make two mocked calls and still return None, so
+    # call_count alone cannot tell fetch from clone.
+    assert mock_run.call_count == 2
+    assert mock_run.call_args_list[1].args[0] == ["git", "-C", str(repo), "fetch", "origin"]
+
+
+def test_ensure_repo_clone_fetch_targets_origin_only(tmp_path):
+    """Never "--all": a fork PR's branch prep can register a temporary named
+    remote (khala-pr-head) that persists on a long-lived operator-pinned
+    checkout. If that fork later becomes inaccessible, "--all" would make
+    every future clone-or-fetch on this checkout fail here, before branch
+    prep (which fetches whichever remote it actually needs itself) even
+    runs."""
+    repo = tmp_path / "checkout"
+    (repo / ".git").mkdir(parents=True)
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="https://github.com/acme/widget\n", stderr=""
+    )
+    fetch_ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+    with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]) as mock_run:
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is None
+    fetch_call_args = mock_run.call_args_list[1].args[0]
+    assert fetch_call_args == ["git", "-C", str(repo), "fetch", "origin"]
+
+
 def test_ensure_repo_clone_fetch_failure_scrubs_token(tmp_path):
     repo = tmp_path / "checkout"
     (repo / ".git").mkdir(parents=True)
@@ -650,7 +766,7 @@ def test_resolve_repo_path_operator_override_returned_verbatim():
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch):
+def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch, tmp_path):
     """An auto-derived run clones the per-issue folder and forwards repo_path +
     cleanup_checkout_on_success=True to the coding team."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -658,11 +774,29 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_ok_resp())
-    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+    # run_github_issue now takes a real flock on clone_lock_path(repo_path) at the
+    # route level (not just inside the mocked _ensure_repo_clone), so its parent-dir
+    # mkdir must land somewhere writable — "/cache" itself isn't creatable by the
+    # test process. Route the lock file under tmp_path while payload assertions
+    # below still see the real "/cache/..." repo_path (only the lock's own location
+    # is redirected).
+    with (
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+        patch(
+            f"{_M}.clone_lock_path", return_value=tmp_path / "issue-7.clone.lock"
+        ) as mock_lock_path,
+    ):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 200
     payload = fake.last_payload()
     assert payload["repo_path"] == "/cache/github_workspaces/acme/widget/issue-7"
+    # The route-level lock must be taken on the RESOLVED per-issue checkout, not
+    # on the repo-level path: the lock is what serializes this route against
+    # address-comments on the same checkout, and a lock keyed off the wrong path
+    # would still let both routes run while looking correct here. Redirecting
+    # clone_lock_path's RETURN value (so the lock file lands somewhere writable)
+    # leaves its ARGUMENT free to assert on.
+    mock_lock_path.assert_called_once_with("/cache/github_workspaces/acme/widget/issue-7")
     assert payload["cleanup_checkout_on_success"] is True
     # The clone target must be the per-issue folder, not the repo-level path, and
     # an auto-derived checkout is platform-owned (so it takes the sibling lock).
@@ -672,13 +806,14 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
         "widget",
         "ghp_token",
         platform_owned=True,
+        acquire_lock=False,
     )
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
-def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, monkeypatch):
+def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, monkeypatch, tmp_path):
     """A body-supplied owner/repo runs the issue in THAT repository — the configured
     default is only a fallback; the PAT's own authorization is the access list."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -686,7 +821,13 @@ def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, m
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_ok_resp())
-    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+    # See test_run_issue_forwards_per_issue_checkout_and_cleanup_flag: the route-level
+    # flock now touches the filesystem for real, so redirect the lock file under
+    # tmp_path (the "/cache/..." repo_path assertions below are unaffected).
+    with (
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+        patch(f"{_M}.clone_lock_path", return_value=tmp_path / "issue-7.clone.lock"),
+    ):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7, "owner": "other", "repo": "thing"})
     assert resp.status_code == 200
     payload = fake.last_payload()
@@ -699,6 +840,7 @@ def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, m
         "thing",
         "ghp_token",
         platform_owned=True,
+        acquire_lock=False,
     )
 
 
@@ -732,43 +874,9 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     # Cloning is not skipped for an override — it runs once against the pinned
     # path, and platform_owned=False so it does NOT require a sibling lock (the
     # operator's parent dir may be read-only).
-    mock_clone.assert_called_once_with("/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False)
-
-
-# ---------------------------------------------------------------------------
-# _remote_matches: exact owner/repo comparison (no substring false positives)
-# ---------------------------------------------------------------------------
-
-
-def test_remote_matches_exact_https():
-    """An exact https remote (with or without .git) matches owner/repo."""
-    assert _remote_matches("https://github.com/acme/widget.git", "acme", "widget") is True
-    assert _remote_matches("https://github.com/acme/widget", "acme", "widget") is True
-
-
-def test_remote_matches_is_case_insensitive():
-    """owner/repo comparison is case-insensitive (GitHub treats them that way)."""
-    assert _remote_matches("https://github.com/ACME/Widget.git", "acme", "widget") is True
-
-
-def test_remote_matches_accepts_scp_form():
-    """The git@host:owner/repo scp form matches the same owner/repo."""
-    assert _remote_matches("git@github.com:acme/widget.git", "acme", "widget") is True
-
-
-def test_remote_matches_rejects_repo_prefix_substring():
-    """'acme/widget' is a substring of 'acme/widget-extra' but must NOT match."""
-    assert _remote_matches("https://github.com/acme/widget-extra.git", "acme", "widget") is False
-
-
-def test_remote_matches_rejects_owner_suffix_substring():
-    """'acme/widget' is a suffix of 'notacme/widget' but must NOT match."""
-    assert _remote_matches("https://github.com/notacme/widget.git", "acme", "widget") is False
-
-
-def test_remote_matches_rejects_short_url():
-    """A URL with fewer than two path segments never matches."""
-    assert _remote_matches("widget", "acme", "widget") is False
+    mock_clone.assert_called_once_with(
+        "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False, acquire_lock=False
+    )
 
 
 def test_ensure_repo_clone_rejects_substring_remote(tmp_path):
@@ -910,6 +1018,108 @@ def test_resolve_repo_path_override_not_applied_to_other_repo(monkeypatch):
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
     assert _resolve_repo_path(cfg, "other", "thing", issue_number=3) == "/cache/github_workspaces/other/thing/issue-3"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_repo_path: per-PR checkout isolation (address-comments flow)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_path_namespaces_per_pr_under_agent_cache(monkeypatch):
+    """AGENT_CACHE-derived path is namespaced per PR under github_workspaces, using a
+    distinct pr- prefix so it can never collide with an issue-N checkout."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=42)
+    assert path == "/cache/github_workspaces/acme/widget/pr-42"
+
+
+def test_resolve_repo_path_distinct_prs_map_to_distinct_paths(monkeypatch):
+    """Two distinct PR numbers resolve to two distinct checkout paths."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = dict(_GH_CFG)
+    assert _resolve_repo_path(cfg, "acme", "widget", pr_number=1) != _resolve_repo_path(
+        cfg, "acme", "widget", pr_number=2
+    )
+
+
+def test_resolve_repo_path_pr_and_issue_never_collide(monkeypatch):
+    """An issue and a PR that share the same number (GitHub's shared numbering
+    sequence) resolve to distinct checkout paths."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = dict(_GH_CFG)
+    assert _resolve_repo_path(cfg, "acme", "widget", issue_number=42) != _resolve_repo_path(
+        cfg, "acme", "widget", pr_number=42
+    )
+
+
+def test_resolve_repo_path_uses_se_workspace_dir_with_pr(monkeypatch):
+    """SE_WORKSPACE_DIR wins over WORKSPACE_ROOT and AGENT_CACHE even when all
+    three are set, yielding <root>/<owner>_<repo>/pr-N."""
+    monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
+    monkeypatch.setenv("WORKSPACE_ROOT", "/workspace")
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=9)
+    assert path == "/work/acme_widget/pr-9"
+
+
+def test_resolve_repo_path_uses_workspace_root_with_pr(monkeypatch):
+    """WORKSPACE_ROOT alone, in PR mode, yields <root>/<owner>_<repo>/pr-N.
+
+    The issue-flow sibling above pins the same root against `issue-N`, but no
+    test exercised WORKSPACE_ROOT on its own in PR mode: with SE_WORKSPACE_DIR
+    covering the pr-N layout and AGENT_CACHE covering its own, a middle-tier
+    branch that emitted the ISSUE segment here would have gone uncaught.
+    """
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", "/ws")
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=5)
+    assert path == "/ws/acme_widget/pr-5"
+
+
+def test_resolve_repo_path_operator_override_returned_verbatim_for_pr(monkeypatch):
+    """An operator-pinned repo_path is returned verbatim, never per-PR-namespaced.
+
+    Every workspace-root env var is SET (not merely cleared, as the sibling
+    auto-derivation tests do) to a value that would produce a visibly different
+    path: that makes this hermetic against the ambient environment AND turns it
+    into a precedence test -- the override must beat all three roots, not merely
+    win by default when none of them is configured.
+    """
+    monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
+    monkeypatch.setenv("WORKSPACE_ROOT", "/workspace")
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
+    assert _resolve_repo_path(cfg, "acme", "widget", pr_number=42) == "/srv/checkout"
+
+
+@pytest.mark.parametrize("bad", [0, -1, -42])
+def test_resolve_repo_path_rejects_nonpositive_pr_number(monkeypatch, bad):
+    """A non-positive PR number (which would build a degenerate pr-0/pr--1 segment)
+    is rejected with HTTP 400."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(dict(_GH_CFG), "acme", "widget", pr_number=bad)
+    assert exc.value.status_code == 400
+
+
+def test_resolve_repo_path_rejects_both_issue_and_pr_number(monkeypatch):
+    """issue_number and pr_number are mutually exclusive; passing both is HTTP 400
+    rather than silently preferring one."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(dict(_GH_CFG), "acme", "widget", issue_number=1, pr_number=1)
+    assert exc.value.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -1522,3 +1732,35 @@ def test_start_pr_review_falls_back_to_configured_default_repo(monkeypatch):
     payload = fake.last_payload()
     assert payload["owner"] == "acme"
     assert payload["repo"] == "widget"
+
+
+# ---------------------------------------------------------------------------
+# _github_api_base(): GITHUB_API_URL normalization (GHES bases)
+# ---------------------------------------------------------------------------
+
+
+def test_github_api_base_strips_trailing_slash(monkeypatch):
+    """An operator's GITHUB_API_URL with a trailing slash must not produce a
+    double slash (`.../api/v3//repos/...`) when a caller builds a URL as
+    f"{_github_api_base()}/repos/...", matching the synchronous GitHubClient,
+    which already strips trailing slashes."""
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3/")
+    assert _github_api_base() == "https://ghes.example.com/api/v3"
+
+
+def test_github_api_base_strips_multiple_trailing_slashes(monkeypatch):
+    """GITHUB_API_URL with SEVERAL trailing slashes is normalized to exactly one stripped base."""
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3///")
+    assert _github_api_base() == "https://ghes.example.com/api/v3"
+
+
+def test_github_api_base_no_trailing_slash_unaffected(monkeypatch):
+    """GITHUB_API_URL without a trailing slash is returned unchanged."""
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com/api/v3")
+    assert _github_api_base() == "https://ghes.example.com/api/v3"
+
+
+def test_github_api_base_default_when_unset(monkeypatch):
+    """GITHUB_API_URL unset falls back to the public GitHub API base."""
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+    assert _github_api_base() == "https://api.github.com"

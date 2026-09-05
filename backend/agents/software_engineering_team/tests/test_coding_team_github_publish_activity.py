@@ -8,6 +8,17 @@ Everything `_finish_already_complete`/`_publish_merged_work` touch is reached
 through the shared `coding_team_main` module-object alias, so this file
 monkeypatches that surface directly rather than driving real git repos or a
 real job service.
+
+Two `github_pr_publish_activity` tests live here as well, despite the sibling
+`test_coding_team_github_pr_publish_activity.py` being named for that activity:
+they assert on the JOB-STORE side of the publish (cleared PR markers, the
+terminal status derived from `task_graph_snapshot`), which is exactly what this
+file's `_install` store double and `_publish_request` payload already model,
+while the sibling file builds an entirely different fixture stack
+(`_ensure_real_modules`/`_stub_orchestrator_only`) around request validation and
+git-failure paths. Moving them would mean porting that store scaffolding into
+the sibling and maintaining two copies of it -- more duplication, not less. The
+split is by fixture stack, not by accident.
 """
 
 from __future__ import annotations
@@ -194,6 +205,79 @@ def _activity():
     )
 
     return github_publish_activity
+
+
+def _pr_publish_activity():
+    """The ``existing_pr`` sibling of :func:`_activity`.
+
+    Both are imported inside the helper, not at module scope, for the same
+    reason: the activities module pulls in the heavy SE API surface, which the
+    ``_stub_heavy_modules`` fixture must be allowed to install first. Two
+    activities, one access pattern -- a second function-local import spelled
+    out at each call site is how the two drift.
+    """
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_pr_publish_activity,
+    )
+
+    return github_pr_publish_activity
+
+
+def _stub_push_paths(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str, str]]]:
+    """Stub ``api._fast_forward``/``api._push_branch`` to always succeed, recording each call.
+
+    Shared by the ``github_pr_publish_activity`` tests that assert on the
+    branch/push happy path: each just needs to see what it fast-forwarded
+    and pushed, not exercise a failure from either.
+
+    Postconditions:
+        - Returns the ``(fast_forwards, pushes)`` lists the stubs append to,
+          in call order, once the caller invokes the activity under test.
+    """
+    fast_forwards: list[tuple[str, str, str]] = []
+    pushes: list[tuple[str, str, str, str]] = []
+
+    # Named closures rather than ``lst.append(...) or (True, None)`` lambdas:
+    # that idiom works only because ``list.append`` happens to return ``None``,
+    # so the stub's return value is coupled to an incidental property of the
+    # recording call -- an edit to the append would silently change what the
+    # stub returns. Same treatment the sibling
+    # ``test_coding_team_github_pr_publish_activity`` file's ``_fake_push``
+    # already uses.
+    def fake_fast_forward(path: str, branch: str, source: str) -> tuple[bool, None]:
+        """Record the fast-forward call and report success."""
+        fast_forwards.append((path, branch, source))
+        return True, None
+
+    def fake_push_branch(path: str, remote: str, branch: str, token: str) -> tuple[bool, None]:
+        """Record the push call and report success."""
+        pushes.append((path, remote, branch, token))
+        return True, None
+
+    monkeypatch.setattr(api, "_fast_forward", fake_fast_forward)
+    monkeypatch.setattr(api, "_push_branch", fake_push_branch)
+    return fast_forwards, pushes
+
+
+def _publish_request() -> dict[str, Any]:
+    """The ``github_pr_publish_activity`` request payload shared by the tests below.
+
+    Shared by the existing-head-push happy-path and partial-failure tests —
+    both exercise the same PR/branch/remote, differing only in the job's
+    ``task_graph_snapshot``.
+    """
+    return {
+        "job_id": "job-1",
+        "owner": "acme",
+        "repo": "widgets",
+        "repo_path": "/repo",
+        "pr_number": 7,
+        "pr_url": "https://example/pull/7",
+        "integration_branch": "feature/pr-7",
+        "remote": "origin",
+    }
 
 
 @pytest.mark.parametrize(
@@ -569,3 +653,50 @@ def test_publish_activity_registered_under_expected_temporal_name() -> None:
     silently break that dispatch without this test catching it."""
     definition = _activity().__temporal_activity_definition
     assert definition.name == "coding_team_github_publish"
+
+
+def test_pr_publish_activity_pushes_existing_head_and_completes_child(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> None:
+    """When the task graph has no failed tasks, github_pr_publish_activity
+    fast-forwards the integration branch onto the development branch, pushes
+    it to the PR remote, clears the PR marker from the store, and returns a
+    'completed' status with the PR URL."""
+    store, _ = _install(monkeypatch, api, "job-1")
+    fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
+
+    out = _pr_publish_activity()(_publish_request())
+
+    assert fast_forwards == [("/repo", "feature/pr-7", api.DEVELOPMENT_BRANCH)]
+    assert pushes == [("/repo", "origin", "feature/pr-7", "tok-123")]
+    assert store.cleared_markers == [("/repo", 7)]
+    assert out["status"] == "completed"
+    assert out["github_pr_url"] == "https://example/pull/7"
+
+
+def test_pr_publish_activity_partial_failure_ends_completed_with_failures(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> None:
+    """A run with a failed task in task_graph_snapshot still pushes the
+    branch (partial progress lands), but its terminal status is
+    "completed_with_failures", NOT "completed" — mirroring
+    _publish_merged_work's failed = _failed_tasks(...) check for the
+    issue-driven flow. _dispatch_implementation only treats an exact
+    "completed" status as success, so this keeps the review thread open
+    for retry instead of replying to and resolving over unfinished work."""
+    store, _ = _install(
+        monkeypatch,
+        api,
+        "job-1",
+        task_graph_snapshot=[{"id": "t1", "title": "x", "status": "failed"}],
+    )
+    fast_forwards, pushes = _stub_push_paths(monkeypatch, api)
+
+    out = _pr_publish_activity()(_publish_request())
+
+    assert out["status"] == "completed_with_failures"
+    assert store.cleared_markers == [("/repo", 7)]
+    # "still pushes the branch (partial progress lands)" is the whole point of
+    # this test — pin that it actually happened, not just the terminal status.
+    assert fast_forwards == [("/repo", "feature/pr-7", api.DEVELOPMENT_BRANCH)]
+    assert pushes == [("/repo", "origin", "feature/pr-7", "tok-123")]

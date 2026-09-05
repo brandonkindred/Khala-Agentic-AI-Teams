@@ -25,6 +25,7 @@ from shared.git.git_utils import (
     ensure_development_branch,
     initialize_new_repo,
     prune_worktrees,
+    remote_url_matches,
     remove_worktree,
     reset_hard_to,
     resolve_remote_branch_sha,
@@ -564,6 +565,201 @@ def test_reset_hard_to_propagates_untracked_cleanup_failure(repo: Path, monkeypa
     assert "boom" in msg
 
 
+# ---------------------------------------------------------------------------
+# remote_url_matches: single-source-of-truth origin-remote validation shared
+# by software_engineering_team.api.git_ops and unified_api.routes.integrations
+# ---------------------------------------------------------------------------
+
+
+def test_remote_url_matches_exact_https() -> None:
+    assert remote_url_matches("https://github.com/acme/widget.git", "acme", "widget") is True
+    assert remote_url_matches("https://github.com/acme/widget", "acme", "widget") is True
+
+
+def test_remote_url_matches_is_case_insensitive() -> None:
+    assert remote_url_matches("https://github.com/ACME/Widget.git", "acme", "widget") is True
+
+
+def test_remote_url_matches_accepts_scp_form() -> None:
+    assert remote_url_matches("git@github.com:acme/widget.git", "acme", "widget") is True
+
+
+def test_remote_url_matches_rejects_repo_prefix_substring() -> None:
+    """'acme/widget' is a substring of 'acme/widget-extra' but must NOT match."""
+    assert remote_url_matches("https://github.com/acme/widget-extra.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_owner_suffix_substring() -> None:
+    """'acme/widget' is a suffix of 'notacme/widget' but must NOT match."""
+    assert remote_url_matches("https://github.com/notacme/widget.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_short_url() -> None:
+    assert remote_url_matches("widget", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_wrong_host() -> None:
+    """A remote whose owner/repo segments match but whose HOST does not is
+    still a mismatch — otherwise https://evil.example.com/acme/widget.git
+    would be accepted as a match for github.com's acme/widget."""
+    assert remote_url_matches("https://evil.example.com/acme/widget.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_rejects_wrong_host_scp_form() -> None:
+    assert remote_url_matches("git@evil.example.com:acme/widget.git", "acme", "widget") is False
+
+
+def test_remote_url_matches_accepts_custom_expected_host() -> None:
+    """A caller pointed at a GitHub Enterprise Server host can override the
+    github.com default."""
+    assert (
+        remote_url_matches(
+            "https://ghes.internal/acme/widget.git", "acme", "widget", expected_host="ghes.internal"
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_preserves_port_on_ghes_host() -> None:
+    """P2 regression: a GHES host with a non-default port (e.g.
+    "git.example.com:8443") must not have its port mangled by the scp-colon
+    normalization, which only applies to genuine scp-style syntax (no scheme
+    prefix) — a URL-form remote's colon here is always a host:port separator."""
+    assert (
+        remote_url_matches(
+            "https://git.example.com:8443/acme/widget.git",
+            "acme",
+            "widget",
+            expected_host="git.example.com:8443",
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_rejects_wrong_port_on_ghes_host() -> None:
+    assert (
+        remote_url_matches(
+            "https://git.example.com:8443/acme/widget.git",
+            "acme",
+            "widget",
+            expected_host="git.example.com:9999",
+        )
+        is False
+    )
+
+
+def test_remote_url_matches_preserves_port_with_userinfo() -> None:
+    """A port-bearing GHES host combined with embedded HTTPS credentials must
+    still resolve the host:port correctly, not have the userinfo strip or the
+    (skipped) scp-colon normalization interfere with the port.
+
+    The credential portion is a synthetic placeholder built via f-string
+    interpolation (never a single contiguous string literal), matching the
+    convention the sibling userinfo tests below document — so no source
+    scanner can mistake it for a real embedded secret. It never was, and is
+    not, a valid credential of any kind.
+    """
+    not_a_real_credential = "placeholder"
+    url = f"https://x-access-token:{not_a_real_credential}@git.example.com:8443/acme/widget.git"
+    assert remote_url_matches(url, "acme", "widget", expected_host="git.example.com:8443") is True
+
+
+def test_remote_url_matches_accepts_https_with_userinfo_credentials() -> None:
+    """P1 regression: a token-based HTTPS clone (the form produced by CI /
+    _git_auth_env-style credentials) embeds `user:token@` in the URL. The
+    userinfo colon must not be mistaken for the scp-form's host separator —
+    that would split the token into its own path segment and read the
+    username as the host, always failing to match a perfectly valid remote.
+
+    The credential portion below is a synthetic placeholder, built via
+    f-string interpolation (never a single contiguous string literal) so it
+    can't be mistaken for a real embedded secret by source scanners — it
+    never was, and is not, a valid credential of any kind.
+    """
+    not_a_real_credential = "placeholder"
+    url = f"https://x-access-token:{not_a_real_credential}@github.com/acme/widget.git"
+    assert remote_url_matches(url, "acme", "widget") is True
+
+
+def test_remote_url_matches_accepts_https_with_username_only_credentials() -> None:
+    not_a_real_credential = "placeholder"
+    url = f"https://{not_a_real_credential}@github.com/acme/widget.git"
+    assert remote_url_matches(url, "acme", "widget") is True
+
+
+def test_remote_url_matches_rejects_at_sign_inside_repo_name() -> None:
+    """An "@" that is part of the path (not userinfo) must not be silently
+    swallowed by the userinfo-stripping guard — it has no preceding "/"-free
+    head here that looks like a userinfo section ending exactly at the host,
+    so this should simply fail to match cleanly rather than false-match."""
+    assert remote_url_matches("https://github.com/acme/w@idget", "acme", "widget") is False
+
+
+def test_remote_url_matches_accepts_ssh_url_with_incidental_port_on_bare_host() -> None:
+    """P2 regression: a valid URL-form SSH remote with an explicit port that is
+    NOT part of `expected_host` (e.g. the standard
+    `ssh://git@host:port/owner/repo.git` form, where the port follows the HOST)
+    must still match a bare expected host -- the port here is incidental
+    (SSH's default port spelled out explicitly, or a custom one), not part of
+    the host identity being checked."""
+    assert (
+        remote_url_matches(
+            "ssh://git@github.com:22/acme/widget.git", "acme", "widget", expected_host="github.com"
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_accepts_https_url_with_incidental_port_on_bare_host() -> None:
+    """Same incidental-port case as above, for an HTTPS remote."""
+    assert (
+        remote_url_matches(
+            "https://github.com:443/acme/widget.git", "acme", "widget", expected_host="github.com"
+        )
+        is True
+    )
+
+
+def test_remote_url_matches_accepts_https_url_with_incidental_port_and_userinfo() -> None:
+    """The incidental-port case combined with embedded HTTPS credentials --
+    the userinfo strip must still leave the port stripping able to run
+    afterward."""
+    not_a_real_credential = "placeholder"
+    url = f"https://x-access-token:{not_a_real_credential}@github.com:443/acme/widget.git"
+    assert remote_url_matches(url, "acme", "widget", expected_host="github.com") is True
+
+
+def test_remote_url_matches_rejects_incidental_port_wrong_host() -> None:
+    """An incidental port must not accidentally widen the match to the wrong
+    host -- only the port is forgiven, not the host itself."""
+    assert (
+        remote_url_matches(
+            "https://evil.example.com:443/acme/widget.git",
+            "acme",
+            "widget",
+            expected_host="github.com",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("suffix", [".git", ".GIT", ".Git"])
+def test_remote_url_matches_strips_dot_git_case_insensitively(suffix: str) -> None:
+    """The ``.git`` strip must casefold like every other identity comparison in
+    this function. A remote spelled ``.../acme/widget.GIT`` otherwise keeps the
+    suffix, so the last path segment compares as ``widget.git`` != ``widget``
+    and a legitimate checkout is rejected as the wrong repository."""
+    assert (
+        remote_url_matches(
+            f"https://github.com/acme/widget{suffix}",
+            "acme",
+            "widget",
+            expected_host="github.com",
+        )
+        is True
+    )
+
+
 def _self_alias_origin(repo: Path) -> None:
     """Add ``origin`` pointing at ``repo`` itself, so fetch works without a real remote."""
     subprocess.run(
@@ -752,3 +948,17 @@ def test_resolve_remote_branch_sha_immune_to_concurrent_fetch_head_overwrite(
     assert ok is True, sha
     assert sha == expected
     assert sha != other_sha
+
+
+@pytest.mark.parametrize(
+    "local_path",
+    ["github.com/acme/widget", "github.com/acme/widget.git", "a/github.com/acme/widget"],
+)
+def test_remote_url_matches_rejects_scheme_less_colon_less_local_path(local_path: str) -> None:
+    """A value with neither a scheme nor a colon is a LOCAL path to git.
+
+    ``github.com/acme/widget`` is a relative directory, not a remote in either
+    supported form. This function gates pushes to a checkout's origin, so
+    accepting it on the strength of its trailing segments would fail OPEN.
+    """
+    assert remote_url_matches(local_path, "acme", "widget") is False

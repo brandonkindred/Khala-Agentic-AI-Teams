@@ -20,7 +20,10 @@ from .client import (
     PullRequestFile,
     Repo,
     ReviewComment,
+    ReviewThread,
+    ReviewThreadsUnavailableError,
     SubIssue,
+    redact_secret,
     scrub_token_from_text,
 )
 from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
@@ -55,6 +58,7 @@ from .issue_proposals import (
     build_issue_from_proposal,
     duplicate_check_max_open_issues,
     find_matching_open_issue,
+    find_similar_open_issue_via_llm,
     group_similar_findings,
     proposal_from_findings,
 )
@@ -114,6 +118,8 @@ __all__ = [
     "ReadyCheckResult",
     "Repo",
     "ReviewComment",
+    "ReviewThread",
+    "ReviewThreadsUnavailableError",
     "ScoreBreakdown",
     "SubIssue",
     "annotate_duplicate_proposals",
@@ -129,6 +135,7 @@ __all__ = [
     "duplicate_check_max_open_issues",
     "extract_checklist_items",
     "find_matching_open_issue",
+    "find_similar_open_issue_via_llm",
     "format_comment_body",
     "format_issue_comment",
     "format_systemic_findings_comment",
@@ -147,6 +154,7 @@ __all__ = [
     "partition_issues_by_existing_comments",
     "pick_ready_issue",
     "proposal_from_findings",
+    "redact_secret",
     "render_annotated_hunks",
     "render_removed_hunks",
     "resolve_scoring_mode",

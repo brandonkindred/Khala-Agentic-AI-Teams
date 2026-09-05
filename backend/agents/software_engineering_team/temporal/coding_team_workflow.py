@@ -12,6 +12,7 @@ from temporalio.common import RetryPolicy
 from software_engineering_team.temporal.coding_team_github_activities import (
     github_branch_prep_activity,
     github_failure_notice_activity,
+    github_pr_publish_activity,
     github_publish_activity,
 )
 
@@ -347,6 +348,32 @@ class CodingTeamWorkflow:
             return
         self._submitted_answers = answers
 
+    async def _mark_job_failed(self, *, job_id: str, message: str) -> dict[str, Any]:
+        """Run the mark-job-failed activity — ONE spelling of its invocation.
+
+        Both terminalization paths (the notice fallback in
+        :meth:`_best_effort_github_failure_notice` and the notice-free
+        :meth:`_best_effort_mark_job_failed`) reached for the same activity with
+        the same request shape, timeout and retry policy. Keeping two copies
+        meant a change to any of those three had to be made twice, and a
+        divergence would be invisible until a failure path ran in production.
+
+        Preconditions:
+            - Called from ``run`` (or a helper it awaits) while this workflow is
+              executing; ``job_id`` identifies this workflow's job and
+              ``message`` is the non-empty diagnostic to record against it.
+        Postconditions:
+            - Returns the resulting job snapshot on success.
+            - Propagates any activity failure (after the shared bounded
+              retries); the two callers each decide whether to swallow it.
+        """
+        return await workflow.execute_activity(
+            mark_coding_team_job_failed_activity,
+            {"job_id": job_id, "error": message},
+            start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=_GITHUB_ACTIVITY_RETRY,
+        )
+
     async def _best_effort_github_failure_notice(
         self,
         *,
@@ -386,11 +413,38 @@ class CodingTeamWorkflow:
             _log_github_side_effect_failure(
                 "github_failure_notice_activity failed; marking job failed locally"
             )
-            return await workflow.execute_activity(
-                mark_coding_team_job_failed_activity,
-                {"job_id": job_id, "error": message},
-                start_to_close_timeout=timedelta(minutes=1),
-                retry_policy=_GITHUB_ACTIVITY_RETRY,
+            return await self._mark_job_failed(job_id=job_id, message=message)
+
+    async def _best_effort_mark_job_failed(self, *, job_id: str, message: str) -> None:
+        """Terminalize the Khala job record WITHOUT posting any GitHub notice.
+
+        Used for caller-contract violations (an unusable ``github`` payload),
+        where :meth:`_best_effort_github_failure_notice` is the wrong tool for
+        two separate reasons: the payload that would address the notice is the
+        very thing that is malformed (``owner``/``repo``/``issue_number`` may be
+        absent or unusable), and a payload-wiring bug is not a run failure worth
+        announcing on the issue/PR. Terminalizing the record is still required —
+        otherwise the API layer's running-job / checkout-admission checks keep
+        seeing a permanently-failed workflow's job as active and wedge every
+        sibling run on that checkout.
+
+        Preconditions:
+            - Called from ``run`` while this workflow is executing.
+            - ``job_id`` identifies the job this workflow was started for;
+              ``message`` is the non-empty diagnostic to record against it.
+        Postconditions:
+            - Attempts ``mark_coding_team_job_failed_activity`` (bounded
+              retries) so the job record reaches a terminal state.
+            - NEVER posts a GitHub notice, and never raises: a failure to
+              terminalize is logged only, so the caller's validation error is
+              what surfaces. Returns normally in both cases.
+        """
+        try:
+            await self._mark_job_failed(job_id=job_id, message=message)
+        except Exception:
+            _log_github_side_effect_failure(
+                "best-effort mark-job-failed for an unusable github payload failed; "
+                "surfacing the validation error anyway"
             )
 
     async def _best_effort_terminalize_then_reraise(
@@ -436,25 +490,68 @@ class CodingTeamWorkflow:
               ``run_pipeline_activity``'s contract).
             - When supplied, ``request["github"]`` is a dict carrying the
               GitHub branch/PR coordinates needed by the GitHub activities:
-              ``owner``, ``repo``, ``issue_number``, ``issue_title``,
-              ``base``, and ``integration_branch``. ``remote`` defaults to
-              ``"origin"`` when blank or absent.
+              ``owner``, ``repo``, ``base``, and ``integration_branch``, plus
+              either ``issue_number``/``issue_title`` for issue-driven publishing
+              or ``publish_mode="existing_pr"``/``pr_number`` for review-comment
+              remediation. ``remote``, when present, must be a non-blank
+              string; it defaults to ``"origin"`` when absent or falsy, and
+              any other value is a caller-contract violation rejected up
+              front like the required keys.
+              Optional ``expected_head_sha`` and ``expected_base_sha`` values
+              are both forwarded to ``github_branch_prep_activity`` (see its
+              contract) so branch prep fails closed if the integration branch
+              (``expected_head_sha``) or the base branch (``expected_base_sha``)
+              moved since the caller's plan was grounded, rather than silently
+              seeding work from newer code. An
+              optional ``pr_url`` is forwarded to ``github_pr_publish_activity``
+              in ``existing_pr`` mode, and an optional
+              ``cleanup_checkout_on_success`` flag is forwarded to whichever
+              publish activity runs.
             - Any GitHub token or credential stays outside workflow activity
               arguments. This workflow passes only repository coordinates and
               issue metadata to GitHub activities; a ``"token"`` key must
               never appear in activity args.
 
         Postconditions:
+            - Raises ``ValueError`` BEFORE any other work when ``github`` is a
+              non-empty dict carrying an unsupported ``publish_mode``, missing
+              a required key for its mode, or carrying an UNUSABLE value for
+              one (``owner``/``repo``/``base``/``integration_branch`` must be
+              non-empty strings; ``pr_number``/``issue_number`` positive
+              non-bool ints; ``issue_title`` a non-empty string). This
+              validation runs first
+              deliberately: a bad payload is a caller-wiring bug, not an
+              activity failure, so it fails the workflow task outright rather
+              than burning a full pipeline run and then posting a misleading
+              "publish failed" notice. No GitHub notice is posted — unlike
+              every other failure path below — because the payload that would
+              address one is the very thing that is malformed. The job record
+              IS still terminalized first, best-effort, via
+              :meth:`_best_effort_mark_job_failed`: the workflow task fails
+              before reaching any activity, so leaving the record non-terminal
+              would make the API layer's running-job / checkout-admission
+              checks treat a permanently-failed job as active and wedge every
+              sibling run on that checkout. A failure to terminalize is logged
+              only; the ``ValueError`` is always what surfaces.
             - Without GitHub metadata, returns the activity's result dict.
               With GitHub metadata, prepares the integration branch before
               running the pipeline, posts a failure notice (and marks the job
               failed) when branch prep reports ``ok=False`` or raises, best-
               effort notices/mark-failed then re-raises the original error when
-              prep, the pipeline activity, or publish raises, returns
-              failed/cancelled/waiting-for-user pipeline results unchanged, and
-              publishes the integration branch after successful terminal
-              pipeline results (including deferred ``running``/``publishing``
-              success).
+              prep, the pipeline activity, or publish raises, and returns
+              failed/cancelled/waiting-for-user pipeline results unchanged.
+            - After a successful terminal pipeline result (including deferred
+              ``running``/``publishing`` success), which publish activity runs
+              depends on the mode established by the validation above:
+              * default (issue-driven) mode publishes the INTEGRATION branch
+                via ``github_publish_activity``, using the ``issue_number``/
+                ``issue_title`` extracted up front;
+              * ``publish_mode="existing_pr"`` (review-comment remediation)
+                instead publishes to the PR's own branch via
+                ``github_pr_publish_activity``, using ``pr_number`` and the
+                optional ``pr_url``.
+              Both receive the same ``cleanup_checkout_on_success`` flag, and
+              both return their result dict as this method's own.
             - ``run_pipeline_activity`` now always requests
               ``pause_strategy="return"`` and emits
               ``{"outcome": "paused", ...}`` whenever a HITL gate pauses, or
@@ -509,17 +606,136 @@ class CodingTeamWorkflow:
         activity_timeout = timedelta(hours=4)
         github_timeout = timedelta(minutes=30)
 
+        # Validate github.publish_mode and extract the required github-payload
+        # keys UP FRONT, before branch prep or the (potentially long,
+        # LLM-driven) pipeline activity ever run: both are caller-contract
+        # concerns (a payload-wiring bug), not an orchestrator/activity
+        # failure worth posting to the issue/PR as a "publish failed" notice,
+        # so a bad payload should fail the workflow task immediately rather
+        # than burn an entire pipeline run first. The extracted values are
+        # reused, unchanged, at publish time below: this is a pure up-front
+        # check, so nothing downstream re-validates or re-reads them.
+        owner = repo = base = integration_branch = None
+        is_existing_pr_publish = False
+        pr_number = None
+        issue_number = issue_title = None
+        remote = "origin"
         if isinstance(github, dict) and github:
+            # Every validation failure below is a caller-contract violation, and
+            # each raises immediately rather than taking the terminalize-with-
+            # notice path (no GitHub notice is posted for a payload-wiring bug).
+            # Terminalizing the JOB RECORD is a separate concern from posting
+            # that notice, and is still required: a workflow task that fails here
+            # never reaches an activity, so without this the record stays
+            # non-terminal and the API layer's running-job / checkout-admission
+            # checks keep treating a permanently-failed job as active, wedging
+            # every sibling run on the same checkout. Catching ValueError around
+            # the whole block keeps that terminalization in ONE place instead of
+            # repeating it at each raise site (where copies could drift), and
+            # leaves every diagnostic message and exception chain untouched.
+            try:
+                publish_mode = github.get("publish_mode")
+                if publish_mode not in (None, "existing_pr"):
+                    raise ValueError(f"unsupported github.publish_mode: {publish_mode!r}")
+                is_existing_pr_publish = publish_mode == "existing_pr"
+                # A missing required key here is a caller-contract violation, exactly
+                # like the publish_mode check above: it fails the workflow task
+                # directly (ValueError, not terminalize-with-notice) rather than being
+                # treated as a runtime/activity failure worth posting a notice about.
+                # The enclosing handler still terminalizes the job record, which is a
+                # separate concern from posting that notice.
+                try:
+                    owner = github["owner"]
+                    repo = github["repo"]
+                    base = github["base"]
+                    integration_branch = github["integration_branch"]
+                    if is_existing_pr_publish:
+                        pr_number = github["pr_number"]
+                    else:
+                        issue_number = github["issue_number"]
+                        issue_title = github["issue_title"]
+                except KeyError as exc:
+                    raise ValueError(f"github payload missing required key: {exc}") from exc
+
+                # Presence alone is not enough: a payload carrying `owner=None` or
+                # `integration_branch=""` passes the KeyError check above and is then
+                # forwarded verbatim to branch prep, which fails as an ACTIVITY
+                # failure and takes the terminalize-with-notice path -- burning a run
+                # and posting a misleading "publish failed" notice for what is a
+                # caller-wiring bug. Validate the VALUES here so the same bug fails
+                # the same way (immediate ValueError) whether the key was absent or
+                # merely unusable.
+                for _name, _value in (
+                    ("owner", owner),
+                    ("repo", repo),
+                    ("base", base),
+                    ("integration_branch", integration_branch),
+                ):
+                    if not isinstance(_value, str) or not _value.strip():
+                        raise ValueError(
+                            f"github payload key {_name!r} must be a non-empty string, "
+                            f"got {_value!r}"
+                        )
+                if is_existing_pr_publish:
+                    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
+                        raise ValueError(
+                            f"github payload key 'pr_number' must be a positive int, got {pr_number!r}"
+                        )
+                else:
+                    if (
+                        isinstance(issue_number, bool)
+                        or not isinstance(issue_number, int)
+                        or issue_number <= 0
+                    ):
+                        raise ValueError(
+                            "github payload key 'issue_number' must be a positive int, "
+                            f"got {issue_number!r}"
+                        )
+                    if not isinstance(issue_title, str) or not issue_title.strip():
+                        raise ValueError(
+                            "github payload key 'issue_title' must be a non-empty string, "
+                            f"got {issue_title!r}"
+                        )
+                # `remote` is optional, so it is validated separately from the
+                # required keys above: absent/blank means "origin". What it must
+                # NOT do is fall through unchecked -- `github.get("remote") or
+                # "origin"` rescues only FALSY values, so a truthy non-string
+                # (``remote=123``) would reach `github_branch_prep_activity`
+                # verbatim and fail there as an ACTIVITY failure, reproducing the
+                # exact misleading-notice failure mode this block exists to
+                # prevent. Validate once here and pass the local to both activity
+                # call sites.
+                raw_remote = github.get("remote")
+                if not raw_remote:
+                    remote = "origin"
+                elif not isinstance(raw_remote, str) or not raw_remote.strip():
+                    raise ValueError(
+                        "github payload key 'remote' must be a non-empty string when "
+                        f"present, got {raw_remote!r}"
+                    )
+                else:
+                    remote = raw_remote
+            except ValueError as invalid_payload:
+                await self._best_effort_mark_job_failed(
+                    job_id=request["job_id"], message=str(invalid_payload)
+                )
+                raise
+
+            # Branch prep lives under the SAME guard as the validation above (one
+            # `isinstance(github, dict) and github` in this method, not two
+            # identical ones that can drift apart) — and it must stay ordered
+            # after it, since it consumes the locals extracted there.
             try:
                 prep = await workflow.execute_activity(
                     github_branch_prep_activity,
                     {
                         "job_id": request["job_id"],
                         "repo_path": request["repo_path"],
-                        "remote": github.get("remote") or "origin",
-                        "default_branch": github["base"],
-                        "integration_branch": github["integration_branch"],
+                        "remote": remote,
+                        "default_branch": base,
+                        "integration_branch": integration_branch,
                         "issue_number": github.get("issue_number"),
+                        "expected_head_sha": github.get("expected_head_sha"),
                         "expected_base_sha": github.get("expected_base_sha"),
                     },
                     start_to_close_timeout=github_timeout,
@@ -568,6 +784,27 @@ class CodingTeamWorkflow:
                 # key is stale (tokens are never reused) — drop them so retries
                 # across many pause rounds cannot grow durable workflow state.
                 self._buffered_signals.clear()
+                # KNOWN LIMITATION: this predicate only observes `submit_answers`
+                # signals — it has no way to notice this job's row being marked
+                # cancelled through the generic `/api/jobs/{team}/{job_id}/cancel`
+                # proxy, which patches job-service state only and never touches
+                # Temporal. A genuine Temporal-level cancel (`handle.cancel()` on
+                # THIS workflow's own id, `coding_team-<job_id>` — see
+                # `coding_team_start_workflow._workflow_id`) WOULD interrupt this
+                # wait_condition correctly (the SDK delivers it as
+                # `asyncio.CancelledError` at the next await point); the gap is
+                # that no code path in this repo currently issues that call for a
+                # coding_team workflow specifically. The one existing "cancel a
+                # workflow" helper wired to a job-cancel action
+                # (`start_workflow.cancel_run_team_workflow`) targets the
+                # DIFFERENT `se-run-team-<job_id>` id prefix used by the
+                # unrelated RunTeamWorkflow, so it cannot be reused here as-is.
+                # Closing this gap needs either a coding-team-specific cancel
+                # endpoint (calling `shared.temporal.runner.cancel_workflow_sync`
+                # with this workflow's own id) or teaching the generic job-cancel
+                # proxy about per-team Temporal id conventions — both are new
+                # plumbing, not a same-day fix, so this is left as a documented
+                # gap rather than a partial/speculative change.
                 await workflow.wait_condition(lambda: self._submitted_answers is not None)
                 request["acknowledged_resume_token"] = self._active_resume_token
                 self._submitted_answers = None
@@ -599,23 +836,43 @@ class CodingTeamWorkflow:
             status = result.get("status")
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
+            # publish_mode and the required github-payload keys (owner, repo,
+            # base, integration_branch, and either pr_number or
+            # issue_number/issue_title) were already validated and extracted
+            # up front, before branch prep -- see the top of this method.
             try:
+                publish_activity = (
+                    github_pr_publish_activity if is_existing_pr_publish else github_publish_activity
+                )
+                publish_request = {
+                    "job_id": request["job_id"],
+                    "owner": owner,
+                    "repo": repo,
+                    "repo_path": request["repo_path"],
+                    "base": base,
+                    "integration_branch": integration_branch,
+                    "remote": remote,
+                    "cleanup_checkout_on_success": bool(
+                        github.get("cleanup_checkout_on_success")
+                    ),
+                }
+                if is_existing_pr_publish:
+                    publish_request.update(
+                        {
+                            "pr_number": pr_number,
+                            "pr_url": github.get("pr_url"),
+                        }
+                    )
+                else:
+                    publish_request.update(
+                        {
+                            "issue_number": issue_number,
+                            "issue_title": issue_title,
+                        }
+                    )
                 return await workflow.execute_activity(
-                    github_publish_activity,
-                    {
-                        "job_id": request["job_id"],
-                        "owner": github["owner"],
-                        "repo": github["repo"],
-                        "repo_path": request["repo_path"],
-                        "issue_number": github["issue_number"],
-                        "issue_title": github["issue_title"],
-                        "base": github["base"],
-                        "integration_branch": github["integration_branch"],
-                        "remote": github.get("remote") or "origin",
-                        "cleanup_checkout_on_success": bool(
-                            github.get("cleanup_checkout_on_success")
-                        ),
-                    },
+                    publish_activity,
+                    publish_request,
                     start_to_close_timeout=github_timeout,
                     retry_policy=_GITHUB_ACTIVITY_RETRY,
                 )
@@ -638,6 +895,7 @@ ACTIVITIES = [
     run_pipeline_activity,
     github_branch_prep_activity,
     github_publish_activity,
+    github_pr_publish_activity,
     github_failure_notice_activity,
     mark_coding_team_job_failed_activity,
     # Not scheduled by CodingTeamWorkflow itself (see the module-level Postconditions

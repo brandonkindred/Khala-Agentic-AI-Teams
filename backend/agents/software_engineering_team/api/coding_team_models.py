@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+from pydantic.fields import FieldInfo
 
 # The HITL "pending question / answer" schemas live in the shared.hitl package so every
 # team shares one reconciled definition; re-exported here so existing importers (routes,
@@ -23,6 +24,51 @@ from shared.hitl.models import (  # noqa: F401
     SubmitAnswersRequest,
 )
 from software_engineering_team.models import AgentStatusEntry
+
+# A deliberately LOOSE superset of GitHub's owner and repository naming rules:
+# ASCII alphanumerics, ``-``, ``_`` and ``.``, starting with an alphanumeric.
+# It is not a faithful encoding of either rule set -- GitHub owners in fact
+# allow only alphanumerics and single, non-trailing hyphens, so this pattern
+# accepts owner spellings GitHub itself would reject. That is intentional: the
+# GitHub API is the authority on whether a name exists, and duplicating its
+# (independently evolving) rules here would reject valid names on a schema
+# change we do not control. What this pattern is for is REJECTING SHAPES, not
+# validating identity. Anchored, so a whitespace-only value, an embedded ``/``
+# (a two-segment "owner/repo" pasted into one field) or a path traversal
+# (``..``) is a 422 at the boundary instead of a confusing downstream failure --
+# an address-comments run, for instance, would otherwise surface a malformed
+# owner as the route's "origin remote names a different repository" 400,
+# blaming the checkout for a bad identifier.
+#
+# A LEADING dot is allowed when a non-dot follows it, because ``.github`` is a
+# real and common repository name (the org-level defaults repository), and
+# rejecting it here would 422 every request naming it. The second character
+# must not itself be a dot, so ``..`` and every ``..``-prefixed traversal
+# spelling stay rejected, as does a bare ``.``.
+_GITHUB_NAME_PATTERN = r"^(?:[A-Za-z0-9]|\.[A-Za-z0-9])[A-Za-z0-9._-]*$"
+# GitHub caps owner names at 39 characters and repository names at 100; the
+# looser 100 is used for both so oversized junk never reaches an API URL.
+_GITHUB_NAME_MAX_LENGTH = 100
+
+
+def _github_name_field(description: str) -> FieldInfo:
+    """Build the shared owner/repo ``Field`` so all five request models agree.
+
+    Preconditions:
+        - ``description`` is the field's human-readable description.
+    Postconditions:
+        - Returns the required :class:`~pydantic.fields.FieldInfo` that
+          :func:`pydantic.Field` builds, constrained to
+          :data:`_GITHUB_NAME_PATTERN` and at most
+          :data:`_GITHUB_NAME_MAX_LENGTH` characters (the pattern already
+          forbids the empty string, so ``min_length`` is redundant). Pure.
+    """
+    return Field(
+        ...,
+        max_length=_GITHUB_NAME_MAX_LENGTH,
+        pattern=_GITHUB_NAME_PATTERN,
+        description=description,
+    )
 
 
 class RunRequest(BaseModel):
@@ -157,8 +203,8 @@ class JobListItem(BaseModel):
 class RunFromGitHubRequest(BaseModel):
     """Request body for POST /run-from-github."""
 
-    owner: str = Field(..., description="GitHub repository owner (user or org)")
-    repo: str = Field(..., description="GitHub repository name")
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
     repo_path: str = Field(..., description="Local checkout the implementation teams work in")
     label: Optional[str] = Field(default=None, description="Optional label filter")
     issue_number: Optional[int] = Field(
@@ -195,8 +241,8 @@ class RunFromGitHubResponse(BaseModel):
 class GroomGithubIssuesRequest(BaseModel):
     """Request body for POST /groom-github-issues."""
 
-    owner: str = Field(..., description="GitHub repository owner (user or org)")
-    repo: str = Field(..., description="GitHub repository name")
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
     issue_number: int = Field(..., description="Issue to groom")
     github_token: Optional[str] = Field(
         default=None,
@@ -214,8 +260,8 @@ class GroomGithubIssuesResponse(BaseModel):
 class ReviewPrRequest(BaseModel):
     """Request body for POST /review-pr."""
 
-    owner: str = Field(..., description="GitHub repository owner (user or org)")
-    repo: str = Field(..., description="GitHub repository name")
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
     repo_path: str = Field(
         default="",
         description="Local checkout path, accepted for parity with /run-from-github. "
@@ -245,6 +291,130 @@ class ReviewPrResponse(BaseModel):
     # rather than mixing the browser clock in. Optional: absent when the start
     # timestamp is unavailable, in which case the UI falls back to its own clock.
     created_at: Optional[datetime] = None
+
+
+class AddressCommentsRequest(BaseModel):
+    """Request body for POST /pulls/{pr_number}/address-comments.
+
+    Kicks off the "address & respond to every unresolved review comment on this
+    PR" flow: gather the PR's unresolved review comments, hand each to the
+    software-engineering team to triage (false positive vs. real issue), and for
+    real issues plan + implement a fix, push it, reply to and resolve the comment,
+    then move the PR to "waiting for review".
+    """
+
+    owner: str = _github_name_field("GitHub repository owner (user or org)")
+    repo: str = _github_name_field("GitHub repository name")
+    repo_path: str = Field(
+        default="",
+        description=(
+            "Local git checkout of owner/repo to implement and push fixes in. "
+            "REQUIRED despite the empty default: the route rejects a blank value, a "
+            "path that is not an existing git checkout, or one whose origin remote "
+            "names a different repository, each with a 400. The default is empty "
+            "only so the 400 (which explains all three conditions) is what a caller "
+            "omitting it sees, rather than a generic 422."
+        ),
+    )
+    pr_number: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Pull request number whose comments to address. Optional in the request "
+            "body: the route's path pr_number is authoritative and the route "
+            "unconditionally coerces this field to match it via model_copy before "
+            "use, so a caller sending only {owner, repo, repo_path} (relying on the "
+            "path parameter alone) is not forced to redundantly repeat it here, and "
+            "a divergent POSITIVE body value is silently overridden rather than "
+            "causing ambiguity. The gt=0 bound still applies first: 0 or a negative "
+            "number is rejected with a 422 before the route runs, since a value that "
+            "could never name a pull request is a caller bug worth reporting rather "
+            "than one worth silently discarding."
+        ),
+    )
+    github_token: Optional[str] = Field(
+        default=None, description="Overrides GITHUB_TOKEN env var for this request."
+    )
+    base_branch: Optional[str] = Field(
+        default=None,
+        description=(
+            "Overrides the PR's own base branch for branch preparation, mirroring "
+            "RunFromGitHubRequest.base_branch's `request.base_branch or default_branch` "
+            "convention. When omitted (the common case), the PR's actual base (as "
+            "reported by GitHub) is used, which is correct for almost every caller "
+            "since an open PR already has a fixed base -- this exists only for the "
+            "rare case where a caller deliberately wants branch prep to compare "
+            "against a different branch."
+        ),
+    )
+    cleanup_checkout_on_success: bool = Field(
+        default=False,
+        description=(
+            "When true, the per-PR checkout at repo_path is platform-owned and ephemeral: "
+            "delete it after every unresolved comment is handled without failure. "
+            "Defaults to false so an operator-managed checkout is never removed."
+        ),
+    )
+
+
+class AddressCommentsResponse(BaseModel):
+    """Response for ``POST /pulls/{pr_number}/address-comments``: the started job's
+    id, PR number/url, initial status, and the count of unresolved comments the job
+    will work through."""
+
+    job_id: str
+    pr_number: int = Field(
+        gt=0,
+        description=(
+            "The pull request the job was started for. Bounded gt=0 for symmetry with "
+            "AddressCommentsRequest.pr_number: a response that echoed a number which "
+            "could never name a pull request would be a server bug worth surfacing."
+        ),
+    )
+    pr_url: str
+    unresolved_comment_count: int = Field(
+        ge=0,
+        description=(
+            "Number of unresolved review comments the job will address. Bounded ge=0 "
+            "(not gt=0): zero is a legitimate outcome -- a PR whose every thread is "
+            "already resolved -- while a negative count is never meaningful."
+        ),
+    )
+    status: str = "pending"
+    message: str = "Addressing unresolved comments. Poll GET /status/{job_id} for progress."
+    created_at: Optional[datetime] = None
+
+
+class AddressCommentsAdmissionResponse(BaseModel):
+    """Response for ``GET /pulls/{pr_number}/address-comments/running``: a
+    lightweight, best-effort admission pre-check so a caller (the unified API)
+    can avoid touching a PR's shared checkout when a job is already running
+    for it. Not a substitute for the authoritative admission lock the
+    ``POST`` route still takes — a race between this check and a concurrent
+    admission remains possible, same as any other TOCTOU pre-check."""
+
+    running_job_id: Optional[str] = Field(
+        default=None,
+        description="job_id of the live, non-terminal address-comments/review job for this "
+        "PR, or null when none is running.",
+    )
+
+
+class CheckoutRunningResponse(BaseModel):
+    """Response for ``GET /checkout/running``: a generic, best-effort pre-check
+    for ANY active job (any kind — issue run, PR review, address-comments) on a
+    given checkout path. Distinct from :class:`AddressCommentsAdmissionResponse`
+    (PR-scoped, address-comments/review specific) even though the shape is
+    identical today — this endpoint is meant for any caller that owns a shared,
+    mutable checkout resource, not just the address-comments flow, so it must
+    not be coupled to that flow's own response model if either evolves
+    independently later."""
+
+    running_job_id: Optional[str] = Field(
+        default=None,
+        description="job_id of the live, non-terminal job (any kind) using this exact "
+        "checkout, or null when none is running.",
+    )
 
 
 class ReviewRunItem(BaseModel):
@@ -377,8 +547,8 @@ class CreateEnhancedIssuesRequest(BaseModel):
     proposal_ids: List[str] = Field(
         description="Composite ids of the form 'job_id:proposal_id' identifying which proposals to file."
     )
-    owner: str = Field(description="Repository owner (validated against stored review).")
-    repo: str = Field(description="Repository name (validated against stored review).")
+    owner: str = _github_name_field("Repository owner (validated against stored review).")
+    repo: str = _github_name_field("Repository name (validated against stored review).")
     github_token: Optional[str] = Field(
         default=None, description="Overrides GITHUB_TOKEN env var for this request."
     )

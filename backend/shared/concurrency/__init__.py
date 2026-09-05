@@ -8,6 +8,13 @@ Exports:
 - :func:`flock_lock` — an exclusive, cross-process ``fcntl.flock`` on a
   well-known file: the primitive for "serialize access to a shared resource
   across worker *processes*", not just threads in one process.
+- :class:`CloneLockAcquisitionError` — the exception ``held_checkout_lock``
+  raises when ACQUIRING a checkout lock fails, so callers can tell that apart
+  from any other ``OSError`` escaping their locked section.
+- :func:`held_checkout_lock` — the cancellation-safe async wrapper around
+  ``flock_lock`` for holding it from a coroutine (acquisition runs in an
+  executor thread; a cancellation of the awaiting coroutine mid-acquisition
+  must not leak the flock).
 - :class:`KeyedLazyRegistry` — a value per key, each built at most once even
   under concurrent first access to that key, with distinct keys never blocking
   each other's construction: the dict-keyed sibling of :class:`LazySingleton`.
@@ -26,6 +33,7 @@ Exports:
 
 from __future__ import annotations
 
+from shared.concurrency.checkout_lock import CloneLockAcquisitionError, held_checkout_lock
 from shared.concurrency.flock_lock import flock_lock
 from shared.concurrency.heartbeat import BackgroundHeartbeat
 from shared.concurrency.keyed_lazy_registry import KeyedLazyRegistry
@@ -36,10 +44,12 @@ from shared.concurrency.parallel_map import parallel_map
 
 __all__ = [
     "BackgroundHeartbeat",
+    "CloneLockAcquisitionError",
     "KeyedLazyRegistry",
     "KeyedLockManager",
     "LatestValueFlusher",
     "LazySingleton",
     "flock_lock",
+    "held_checkout_lock",
     "parallel_map",
 ]

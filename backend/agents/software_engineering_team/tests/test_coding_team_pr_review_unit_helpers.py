@@ -8,6 +8,14 @@ only reaches indirectly (or not at all): heartbeat liveness, duplicate-review
 and sibling-checkout detection, language inference, the diff-first focus
 note, author resolution, and the reviewer-dispatch/merge logic in
 ``_run_reviewer``. Self-contained: no imports from other test modules.
+
+It also carries ``TestGitHubNameValidation``, which pins the ``owner``/``repo``
+constraints on the ``coding_team_models`` REQUEST models rather than on a
+``pr_review`` helper. That belongs here because those constraints exist for
+this flow: an unconstrained name reached GitHub URLs and the checkout-origin
+comparison and surfaced as the address-comments route's misleading "origin
+remote names a different repository" 400, and the models are covered nowhere
+else.
 """
 
 from __future__ import annotations
@@ -16,8 +24,10 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from unittest.mock import ANY
 
 import pytest
+from pydantic import ValidationError
 
 import software_engineering_team.api.coding_team_main as main
 from software_engineering_team.api import pr_review
@@ -26,6 +36,12 @@ from software_engineering_team.code_review_agent.change_surface import ChangeSur
 from software_engineering_team.github_source import PullRequestFile
 
 _STALE_S = pr_review._REVIEW_GUARD_HEARTBEAT_STALE_S
+
+# Read off the PRODUCTION set rather than restated here: a regression that
+# narrowed the terminal set (to just "completed", say) would still satisfy a
+# hardcoded list, and the orphan-detection test below would keep passing while
+# every other terminal parent silently wedged its checkout forever.
+_TERMINAL_STATUSES = sorted(pr_review._RECOGNIZED_TERMINAL_STATUSES)
 
 
 def _iso(delta_seconds: float) -> str:
@@ -180,6 +196,93 @@ class TestRunningReviewForPrUnit:
         # Must not raise despite the job-service failure.
         assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
 
+    def test_stale_child_job_is_excluded_not_marked_failed(self, monkeypatch) -> None:
+        """A child implementation job (address_comments._dispatch_implementation)
+        carries the same PR-identifying github_context as its parent but is
+        never independently heartbeated, so it would look stale even while its
+        durable workflow legitimately keeps running (a long activity, a HITL
+        pause). It must be excluded from the scan entirely — never inspected
+        for liveness, never destructively marked failed — with the parent
+        alone deciding admission."""
+        stale_child = _job(job_id="job-1:comment:2", heartbeat_delta=_STALE_S + 60)
+        stale_child["parent_job_id"] = "job-1"
+        live_parent = _job(job_id="job-1", heartbeat_delta=0.0)
+        # Newest-first order (child created after its parent), matching the
+        # real /jobs ordering the finding described.
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [stale_child, live_parent])
+        job_updates: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            main, "update_job", lambda job_id, **kw: job_updates.append({"job_id": job_id, **kw})
+        )
+        review_updates: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            main,
+            "update_review",
+            lambda *a, **kw: review_updates.append({"args": a, "kwargs": kw}),
+        )
+
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) == "job-1"
+        assert job_updates == []  # the stale child was never touched
+        assert review_updates == []  # the review record was never marked failed either
+
+    def test_stale_parent_cascades_terminalization_to_its_children(self, monkeypatch) -> None:
+        """Excluding children from the SCAN must not abandon them.
+
+        A child is never independently heartbeated, so its only terminalizer is
+        its parent's lifecycle. When this sweep declares the parent dead, the
+        child would otherwise stay non-terminal forever and surface as a phantom
+        active job to every other ``list_jobs(active_only=True)`` consumer.
+        """
+        stale_parent = _job(job_id="job-1", heartbeat_delta=_STALE_S + 60)
+        child = _job(job_id="job-1:comment:2", heartbeat_delta=_STALE_S + 60)
+        child["parent_job_id"] = "job-1"
+        child["repo_path"] = "/tmp/checkout"
+        other = _job(job_id="job-9", heartbeat_delta=_STALE_S + 60)
+        other["parent_job_id"] = "some-other-parent"
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child, other, stale_parent])
+        job_updates: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            main, "update_job", lambda job_id, **kw: job_updates.append({"job_id": job_id, **kw})
+        )
+        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
+
+        updated = {u["job_id"]: u for u in job_updates}
+        assert updated["job-1"]["status"] == "failed"
+        assert updated["job-1:comment:2"]["status"] == "failed"
+        # A child of a DIFFERENT parent is left alone.
+        assert "job-9" not in updated
+
+    def test_child_cascade_failure_never_breaks_admission(self, monkeypatch) -> None:
+        """The cascade lives in the same swallow-and-log block as the parent's
+        own cleanup: unblocking admission must not depend on it."""
+        stale_parent = _job(job_id="job-1", heartbeat_delta=_STALE_S + 60)
+        child = _job(job_id="job-1:comment:2", heartbeat_delta=_STALE_S + 60)
+        child["parent_job_id"] = "job-1"
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [stale_parent, child])
+
+        job_updates: List[Dict[str, Any]] = []
+
+        def _boom_on_child(job_id, **kw):
+            job_updates.append({"job_id": job_id, **kw})
+            if job_id != "job-1":
+                raise RuntimeError("job service unreachable")
+
+        monkeypatch.setattr(main, "update_job", _boom_on_child)
+        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
+
+        # The calls are asserted, not just discarded: with them thrown away this
+        # test would stay green if the sweep were reordered so the parent never
+        # got terminalized at all (nothing would raise, and admission would be
+        # unblocked for the wrong reason). Both must hold -- the parent really
+        # was marked failed, and the child's failure did not undo that.
+        updated = {u["job_id"]: u for u in job_updates}
+        assert updated["job-1"]["status"] == "failed"
+        assert "job-1:comment:2" in updated
+
 
 # ---------------------------------------------------------------------------
 # _running_sibling_on_checkout
@@ -204,6 +307,22 @@ class TestRunningSiblingOnCheckoutUnit:
         own = {"job_id": "own-job", "repo_path": str(repo_dir)}
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [own])
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+
+    def test_precheck_reports_a_job_whose_own_id_is_missing(self, monkeypatch, tmp_path) -> None:
+        """``own_job_id=None`` (a PRE-CHECK) must exclude NOTHING.
+
+        A plain ``j.get("job_id") == own_job_id`` equality would silently treat
+        a malformed active job carrying no ``job_id`` as "the caller's own" and
+        skip it, letting admission proceed to mutate a working tree an
+        UNIDENTIFIABLE job may still be using -- the exact outcome this scan
+        exists to prevent. In a pre-check there is no caller job, so nothing
+        can be the caller's own.
+        """
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        anonymous = {"job_id": None, "repo_path": str(repo_dir)}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [anonymous])
+        assert pr_review._running_sibling_on_checkout(str(repo_dir)) == anonymous
 
     def test_different_path_returns_none(self, monkeypatch, tmp_path) -> None:
         repo_dir = tmp_path / "repo"
@@ -246,6 +365,105 @@ class TestRunningSiblingOnCheckoutUnit:
         assert sibling is not None
         assert sibling["job_id"] == "<job-scan-unavailable>"
         assert sibling["repo_path"] == "/tmp/repo"
+
+    @pytest.mark.parametrize("parent_status", _TERMINAL_STATUSES)
+    def test_orphaned_child_with_terminal_parent_is_skipped_and_marked_failed(
+        self, monkeypatch, tmp_path, parent_status: str
+    ) -> None:
+        """A child job (parent_job_id set) whose parent has already terminalized
+        can never be terminalized itself -- only the parent runs a heartbeat --
+        so it must not be reported as a live sibling (that would wedge the
+        checkout's admission forever), and should be best-effort marked failed.
+
+        Parametrized over EVERY status production recognizes as terminal, not
+        just "completed": each one must orphan-kill the child, and a stub of one
+        status alone would let a narrowed terminal set pass unnoticed."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(
+            main, "get_job", lambda job_id: {"job_id": "parent-1", "status": parent_status}
+        )
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+        assert len(updates) == 1
+        job_id, kwargs = updates[0]
+        assert job_id == "child-1"
+        assert kwargs.get("status") == "failed"
+        assert kwargs.get("error")
+
+    def test_orphaned_child_with_missing_parent_is_marked_failed_and_not_reported(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A child whose parent lookup succeeds but returns None (parent gone) is
+        crash-orphaned: it is not reported as a live sibling AND is
+        best-effort marked failed (unlike the lookup-FAILS case in
+        test_child_with_unlookupable_parent_is_reported_as_sibling_not_failed,
+        where the child is left untouched and reported as a live sibling)."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(main, "get_job", lambda job_id: None)
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+        assert updates == [("child-1", {"status": "failed", "error": ANY})]
+
+    def test_mark_failed_raising_does_not_break_the_scan(self, monkeypatch, tmp_path) -> None:
+        """The orphan mark-failed is documented best-effort, and the scan's own
+        fail-closed contract is never-raise: an ``update_job`` that itself throws
+        (job service down) must be swallowed, leaving the orphan unreported so
+        admission is still unblocked -- the whole point of the cleanup."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(main, "get_job", lambda job_id: None)
+
+        def _boom(job_id, **kw):
+            raise RuntimeError("job service unreachable")
+
+        monkeypatch.setattr(main, "update_job", _boom)
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
+
+    def test_child_with_live_parent_is_still_reported_as_sibling(self, monkeypatch, tmp_path) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+        monkeypatch.setattr(main, "get_job", lambda job_id: {"job_id": "parent-1", "status": "running"})
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") == child
+        assert updates == []
+
+    def test_child_with_unlookupable_parent_is_reported_as_sibling_not_failed(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A transient job-service failure on the PARENT lookup must fail closed
+        (treat the child as a live sibling) rather than assume the parent is
+        gone and mark a possibly still-running child job failed."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        child = {"job_id": "child-1", "repo_path": str(repo_dir), "parent_job_id": "parent-1"}
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [child])
+
+        def _boom(job_id):
+            raise RuntimeError("job service unreachable")
+
+        monkeypatch.setattr(main, "get_job", _boom)
+        updates = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+
+        assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") == child
+        assert updates == []
 
 
 # ---------------------------------------------------------------------------
@@ -896,3 +1114,77 @@ class TestBuildChangeSurfaceForReviewable:
             files, {"gone.py": content, "ok.py": content}
         )
         assert list(surface.blocks.keys()) == ["ok.py"]
+
+
+# ---------------------------------------------------------------------------
+# owner/repo request-model validation
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubNameValidation:
+    """``owner``/``repo`` are identifiers, not free text.
+
+    Before these constraints existed, a whitespace-only or path-like value
+    satisfied ``min_length=1`` and flowed into GitHub API URLs and
+    checkout-origin comparisons, failing only downstream -- for an
+    address-comments run, as the route's "origin remote names a different
+    repository" 400, which blamed the checkout for what was really a
+    malformed identifier.
+    """
+
+    @staticmethod
+    def _models():
+        from software_engineering_team.api import coding_team_models as m
+
+        return [
+            (m.RunFromGitHubRequest, {"repo_path": "/tmp/x"}),
+            (m.GroomGithubIssuesRequest, {"issue_number": 1}),
+            (m.ReviewPrRequest, {"pr_number": 1}),
+            (m.AddressCommentsRequest, {"repo_path": "/tmp/x"}),
+            (m.CreateEnhancedIssuesRequest, {"proposal_ids": ["a:b"]}),
+        ]
+
+    @pytest.mark.parametrize(
+        "bad",
+        [" ", "", "acme/widgets", "../etc", "%2e%2e", "-leading-dash", "x" * 101, ".", "..evil"],
+    )
+    def test_malformed_owner_is_rejected(self, bad: str) -> None:
+        # Named failure, not a bare `pytest.raises` inside the loop: five models
+        # share this body, and a bare raises-context reports only "DID NOT RAISE"
+        # without saying WHICH model let the value through -- the one fact needed
+        # to find the missing constraint.
+        for model, extras in self._models():
+            try:
+                model(owner=bad, repo="widgets", **extras)
+            except ValidationError:
+                continue
+            pytest.fail(f"{model.__name__} accepted malformed owner {bad!r}")
+
+    @pytest.mark.parametrize("bad", [" ", "", "acme/widgets", "..", "x" * 101, ".", "..evil"])
+    def test_malformed_repo_is_rejected(self, bad: str) -> None:
+        # Same reasoning as test_malformed_owner_is_rejected: name the model.
+        for model, extras in self._models():
+            try:
+                model(owner="acme", repo=bad, **extras)
+            except ValidationError:
+                continue
+            pytest.fail(f"{model.__name__} accepted malformed repo {bad!r}")
+
+    @pytest.mark.parametrize("good", ["acme", "Acme-Corp", "a.b_c-d", "0day", ".github"])
+    def test_well_formed_names_are_accepted(self, good: str) -> None:
+        """Both names round-trip unchanged on every model.
+
+        ``.github`` is in the accepted set deliberately: the org-level defaults
+        repository is a real, common target, so a leading dot followed by an
+        alphanumeric must pass while ``.`` and ``..evil`` (pinned above) stay
+        rejected.
+
+        Asserting ``repo`` too is what keeps ``test_malformed_repo_is_rejected``
+        honest: on a model that did NOT declare a ``repo`` field but forbids
+        extras, that test would pass on the unknown-field error rather than on
+        value validation, and nothing else here would notice.
+        """
+        for model, extras in self._models():
+            built = model(owner=good, repo=good, **extras)
+            assert built.owner == good
+            assert built.repo == good
