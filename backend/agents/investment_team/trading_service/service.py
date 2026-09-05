@@ -2629,6 +2629,11 @@ def _apply_fill_outcome_events(
             diagnostics.exit_rule_firings[kind] = diagnostics.exit_rule_firings.get(kind, 0) + 1
             sym_firings = diagnostics.exit_rule_firings_by_symbol.setdefault(ev.symbol, {})
             sym_firings[kind] = sym_firings.get(kind, 0) + 1
+            # "{kind}:{basis}" composite key, matching _record_emission's own
+            # basis_label format above. Additive telemetry only — surfaced by
+            # exit_rule_conformance.py's diagnostics summary, not read by
+            # _check_stop_loss's leak-check reconciliation (which keys off
+            # exit_rule_firings_by_symbol instead).
             basis_label = f"{kind}:{_RESTING_STOP_LOSS_BASIS}"
             diagnostics.exit_rule_firings_by_basis[basis_label] = (
                 diagnostics.exit_rule_firings_by_basis.get(basis_label, 0) + 1

@@ -770,6 +770,9 @@ class FillSimulator:
         po: PendingOrder,
         bar: Bar,
         terms: FillTerms,
+        # Required: always called from process_bar, where events is in scope
+        # (unlike _materialize_attached_exit_children's Optional default,
+        # which exists only for its un-wired abandon-path call sites).
         events: List[FillDiagnosticEvent],
     ) -> Tuple[Optional[Fill], Optional[str]]:
         """Apply a follow-on entry fill against an already-open position.

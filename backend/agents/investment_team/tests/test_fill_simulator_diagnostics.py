@@ -870,9 +870,8 @@ def _engine_exit_attached_event(*, symbol: str, reason: str) -> FillDiagnosticEv
 
 def test_engine_exit_attached_bumps_firing_counter() -> None:
     from investment_team.models import BacktestExecutionDiagnostics
-    from investment_team.trading_service.service import (
+    from investment_team.trading_service.engine.fill_simulator import (
         ENGINE_EXIT_REASON_PREFIX,
-        _apply_fill_outcome_events,
     )
 
     diag = BacktestExecutionDiagnostics()
