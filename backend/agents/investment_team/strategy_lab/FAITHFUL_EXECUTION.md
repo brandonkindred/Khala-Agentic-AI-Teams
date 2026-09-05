@@ -93,12 +93,18 @@ entry at all" from "one rule is dead but others fire", and the per-leg diagnosti
 bottleneck (a leg that never holds, or legs that never co-occur). Findings are recorded on the
 gate timeline; routing stays with the existing post-backtest zero-trade path.
 
-This probe currently only catches a rule that never fires at all ("dead"). It does not yet catch
-a rule that fires plenty on its own but is always shadowed by an earlier, higher-priority rule in
-`evaluate_entry_rules`'s first-match-wins scan ("structurally starved") — that extension is
-tracked separately. The authoritative priority decision and the formal "structurally starved"
-definition it must detect are documented on `evaluate_entry_rules` in
-`executor/predicate_evaluator.py`.
+Beyond dead rules, the probe also reports a rule that fires plenty on its own but is always
+shadowed by an earlier, higher-priority rule in `evaluate_entry_rules`'s first-match-wins scan
+("structurally starved") as a distinct finding kind — `probe_pairs()` computes, for every ordered
+(earlier, later) entry-rule pair, whether the later rule ever fires independently of the earlier
+one, and `to_starvation_gate_results()` renders that into a critical/warning finding (same
+compiled-vs-custom severity split as dead-code findings) naming both rules, with the same
+per-leg diagnostic pattern. A rule already reported dead is never additionally reported as
+starved. This is a pairwise, sufficient-condition check: it catches a later rule shadowed by one
+specific earlier rule, but not (yet) the case where several earlier rules jointly cover it without
+any single one being a superset on its own — the full union-based verdict `evaluate_entry_rules`'s
+docstring defines. The authoritative priority decision and the formal "structurally starved"
+definition are documented on `evaluate_entry_rules` in `executor/predicate_evaluator.py`.
 
 ### 6. Design-time spec-quality hardening (`design_system.md`, `strategy_validator.py`, `orchestrator.py`)
 

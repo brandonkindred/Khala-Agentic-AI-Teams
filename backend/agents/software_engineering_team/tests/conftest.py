@@ -263,17 +263,6 @@ def _stub_orchestrator_only(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team_orchestrator", stub)
 
 
-def _expected_basic_header(token: str) -> str:
-    """Expected git auth header for a fake token, built at runtime so a
-    credential-shaped Base64 literal never appears in source — secret
-    scanners (GitGuardian etc.) flag the pattern regardless of how fake
-    the values are."""
-    import base64
-
-    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return f"Authorization: Basic {encoded}"
-
-
 @pytest.fixture
 def patched_job_store(monkeypatch, fake_job_client):  # noqa: F811 (pytest fixture name)
     """Route the SE ``job_store._client`` factory through the in-memory fake.

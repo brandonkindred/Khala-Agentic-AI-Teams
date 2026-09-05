@@ -26,6 +26,13 @@ Four tables:
   inspected after the fact. Rows are appended to incrementally as the review
   runs (see ``review_history_store.append_review_transcript_entries``), keyed
   1:1 with ``code_review_runs.job_id``.
+- ``address_comments_resolve_attempts`` — one row per review thread whose
+  Khala-issued ``resolve_review_thread`` mutation is known to have failed
+  (address_comments sub-team). Lets ``_unresolved_comments`` distinguish "our
+  own resolve call failed, safe to retry" from "GitHub reports the same
+  unresolved state because a reviewer manually reopened the thread" — a
+  distinction GitHub's read APIs cannot make on their own. See
+  ``resolve_attempt_store`` for the read/write/cleanup contract.
 """
 
 from __future__ import annotations
@@ -134,6 +141,26 @@ SCHEMA = TeamSchema(
             entries      JSONB NOT NULL DEFAULT '[]'::jsonb,
             created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
+        # One row per review thread with a KNOWN-FAILED Khala resolve attempt.
+        # Absence of a row is the default/safe state (no evidence a resolve was
+        # ever attempted and failed for this thread) — rows are written only on
+        # failure and deleted on success or once the owning PR closes (see
+        # `resolve_attempt_store`).
+        # No separate (owner, repo, pr_number) index: the PRIMARY KEY below
+        # already creates a btree over (owner, repo, pr_number, thread_id),
+        # and Postgres btrees serve equality lookups on any leftmost prefix —
+        # so the 3-column delete in `clear_resolve_attempts_for_pr` is already
+        # fully served by the PK index. A separate index here would only add
+        # write amplification on every upsert/delete for no read benefit.
+        """CREATE TABLE IF NOT EXISTS address_comments_resolve_attempts (
+            owner                   TEXT NOT NULL,
+            repo                    TEXT NOT NULL,
+            pr_number               INTEGER NOT NULL,
+            thread_id               TEXT NOT NULL,
+            khala_reply_comment_id  BIGINT,
+            failed_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (owner, repo, pr_number, thread_id)
+        )""",
     ],
     table_names=[
         "se_agent_traces",
@@ -141,6 +168,7 @@ SCHEMA = TeamSchema(
         "se_learnings",
         "code_review_runs",
         "code_review_transcripts",
+        "address_comments_resolve_attempts",
     ],
 )
 

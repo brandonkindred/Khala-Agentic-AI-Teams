@@ -11,7 +11,12 @@ from __future__ import annotations
 import pytest
 from strands.multiagent.graph import Graph, GraphBuilder
 
-from shared.graph import build_agent, build_fan_out_fan_in, wire_fan_out_fan_in
+from shared.graph import (
+    build_agent,
+    build_fan_out_fan_in,
+    build_sequential,
+    wire_fan_out_fan_in,
+)
 
 
 def _agent(name: str):
@@ -94,3 +99,58 @@ def test_wire_fan_out_fan_in_rejects_empty_agents() -> None:
 
     with pytest.raises(AssertionError, match="agents must be non-empty"):
         wire_fan_out_fan_in(builder, [], fan_in_node)
+
+
+# ---------------------------------------------------------------------------
+# build_sequential
+# ---------------------------------------------------------------------------
+
+
+def test_build_sequential_rejects_empty_stages() -> None:
+    with pytest.raises(ValueError, match="stages must contain at least one entry"):
+        build_sequential(stages=[])
+
+
+def test_build_sequential_single_stage_is_its_own_entry_point() -> None:
+    graph = build_sequential(stages=[("only", _agent("only"))])
+
+    assert isinstance(graph, Graph)
+    assert {n.node_id for n in graph.entry_points} == {"only"}
+    assert set(graph.nodes.keys()) == {"only"}
+    assert graph.edges == set()
+
+
+def test_build_sequential_chains_stages_in_order() -> None:
+    graph = build_sequential(
+        stages=[
+            ("plan", _agent("plan")),
+            ("draft", _agent("draft")),
+            ("review", _agent("review")),
+        ]
+    )
+    edges = {(e.from_node.node_id, e.to_node.node_id) for e in graph.edges}
+
+    assert {n.node_id for n in graph.entry_points} == {"plan"}
+    assert edges == {("plan", "draft"), ("draft", "review")}
+    assert set(graph.nodes.keys()) == {"plan", "draft", "review"}
+
+
+def test_build_sequential_defaults_graph_id_and_timeouts() -> None:
+    graph = build_sequential(stages=[("only", _agent("only"))])
+
+    assert graph.id == "sequential_pipeline"
+    assert graph.execution_timeout == 600.0
+    assert graph.node_timeout == 180.0
+
+
+def test_build_sequential_accepts_custom_graph_id_and_timeouts() -> None:
+    graph = build_sequential(
+        stages=[("a", _agent("a")), ("b", _agent("b"))],
+        graph_id="custom_pipeline",
+        execution_timeout=45.0,
+        node_timeout=15.0,
+    )
+
+    assert graph.id == "custom_pipeline"
+    assert graph.execution_timeout == 45.0
+    assert graph.node_timeout == 15.0

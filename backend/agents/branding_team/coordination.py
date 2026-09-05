@@ -20,7 +20,6 @@ calls into public methods the stores expose for exactly this purpose —
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from .assistant.store import BrandingConversationStore, ConversationAttachResult
@@ -73,7 +72,11 @@ def attach_conversation_to_brand(
     Postconditions:
         On :attr:`AttachConversationResult.OK`, the conversation row now has
         ``brand_id`` set to *brand_id*, the brand's ``conversation_id`` is set
-        to *conversation_id*, and the updated :class:`Brand` is returned.
+        to *conversation_id*, the brand's ``updated_at`` is restamped with the
+        shared :func:`store.now_iso` formatter (the same one every other write
+        path through ``BrandingStore`` uses, so rows written here are not
+        formatted differently from the rest of the column), and the updated
+        :class:`Brand` is returned.
 
         When *mission* is provided, ``mission_json`` is overwritten with it.
         When *mission* is omitted (``None``), ``mission_json`` is left as
@@ -103,7 +106,13 @@ def attach_conversation_to_brand(
     # attach_conversation_to_brand and this module needs AttachConversationResult,
     # so at least one side has to stay function-scoped to avoid a load-order
     # cycle; both sides do, so neither import order is load-bearing.
-    from .store import AttachConversationResult
+    # ``now_iso`` is taken from store.py rather than re-implemented here:
+    # every other write path stamps ``updated_at`` with it, and a second
+    # hand-rolled formatter would drift the moment that one changes (a
+    # ``timespec``, a ``Z`` suffix), leaving rows written through this path
+    # formatted differently from every other row in the same column. It is part
+    # of store.py's public surface precisely because this path shares it.
+    from .store import AttachConversationResult, now_iso
 
     for name, value in (
         ("client_id", client_id),
@@ -126,7 +135,7 @@ def attach_conversation_to_brand(
 
             patch = {
                 "conversation_id": conversation_id,
-                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+                "updated_at": now_iso(),
             }
             brand = store.patch_brand_locked(cur, brand_id, client_id, patch)
             if brand is None:

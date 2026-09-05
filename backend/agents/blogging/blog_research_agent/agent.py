@@ -129,6 +129,18 @@ class ResearchAgent(_BlogAgentBase):
             - Returns ResearchAgentOutput with query_plan (list), references (list,
               length <= brief_input.max_results), notes (str or None), and
               compiled_document (formatted document of most relevant links with summaries).
+            - Checkpoint resume for the merged scoring/summarization step (Step 5):
+              if cache is set and a loaded checkpoint has both "scored_docs" and
+              "references" populated (including as empty lists), _evaluate_documents
+              is not called; scored_docs entries are read back supporting both the
+              current 5-element (doc, relevance, authority, accuracy, type_label)
+              shape and the legacy 3-element (doc, score, type_label) shape written
+              before per-document authority/accuracy scoring existed. A checkpoint
+              with "scored_docs" but no "references" (an interrupted run, or a write
+              failure between the two sequential save_checkpoint calls below) is not
+              treated as resumable for this step: _evaluate_documents runs exactly
+              once, recomputing scored_docs and references together rather than
+              reusing the partial scored_docs.
         """
 
         def _report(status: str, sub: float) -> None:
@@ -220,11 +232,18 @@ class ResearchAgent(_BlogAgentBase):
                 if self.cache:
                     self.cache.save_checkpoint(brief_input, "documents", documents=documents)
 
-            # Step 5: Score documents
+            # Step 5: Score and summarize documents
             _report("Scoring documents for relevance...", 0.50)
-            # scored_docs: "is not None" for the same reason as documents above.
+            # scored_docs/references: "is not None" for the same reason as documents
+            # above. Both must already be checkpointed to skip recomputation - a
+            # checkpoint with scored_docs but not yet references (from a pre-merge
+            # checkpoint resumed after this deploy, or a crash/write failure between
+            # the two save_checkpoint calls below) recomputes both via one fresh
+            # _evaluate_documents call rather than reusing scored_docs alone.
             if (
-                cached_state and cached_state.scored_docs is not None
+                cached_state
+                and cached_state.scored_docs is not None
+                and cached_state.references is not None
             ):  # pragma: no cover - resume-from-checkpoint branch including the legacy 3-tuple shape; see Step 1.
                 logger.info("Using cached scored documents (%s)", len(cached_state.scored_docs))
                 scored_docs = []
@@ -244,25 +263,15 @@ class ResearchAgent(_BlogAgentBase):
                                 item[2] if len(item) > 2 else None,
                             )
                         )
-            else:
-                scored_docs = self._score_documents(documents, brief_input)
-                if self.cache:
-                    self.cache.save_checkpoint(brief_input, "scored_docs", scored_docs=scored_docs)
-
-            # Step 6: Summarize documents
-            _report("Summarizing references...", 0.65)
-            # references: "is not None" for the same reason as documents above.
-            if (
-                cached_state and cached_state.references is not None
-            ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
                 logger.info("Using cached references (%s)", len(cached_state.references))
                 references = [ResearchReference(**r) for r in cached_state.references]
             else:
-                references = self._summarize_documents(scored_docs, brief_input)
+                scored_docs, references = self._evaluate_documents(documents, brief_input)
                 if self.cache:
+                    self.cache.save_checkpoint(brief_input, "scored_docs", scored_docs=scored_docs)
                     self.cache.save_checkpoint(brief_input, "references", references=references)
 
-            # Steps 7-9: synthesize overview (LLM), fetch academic papers (arXiv
+            # Steps 6-8: synthesize overview (LLM), fetch academic papers (arXiv
             # HTTP), and find similar topics (LLM) are mutually independent — none
             # consumes another's output — so run them concurrently instead of as
             # three sequential round-trips. Each keeps its own resume-from-checkpoint
@@ -365,7 +374,7 @@ class ResearchAgent(_BlogAgentBase):
             academic_papers = results["academic_papers"]
             similar_topics = results["similar_topics"]
 
-            # Step 10: Compile document (Blog Post Research format)
+            # Step 9: Compile document (Blog Post Research format)
             _report("Compiling research document...", 0.95)
             compiled_document = self._compile_document(
                 brief_input, references, notes, academic_papers, similar_topics
@@ -653,121 +662,66 @@ class ResearchAgent(_BlogAgentBase):
         )
         return (doc, relevance, authority, accuracy, type_label, reference)
 
-    def _score_documents(
+    def _evaluate_documents(
         self,
         documents: List[SourceDocument],
         brief_input: ResearchBriefInput,
-    ) -> List[Tuple[SourceDocument, float, float, float, str]]:
+    ) -> Tuple[List[Tuple[SourceDocument, float, float, float, str]], List[ResearchReference]]:
         """
-        Use the LLM to produce relevance, authority, accuracy scores and type for each document.
-        Documents are scored in parallel; results are sorted by relevance descending.
+        Score and summarize every fetched document in one fan-out, then rank and cap.
+
+        Replaces the former _score_documents / _summarize_documents pair, which
+        each fanned out separately over _evaluate_one_document - the second fan-out
+        re-ran _evaluate_one_document on the top-ranked subset purely to recover the
+        ResearchReference the first fan-out had already built and discarded, costing
+        every top-ranked document a second LLM round-trip. Fanning out once and
+        keeping each document's ResearchReference alongside its score tuple removes
+        that redundant call entirely.
 
         Preconditions: documents and brief_input valid.
-        Postconditions: Returns list of (document, relevance, authority, accuracy, type_label) sorted by relevance descending.
+        Postconditions:
+            - Returns (scored_docs, references).
+            - scored_docs holds one (doc, relevance, authority, accuracy, type_label)
+              tuple per input document, sorted by relevance descending.
+            - references holds a ResearchReference for each of the
+              min(len(documents), brief_input.max_results) highest-relevance
+              documents, in the same descending order, taken directly from the
+              same _evaluate_one_document call as its corresponding scored_docs
+              entry - no second LLM round-trip for the top-ranked subset.
+            - If documents is empty, returns ([], []) without a fan-out.
         """
         n_docs = len(documents)
         if n_docs == 0:
-            logger.info("No documents to score")
-            return []
+            logger.info("No documents to evaluate")
+            return [], []
 
-        logger.info(
-            "Scoring %s documents for relevance, authority, and accuracy (parallel)...", n_docs
-        )
+        logger.info("Scoring and summarizing %s documents (parallel)...", n_docs)
         self._report_llm("Scoring documents for relevance...", 0.50)
 
         # parallel_map copies this thread's context per task so the LLM
-        # attribution/request-id contextvars propagate into the scoring workers
-        # (raw threads don't copy them; see llm_service.attribution).
+        # attribution/request-id contextvars propagate into the workers (raw
+        # threads don't copy them; see llm_service.attribution).
         # skip_none=False keeps one result per document positionally, exactly as
-        # the previous list comprehension did — safe because _evaluate_one_document
+        # the previous list comprehensions did — safe because _evaluate_one_document
         # always returns a tuple (never None; it degrades to default scores on a
         # non-cancellation failure instead of raising), so the sort below never
-        # sees a None element. Only the first five elements (the score tuple) are
-        # kept here; the ResearchReference _evaluate_one_document also builds is
-        # discarded and rebuilt by _summarize_documents for the top-ranked subset.
-        scored = parallel_map(
+        # sees a None element.
+        evaluated = parallel_map(
             documents,
-            lambda doc: self._evaluate_one_document(doc, brief_input)[:5],
+            lambda doc: self._evaluate_one_document(doc, brief_input),
             max_workers=_DOC_PARALLEL_WORKERS,
             skip_none=False,
         )
 
-        scored.sort(key=lambda t: t[1], reverse=True)
+        evaluated.sort(key=lambda t: t[1], reverse=True)
         self._report_llm("Document scoring complete.", 0.65)
-        logger.info("Scored %s documents", len(scored))
-        return scored
+        logger.info("Scored %s documents", len(evaluated))
 
-    def _reference_for_scored_item(
-        self,
-        item: Tuple[SourceDocument, float, float, float, str],
-        brief_input: ResearchBriefInput,
-    ) -> ResearchReference:
-        """
-        Build the ResearchReference for an already-scored document.
-
-        Re-runs _evaluate_one_document to get a fresh summary/key_points, but
-        keeps item's own scores/type as the source of truth rather than the
-        fresh call's - item may have come from a resumed scored_docs
-        checkpoint (including the legacy 3-tuple format reconstructed in
-        run()), so its values must not be silently overwritten by a second,
-        independent LLM call's scores.
-
-        Preconditions:
-            - item is a (doc, relevance, authority, accuracy, type_label) tuple.
-            - brief_input is a valid ResearchBriefInput.
-        Postconditions:
-            - Returns a ResearchReference whose relevance_score, authority_score,
-              accuracy_score, and type equal item's relevance, authority,
-              accuracy, and type_label respectively, and whose
-              title/url/domain/summary/key_points/content come from a fresh
-              _evaluate_one_document(item[0], brief_input) call.
-        """
-        doc, relevance, authority, accuracy, type_label = item
-        _, _, _, _, _, reference = self._evaluate_one_document(doc, brief_input)
-        return reference.model_copy(
-            update={
-                "relevance_score": relevance,
-                "authority_score": authority,
-                "accuracy_score": accuracy,
-                "type": type_label,
-            }
-        )
-
-    def _summarize_documents(
-        self,
-        scored_docs: List[Tuple[SourceDocument, float, float, float, str]],
-        brief_input: ResearchBriefInput,
-    ) -> List[ResearchReference]:
-        """
-        Preconditions: scored_docs and brief_input valid.
-        Postconditions: Returns list of ResearchReference, length <= brief_input.max_results.
-        """
-        cap = min(len(scored_docs), brief_input.max_results)
-        if cap == 0:
-            logger.info("No documents to summarize")
-            return []
-
-        logger.info("Summarizing %s references (parallel)...", cap)
-        self._report_llm("Summarizing references...", 0.65)
-
-        items = scored_docs[: brief_input.max_results]
-        # parallel_map copies this thread's context per task so the LLM
-        # attribution/request-id contextvars propagate into the summarizing
-        # workers (raw threads don't copy them; see llm_service.attribution).
-        # skip_none=False keeps one result per item positionally, as the previous
-        # list comprehension did — safe because _reference_for_scored_item always
-        # returns a ResearchReference (its except path, inside
-        # _evaluate_one_document, falls back to an excerpt, never None).
-        references = parallel_map(
-            items,
-            lambda item: self._reference_for_scored_item(item, brief_input),
-            max_workers=_DOC_PARALLEL_WORKERS,
-            skip_none=False,
-        )
-
-        self._report_llm("Summarization complete.", 0.78)
+        scored_docs = [item[:5] for item in evaluated]
+        cap = min(len(evaluated), brief_input.max_results)
+        references = [item[5] for item in evaluated[:cap]]
         logger.info("Produced %s references", len(references))
-        return references
+        return scored_docs, references
 
     def _synthesize_overview(
         self,

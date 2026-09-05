@@ -3,12 +3,23 @@
 Monkeypatched collaborators are dereferenced through the ``main`` module object
 at call time so ``monkeypatch.setattr(main, ...)`` keeps taking effect after the
 split; models are imported directly.
+
+``coding_team_main`` is imported INSIDE each function that needs it, never at
+module scope. The two modules are mutually dependent -- ``coding_team_main``
+does a module-scope ``from ... git_ops import <names>`` -- so a module-scope
+import here closes a cycle: any entry point that reaches ``git_ops`` first (a
+script, a worker bootstrap, a test runner) would find ``coding_team_main``
+re-entering a half-initialized ``git_ops`` and failing on the not-yet-bound
+from-imports. Deferring to call time breaks the cycle at its only edge without
+changing what any call site sees: the import statement resolves the same live
+module object out of ``sys.modules``, so ``monkeypatch.setattr(main, ...)``
+still takes effect exactly as before, and the cost is one ``sys.modules`` dict
+lookup per call -- negligible beside the git subprocesses these functions run.
 """
 
 from __future__ import annotations
 
 import base64
-import fcntl
 import logging
 import os
 import shutil
@@ -16,18 +27,21 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
+from shared.concurrency import flock_lock
 from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     git_identity_env,
+    remote_url_matches,
 )
 from shared.git.git_utils import (
     resolve_remote_branch_sha as _shared_resolve_remote_branch_sha,
 )
-from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.clone_workspace import (
     clone_lock_path,
     is_per_issue_dir,
+    is_per_pr_dir,
     is_within_ephemeral_workspace,
 )
 from software_engineering_team.github_source import (
@@ -110,6 +124,12 @@ def _git(
           URL-embedded token redacted via ``scrub_token_from_text`` and, when
           an auth env was supplied, the transient Authorization header value
           (including its base64 form) redacted as well.
+        - The message is STRIPPED of surrounding whitespace, so callers can
+          compare it against an expected value directly without re-normalizing
+          the trailing newline git emits. Callers such as
+          ``_checkout_remote_matches`` rely on this: they pass the returned
+          value into a URL predicate whole, and a retained trailing newline
+          would make every comparison fail closed.
         - ``env=None`` (default) inherits the parent environment, preserving the
           prior behaviour for local-only operations. Pass an auth env (see
           ``_git_auth_env``) for network operations against a private remote.
@@ -134,6 +154,30 @@ def _git(
 RESCUE_BRANCH_PREFIX = "khala/rescue/"
 ACTIVE_ISSUE_CONFIG_KEY = "khala.active-issue"
 
+# Single source of truth for the per-issue INTEGRATION BRANCH name (the branch the
+# coding team commits an issue's work to and opens its PR from). Both places that
+# build one -- the route that dispatches a GitHub-issue run
+# (``api/routes/github.py``) and the thread-mode github-hook flow
+# (``api/orchestration.py``) -- go through :func:`integration_branch_for`, so the
+# two spellings cannot drift apart. Distinct from the per-issue CHECKOUT DIRECTORY
+# name (``clone_workspace.PER_ISSUE_DIR_TEMPLATE``, ``issue-<N>``): that is a
+# filesystem path segment with no ``khala/`` namespace, so the two are deliberately
+# NOT shared. Every other module takes the branch as an ``integration_branch``
+# parameter and never reconstructs or parses it.
+INTEGRATION_BRANCH_PREFIX = "khala/issue-"
+
+
+def integration_branch_for(issue_number: int) -> str:
+    """Return the integration-branch name the coding team uses for ``issue_number``.
+
+    Preconditions:
+        - ``issue_number`` is a GitHub issue number (a positive integer).
+    Postconditions:
+        - Returns ``f"{INTEGRATION_BRANCH_PREFIX}{issue_number}"``. Pure; never
+          raises.
+    """
+    return f"{INTEGRATION_BRANCH_PREFIX}{issue_number}"
+
 
 def _utc_timestamp() -> str:
     """Wall-clock UTC stamp used in rescue branch names (patchable in tests)."""
@@ -151,6 +195,7 @@ def _read_active_issue(repo_path: str) -> Optional[int]:
         - Returns the issue number, or None when the marker is absent or
           unparseable (treated as unattributed).
     """
+    from software_engineering_team.api import coding_team_main as _main
     rc, msg = _main._git(repo_path, "config", "--local", "--get", ACTIVE_ISSUE_CONFIG_KEY)
     if rc != 0:
         return None
@@ -162,21 +207,34 @@ def _read_active_issue(repo_path: str) -> Optional[int]:
 
 def _write_active_issue(repo_path: str, issue_number: int) -> None:
     """Record that a job for issue_number is mid-flight on this checkout."""
+    from software_engineering_team.api import coding_team_main as _main
     _main._git(repo_path, "config", "--local", ACTIVE_ISSUE_CONFIG_KEY, str(issue_number))
 
 
 def _clear_active_issue(repo_path: str) -> None:
     """Remove the marker; idempotent (unsetting a missing key is a no-op)."""
+    from software_engineering_team.api import coding_team_main as _main
     _main._git(repo_path, "config", "--local", "--unset", ACTIVE_ISSUE_CONFIG_KEY)
 
 
 def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
-    """Remove the marker only when it belongs to this job's issue.
+    """Remove the marker only when it belongs to this job's work item.
 
-    Two different issues may legitimately run against the same checkout (the
-    duplicate guard is per-issue); an older job publishing after a newer job
-    prepped must not unset the newer job's marker, or a crash of the newer
-    job would lose its development-work attribution.
+    Despite the name, ``issue_number`` is not restricted to GitHub issues:
+    the address-comments (PR remediation) flow calls this with a PR number
+    too, matching how it also writes the SAME marker with the PR number
+    during branch preparation (see ``_prepare_issue_branch``). This is safe
+    because GitHub issues and pull requests share ONE number sequence per
+    repository — a given number can never simultaneously be both an issue
+    and a PR there — so the marker's value alone still uniquely identifies
+    one work item regardless of which kind it is. The name is a historical
+    holdover from before PR remediation existed, not a real behavioral
+    restriction.
+
+    Two different issues (or PRs) may legitimately run against the same
+    checkout (the duplicate guard is per-work-item); an older job publishing
+    after a newer job prepped must not unset the newer job's marker, or a
+    crash of the newer job would lose its development-work attribution.
 
     Postconditions:
         - The marker is unset iff it equaled ``issue_number``; any other
@@ -186,32 +244,112 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
-def _is_deletable_per_issue(target: Path) -> bool:
-    """True iff *target* is an ephemeral per-issue git checkout safe to delete.
+def _is_deletable_ephemeral_checkout(target: Path) -> bool:
+    """True iff *target* is an ephemeral per-issue OR per-PR git checkout safe to delete.
 
     The three content conditions (2–4) shared by the resolve-time gate in
     ``_ephemeral_checkout_target`` and the under-lock re-validation in
     ``_cleanup_issue_checkout``: strictly under an ephemeral workspace root, an
-    ``issue-{N}`` per-issue final component, and carrying a ``.git`` entry. It
-    does NOT resolve or re-check the symlink-root condition (1) — callers pass an
-    already-resolved, non-symlink ``Path``.
+    ``issue-{N}`` per-issue OR ``pr-{N}`` per-PR (the address-comments flow's
+    namespacing — see ``unified_api``'s ``_resolve_repo_path``) final component,
+    and carrying a ``.git`` entry. It does NOT resolve or re-check the
+    symlink-root condition (1) — callers pass an already-resolved, non-symlink
+    ``Path``. The final-component test is a name-shape test, with the same
+    documented ``issue-{N}``/``pr-{N}``-named-repository collision
+    ``_ephemeral_checkout_target``'s condition 3 records; the two conditions
+    are one implementation, so they cannot disagree.
 
     Preconditions:
         - ``target`` is an already-resolved path (symlink-collapsed).
     Postconditions:
         - Returns True iff all three content conditions hold. Pure apart from
-          filesystem reads; never raises.
+          filesystem reads. May raise ``OSError`` if a filesystem read fails
+          for a reason ``Path.exists()`` does not itself swallow (e.g. a
+          permission error) — callers are responsible for catching it, same
+          as any other filesystem call.
     """
     return (
         is_within_ephemeral_workspace(target)
-        and is_per_issue_dir(target.name)
+        and (is_per_issue_dir(target.name) or is_per_pr_dir(target.name))
         and (target / ".git").exists()
     )
 
 
+# Both git subprocess calls in _checkout_remote_matches query the local git
+# config (no network round-trip), so this is generous headroom, not a tuned
+# network timeout; named so the two call sites can't drift independently.
+_REMOTE_QUERY_TIMEOUT_S = 10.0
+
+
+def _checkout_remote_matches(
+    repo_path: str, owner: str, repo: str, *, expected_host: Optional[str] = None
+) -> bool:
+    """True iff ``repo_path``'s ``origin`` remote points at ``owner/repo``.
+
+    An operator-pinned ``repo_path`` is only validated as "a git checkout"
+    (``(path / ".git").exists()``) elsewhere — that alone doesn't rule out an
+    existing checkout of a COMPLETELY DIFFERENT repository, which would let
+    this repo's PR remediation plan get committed and pushed to that unrelated
+    repository's ``origin`` if the token happens to have access to it. This
+    compares the checkout's actual remote against the requested coordinates
+    before that can happen.
+
+    Preconditions:
+        - ``repo_path`` names an existing directory with a ``.git`` entry
+          (checked by the caller first — this issues a real git subprocess
+          call and is not itself a "is this a checkout at all" check).
+        - ``expected_host``, when given, should be the caller's
+          ``GitHubClient.web_host`` (the clone/browse host matching whatever
+          ``GITHUB_API_URL`` this deployment is configured with) so a GitHub
+          Enterprise Server checkout is validated against its own host
+          instead of unconditionally requiring ``github.com``. ``None``
+          (the default) falls back to :func:`remote_url_matches`'s own
+          ``github.com`` default, preserving prior behavior for callers that
+          have no client handy.
+    Postconditions:
+        - Returns True iff ``git remote get-url origin`` (the fetch URL) AND
+          EVERY URL returned by ``git remote get-url --push --all origin``
+          (every configured push destination) succeed and match
+          ``owner``/``repo`` on this deployment's expected git host, per
+          :func:`shared.git.git_utils.remote_url_matches` (the same predicate
+          ``unified_api``'s clone-or-fetch reuse path uses, so the two never
+          drift on URL-parsing edge cases). Checking push URLs too closes a
+          gap the fetch-URL-only check left open: git supports one or more
+          separately configured ``remote.origin.pushurl`` entries that can
+          point at a different repository than the fetch URL, and ``git
+          push`` publishes to ALL of them — ``--all`` (rather than the
+          bare ``--push`` form, which only ever reports the FIRST configured
+          pushurl) is what surfaces every one of them, one per output line,
+          so a checkout with a second, unrelated push destination configured
+          is caught instead of silently passing on the first URL alone. When
+          no ``pushurl`` is configured, git's ``--push --all`` form already
+          falls back to reporting the single fetch URL, so this adds no
+          false negatives for the common case. Returns False on any git
+          failure (no ``origin`` remote, git not installed, timeout —
+          ``_git`` never raises, it degrades to a non-zero return code) or
+          when the push-URL listing is empty — an unverifiable remote is
+          treated the same as a mismatched one, never assumed to match.
+    """
+    kwargs = {} if expected_host is None else {"expected_host": expected_host}
+    rc, out = _git(repo_path, "remote", "get-url", "origin", timeout=_REMOTE_QUERY_TIMEOUT_S)
+    if rc != 0:
+        return False
+    if not remote_url_matches(out, owner, repo, **kwargs):
+        return False
+    rc, push_out = _git(
+        repo_path, "remote", "get-url", "--push", "--all", "origin", timeout=_REMOTE_QUERY_TIMEOUT_S
+    )
+    if rc != 0:
+        return False
+    push_urls = [line for line in push_out.splitlines() if line.strip()]
+    if not push_urls:
+        return False
+    return all(remote_url_matches(url, owner, repo, **kwargs) for url in push_urls)
+
+
 def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     """Resolve ``repo_path`` and return it iff it is a platform-owned per-issue
-    git checkout safe to delete; otherwise ``None``.
+    or per-PR git checkout safe to delete; otherwise ``None``.
 
     Resolving here (and handing the resolved ``Path`` back) means the path that is
     *validated* is the exact symlink-collapsed path the caller then deletes,
@@ -229,11 +367,20 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
        root or shallow system dir like ``/`` or ``/data`` is excluded because it
        is not under a workspace root), even if a caller sets the cleanup flag and
        points ``repo_path`` at someone else's repo;
-    3. its final component is the auto-derived ``issue-{N}`` per-issue shape
-       (``is_per_issue_dir``) — so a repo-level checkout that merely sits under an
-       ephemeral root (e.g. the PR-review path ``.../github_workspaces/owner/repo``)
-       is never deleted, matching the contract that only per-issue clones are
-       reclaimed;
+    3. its final component is the auto-derived ``issue-{N}`` per-issue OR
+       ``pr-{N}`` per-PR shape (``is_per_issue_dir``/``is_per_pr_dir``) — so a
+       repo-level checkout that merely sits under an ephemeral root (e.g. the
+       PR-review path ``.../github_workspaces/owner/repo``) is normally never
+       deleted, matching the contract that only per-issue/per-PR clones are
+       reclaimed. This is a NAME-SHAPE test with one documented collision: a
+       GitHub repository literally named ``issue-{N}`` or ``pr-{N}`` produces a
+       repo-level checkout whose own final component has the ephemeral shape,
+       and that checkout IS eligible. Tightening it would need a
+       root-layout-dependent depth rule (``<cache>/github_workspaces/{owner}/
+       {repo}/pr-N`` and ``<root>/{owner}_{repo}/pr-N`` put the checkout at
+       different depths), so the collision is documented rather than closed;
+       its blast radius is bounded — a deleted clone is recoverable by
+       re-cloning — and condition 2 still keeps every non-platform path out;
     4. it is actually a git checkout (carries a ``.git`` entry).
 
     Preconditions:
@@ -258,8 +405,25 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
     # path resolves without raising; passing the already-resolved path to is_within
     # keeps its internal resolve idempotent. Conditions 2–4 are the shared
-    # content gate (see ``_is_deletable_per_issue``).
-    if not _is_deletable_per_issue(resolved):
+    # content gate (see ``_is_deletable_ephemeral_checkout``), whose own
+    # docstring warns it can raise OSError on a filesystem read failure (e.g. a
+    # permission error) — caught here so this function's own "None on any
+    # resolution error" postcondition holds for that failure mode too.
+    try:
+        deletable = _is_deletable_ephemeral_checkout(resolved)
+    except OSError as e:
+        # Logged at WARNING, not silently swallowed and not at debug: without
+        # this an operator cannot tell a routine refusal ("not a platform-owned
+        # per-issue/per-PR checkout") from an environmental one (a permission
+        # error stopped the safety check), and the only other operator-visible
+        # trace is ``_cleanup_issue_checkout``'s "Refusing to remove unsafe or
+        # non-checkout path" line, which MISREPORTS an environmental failure as
+        # an unsafe path. ``_locked_rmtree`` logs the identical failure mode at
+        # its own validation site at warning too, so the two are observable at
+        # the same default log level for the same failure.
+        logger.warning("Could not validate ephemeral checkout target %s: %s", resolved, e)
+        return None
+    if not deletable:
         return None
     return resolved
 
@@ -281,29 +445,40 @@ def _is_ephemeral_checkout_path(repo_path: str) -> bool:
     return _ephemeral_checkout_target(repo_path) is not None
 
 
-def _locked_rmtree(target: Path, repo_path: str) -> None:
-    """Delete a resolved per-issue checkout while holding the shared clone flock.
+def _locked_rmtree(target: Path) -> None:
+    """Delete a resolved per-issue or per-PR checkout while holding the shared clone flock.
 
     Holds the SAME sibling ``flock`` that unified_api's ``_ensure_repo_clone``
-    takes around clone/fetch, keyed on the RESOLVED checkout path (not the raw
-    request string) so a symlinked request can't lock a different name and leave
-    the real checkout unguarded. Re-validates under the lock on the fixed
-    resolved ``target`` — never by re-resolving ``repo_path`` — so a symlink
-    swapped between the first resolve and lock acquisition cannot redirect the
-    delete. The lock file is released and closed but never unlinked (unlinking a
-    flock'd file lets a waiter keep the orphaned inode while a later run locks a
-    fresh one, so two runs would each think they hold "the" lock).
+    takes around clone/fetch, through the SAME primitive
+    (:func:`shared.concurrency.flock_lock`) rather than a second hand-rolled
+    copy of the open -> ``flock(LOCK_EX)`` -> ``flock(LOCK_UN)`` -> close
+    bookkeeping: the clone path and this cleanup path serialize against each
+    other on one lock file, so one implementation of that protocol serves both
+    and cannot drift out of step with the other. Keyed on the RESOLVED checkout
+    path (not the raw request string) so a symlinked request can't lock a
+    different name and leave the real checkout unguarded. Re-validates under the
+    lock on the fixed resolved ``target`` — never by re-resolving ``repo_path``
+    — so a symlink swapped between the first resolve and lock acquisition
+    cannot redirect the delete. ``flock_lock`` releases and closes but never
+    unlinks the lock file (unlinking a flock'd file lets a waiter keep the
+    orphaned inode while a later run locks a fresh one, so two runs would each
+    think they hold "the" lock), which is exactly what this caller needs.
 
     Preconditions:
-        - ``target`` is the resolved, non-symlink per-issue checkout returned by
-          ``_ephemeral_checkout_target``; ``repo_path`` is the original request
-          string (used only for the failure log line).
+        - ``target`` is the resolved, non-symlink per-issue or per-PR checkout
+          returned by ``_ephemeral_checkout_target``. Every log line here names
+          ``target`` — the path actually operated on — so one cleanup never
+          reports two different path spellings depending on its outcome. The
+          lock-failure lines name the lock file as WELL, never instead.
     Postconditions:
         - Best-effort: ``target`` is removed only if the lock is acquired and it
-          still resolves as a deletable per-issue checkout under the lock. Never
+          still resolves as a deletable per-issue or per-PR checkout under the lock. Never
           raises — any lock/rmtree failure is caught and logged so a successful
-          job is not turned into a failure. The success line is logged only after
-          ``rmtree`` returns.
+          job is not turned into a failure. ``flock_lock`` deliberately
+          propagates ``OSError`` from ``open``/``flock`` to its caller (different
+          callers want different handling); this one swallows it, mirroring
+          ``_ensure_repo_clone``'s own ``except OSError`` around the same
+          primitive. The success line is logged only after ``rmtree`` returns.
     """
     # clone_lock_path would only raise ValueError on an empty-name path, which a
     # validated per-issue target never is — but guard it anyway so a future change
@@ -314,58 +489,56 @@ def _locked_rmtree(target: Path, repo_path: str) -> None:
         logger.warning("Skipping checkout cleanup; invalid lock path for %s: %s", target, e)
         return
     try:
-        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
+        with flock_lock(lock_path):
+            # Re-validate under the lock on the fixed resolved ``target`` (see the
+            # docstring): rmtree does not follow symlinks *inside* the tree, and the
+            # resolved root is never a symlink, so a symlink planted in the checkout
+            # can't redirect the delete. Guarded the same way
+            # ``_ephemeral_checkout_target`` guards its own call: the gate's
+            # docstring warns it can raise OSError on a filesystem read failure,
+            # which must not escape this "never raises" cleanup path.
+            try:
+                deletable = _is_deletable_ephemeral_checkout(target)
+            except OSError as e:
+                logger.warning("Skipping checkout cleanup; could not validate %s: %s", target, e)
+                return
+            if not deletable:
+                logger.warning(
+                    "Checkout no longer a deletable per-issue or per-PR path under lock: %s", target
+                )
+                return
+            try:
+                shutil.rmtree(target)
+                logger.info("Removed ephemeral per-issue or per-PR checkout at %s", target)
+            except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
+                # exc_info so a partial-rmtree failure (the non-atomic case) is
+                # diagnosable from the traceback, not just the message.
+                logger.warning(
+                    "Failed to remove ephemeral checkout at %s: %s", target, e, exc_info=True
+                )
     except OSError as e:
-        # Can't take the lock (e.g. parent vanished) — skip rather than delete
-        # unsynchronised and risk racing a concurrent clone. Best-effort.
-        logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
-        return
-    try:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-        except OSError as e:
-            # flock can fail (e.g. ENOLCK on some network filesystems). Cleanup must
-            # never turn a successful job into a failure, so skip rather than let it
-            # propagate — honouring the "never raises" contract.
-            logger.warning(
-                "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
-            )
-            return
-        # Re-validate under the lock on the fixed resolved ``target`` (see the
-        # docstring): rmtree does not follow symlinks *inside* the tree, and the
-        # resolved root is never a symlink, so a symlink planted in the checkout
-        # can't redirect the delete.
-        if not _is_deletable_per_issue(target):
-            logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
-            return
-        try:
-            shutil.rmtree(target)
-            logger.info("Removed ephemeral per-issue checkout at %s", target)
-        except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
-            # exc_info so a partial-rmtree failure (the non-atomic case) is
-            # diagnosable from the traceback, not just the message.
-            logger.warning(
-                "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
-            )
-    finally:
-        # Release and close, but do NOT unlink the lock file (see the docstring).
-        # Both are wrapped so a degenerate flock/close can't break "never raises".
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            lock_file.close()
-        except OSError:
-            pass
+        # The lock could not be opened or taken (parent vanished, ENOLCK on some
+        # network filesystems, ...). Skip rather than delete unsynchronised and
+        # risk racing a concurrent clone, and never let it propagate — cleanup
+        # must not turn a successful job into a failure. Names ``target`` first
+        # so an operator grepping the checkout path finds this skip too, then
+        # the lock file that actually failed.
+        logger.warning(
+            "Skipping checkout cleanup for %s; could not acquire clone lock %s: %s",
+            target,
+            lock_path,
+            e,
+        )
 
 
 def _cleanup_issue_checkout(repo_path: str) -> None:
-    """Remove a platform-owned, ephemeral per-issue checkout after clean success.
+    """Remove a platform-owned, ephemeral per-issue OR per-PR checkout after clean success.
 
     Only called once the job has completed with every task merged and the work
-    published to a PR, so the local clone holds nothing the remote does not. The
-    folder is recreated by the caller's clone-or-fetch on a later run.
+    published to a PR (issue-driven flow) or every unresolved comment
+    successfully handled (the address-comments flow's per-PR checkout — see
+    ``is_per_pr_dir``), so the local clone holds nothing the remote does not.
+    The folder is recreated by the caller's clone-or-fetch on a later run.
 
     Concurrency:
         The ``rmtree`` runs while holding the SAME sibling ``flock`` that
@@ -377,14 +550,15 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         deliberately NOT unlinked: unlinking a flock'd file lets a waiter keep the
         old (now-orphaned) inode while a later run creates a fresh lock file and
         locks the new inode, so two runs would each think they hold "the" lock.
-        Leaving it makes a stable per-issue lock both clone and cleanup share; the
-        files are tiny and bounded by the number of distinct issues per repo.
+        Leaving it makes a stable per-issue/per-PR lock both clone and cleanup share;
+        the files are tiny and bounded by the number of distinct issues and PRs
+        per repo.
 
     Postconditions:
         - Best-effort: the checkout is removed only when
           ``_ephemeral_checkout_target`` resolves ``repo_path`` to a
-          platform-owned, non-shallow per-issue git checkout under an ephemeral
-          root, and the resolved (symlink-collapsed) path it returns is the one
+          platform-owned, non-shallow per-issue OR per-PR git checkout under an
+          ephemeral root, and the resolved (symlink-collapsed) path it returns is the one
           deleted; an unsafe path is refused (logged, left in place). Never
           raises — a cleanup failure (permissions, lock unavailable, race with a
           concurrent reader) must not turn a successful job into a failure; it is
@@ -405,11 +579,12 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
         return
 
-    _locked_rmtree(target, repo_path)
+    _locked_rmtree(target)
 
 
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
     """True if ref resolves to a commit and has commits not reachable from base_ref."""
+    from software_engineering_team.api import coding_team_main as _main
     rc, _ = _main._git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
     if rc != 0:
         return False
@@ -424,6 +599,7 @@ def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
 
 def _reachable_from(repo_path: str, tip: str, container: str) -> bool:
     """True if tip is an ancestor of container (resetting container keeps tip reachable)."""
+    from software_engineering_team.api import coding_team_main as _main
     rc, _ = _main._git(repo_path, "merge-base", "--is-ancestor", tip, container)
     return rc == 0
 
@@ -436,6 +612,7 @@ def _rescue_branch_name(repo_path: str, issue: Optional[int]) -> Optional[str]:
           `khala/rescue/<ts>`, suffixed `-1`..`-9` on collision; None when
           all ten candidates exist.
     """
+    from software_engineering_team.api import coding_team_main as _main
     tag = f"issue-{issue}-" if issue is not None else ""
     base = f"{RESCUE_BRANCH_PREFIX}{tag}{_main._utc_timestamp()}"
     for cand in [base] + [f"{base}-{i}" for i in range(1, 10)]:
@@ -447,6 +624,7 @@ def _rescue_branch_name(repo_path: str, issue: Optional[int]) -> Optional[str]:
 
 def _latest_issue_rescue_ref(repo_path: str, issue_number: int) -> Optional[str]:
     """Newest rescue ref for the issue (timestamps sort lexicographically)."""
+    from software_engineering_team.api import coding_team_main as _main
     rc, out = _main._git(
         repo_path,
         "for-each-ref",
@@ -471,6 +649,7 @@ def _working_tree_dirty(repo_path: str) -> Tuple[bool, bool, Optional[str]]:
           clean) so conflicting paths can be surfaced without dumping file
           contents.
     """
+    from software_engineering_team.api import coding_team_main as _main
     rc, msg = _main._git(repo_path, "status", "--porcelain")
     if rc != 0:
         return False, True, msg or "git status failed"
@@ -497,6 +676,7 @@ def _recover_dirty_tree(
           issue_number, else None; note is operator-facing.
         - On failure (error set) nothing has been deleted.
     """
+    from software_engineering_team.api import coding_team_main as _main
     same_issue = marker is not None and issue_number is not None and marker == issue_number
     rc, head = _main._git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
     head_branch = head.strip() if rc == 0 else "HEAD"
@@ -546,6 +726,7 @@ def _preserve_if_would_orphan(
           holds the tip; returns an error string when preservation was
           needed but failed (callers must fail closed).
     """
+    from software_engineering_team.api import coding_team_main as _main
     if branch == seed:
         return None
     if not _is_ahead(repo_path, branch, base_ref):
@@ -590,6 +771,7 @@ def _reconcile_remote_issue_ref(
           stale remote-tracking ref (if it was ahead) has been pinned via a
           rescue ref and then dropped, so it can no longer pose as live state.
     """
+    from software_engineering_team.api import coding_team_main as _main
     rc_probe, probe_out = _main._git(
         repo_path,
         "ls-remote",
@@ -729,6 +911,7 @@ def _merge_recovered_wip(
           (``note`` may be ``None`` when no merge was needed), or ``(None, err)``
           when a failed merge could not be cleanly aborted (caller fails closed).
     """
+    from software_engineering_team.api import coding_team_main as _main
     if not (
         wip_tip
         and _is_safe_ref(wip_tip)
@@ -756,6 +939,151 @@ def _merge_recovered_wip(
     )
 
 
+# Name under which a fork's clone URL is registered once it has been added as a
+# local git remote (see _ensure_named_remote). Fixed rather than per-fork: the
+# per-PR checkout isolation (unified_api's pr-{N} namespacing) already
+# guarantees at most one PR's head repository is ever relevant to a given
+# checkout, so there is never more than one fork remote to register at a time.
+_FORK_REMOTE_NAME = "khala-pr-head"
+
+
+def _ensure_named_remote(repo_path: str, remote: str) -> Tuple[str, Optional[str]]:
+    """Resolve ``remote`` to a git remote NAME safe for ``{name}/{branch}`` refs.
+
+    ``git fetch -- <repository> <branch>`` with a bare URL as ``<repository>``
+    only populates ``FETCH_HEAD`` — unlike fetching a CONFIGURED remote by
+    name, it does not create the ``refs/remotes/{name}/{branch}`` tracking ref
+    that ``_prepare_issue_branch`` (and ``_push_branch``'s ``--set-upstream``)
+    build via plain string interpolation. A fork-opened PR's remote (see
+    ``address_comments._pr_head_remote``) is such a URL, so it must be
+    registered as a real local remote before it is used that way.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout the caller can write to.
+        - ``remote`` is either the name of an already-configured git remote
+          (e.g. ``"origin"``) or an ``http(s)://`` URL. scp-style syntax
+          (``user@host:path``) and bare local paths contain no ``"://"``, so
+          they are NOT recognised as URLs here — they take the plain-name
+          branch below and are returned unregistered, unchanged. The only
+          current caller of the URL branch (``address_comments._pr_head_remote``)
+          always builds an ``https://`` value, so this is not reachable today.
+    Postconditions:
+        - When ``remote`` is already a plain name (no ``"://"``, e.g.
+          ``"origin"``), returns ``(remote, None)`` unchanged — no git call is
+          made, so the common (non-fork) path is a pure no-op.
+        - When ``remote`` is a URL, any embedded userinfo
+          (``https://user:token@host/...``) is stripped from it FIRST, so a
+          credential can never be written into the checkout's ``.git/config``
+          by the durable registration below, nor echoed back in this
+          function's error return. Scheme, host, port and path are otherwise
+          preserved exactly. The registration then uses that normalized URL.
+        - When ``remote`` is a URL, registers it as a durable local remote
+          named ``_FORK_REMOTE_NAME`` — ``git remote add`` on first use,
+          falling back to ``git remote set-url`` PLUS ``git remote set-url
+          --push`` when it is already registered (idempotent across retries on
+          the same checkout) — and returns ``(_FORK_REMOTE_NAME, None)``. The
+          fallback deliberately rewrites ``remote.<name>.pushurl`` too, so a
+          previously-configured push URL cannot leave push and fetch pointing
+          at different repositories for this remote.
+        - On a git failure returns ``(remote, error)``: the caller's value is
+          returned as given for a plain name, and userinfo-stripped for a URL
+          (never a name that failed to register) alongside
+          a message describing the failure.
+        - When a URL's authority cannot be parsed at all (malformed brackets),
+          returns ``("<scheme>://<unparsable-authority>", error)`` rather than
+          raising, so this function still reports EVERY failure as the second
+          tuple element. Neither element carries any part of the original
+          authority, since userinfo stripping is exactly what could not be
+          performed. Note the fallback's two writes are
+          NOT atomic: if the push-URL reset fails after the fetch URL was
+          already updated, the checkout's git config is left half-updated, so
+          callers must treat the returned error as fatal for this checkout
+          rather than retrying the fetch through the partially-configured
+          remote.
+    """
+    from software_engineering_team.api import coding_team_main as _main
+    if "://" not in remote:
+        return remote, None
+    # Strip any userinfo BEFORE the URL is written anywhere. Registration here
+    # is durable -- the remote is left in the checkout's `.git/config`
+    # afterward -- so a URL carrying an embedded credential would persist that
+    # credential to disk, contradicting the design in which the credential is
+    # supplied transiently per-invocation via `_git_auth_env(token)`. No
+    # current caller passes such a URL; this makes the guarantee structural
+    # rather than a property of the callers, and also keeps a credential out
+    # of the value echoed back in this function's error returns.
+    # Rebuild the authority by slicing the RAW netloc at the last "@" rather
+    # than from `parts.hostname`/`parts.port`: those two accessors normalize
+    # (hostname is lowercased, silently rewriting a case-sensitive host) and
+    # `parts.port` RAISES ValueError on an out-of-range port, which would
+    # escape this function and break the documented ``(remote, error)`` return
+    # contract for a malformed URL -- the one shape most likely to reach here.
+    # The raw slice preserves host case, port text, and bracketed IPv6
+    # authorities (``user@[::1]:8080``) verbatim, and drops exactly the
+    # userinfo.
+    #
+    # `urlsplit` itself raises ValueError before any of that when the authority
+    # has malformed brackets -- an unterminated `[` ("Invalid IPv6 URL") or a
+    # bracketed host that is not an IP literal ("... does not appear to be an
+    # IPv4 or IPv6 address"). That is the same contract break the `.port`
+    # accessor would have caused, one parse step earlier, so it is caught here
+    # and reported as the documented second tuple element. Neither the offending
+    # URL nor the parser's own message is echoed: the userinfo has not been
+    # stripped yet (that is what failed), and the parser quotes fragments of the
+    # authority it could not classify, so both are treated as potentially
+    # credential-bearing. The scheme alone is safe -- userinfo always follows
+    # "://" -- so it is kept to make the failure recognisable in a log.
+    try:
+        parts = urlsplit(remote)
+    except ValueError:
+        return (
+            f"{remote.split('://', 1)[0]}://<unparsable-authority>",
+            "could not parse fork remote URL: malformed authority "
+            "(unterminated or non-IP bracketed host)",
+        )
+    if "@" in parts.netloc:
+        remote = urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+    # `--` ends option parsing before the name/URL positionals: the only caller
+    # of this URL branch (`_pr_head_remote`) always builds an "https://..."
+    # value from GitHub's own API response, which can never start with `-`, but
+    # this stays consistent with the option-injection guard already used for
+    # the `fetch` calls below rather than relying on that invariant alone.
+    rc, add_msg = _main._git(repo_path, "remote", "add", "--", _FORK_REMOTE_NAME, remote)
+    if rc != 0:
+        rc, set_url_msg = _main._git(
+            repo_path, "remote", "set-url", "--", _FORK_REMOTE_NAME, remote
+        )
+        if rc != 0:
+            # `add` can fail for reasons OTHER than "already exists" (a
+            # corrupted .git dir, a config permission error, an invalid
+            # remote name) — `set-url` then fails too, for its own reason.
+            # Keep both messages: reporting only the set-url failure would
+            # hide the original add failure from an operator triaging a
+            # non-idempotency-related problem.
+            return (
+                remote,
+                f"could not register fork remote {_FORK_REMOTE_NAME!r}: "
+                f"add failed ({add_msg}); set-url failed ({set_url_msg})",
+            )
+        # `set-url` (without `--push`) only rewrites the fetch URL. If this
+        # remote was previously registered with a separately-configured
+        # `remote.<name>.pushurl` pointing elsewhere (e.g. a stale fork from
+        # an earlier run — see the module comment above on why there is only
+        # ever one fork remote to reuse), a later `git push` would still go
+        # to that stale destination even though `get-url` now reports the
+        # freshly-set fetch URL. Reset the push URL to match so push and
+        # fetch never diverge for this remote.
+        rc, push_set_url_msg = _main._git(
+            repo_path, "remote", "set-url", "--push", "--", _FORK_REMOTE_NAME, remote
+        )
+        if rc != 0:
+            return (
+                remote,
+                f"could not reset push URL for fork remote {_FORK_REMOTE_NAME!r}: {push_set_url_msg}",
+            )
+    return _FORK_REMOTE_NAME, None
+
+
 def resolve_remote_branch_sha(
     repo_path: str,
     remote: str,
@@ -774,22 +1102,85 @@ def resolve_remote_branch_sha(
     they have nothing coding-team-specific about them.
 
     Preconditions:
-        - repo_path is a git checkout; remote/branch are ref-shaped names
-          the caller trusts enough to fetch (this helper does not itself
-          validate them via ``_is_safe_ref`` -- callers that accept these
-          names from an untrusted source must validate first).
+        - repo_path is a git checkout.
     Postconditions:
+        - ``remote`` and ``branch`` are validated HERE, with ``_is_safe_ref``,
+          before any network call. This is the choke point every caller of the
+          authenticated fetch passes through, and the fetch carries the GitHub
+          PAT in ``http.extraHeader``: ``--`` stops git reading the value as an
+          option but not as a URL or an ``ext::`` transport, so an unvalidated
+          name could send the token to an arbitrary host or run a command.
+          Validating per-caller instead left whichever call site was added last
+          uncovered, which is exactly what happened. Returns
+          ``(False, "unsafe ...")`` without fetching.
         - On success returns ``(True, <full sha>)`` for ``<remote>/<branch>``
           exactly as fetched -- callers use this as a freshness anchor to
           compare against a later re-fetch of the same branch.
         - On failure (fetch or rev-parse error) returns ``(False, message)``,
           scrubbed of any credential.
     """
+    if not _is_safe_ref(remote):
+        return False, f"unsafe remote name: {remote!r}"
+    if not _is_safe_ref(branch):
+        return False, f"unsafe branch ref: {branch!r}"
     auth_env = _git_auth_env(token) if token else None
     ok, msg = _shared_resolve_remote_branch_sha(repo_path, remote, branch, env=auth_env)
     if not ok:
         return False, scrub_token_from_text(_scrub_auth_header_values(msg, auth_env))
     return True, msg
+
+
+def _verify_pinned_head(
+    repo_path: str,
+    remote_issue_ref: str,
+    integration_branch: str,
+    expected_head_sha: str,
+) -> Optional[str]:
+    """Verify ``remote_issue_ref``'s live head still matches the pinned SHA.
+
+    Split out of :func:`_prepare_issue_branch` (already long, with several
+    unrelated recovery concerns) because this is one self-contained
+    verification step with two distinct failure messages. The CALLER owns
+    where this runs — immediately after the fetch and before any local branch
+    is touched — since that ordering is what makes the read fresh.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout; ``remote_issue_ref`` is the
+          remote-tracking ref for ``integration_branch``, already fetched.
+        - ``expected_head_sha`` is the non-``None`` SHA the caller's plan was
+          grounded on. A caller with nothing pinned must not call this.
+    Postconditions:
+        - Returns ``None`` when the live head resolves and equals
+          ``expected_head_sha``, compared with ``casefold`` (git SHAs are hex
+          and case-insensitive, and nothing guarantees the caller's SHA and
+          ``rev-parse``'s output agree on letter case — a same-commit
+          comparison must not fail merely because of that).
+        - Returns a caller-facing error MESSAGE — never raises, never mutates
+          the checkout — when the ref cannot be resolved at all, or when it
+          resolves to a different commit. The two messages are distinct so an
+          operator can tell a deleted/unfetchable branch from one that moved.
+    """
+    from software_engineering_team.api import coding_team_main as _main
+
+    rc_live_head, live_head = _main._git(
+        repo_path, "rev-parse", "--verify", "--quiet", remote_issue_ref
+    )
+    live_head_sha = live_head.strip() if rc_live_head == 0 else None
+    if live_head_sha is None:
+        return (
+            f"integration_branch {integration_branch!r} head could not be resolved "
+            f"from {remote_issue_ref!r}; the branch may have been deleted or is not "
+            f"fetchable. Expected {expected_head_sha!r}, so branch prep was aborted "
+            "rather than applying the plan to an unknown head"
+        )
+    if live_head_sha.casefold() != expected_head_sha.casefold():
+        return (
+            f"integration_branch {integration_branch!r} head is {live_head_sha}, "
+            f"expected {expected_head_sha!r}; the branch moved after this run's plan "
+            "was grounded, so branch prep was aborted rather than applying it to "
+            "newer code"
+        )
+    return None
 
 
 def _prepare_issue_branch(
@@ -799,7 +1190,10 @@ def _prepare_issue_branch(
     integration_branch: str,
     token: Optional[str] = None,
     issue_number: Optional[int] = None,
+    *,
+    expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
+    base_remote: str = "origin",
 ) -> Tuple[bool, Optional[str], List[str]]:
     """Prepare development + integration branches, recovering interrupted state.
 
@@ -810,9 +1204,36 @@ def _prepare_issue_branch(
 
     Preconditions:
         - repo_path is a git checkout; ref arguments may be untrusted.
-        - expected_base_sha, when provided, is the default_branch HEAD SHA
-          observed at triage time (before this activity ran) -- used only as
-          a freshness check, never passed to git as a ref.
+        - ``expected_head_sha``, when provided, is the ``integration_branch``
+          head SHA a caller's plan was grounded on (e.g. review-comment
+          remediation, which triages and plans against a specific PR head
+          before this ever runs -- see ``address_comments._pr_became_stale``
+          for the same freshness concern applied earlier in that flow). This
+          activity can run long after that snapshot was taken (queued behind
+          other Temporal work), so the branch may have moved again in the
+          interim; passing it closes that last window. ``None`` (the default,
+          used by the plain issue-driven flow, which has no such snapshot to
+          pin to) skips the check entirely.
+        - ``base_remote`` names the remote pointing at the PR's (or issue's)
+          BASE repository — defaults to ``"origin"``, matching
+          ``unified_api._ensure_repo_clone``'s convention of always cloning
+          the base repository under that name. Only relevant when ``remote``
+          resolves to a fork remote (see the ``is_fork_remote`` note below);
+          non-fork callers use ``remote`` for both fetches regardless of this
+          value.
+        - ``expected_base_sha``, when provided, is the ``default_branch`` HEAD
+          SHA observed at triage time (before this activity ran) -- used only
+          as a freshness check, never passed to git as a ref.
+        - Both optional SHA parameters use ONE presence convention: ``None``
+          means "not provided" (the check is skipped) and any other value --
+          including ``""`` -- means "provided" and is compared against the live
+          ref. A SHA is never legitimately empty, so an empty string is a caller
+          bug that fails the job closed rather than silently disabling the
+          freshness check the caller asked for. Both comparisons are
+          case-insensitive (``casefold`` on both sides): git SHAs are hex, and
+          nothing guarantees a caller's snapshotted SHA and ``rev-parse``'s
+          output agree on letter case, so a same-commit comparison must not
+          fail merely because of that.
     Postconditions (success):
         - integration_branch is checked out with a clean working tree;
           khala.active-issue records issue_number when provided; every commit
@@ -822,13 +1243,23 @@ def _prepare_issue_branch(
     Postconditions (failure):
         - No uncommitted work has been deleted and no commit that was
           reachable on entry has become unreachable.
-        - When expected_base_sha is provided and the freshly-fetched
-          default_branch HEAD no longer matches it, fails closed with an
+        - When ``expected_head_sha`` is provided and, after fetching, the
+          remote's live ``integration_branch`` tip does not resolve to that
+          exact SHA (a newer commit landed, or the branch is gone), returns
+          ``False`` with an explanatory message BEFORE any checkout/reset of
+          ``integration_branch`` runs -- dirty-tree recovery may already have
+          committed WIP to a rescue branch by this point (no work is lost,
+          per the failure postcondition above), but the seed/checkout that
+          would apply the caller's plan to the branch has not -- the plan was
+          grounded on stale code and must not be applied to newer state.
+        - When ``expected_base_sha`` is provided and the freshly-fetched
+          ``default_branch`` HEAD no longer matches it, fails closed with an
           error naming both SHAs -- before any dirty-tree recovery, seed
           selection, or checkout runs -- since the plan this job carries was
           grounded on the expected SHA and must not be silently applied to
           different code.
     """
+    from software_engineering_team.api import coding_team_main as _main
     notes: List[str] = []
 
     # Defense-in-depth: reject ref names that could be parsed as git options.
@@ -840,10 +1271,41 @@ def _prepare_issue_branch(
     if not _is_safe_ref(integration_branch):
         return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
 
-    # `fetch` is the only network op here (the checkouts below are local), so it
-    # needs the credential. The clone was authenticated transiently by the
-    # unified API; that auth is not persisted, so we re-supply it per fetch.
-    auth_env = _git_auth_env(token) if token else None
+    # A fork PR's remote is a bare URL (see _pr_head_remote); resolve it to a
+    # registered local remote NAME before it is used to build {remote}/{branch}
+    # refs below — a URL used directly there would silently never resolve.
+    # is_fork_remote tracks whether resolution actually rewrote the value (a
+    # URL was given), as opposed to a plain name (e.g. "origin", or an
+    # operator's custom remote name) passing through unchanged.
+    original_remote = remote
+    remote, remote_err = _ensure_named_remote(repo_path, remote)
+    if remote_err:
+        return False, remote_err, notes
+    # The `"://"` half is NOT redundant with the inequality: on its own, the
+    # inequality infers "a URL was resolved" from the mere fact that
+    # `_ensure_named_remote` returned a different string. That holds only while
+    # that helper passes plain names through byte-for-byte, which is its
+    # documented contract but not something this call site can enforce. Were it
+    # ever to normalize a plain NAME (trim, case-fold, alias-map), a non-fork
+    # caller would be silently reclassified as a fork and its `default_branch`
+    # fetched from `base_remote` instead of the caller's own remote -- changing
+    # which repository the plan is grounded on, with no error. Testing the
+    # ORIGINAL value for `"://"` mirrors the exact predicate
+    # `_ensure_named_remote` branches on, so only a genuine URL can set this.
+    is_fork_remote = remote != original_remote and "://" in original_remote
+
+    # default_branch always lives in the checkout's own base remote — the PR's
+    # (or issue's) BASE repository, which unified_api's _ensure_repo_clone always
+    # clones from — so a resolved FORK remote (only ever relevant to
+    # integration_branch, the PR's head) must not be used to fetch it too.
+    # Every non-fork caller keeps its prior behaviour exactly: `remote` is
+    # "origin" (or an operator's custom remote name) for both fetches, unchanged.
+    default_branch_remote = base_remote if is_fork_remote else remote
+    # `resolve_remote_branch_sha`'s own precondition documents that it does not
+    # validate its `remote` argument itself -- defense-in-depth, matching the
+    # `_is_safe_ref` checks on `default_branch`/`integration_branch` above.
+    if not _is_safe_ref(default_branch_remote):
+        return False, f"unsafe base remote: {default_branch_remote!r}", notes
     # Resolve via the same consolidated primitive the route uses to capture
     # the triaged SHA (fetch + FETCH_HEAD rev-parse, credential-scrubbed) --
     # not a second inline copy of that sequence. Rebinding `base_ref` to the
@@ -852,13 +1314,15 @@ def _prepare_issue_branch(
     # exact commit -- immune to a concurrent fetch on a shared checkout (e.g.
     # another job's own base-SHA resolution) moving the tracking ref again
     # before seed selection/checkout consume it.
-    ok, base_ref = _main.resolve_remote_branch_sha(repo_path, remote, default_branch, token)
+    ok, base_ref = _main.resolve_remote_branch_sha(
+        repo_path, default_branch_remote, default_branch, token
+    )
     if not ok:
         return False, base_ref, notes
     # This freshness check must also precede dirty-tree recovery, same as the
     # unsafe-ref checks above: a job whose plan is already known stale must
     # not commit WIP or create rescue branches on its way to being rejected.
-    if expected_base_sha and base_ref != expected_base_sha:
+    if expected_base_sha is not None and base_ref.casefold() != expected_base_sha.casefold():
         return (
             False,
             f"base branch `{default_branch}` moved from `{expected_base_sha}` to "
@@ -893,6 +1357,10 @@ def _prepare_issue_branch(
     # path's _write_active_issue overwrite; every failure exit retains it
     # so a retry can still attribute and continue the prior work.
 
+    # `fetch` is the only network op here (the checkouts below are local), so it
+    # needs the credential. The clone was authenticated transiently by the
+    # unified API; that auth is not persisted, so we re-supply it per fetch.
+    auth_env = _git_auth_env(token) if token else None
     # The issue branch may exist remotely from a previous job that pushed
     # before dying; fetch it as a continuation candidate (absence is fine).
     remote_issue_ref = f"{remote}/{integration_branch}"
@@ -911,6 +1379,19 @@ def _prepare_issue_branch(
         )
         if reconcile_err:
             return False, reconcile_err, notes
+
+    if expected_head_sha is not None:
+        # Checked right after the fetch above (the freshest possible read of
+        # the remote) and before any local branch is touched below, so a stale
+        # plan is rejected here rather than being silently applied to newer
+        # code that landed while this activity was queued or the caller's own
+        # LLM round-trips were in flight. Position is load-bearing; the check
+        # itself is factored out.
+        pin_err = _verify_pinned_head(
+            repo_path, remote_issue_ref, integration_branch, expected_head_sha
+        )
+        if pin_err:
+            return False, pin_err, notes
 
     seed = _select_seed(
         repo_path,
@@ -978,6 +1459,7 @@ def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, O
     to what the subsequent push expects (``branch`` points at ``source_ref``);
     the working tree is only ever left detached, never on a different branch.
     """
+    from software_engineering_team.api import coding_team_main as _main
     if not _is_safe_ref(branch) or not _is_safe_ref(source_ref):
         return False, f"unsafe ref: {branch!r} <- {source_ref!r}"
 
@@ -997,8 +1479,34 @@ def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, O
 def _push_branch(
     repo_path: str, remote: str, branch: str, token: Optional[str] = None
 ) -> Tuple[bool, Optional[str]]:
+    """Force-with-lease push ``branch`` to ``remote``, setting its upstream.
+
+    Preconditions:
+        - ``repo_path`` is a git checkout the caller can write to.
+        - ``remote`` is either an existing remote NAME (e.g. ``"origin"``, an
+          operator's custom name) or a bare HTTPS clone URL (a fork-opened
+          PR's head, see ``address_comments._pr_head_remote``) — either form
+          the same ``_prepare_issue_branch`` accepts.
+    Postconditions:
+        - When ``remote`` is a URL, it is registered as a durable local git
+          remote (see ``_ensure_named_remote``) BEFORE the push — a bare URL
+          pushes fine directly, but ``--set-upstream``/``-u`` below has
+          nothing to name the tracking branch after without a registered
+          remote. The registered remote is left in place afterward (not
+          cleaned up); ``_ensure_named_remote``'s own registration is
+          idempotent, so a retry on the same checkout re-registers the same
+          name rather than erroring.
+        - Returns ``(True, None)`` on a successful push with upstream set;
+          ``(False, message)`` otherwise — an unsafe ``branch`` name, a failed
+          remote registration, or a failed ``git push`` are all reported this
+          way, never raised.
+    """
+    from software_engineering_team.api import coding_team_main as _main
     if not _is_safe_ref(branch):
         return False, f"unsafe branch name: {branch!r}"
+    remote_name, remote_err = _ensure_named_remote(repo_path, remote)
+    if remote_err:
+        return False, remote_err
     # Push is a network op against the (HTTPS) origin; supply the transient
     # credential so the PR branch actually lands instead of hanging on an auth
     # prompt until the timeout (GIT_TERMINAL_PROMPT=0 turns that into a fast
@@ -1008,7 +1516,7 @@ def _push_branch(
         "push",
         "--force-with-lease",
         "-u",
-        remote,
+        remote_name,
         branch,
         timeout=180,
         env=_git_auth_env(token) if token else None,

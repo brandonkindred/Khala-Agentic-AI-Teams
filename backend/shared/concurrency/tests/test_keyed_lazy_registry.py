@@ -5,11 +5,10 @@ return-same-object, independence between keys, raise-and-retry on a failing
 factory, and the cross-key nesting rules the class documents as preconditions.
 
 The concurrent-first-call proof — that a key's value is built exactly once under
-genuinely concurrent first access, the postcondition the class leads with — is
-**not yet written**, here or anywhere else in this repository. It is planned as
-one dedicated thread-safety suite covering this class and ``LazySingleton``
-together, so the property is proven once rather than twice. Until that lands,
-treat the guarantee as reasoned-but-unproven: no test in this tree exercises it.
+genuinely concurrent first access, the postcondition the class leads with — lives
+in ``test_lazy_thread_safety.py``, one dedicated thread-safety suite covering this
+class and ``LazySingleton`` together, so the property is proven once rather than
+twice.
 """
 
 from __future__ import annotations

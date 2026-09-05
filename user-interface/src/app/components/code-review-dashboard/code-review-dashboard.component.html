@@ -85,19 +85,30 @@
           } @else {
           <div class="cr-repos-list">
             @for (repo of fr; track repo.full_name; let i = $index) {
+              <!--
+                No tabindex on the nested description span below: a focusable
+                descendant of a <button> is invalid per the HTML interactive-content
+                model and would add a second tab stop to every repo row. The tooltip
+                is bound on the button itself instead, using repo.description
+                directly (coalesced to '' only to satisfy MatTooltip's non-nullable
+                input type) — MatTooltip already treats an empty message as "no
+                tooltip", so the existing @if guard below is only needed to keep the
+                visible span out of the DOM when there's no description.
+              -->
               <button
                 class="cr-repo-row"
                 type="button"
                 [class.cr-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
                 [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
                 [attr.aria-controls]="'repo-pulls-' + i"
+                [matTooltip]="repo.description ?? ''"
                 (click)="toggleRepo(repo)"
               >
                 <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
                 <span class="cr-repo-row__main">
                   <span class="cr-repo-row__name">{{ repo.full_name }}</span>
                   @if (repo.description) {
-                    <span class="cr-repo-row__description" [matTooltip]="repo.description">{{ repo.description }}</span>
+                    <span class="cr-repo-row__description">{{ repo.description }}</span>
                   }
                 </span>
                 @if (repo.archived) {

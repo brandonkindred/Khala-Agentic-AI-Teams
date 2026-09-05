@@ -14,8 +14,8 @@ directly compare their outcomes. This module closes that last gap: it
 drives the identical fixture-defined scenario through both
 ``StrategyLabOrchestrator.run_cycle`` (thread mode) and
 ``StrategyLabCycleWorkflow.run`` (Temporal mode) and asserts both resolve
-the re-entry to the *same* ``PipelineStage`` -- the epic's (#7269) central
-cross-mode parity claim, proven end-to-end rather than asserted only in a
+the re-entry to the *same* ``PipelineStage`` -- the cross-mode parity work's central
+claim, proven end-to-end rather than asserted only in a
 PR description.
 
 Both modes' resume-stage determinations are already produced by one shared
@@ -205,7 +205,7 @@ async def test_thread_and_temporal_modes_resume_from_same_pipeline_stage(
 ) -> None:
     """Thread mode and Temporal mode, driven through the identical shared
     ``SpecImplementabilityError``-after-partial-convergence scenario, must
-    resume from the same ``PipelineStage`` -- the parity claim epic #7269's
+    resume from the same ``PipelineStage`` -- the parity claim's
     shared checkpoint model exists to guarantee. No wall-clock timing is
     asserted anywhere in this test (``_workflow_environment()`` runs
     Temporal's own embedded, time-skipping test server); every assertion

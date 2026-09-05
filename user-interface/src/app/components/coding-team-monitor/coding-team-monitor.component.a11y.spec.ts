@@ -45,12 +45,15 @@ describe('CodingTeamMonitorComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
-  it('exposes exactly one polite live region, carrying the summary text', async () => {
+  // The summary's actual text — including that it settles to the latest value after a debounce
+  // window rather than announcing every poll — is a fake-timer behavior test, so it lives in
+  // coding-team-monitor.component.spec.ts. This spec only asserts the structural a11y contract:
+  // exactly one polite live region exists, regardless of what it currently contains.
+  it('exposes exactly one polite live region for the debounced summary', async () => {
     const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
     const liveRegions = el.querySelectorAll('[aria-live]');
     expect(liveRegions.length).toBe(1);
     expect(liveRegions[0].getAttribute('aria-live')).toBe('polite');
-    expect(liveRegions[0].textContent).toContain('47% complete');
     await expectNoAxeViolations(el);
   }, 15000);
 

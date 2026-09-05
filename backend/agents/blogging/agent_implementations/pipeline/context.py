@@ -31,6 +31,16 @@ class PipelineContext:
           stage runs.
         - ``planning_phase_result``/``plan``/``elicited_stories_text`` are populated
           by the planning stage before the draft stage reads them.
+        - ``covered_sections`` is the de-duplicated set of plan section titles that
+          already received an author narrative (a fresh interview or a story-bank
+          hit). It is populated by the planning stage in thread mode: it is
+          ``None`` before the planning stage runs and a ``set[str]`` (possibly
+          empty) afterward. Consumption by the draft stage and threading it
+          across the Temporal activity boundary are both follow-ups —
+          ``PlanningStageResult`` doesn't carry it yet and neither
+          ``draft_stage_activity`` nor ``gates_stage_activity`` re-seed it
+          (unlike ``elicited_stories_text``, which both do) — so today nothing
+          reads this field in either execution mode.
         - ``selected_title`` is populated by the planning stage, after outline
           approval (``_run_title_selection``, a no-op without a configured job
           store). The draft stage reads it and threads it into the writer/revision
@@ -65,6 +75,7 @@ class PipelineContext:
     planning_phase_result: Optional[PlanningPhaseResult] = None
     plan: Optional[ContentPlan] = None
     elicited_stories_text: Optional[str] = None
+    covered_sections: Optional[set[str]] = None
     selected_title: Optional[str] = None
     draft_result: Optional["WriterOutput"] = None
     status: PipelineStatus = "PASS"

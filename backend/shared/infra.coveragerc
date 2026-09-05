@@ -1,11 +1,23 @@
-# Coverage config for the shared-infra CI job (combine-shared-infra in ci.yml):
-# the neutral shared_* packages extracted from software_engineering_team plus the
-# coding_team_service composition root, gated at the repo's 90% line-coverage
-# floor (see CLAUDE.md).
+# Coverage config for the shared-infra CI job (combine-shared-infra in ci.yml),
+# which gates every package under backend/shared/ that has a test suite at the
+# repo's 90% line-coverage floor (see CLAUDE.md). Exceptions: shared.postgres,
+# shared.neo4j and shared.cache carry their own gated jobs (they need live
+# service containers) and stay out of this one.
 #
-# The gate no longer re-runs tests. The SE and coding_team matrix entries record
-# shared coverage into per-suite data-file artifacts; combine-shared-infra
-# downloads them, `coverage combine`s, and reports against this config.
+# The gate never runs tests itself. Two upstream jobs record shared coverage
+# into per-suite data-file artifacts; combine-shared-infra downloads them,
+# `coverage combine`s, and reports against this config:
+#
+#   * test-backend's software_engineering matrix entry — the neutral packages
+#     extracted from software_engineering_team (command_runner, repo_context,
+#     llm_recovery, dev_models, git, hitl, run_thread_registry), which the SE
+#     suite exercises as dependencies. command_runner, repo_context,
+#     llm_recovery and dev_models have no test suite of their own; git, hitl
+#     and run_thread_registry do, run separately below, and simply union with
+#     this data file at combine time.
+#   * test-shared-packages — every shared package whose tests live under
+#     backend/shared/<pkg>/tests/, plus the loose modules covered by
+#     backend/shared/tests/.
 
 # Cross-runner path normalization for `coverage combine`. The SE, coding_team,
 # and combine jobs all checkout to the same absolute prefix today, so combine
@@ -33,3 +45,9 @@ omit =
     # drive live git worktrees and are exercised by integration tests, not unit
     # tests. branch_utils (pure helpers) remains gated.
     */shared/git/git_utils.py
+    # Test-only scaffolding: a shared WorkflowEnvironment bootstrap imported
+    # solely from test files (see its module docstring), kept outside a tests/
+    # directory only so several suites can share one copy. Excluded on the same
+    # grounds as */tests/* above — shared.temporal clears the 90% floor either
+    # way, so this is a correctness cleanup, not a threshold concession.
+    */shared/temporal/testing.py

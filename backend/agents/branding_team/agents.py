@@ -568,11 +568,10 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         through the ``branding_visual_identity`` agent_key tier.
     """
     assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
-    return build_agent(
+    return _build_spec_agent(
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
-        system_prompt=render_agent_prompt(_moodboard_conceptualist_prompt(variant)),
-        structured_output=MoodBoardConcept,
+        prompt=_moodboard_conceptualist_prompt(variant),
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -604,11 +603,10 @@ def make_converge_decider() -> Agent:
         selects a winning candidate. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="converge_decider",
         description="Scores moodboard candidates and selects a winner.",
-        system_prompt=render_agent_prompt(_CONVERGE_DECIDER_PROMPT),
-        structured_output=CreativeRefinementDecision,
+        prompt=_CONVERGE_DECIDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -632,11 +630,10 @@ def make_logo_specifier() -> Agent:
         direction. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="logo_specifier",
         description="Defines logo suite with usage rules.",
-        system_prompt=render_agent_prompt(_LOGO_SPECIFIER_PROMPT),
-        structured_output=LogoSuiteOutput,
+        prompt=_LOGO_SPECIFIER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -661,11 +658,10 @@ def make_color_system_builder() -> Agent:
         rationale for the winning moodboard direction. The agent is
         routed through the ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="color_system_builder",
         description="Builds the brand color palette with psychological rationale.",
-        system_prompt=render_agent_prompt(_COLOR_SYSTEM_BUILDER_PROMPT),
-        structured_output=ColorPaletteSystemOutput,
+        prompt=_COLOR_SYSTEM_BUILDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -690,11 +686,10 @@ def make_typography_builder() -> Agent:
         ``TYPOGRAPHY_SYSTEM_MAX``. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="typography_builder",
         description="Defines the typography system.",
-        system_prompt=render_agent_prompt(_TYPOGRAPHY_BUILDER_PROMPT),
-        structured_output=TypographySystemOutput,
+        prompt=_TYPOGRAPHY_BUILDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -714,11 +709,10 @@ def make_iconography_director() -> Agent:
         moodboard direction. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="iconography_director",
         description="Defines iconography and illustration style.",
-        system_prompt=render_agent_prompt(_ICONOGRAPHY_PROMPT),
-        structured_output=IconographyOutput,
+        prompt=_ICONOGRAPHY_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -739,11 +733,10 @@ def make_photography_video_director() -> Agent:
         is routed through the ``branding_visual_identity`` agent_key
         tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="photography_video_director",
         description="Defines photography direction, video direction, and motion principles.",
-        system_prompt=render_agent_prompt(_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT),
-        structured_output=PhotographyVideoOutput,
+        prompt=_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -767,11 +760,10 @@ def make_voice_tone_builder() -> Agent:
         direction. The agent is routed through the
         ``branding_visual_identity`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="voice_tone_builder",
         description="Defines voice/tone spectrum and language dos/don'ts.",
-        system_prompt=render_agent_prompt(_VOICE_TONE_BUILDER_PROMPT),
-        structured_output=VoiceToneOutput,
+        prompt=_VOICE_TONE_BUILDER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -792,11 +784,10 @@ def make_design_system_codifier() -> Agent:
         agent is routed through the ``branding_visual_identity``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
-        system_prompt=render_agent_prompt(_DESIGN_SYSTEM_CODIFIER_PROMPT),
-        structured_output=DesignSystemDefinition,
+        prompt=_DESIGN_SYSTEM_CODIFIER_PROMPT,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -823,11 +814,10 @@ def make_brand_experience_principler() -> Agent:
         journey moments, and sensory elements. The agent is routed
         through the ``branding_channel_activation`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_experience_principler",
         description="Defines brand experience principles, signature moments, and sensory elements.",
-        system_prompt=render_agent_prompt(_BRAND_EXPERIENCE_PRINCIPLER_PROMPT),
-        structured_output=BrandExperiencePrinciplesOutput,
+        prompt=_BRAND_EXPERIENCE_PRINCIPLER_PROMPT,
         agent_key=_PHASE4_AGENT_KEY,
     )
 
@@ -932,11 +922,10 @@ def make_brand_architecture_builder() -> Agent:
         and a terminology glossary. The agent is routed through the
         ``branding_channel_activation`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_architecture_builder",
         description="Defines brand architecture rules, naming conventions, and terminology.",
-        system_prompt=render_agent_prompt(_BRAND_ARCHITECTURE_BUILDER_PROMPT),
-        structured_output=BrandArchitectureOutput,
+        prompt=_BRAND_ARCHITECTURE_BUILDER_PROMPT,
         agent_key=_PHASE4_AGENT_KEY,
     )
 
@@ -960,11 +949,10 @@ def make_brand_in_action_illustrator() -> Agent:
         agent is routed through the ``branding_channel_activation``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_in_action_illustrator",
         description="Creates brand-in-action do/don't examples.",
-        system_prompt=render_agent_prompt(_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT),
-        structured_output=BrandInActionOutput,
+        prompt=_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT,
         agent_key=_PHASE4_AGENT_KEY,
     )
 
@@ -991,11 +979,10 @@ def make_ownership_definer() -> Agent:
         matrix. The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="ownership_definer",
         description="Defines brand ownership model and decision authority matrix.",
-        system_prompt=render_agent_prompt(_OWNERSHIP_DEFINER_PROMPT),
-        structured_output=OwnershipOutput,
+        prompt=_OWNERSHIP_DEFINER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1015,11 +1002,10 @@ def make_approval_workflow_designer() -> Agent:
         protocols. The agent is routed through the
         ``branding_governance`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="approval_workflow_designer",
         description="Designs approval workflows and agency briefing protocols.",
-        system_prompt=render_agent_prompt(_APPROVAL_WORKFLOW_DESIGNER_PROMPT),
-        structured_output=ApprovalWorkflowsOutput,
+        prompt=_APPROVAL_WORKFLOW_DESIGNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1039,11 +1025,10 @@ def make_asset_wiki_planner() -> Agent:
         The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="asset_wiki_planner",
         description="Plans asset management and brand wiki backlog.",
-        system_prompt=render_agent_prompt(_ASSET_WIKI_PLANNER_PROMPT),
-        structured_output=AssetWikiOutput,
+        prompt=_ASSET_WIKI_PLANNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1062,11 +1047,10 @@ def make_training_planner() -> Agent:
         defines the brand training and onboarding plan. The agent is
         routed through the ``branding_governance`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="training_planner",
         description="Plans brand training and onboarding programmes.",
-        system_prompt=render_agent_prompt(_TRAINING_PLANNER_PROMPT),
-        structured_output=TrainingOnboardingOutput,
+        prompt=_TRAINING_PLANNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1086,11 +1070,10 @@ def make_kpi_designer() -> Agent:
         points. The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="kpi_designer",
         description="Designs brand health KPIs with tracking methodology.",
-        system_prompt=render_agent_prompt(_KPI_DESIGNER_PROMPT),
-        structured_output=BrandHealthKPIsOutput,
+        prompt=_KPI_DESIGNER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1110,11 +1093,10 @@ def make_evolution_framer() -> Agent:
         cadence. The agent is routed through the ``branding_governance``
         agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="evolution_framer",
         description="Defines the brand evolution framework and version control cadence.",
-        system_prompt=render_agent_prompt(_EVOLUTION_FRAMER_PROMPT),
-        structured_output=EvolutionFrameworkOutput,
+        prompt=_EVOLUTION_FRAMER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 
@@ -1141,11 +1123,10 @@ def make_brand_rules_codifier() -> Agent:
         ``BRAND_GUIDELINES_MIN``/``BRAND_GUIDELINES_MAX``). The agent is
         routed through the ``branding_governance`` agent_key tier.
     """
-    return build_agent(
+    return _build_spec_agent(
         name="brand_rules_codifier",
         description="Codifies top-level brand governance rules.",
-        system_prompt=render_agent_prompt(_BRAND_RULES_CODIFIER_PROMPT),
-        structured_output=BrandGuidelinesOutput,
+        prompt=_BRAND_RULES_CODIFIER_PROMPT,
         agent_key=_PHASE5_AGENT_KEY,
     )
 

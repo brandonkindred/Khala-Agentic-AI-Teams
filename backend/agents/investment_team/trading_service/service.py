@@ -126,6 +126,18 @@ _MAX_ORDER_EVENTS = 20
 # is re-exported here for the many call sites and external importers that read it
 # off this module.
 
+#: The ``engine_exit:stop_loss`` literal, defined once — unlike
+#: ``ENGINE_EXIT_REASON_PREFIX`` above, this one is NOT engine-layer-canonical
+#: and re-exported; it is defined directly in this module because every site
+#: that stamps it also lives in this module: ``_EngineExitDispatcher.
+#: _build_close_order`` on the bar-close path, ``resolve_resting_stop_loss_attachment``
+#: on the resting-order path, and ``_build_exit_reconciler``'s closure for a
+#: reconciled strategy close. The ``alignment_checks`` / ``exit_rule_conformance``
+#: quality gates match it byte-exactly. Referencing this one constant from all
+#: three same-module sites means an edit to the suffix can't desynchronize one
+#: from another.
+ENGINE_EXIT_REASON_STOP_LOSS = f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+
 
 def _engine_exit_kind(reason: str) -> str:
     """The bare ``rule_kind`` encoded in an engine-exit order ``reason``.
@@ -286,7 +298,7 @@ def _build_exit_reconciler(
             if kind == "take_profit":
                 return f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
             if kind == "stop_loss":
-                return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+                return ENGINE_EXIT_REASON_STOP_LOSS
             if kind == "signal_exit":
                 # Match the engine's emitted form ``engine_exit:signal_exit[N]``
                 # (``_build_close_order``) so the rule-firing-rate gate, which
@@ -1243,11 +1255,15 @@ class _EngineExitDispatcher:
         """
         self._next_seq += 1
         close_side = tracked.close_side
-        reason = (
-            f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
-            if intent.rule_kind == "signal_exit"
-            else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
-        )
+        if intent.rule_kind == "signal_exit":
+            reason = f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
+        elif intent.rule_kind == "stop_loss":
+            # Must be the byte-stable ENGINE_EXIT_REASON_STOP_LOSS literal, not
+            # folded into the generic branch below — alignment_checks /
+            # exit_rule_conformance match it exactly (no [index] suffix).
+            reason = ENGINE_EXIT_REASON_STOP_LOSS
+        else:
+            reason = f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         if intent.is_scaled_rung:
             # Scaled rung: close this rung's fraction of the full opened position
             # (``scale_in_qty`` is irrelevant — a true partial deliberately leaves
@@ -1910,7 +1926,14 @@ def resolve_resting_stop_loss_attachment(
     this ``ref_price``-anchored preview verbatim (``ref_price`` is the
     signal bar's close, which can gap away from where the entry actually
     fills — see :class:`StopAttachment`'s ``entry_price_pct`` field for why
-    that matters here specifically).
+    that matters here specifically). Also carries
+    ``reason == ENGINE_EXIT_REASON_STOP_LOSS`` — the same named constant
+    :meth:`_EngineExitDispatcher._build_close_order` stamps for a
+    ``StopLossRule`` close on the bar-close path — so materialization (see
+    :class:`StopAttachment`'s ``reason`` field) tags the resting fill with
+    the same, gate-relied-upon attribution regardless of which path actually
+    closes the position, instead of the generic ``exit_leg_{idx}`` label the
+    rule-agnostic ``attached_exits`` plumbing would otherwise derive.
 
     Raises:
         ValueError: if ``rule`` is not resting-eligible (via
@@ -1932,7 +1955,12 @@ def resolve_resting_stop_loss_attachment(
     # attachment's final shape is established in one step; StopAttachment is a
     # Pydantic BaseModel, so model_copy (not dataclasses.replace) is the
     # correct mechanism here.
-    return attachment.model_copy(update={"entry_price_pct": rule.pct})
+    return attachment.model_copy(
+        update={
+            "entry_price_pct": rule.pct,
+            "reason": ENGINE_EXIT_REASON_STOP_LOSS,
+        }
+    )
 
 
 @dataclass
@@ -3343,10 +3371,11 @@ class TradingService:
                         # Register the parent as eligible to carry bracket
                         # children when the strategy attached protective legs;
                         # non-bracket entries pay zero overhead (flag is False).
-                        expect_brackets=(
-                            req.attached_stop_loss is not None
-                            or req.attached_take_profit is not None
-                        ),
+                        # One predicate, not a hand-rolled OR: an entry whose
+                        # exit legs live only in ``attached_exits`` must register
+                        # as bracket-eligible too, or materializing its children
+                        # on fill raises "not a known top-level order id".
+                        expect_brackets=req.has_attached_exits,
                     )
                     # Pin engine-emitted exits to the Position they target so
                     # the fill simulator's stale-continuation guard drops them

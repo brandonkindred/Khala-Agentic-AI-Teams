@@ -496,6 +496,7 @@ def plan_project_activity(
     trace_id: str = "",
     resume_token: Optional[str] = None,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
+    allow_repause: bool = True,
 ) -> Dict[str, Any]:
     """Phase 2: Run Planning workflow.
 
@@ -506,10 +507,23 @@ def plan_project_activity(
     than inherited via contextvars. ``resume_token``/``submitted_answers`` are supplied by
     the calling workflow when re-invoking this activity after a prior pause was resolved by
     a ``submit_planning_answers`` signal; omitted on a fresh (unpaused) invocation.
+    ``allow_repause=False`` suppresses a further pause *via the answer callback* (see
+    ``build_temporal_planning_answer_callback``), which is what the calling workflow
+    passes on the last round of its bounded pause loop -- Planning's question ids are
+    LLM-minted and can drift across a replay, which would otherwise re-pause forever.
+    It is not enforced in this function: a persisted pause replayed on re-entry, or a
+    ``PlanningAnswerPauseSignal`` raised anyway, still returns ``{"outcome": "paused"}``
+    here and the calling workflow fails the run non-retryably. The end-to-end guarantee
+    holds across the two files; this one does not promise it alone.
     """
     with bind_trace_id(trace_id or new_trace_id()):
         return _plan_project_activity_body(
-            job_id, repo_path, spec_parse_result, resume_token, submitted_answers
+            job_id,
+            repo_path,
+            spec_parse_result,
+            resume_token,
+            submitted_answers,
+            allow_repause,
         )
 
 
@@ -519,6 +533,7 @@ def _plan_project_activity_body(
     spec_parse_result: Dict[str, Any],
     resume_token: Optional[str] = None,
     submitted_answers: Optional[List[Dict[str, Any]]] = None,
+    allow_repause: bool = True,
 ) -> Dict[str, Any]:
     """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block.
 
@@ -543,6 +558,22 @@ def _plan_project_activity_body(
         activity blocking. Matches thread-mode's invariant that Planning is never silently
         auto-answered (``auto_answer_questions=False`` in both modes) via a durable signal
         instead of a blocking poll loop.
+
+        ``allow_repause=False`` suppresses a *further* pause on a resume: the callback then
+        resolves every batch with whatever answers match AND defaults every question left
+        unanswered (see ``build_temporal_planning_answer_callback``'s ``_default_answer``),
+        logging a warning naming them. Defaulting is the load-bearing half: the answers
+        route rejects a batch missing any required question and every PRA question is
+        required, so resolving with only the matches would leave the sub-job waiting out its
+        poll timeout instead of resuming. In the designed flow this returns a
+        ``PlanResult`` rather than another ``{"outcome": "paused"}`` -- but the
+        suppression is not enforced here: if a ``PlanningAnswerPauseSignal`` is raised
+        anyway, the handler below still persists the pause and returns
+        ``{"outcome": "paused"}`` (logging a warning), and the calling workflow fails the
+        run non-retryably. Stated to match ``plan_project_activity``'s docstring rather
+        than promising more than this function delivers. The calling workflow uses it to bound its pause
+        loop -- see ``build_temporal_planning_answer_callback`` for why an unbounded one
+        cannot be relied on to terminate.
     """
     from planning_team.temporal.answer_signal import (
         PlanningAnswerPauseSignal,
@@ -585,7 +616,13 @@ def _plan_project_activity_body(
 
     resume_token = resume_token or mint_resume_token(job_id)
     answer_callback = build_temporal_planning_answer_callback(
-        resume_token, submitted_answers=submitted_answers
+        resume_token,
+        submitted_answers=submitted_answers,
+        # A resumed run can still reach a question with no answer -- skipped by
+        # the submitter, or opened fresh by the replay; that pauses again, and a
+        # pause round needs its own token (mint_resume_token: never reused).
+        next_resume_token=lambda: mint_resume_token(job_id),
+        allow_repause=allow_repause,
     )
 
     try:
@@ -665,6 +702,15 @@ def _plan_project_activity_body(
         ).model_dump()
 
     except PlanningAnswerPauseSignal as exc:
+        if not allow_repause:
+            # The callback was told not to pause and did anyway. The workflow will
+            # fail the run non-retryably on the next loop check, so say why here --
+            # otherwise the only trace is a workflow failure with no local cause.
+            logger.warning(
+                "plan_project_activity paused despite allow_repause=False for job %s",
+                job_id,
+                extra={"trace_id": current_trace_id()},
+            )
         from software_engineering_team.orchestrator import _structure_planning_questions
 
         structured = _structure_planning_questions(exc.pending_questions, source="planning")

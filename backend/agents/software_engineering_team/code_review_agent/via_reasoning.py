@@ -42,6 +42,8 @@ from software_engineering_team.shared.system_prompt_assembly import (
     build_system_prompt_with_content,
 )
 
+from .tool_call_budget import ToolCallBudgetModel, resolve_agent_tool_call_cap
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
@@ -474,7 +476,13 @@ def run_agent_via_reasoning(
         attached to the reasoning ``Agent`` only — never the formatting pass.
 
     Postconditions:
-        Returns ``parse``'s result. Tools are attached only to call 1.
+        Returns ``parse``'s result. Tools are attached only to call 1. When
+        ``tools`` is non-empty, call 1's model is wrapped in
+        :class:`~.tool_call_budget.ToolCallBudgetModel`, so the run makes at
+        most ``CODE_REVIEW_AGENT_TOOL_CALL_CAP`` tool calls and then produces a
+        final tool-free answer — the Strands event loop itself has no
+        iteration limit, so without this a model that keeps answering with
+        tool calls never terminates.
         Both passes honor ``model``'s reserved ``max_tokens`` when one is set.
         Empty reasoning output raises ``LLMSemanticExhaustionError`` before
         formatting. ``on_reasoning_agent``, when given, is invoked after the
@@ -503,6 +511,17 @@ def run_agent_via_reasoning(
         response_format="text",
         think=reasoning_think,
     )
+    # Strands has no iteration limit of its own: an agent whose model keeps
+    # answering with tool calls loops until the process dies. The tools' own
+    # budget (``false_positive_filter._make_call_tracker``) only *asks* the
+    # model to stop, which a model is free to ignore — so the reasoning model
+    # is wrapped in a cap that ends the loop unilaterally.
+    if tools:
+        text_model = ToolCallBudgetModel(
+            text_model,
+            resolve_agent_tool_call_cap(),
+            label=agent_key,
+        )
     reasoning_agent_kwargs: dict[str, Any] = {
         "model": text_model,
         "system_prompt": _build_reasoning_agent_system_prompt(

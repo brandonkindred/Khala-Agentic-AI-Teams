@@ -1476,17 +1476,111 @@ async def list_teams() -> dict[str, Any]:
 
 _JOB_SERVICE_URL = os.environ.get("JOB_SERVICE_URL", "http://job-service:8085")
 
+# Job-record fields that hold a credential and must never leave this API, even
+# as ciphertext. Teams persist these on the job row so a worker can resume the
+# job after its orchestrator thread dies (see the software-engineering team's
+# ``github_token_encrypted``); every legitimate reader loads them from the job
+# SERVICE directly through ``JobServiceClient``, never from these proxy routes'
+# responses. Echoing the ciphertext here would instead spray it across every
+# job reader, their client caches, intermediary proxies and access logs for no
+# consumer's benefit — the classic "encrypted, so it's fine to expose" trap:
+# ciphertext at rest is a different threat model from ciphertext in transit to
+# arbitrary readers.
+_REDACTED_JOB_FIELDS = frozenset({"github_token_encrypted"})
+
+
+def _redact_job_secrets(payload: Any) -> Any:
+    """Strip :data:`_REDACTED_JOB_FIELDS` from a job-service response body.
+
+    SHAPE-AGNOSTIC by design. An earlier version walked only the two envelopes
+    these routes are known to return (``{"jobs": [...]}`` and ``{"job": {...}}``)
+    and forwarded anything else untouched — which made the control FAIL OPEN: a
+    job service that renamed its wrapper key, nested a job one level deeper, or
+    grew a third envelope would resume serving credentials to clients, and the
+    only evidence would be a log line. The redaction now depends on the KEY
+    NAMES it strips, not on where in the body a job happens to sit, so no
+    envelope change can silently disable it.
+
+    Preconditions:
+        - ``payload`` is a decoded job-service JSON body (any JSON value).
+    Postconditions:
+        - Returns a structure identical to ``payload`` except that EVERY dict
+          reachable from it, at any depth and through any key or list position,
+          has each :data:`_REDACTED_JOB_FIELDS` key REMOVED (removed, not
+          blanked, so a client cannot tell a redacted value from an absent one
+          and no caller can mistake a placeholder for a usable token).
+        - Recurses through dicts, lists and tuples; every other value (str, int,
+          None, …) is returned as-is.
+        - The envelope-shape warnings below are retained purely as TRIPWIRES
+          for job-service contract drift, and cover it symmetrically: a
+          non-dict top level (no envelope at all), a dict carrying neither
+          ``jobs`` nor ``job``, a non-list ``jobs``, and a non-dict ``job``.
+          They do not gate the redaction — an unrecognized body is redacted
+          just the same — so a warning here means "the envelope changed, go
+          look", not "credentials were forwarded".
+        - Never mutates ``payload`` in place; containers are rebuilt. Never
+          raises on an unexpected shape.
+    """
+    if not isinstance(payload, dict):
+        # A non-dict top level (a bare list of jobs, say) is envelope drift
+        # too: the routes below document a dict body. Warned symmetrically
+        # with the dict-shaped drift cases so the tripwire has no blind side.
+        logger.warning(
+            "_redact_job_secrets: job-service body is %s, not a dict envelope; "
+            "redacting it as an unrecognized shape",
+            type(payload).__name__,
+        )
+    else:
+        if "jobs" not in payload and "job" not in payload:
+            logger.warning(
+                "_redact_job_secrets: job-service body has neither 'jobs' nor 'job'; "
+                "redacting it as an unrecognized shape. Keys seen: %s",
+                sorted(payload),
+            )
+        if "jobs" in payload and not isinstance(payload["jobs"], list):
+            logger.warning(
+                "_redact_job_secrets: job-service body's 'jobs' is %s, not a list; "
+                "redacting it as an unrecognized shape",
+                type(payload["jobs"]).__name__,
+            )
+        if "job" in payload and not isinstance(payload["job"], dict):
+            logger.warning(
+                "_redact_job_secrets: job-service body's 'job' is %s, not a dict; "
+                "redacting it as an unrecognized shape",
+                type(payload["job"]).__name__,
+            )
+
+    def _clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                k: _clean(v) for k, v in value.items() if k not in _REDACTED_JOB_FIELDS
+            }
+        if isinstance(value, list):
+            return [_clean(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(_clean(item) for item in value)
+        return value
+
+    return _clean(payload)
+
 
 @app.get("/api/jobs/{team}", tags=["jobs"])
 async def list_team_jobs(team: str, running_only: bool = False) -> dict[str, Any]:
-    """List all jobs for a team via the job service."""
+    """List all jobs for a team via the job service.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=15.0) as client:
         url = f"{_JOB_SERVICE_URL}/jobs/{team}"
         if running_only:
             url += "?statuses=pending&statuses=running"
         resp = await client.get(url)
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.get("/api/se/metrics", tags=["software", "observability"])
@@ -1545,50 +1639,78 @@ async def delete_job(team: str, job_id: str) -> dict[str, Any]:
 
 @app.post("/api/jobs/{team}/{job_id}/cancel", tags=["jobs"])
 async def cancel_job(team: str, job_id: str) -> dict[str, Any]:
-    """Force-cancel a running or pending job by setting its status to cancelled."""
+    """Force-cancel a running or pending job by setting its status to cancelled.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
             json={"heartbeat": False, "fields": {"status": "cancelled", "error": "Cancelled by user"}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/{job_id}/interrupt", tags=["jobs"])
 async def interrupt_job(team: str, job_id: str) -> dict[str, Any]:
-    """Mark a job as interrupted (e.g. after detecting it's stale)."""
+    """Mark a job as interrupted (e.g. after detecting it's stale).
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
             json={"heartbeat": False, "fields": {"status": "interrupted", "error": "Marked interrupted by user"}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/{job_id}/resume", tags=["jobs"])
 async def resume_job(team: str, job_id: str) -> dict[str, Any]:
-    """Reset a failed/interrupted/cancelled job back to running so its team can pick it up."""
+    """Reset a failed/interrupted/cancelled job back to running so its team can pick it up.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
             json={"heartbeat": True, "fields": {"status": "running", "error": None}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/{job_id}/restart", tags=["jobs"])
 async def restart_job(team: str, job_id: str) -> dict[str, Any]:
-    """Reset a job to pending so its team re-executes it from scratch."""
+    """Reset a job to pending so its team re-executes it from scratch.
+
+    Postconditions:
+        - Returns the job service's body with every credential field named in
+          :data:`_REDACTED_JOB_FIELDS` stripped from every dict it contains, at
+          any depth (see :func:`_redact_job_secrets`); everything else is
+          forwarded verbatim.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
             json={"heartbeat": True, "fields": {"status": "pending", "error": None}},
         )
         resp.raise_for_status()
-        return resp.json()
+        return _redact_job_secrets(resp.json())
 
 
 @app.post("/api/jobs/{team}/mark-all-interrupted", tags=["jobs"])

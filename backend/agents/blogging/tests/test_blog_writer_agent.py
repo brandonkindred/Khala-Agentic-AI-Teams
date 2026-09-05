@@ -9,6 +9,9 @@ import pytest
 from agents.blogging.blog_research_agent.models import ResearchReference
 from agents.blogging.blog_writer_agent import WriterInput, WriterOutput
 from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
+from agents.blogging.shared.system_prompt_assembly import (
+    build_headed_blogging_system_prompt_content,
+)
 
 from llm_service import DummyLLMClient, LLMJsonParseError
 
@@ -250,6 +253,52 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
     draft_prompt = llm.all_prompts[0]
     assert "MyBrand: Test brand." not in draft_prompt
     assert "BRAND AND STYLE" not in draft_prompt
+
+
+def test_system_prompt_content_delegates_to_shared_helper_both_sections() -> None:
+    """agent._system_prompt_content equals build_headed_blogging_system_prompt_content
+    called with the same (stripped) inputs -- pins the constructor's wiring
+    (strip, then pass brand before writing) without re-encoding the helper's
+    own heading/join format, which is already covered by
+    test_system_prompt_assembly.py."""
+    brand, style = "  MyBrand: Test brand.  \n", "\tUse concise, natural sentences.\n"
+
+    agent = make_writer_agent(brand_spec_content=brand, writing_style_guide_content=style)
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_delegates_to_shared_helper_writing_guide_blank() -> None:
+    """Same wiring check as above, with writing_style_guide_content blank."""
+    brand, style = "MyBrand: Test brand.", "   "
+
+    agent = make_writer_agent(brand_spec_content=brand, writing_style_guide_content=style)
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_delegates_to_shared_helper_brand_spec_blank() -> None:
+    """Same wiring check as above, with brand_spec_content blank."""
+    brand, style = "", "Use concise, natural sentences."
+
+    agent = make_writer_agent(brand_spec_content=brand, writing_style_guide_content=style)
+
+    assert agent._system_prompt_content == build_headed_blogging_system_prompt_content(
+        brand.strip(), style.strip()
+    )
+
+
+def test_system_prompt_content_is_none_when_both_sections_blank() -> None:
+    """Both brand_spec_content and writing_style_guide_content blank/whitespace-only
+    yields None, not an empty-text CacheBreakpoint -- matching
+    build_headed_blogging_system_prompt_content's documented empty-input case."""
+    agent = make_writer_agent(brand_spec_content="", writing_style_guide_content="   ")
+
+    assert agent._system_prompt_content is None
 
 
 def test_outline_for_prompt_includes_section_titles() -> None:

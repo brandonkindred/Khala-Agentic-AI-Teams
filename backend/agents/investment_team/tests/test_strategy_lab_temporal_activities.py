@@ -4153,3 +4153,70 @@ def test_activities_list_contains_every_activity():
     assert act.finalize_cycle_record_activity in act.ACTIVITIES
     assert act.merge_wave_results_activity in act.ACTIVITIES
     assert act.publish_run_event_activity in act.ACTIVITIES
+
+
+def test_probe_only_resume_failure_logs_info_without_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A probe that fails to reconstruct has not lost anything.
+
+    ADR-012 already supplied the resume state; the probe only re-derives whether
+    the cross-attempt seed was ever adopted. Logging that at WARNING with a
+    traceback reads as "this run just lost its resume", which is exactly what did
+    not happen — and that misreading is the whole reason the branch exists, so it
+    needs a test or a refactor could quietly put it back.
+    """
+    import logging
+
+    from investment_team.strategy_lab.temporal.activities import (
+        _cross_attempt_resume_from_params,
+    )
+
+    params = {"resume_spec": {"bogus": True}, "resume_design_context": None}
+
+    with caplog.at_level(logging.INFO):
+        result = _cross_attempt_resume_from_params(
+            params, run_id="run-1", design_attempt_index=2, probe_only=True
+        )
+
+    assert result == (None, None, None)
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+    info_records = [rec for rec in caplog.records if rec.levelno < logging.WARNING]
+    assert any("ADR-012 resume is in effect" in rec.getMessage() for rec in info_records)
+    # The level assertion alone does not pin the traceback: an implementation
+    # that logged the same message at INFO with exc_info=True would still dump
+    # the reconstruction failure's stack, which is half of the misreading this
+    # branch exists to avoid.
+    assert all(rec.exc_info is None for rec in info_records), (
+        "probe-only resume failure must not carry a traceback"
+    )
+
+
+def test_non_probe_resume_failure_still_logs_warning_with_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other side of the same branch: a real cross-attempt resume that fails
+    to reconstruct HAS lost its resume, so it keeps the warning and the
+    traceback. Without this, the probe-path test alone would pass against an
+    implementation that downgraded both."""
+    import logging
+
+    from investment_team.strategy_lab.temporal.activities import (
+        _cross_attempt_resume_from_params,
+    )
+
+    params = {"resume_spec": {"bogus": True}, "resume_design_context": None}
+
+    with caplog.at_level(logging.INFO):
+        result = _cross_attempt_resume_from_params(params, run_id="run-1", design_attempt_index=2)
+
+    assert result == (None, None, None)
+    warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert warnings
+    assert any(rec.exc_info is not None for rec in warnings)
+    # Level and traceback alone do not pin what the record SAYS: a message that
+    # stopped naming the lost resume would still satisfy both, and naming it is
+    # the whole point of keeping this branch a warning.
+    assert any(
+        "failed to reconstruct (treating as no resume)" in rec.getMessage() for rec in warnings
+    ), "non-probe resume failure must still name the lost cross-attempt resume"

@@ -25,15 +25,15 @@ Note for maintainers:
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from psycopg import Cursor
 from psycopg.types.json import Json
 
+from shared.concurrency import LazySingleton
 from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
@@ -64,8 +64,24 @@ class BrandVersionAppendConflict(RuntimeError):
     """
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+def now_iso() -> str:
+    """The timestamp format every branding write path stamps ``updated_at`` with.
+
+    Public (not underscore-prefixed) because ``coordination.py`` writes brand rows
+    through its own transaction and shares this formatter: a second hand-rolled
+    one would drift the moment this changes (a ``timespec``, a ``Z`` suffix),
+    leaving rows written through that path formatted differently from every other
+    row in the same column.
+
+    Postconditions: returns an ISO-8601 string in UTC with an explicit offset and
+        microsecond precision. ``timespec`` is pinned rather than left to default
+        because ``isoformat()`` omits the fractional part entirely when
+        ``microsecond == 0`` -- so the shape would vary once every million-odd
+        calls, which is exactly the drift this shared formatter exists to prevent.
+        Rows already written without a fraction still order correctly against it
+        ("+" < "." in ASCII, and the microsecond-zero stamp is the earlier one).
+    """
+    return datetime.now(tz=timezone.utc).isoformat(timespec="microseconds")
 
 
 def _validate_pagination(limit: Optional[int], offset: int) -> None:
@@ -190,7 +206,7 @@ class BrandingStore(PostgresHelperMixin):
         if not name:
             raise ValueError("name must be a non-empty string")
         client_id = f"client_{uuid4().hex[:12]}"
-        now = _now_iso()
+        now = now_iso()
         client = Client(
             id=client_id,
             name=name,
@@ -348,7 +364,7 @@ class BrandingStore(PostgresHelperMixin):
             if cur.fetchone() is None:
                 return None
             brand_id = f"brand_{uuid4().hex[:12]}"
-            now = _now_iso()
+            now = now_iso()
             brand = Brand(
                 id=brand_id,
                 client_id=client_id,
@@ -430,7 +446,7 @@ class BrandingStore(PostgresHelperMixin):
             raise ValueError("mission must be a BrandingMission")
         if status is not None and not isinstance(status, BrandStatus):
             raise ValueError("status must be a BrandStatus")
-        patch: dict = {"updated_at": _now_iso()}
+        patch: Dict[str, Any] = {"updated_at": now_iso()}
         if mission is not None:
             patch["mission"] = mission.model_dump(mode="json")
             # A mission edit invalidates any previously generated output: it was
@@ -556,7 +572,7 @@ class BrandingStore(PostgresHelperMixin):
             row = cur.fetchone()
             if row is None:
                 return None
-            now = _now_iso()
+            now = now_iso()
             new_version = int(row["version"] or 0) + 1
             history_entry = BrandVersionSummary(
                 version=new_version,
@@ -578,8 +594,7 @@ class BrandingStore(PostgresHelperMixin):
 # Lazy singleton
 # ---------------------------------------------------------------------------
 
-_store_lock = threading.Lock()
-_default_store: Optional[BrandingStore] = None
+_default_store: LazySingleton[BrandingStore] = LazySingleton()
 
 
 def get_default_store() -> BrandingStore:
@@ -587,12 +602,8 @@ def get_default_store() -> BrandingStore:
 
     Postconditions:
         Returns the singleton ``BrandingStore``. Concurrent first calls race
-        safely (double-checked locking under ``_store_lock``) — exactly one
-        instance is constructed and every caller observes the same object.
+        safely — ``LazySingleton.get_or_create`` serializes them under its
+        own internal lock — so exactly one instance is constructed and every
+        caller observes the same object.
     """
-    global _default_store
-    if _default_store is None:
-        with _store_lock:
-            if _default_store is None:
-                _default_store = BrandingStore()
-    return _default_store
+    return _default_store.get_or_create(BrandingStore)

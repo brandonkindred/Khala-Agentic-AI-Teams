@@ -4,6 +4,8 @@ import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import { skipErrorNotify } from '../core/error-handler.interceptor';
 import type {
+  AddressPrCommentsRequest,
+  AddressPrCommentsResponse,
   CodeReviewRunItem,
   CodeReviewTranscript,
   CreateReviewIssuesRequest,
@@ -206,6 +208,21 @@ export class IntegrationsApiService {
   /** POST /api/integrations/github/review-pr */
   runGitHubReviewPr(body: RunPrReviewRequest): Observable<RunPrReviewResponse> {
     return this.http.post<RunPrReviewResponse>(`${this.baseUrl}/github/review-pr`, body);
+  }
+
+  /**
+   * POST /api/integrations/github/pulls/{prNumber}/address-comments — start the flow
+   * that addresses & responds to every unresolved review comment on the PR. Omitting
+   * `owner`/`repo` falls back to the backend's legacy configured default.
+   */
+  addressPrComments(
+    prNumber: number,
+    body: AddressPrCommentsRequest = {},
+  ): Observable<AddressPrCommentsResponse> {
+    return this.http.post<AddressPrCommentsResponse>(
+      `${this.baseUrl}/github/pulls/${encodeURIComponent(prNumber)}/address-comments`,
+      body,
+    );
   }
 
   /**

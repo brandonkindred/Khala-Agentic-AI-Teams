@@ -10,7 +10,12 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { NotificationService } from '../../core/notification.service';
 import { CodingTeamPageComponent } from './coding-team-page.component';
-import type { GitHubConfigResponse, GitHubIssueItem, GitHubRepoItem } from '../../models/integrations.model';
+import type {
+  GitHubConfigResponse,
+  GitHubIssueItem,
+  GitHubPullRequestItem,
+  GitHubRepoItem,
+} from '../../models/integrations.model';
 
 function makeIssues(count: number): GitHubIssueItem[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -72,6 +77,23 @@ function ghRun(overrides: Partial<CodingTeamJobListItem> = {}): CodingTeamJobLis
   };
 }
 
+/** One open pull request for the PR-tab tests. */
+function ghPull(number: number, overrides: Partial<GitHubPullRequestItem> = {}): GitHubPullRequestItem {
+  return {
+    number,
+    title: `PR ${number}`,
+    body_preview: 'body',
+    author: 'octocat',
+    html_url: `https://github.com/acme/widgets/pull/${number}`,
+    head: `feature-${number}`,
+    base: 'main',
+    draft: false,
+    labels: [],
+    updated_at: '2026-06-09T10:00:00Z',
+    ...overrides,
+  };
+}
+
 /** Let pending timer(0) emissions (runs poll, then the selected-run status poll) fire. */
 async function flushAsync(): Promise<void> {
   for (let i = 0; i < 3; i++) {
@@ -94,6 +116,8 @@ describe('CodingTeamPageComponent', () => {
     getGitHubRepos: ReturnType<typeof vi.fn>;
     getGitHubIssues: ReturnType<typeof vi.fn>;
     runGitHubIssue: ReturnType<typeof vi.fn>;
+    getGitHubPullRequests: ReturnType<typeof vi.fn>;
+    addressPrComments: ReturnType<typeof vi.fn>;
   };
   let notificationsSpy: { saved: ReturnType<typeof vi.fn> };
 
@@ -131,6 +155,8 @@ describe('CodingTeamPageComponent', () => {
       getGitHubRepos: vi.fn().mockReturnValue(of([REPO])),
       getGitHubIssues: vi.fn().mockReturnValue(of(makeIssues(3))),
       runGitHubIssue: vi.fn(),
+      getGitHubPullRequests: vi.fn().mockReturnValue(of([])),
+      addressPrComments: vi.fn(),
     };
     notificationsSpy = { saved: vi.fn() };
   });
@@ -142,7 +168,7 @@ describe('CodingTeamPageComponent', () => {
   });
 
   /** Switch the visible view (the page opens on 'jobs') and re-render. */
-  function showView(view: 'chat' | 'github' | 'jobs'): void {
+  function showView(view: 'chat' | 'github' | 'pulls' | 'jobs'): void {
     component.activeView = view;
     fixture.detectChanges();
   }
@@ -253,6 +279,31 @@ describe('CodingTeamPageComponent', () => {
       fixture.detectChanges();
       expect(component.jobStatus).not.toBeNull();
       expect(fixture.nativeElement.querySelector('app-loading-spinner')).toBeNull();
+    });
+  });
+
+  describe('empty states render in a role="status" region (no repo access / no open issues)', () => {
+    it('renders "no repository access" in a role="status" region with its icon hidden from AT', async () => {
+      integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      const empty = fixture.nativeElement.querySelector('.github-empty');
+      expect(empty).not.toBeNull();
+      expect(empty?.getAttribute('role')).toBe('status');
+      expect(empty?.textContent).toContain('The personal access token has no repository access.');
+      expect(empty?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    it('renders "no open issues" in a role="status" region with its icon hidden from AT', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      const empty = fixture.nativeElement.querySelector('.github-empty');
+      expect(empty).not.toBeNull();
+      expect(empty?.getAttribute('role')).toBe('status');
+      expect(empty?.textContent).toContain('No open issues found.');
+      expect(empty?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
     });
   });
 
@@ -694,6 +745,34 @@ describe('CodingTeamPageComponent', () => {
       expect(clearBtn).toBeTruthy();
     });
 
+    // The repo search field is the only one in the DOM while no repo is expanded, so this
+    // selector is unambiguous here; the issue-search announcer is nested in .github-repo-issues.
+    function repoAnnouncer(): string {
+      const el: HTMLElement = fixture.nativeElement;
+      return el.querySelector('.github-search-field p[role="status"]')?.textContent?.trim() ?? '';
+    }
+
+    it('announces the filtered repo count in a polite live region as the search narrows the list', async () => {
+      await setup();
+      showView('github');
+      expect(repoAnnouncer()).toBe('3 repositories shown');
+      component.repoSearch = 'gadgets';
+      fixture.detectChanges();
+      expect(repoAnnouncer()).toBe('1 repository shown');
+      component.repoSearch = 'nonexistent-repo-xyz';
+      fixture.detectChanges();
+      expect(repoAnnouncer()).toBe('0 repositories shown');
+    });
+
+    it('announces nothing when the token has no repository access (the search field is not rendered)', async () => {
+      integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      expect(component.repoCountAnnouncement).toBe('');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-search-field p[role="status"]')).toBeNull();
+    });
+
     it('preserves aria-expanded/aria-controls semantics for a row that survives a search, even when its list index shifts', async () => {
       await setup();
       showView('github');
@@ -762,6 +841,35 @@ describe('CodingTeamPageComponent', () => {
       expect(clearBtn).toBeTruthy();
     });
 
+    // Scoped to the expanded repo's panel: the repo-search announcer is also in the DOM here.
+    function issueAnnouncer(): string {
+      const el: HTMLElement = fixture.nativeElement;
+      return (
+        el.querySelector('.github-repo-issues .github-search-field p[role="status"]')?.textContent?.trim() ?? ''
+      );
+    }
+
+    it('announces the filtered issue count in a polite live region as the search narrows the list', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      expect(issueAnnouncer()).toBe('3 issues shown');
+      setIssueSearch('Issue 2');
+      expect(issueAnnouncer()).toBe('1 issue shown');
+      setIssueSearch('nonexistent-issue-xyz');
+      expect(issueAnnouncer()).toBe('0 issues shown');
+    });
+
+    it('announces nothing when the repo has no open issues (the search field is not rendered)', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      expect(component.issueCountAnnouncement).toBe('');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-repo-issues .github-search-field p[role="status"]')).toBeNull();
+    });
+
     it('resets to the first page when a search narrows the list below the current page', async () => {
       integrationsSpy.getGitHubIssues.mockReturnValue(of(makeIssues(25)));
       await setup();
@@ -793,8 +901,9 @@ describe('CodingTeamPageComponent', () => {
       const rows = Array.from(el.querySelectorAll('.github-issue-row')) as HTMLElement[];
       const selectedRow = rows.find((r) => r.getAttribute('aria-expanded') === 'true');
       expect(selectedRow?.textContent).toContain('Issue 2');
-      expect(selectedRow?.getAttribute('aria-controls')).toBe('confirm-panel-2');
-      const panel = el.querySelector('#confirm-panel-2');
+      const expectedId = component.confirmPanelId(2);
+      expect(selectedRow?.getAttribute('aria-controls')).toBe(expectedId);
+      const panel = el.querySelector(`[id="${expectedId}"]`);
       expect(panel).not.toBeNull();
       expect(panel?.classList.contains('github-confirm-panel')).toBe(true);
     });
@@ -1546,11 +1655,14 @@ describe('CodingTeamPageComponent', () => {
   // -------------------------------------------------------------------------
 
   describe('runs panel', () => {
-    it('renders an empty state when there are no runs', async () => {
+    it('renders an empty state when there are no runs, in a role="status" region', async () => {
       await setup();
       await flushAsync();
       showView('jobs');
-      expect(fixture.nativeElement.querySelector('.jobs-panel__empty')).not.toBeNull();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('app-empty-state')).not.toBeNull();
+      const statusRegions = Array.from(el.querySelectorAll('[role="status"]'));
+      expect(statusRegions.some((r) => r.textContent?.includes('No runs yet'))).toBe(true);
     });
 
     it('renders Running and Recent sections without a delete button', async () => {
@@ -2157,9 +2269,360 @@ describe('CodingTeamPageComponent', () => {
     it('cancels the thinking-announcement settle timer on destroy', async () => {
       await setup();
       component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
-      expect(component['thinkingAnnounceTimer']).not.toBeNull();
+      expect(component.thinkingAnnouncementPending).toBe(true);
       fixture.destroy();
-      expect(component['thinkingAnnounceTimer']).toBeNull();
+      expect(component.thinkingAnnouncementPending).toBe(false);
+    });
+
+    it('settles a whitespace-only thinking value to an empty announcement, not "0 lines"', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        component.jobStatus = { job_id: 'j1', status: 'running', thinking: '   ' };
+        expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(component.thinkingAnnouncement).toBe('');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Pull Requests tab — open PRs + "address unresolved comments" action
+  // -------------------------------------------------------------------------
+  describe('Pull Requests tab', () => {
+    /** Expand a repo, switch to the pulls tab, and render. */
+    function openPullsForRepo(): void {
+      component.toggleRepo(component.repos[0]);
+      showView('pulls');
+    }
+
+    it('auto-loads the expanded repo\'s open PRs when the tab opens', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(1), ghPull(2)]));
+      await setup();
+      openPullsForRepo();
+      expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
+      expect(component.pulls.length).toBe(2);
+      expect(component.pullsLoaded).toBe(true);
+    });
+
+    it('renders a row with a play_arrow "Address comments" button per PR', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      await setup();
+      openPullsForRepo();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.pull-row').length).toBe(1);
+      const icons = Array.from(el.querySelectorAll('.pull-row__actions mat-icon')).map((i) => i.textContent?.trim());
+      expect(icons).toContain('play_arrow');
+    });
+
+    it('the per-PR "Address comments" button is wired to addressPrComments (template click)', async () => {
+      // Clicking the real button — rather than calling the method directly, as the
+      // behavioral tests below do — is what pins the template's (click) binding: a
+      // dropped or mis-bound handler would leave every one of those tests passing.
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      integrationsSpy.addressPrComments.mockReturnValue(
+        of({ job_id: 'a1', pr_number: 7, pr_url: 'u', unresolved_comment_count: 2, status: 'pending', message: '' }),
+      );
+      await setup();
+      openPullsForRepo();
+      const btn: HTMLButtonElement | null = fixture.nativeElement.querySelector('.pull-row__actions button');
+      expect(btn).toBeTruthy();
+      btn!.click();
+      fixture.detectChanges();
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledWith(7, { owner: 'acme', repo: 'widgets' });
+    });
+
+    it('disables the per-PR button and shows "Starting…" while its job is in flight', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      // Never-completing observable so the in-flight flag stays set after the click.
+      integrationsSpy.addressPrComments.mockReturnValue(new Subject());
+      await setup();
+      openPullsForRepo();
+      const btn: HTMLButtonElement | null = fixture.nativeElement.querySelector('.pull-row__actions button');
+      expect(btn).toBeTruthy();
+      expect(btn!.disabled).toBe(false);
+
+      btn!.click();
+      fixture.detectChanges();
+
+      // The template binds [disabled]="isAddressingPr(pr)", so the native button is
+      // actually disabled — a second click cannot re-submit the same PR.
+      expect(btn!.disabled).toBe(true);
+      expect(btn!.textContent).toContain('Starting…');
+      btn!.click();
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
+    });
+
+    it('prompts to pick a repo when none is expanded', async () => {
+      await setup();
+      showView('pulls');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.pulls-panel__repo-prompt')).not.toBeNull();
+      expect(integrationsSpy.getGitHubPullRequests).not.toHaveBeenCalled();
+    });
+
+    it('shows an empty state when the repo has no open PRs', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([]));
+      await setup();
+      openPullsForRepo();
+      expect(fixture.nativeElement.querySelector('.pulls-panel__empty')).not.toBeNull();
+    });
+
+    it('does not re-fetch on every tab switch when the repo has no open PRs', async () => {
+      // The auto-load guard keys off `pullsLoaded`, not `pulls.length`: a repo whose
+      // open-PR list is legitimately empty is still LOADED, so leaving and re-entering
+      // the tab must not re-issue the request.
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([]));
+      await setup();
+      openPullsForRepo();
+      expect(component.pulls).toEqual([]);
+      expect(component.pullsLoaded).toBe(true);
+      const loadedCalls = integrationsSpy.getGitHubPullRequests.mock.calls.length;
+
+      showView('jobs');
+      showView('pulls');
+      showView('jobs');
+      showView('pulls');
+      expect(integrationsSpy.getGitHubPullRequests.mock.calls.length).toBe(loadedCalls);
+    });
+
+    it('retries the auto-load on a later tab switch when the first load failed', async () => {
+      // The flag must not suppress a RETRY: `loadPulls` sets `pullsLoaded` only on
+      // success, so a failed load leaves the guard open and re-entering the tab
+      // tries again. This is what keeps the `pullsLoaded` guard from stranding a
+      // repo on a transient error with no way back short of a manual Refresh.
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
+      await setup();
+      openPullsForRepo();
+      expect(component.pullError).toBe('boom');
+      expect(component.pullsLoaded).toBe(false);
+      const failedCalls = integrationsSpy.getGitHubPullRequests.mock.calls.length;
+
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      showView('jobs');
+      showView('pulls');
+      expect(integrationsSpy.getGitHubPullRequests.mock.calls.length).toBe(failedCalls + 1);
+      expect(component.pulls.length).toBe(1);
+      expect(component.pullsLoaded).toBe(true);
+    });
+
+    it('surfaces a load error in an inline banner', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
+      await setup();
+      openPullsForRepo();
+      expect(component.pullError).toBe('boom');
+    });
+
+    it('switching repos mid-load lets the new repo auto-load its own PRs, and the stale response cannot overwrite it', async () => {
+      const slowA = new Subject<GitHubPullRequestItem[]>();
+      integrationsSpy.getGitHubPullRequests.mockReturnValueOnce(slowA);
+      await setup();
+      const repoB: GitHubRepoItem = { ...component.repos[0], name: 'gadgets', full_name: 'acme/gadgets' };
+      component.repos = [component.repos[0], repoB];
+
+      // Expand repo A and open the Pulls tab: loadPulls() fires and is left in flight.
+      component.toggleRepo(component.repos[0]);
+      showView('pulls');
+      expect(component.loadingPulls).toBe(true);
+
+      // Switch to repo B before A's request settles.
+      integrationsSpy.getGitHubPullRequests.mockReturnValueOnce(of([ghPull(9)]));
+      component.toggleRepo(repoB);
+
+      // The switch must not leave `loadingPulls` stuck true — B's own Pulls-tab
+      // auto-load guard (`!loadingPulls`) would otherwise refuse to fire.
+      expect(component.loadingPulls).toBe(false);
+      showView('pulls');
+      expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith({ owner: 'acme', repo: 'gadgets' });
+      expect(component.pulls.map((p) => p.number)).toEqual([9]);
+
+      // A's stale response arriving late must not clobber B's already-loaded state.
+      slowA.next([ghPull(1), ghPull(2)]);
+      slowA.complete();
+      expect(component.pulls.map((p) => p.number)).toEqual([9]);
+    });
+
+    it('addressPrComments starts the job, toasts, and clears the in-flight guard', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      integrationsSpy.addressPrComments.mockReturnValue(
+        of({ job_id: 'a1', pr_number: 7, pr_url: 'u', unresolved_comment_count: 2, status: 'pending', message: '' }),
+      );
+      await setup();
+      openPullsForRepo();
+      component.addressPrComments(ghPull(7));
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledWith(7, { owner: 'acme', repo: 'widgets' });
+      expect(notificationsSpy.saved).toHaveBeenCalled();
+      expect(component.isAddressingPr(ghPull(7))).toBe(false);
+    });
+
+    it('addressPrComments guards against a double-submit while in flight', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      // Never-completing observable so the in-flight flag stays set.
+      integrationsSpy.addressPrComments.mockReturnValue(new Subject());
+      await setup();
+      openPullsForRepo();
+      component.addressPrComments(ghPull(7));
+      component.addressPrComments(ghPull(7));
+      expect(integrationsSpy.addressPrComments).toHaveBeenCalledTimes(1);
+      expect(component.isAddressingPr(ghPull(7))).toBe(true);
+    });
+
+    it('addressPrComments surfaces an error and clears the guard', async () => {
+      integrationsSpy.getGitHubPullRequests.mockReturnValue(of([ghPull(7)]));
+      integrationsSpy.addressPrComments.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
+      await setup();
+      openPullsForRepo();
+      component.addressPrComments(ghPull(7));
+      expect(component.pullError).toBe('nope');
+      expect(component.isAddressingPr(ghPull(7))).toBe(false);
+    });
+  });
+
+  describe('focus management (issue #7918)', () => {
+    it('selectIssue moves focus into the confirm panel, not left on the row button', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+        const el: HTMLElement = fixture.nativeElement;
+        const row = el.querySelector<HTMLButtonElement>('.github-issue-row');
+        expect(row).not.toBeNull();
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        const panel = el.querySelector('.github-confirm-panel');
+        expect(panel).not.toBeNull();
+        expect(panel?.contains(document.activeElement)).toBe(true);
+        expect(document.activeElement).not.toBe(row);
+
+        // The panel's accessible name comes from its heading via aria-labelledby, not subtree
+        // fallback on a plain div — assert the wiring actually points at the rendered heading.
+        const labelledBy = panel?.getAttribute('aria-labelledby');
+        expect(labelledBy).toBe(component.confirmPanelHeadingId(issue.number));
+        const heading = el.querySelector(`[id="${labelledBy}"]`);
+        expect(heading?.tagName).toBe('H3');
+        expect(heading?.textContent).toContain('Start AI coding on this issue?');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancelSelection returns focus to the originating issue row button', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+        const el: HTMLElement = fixture.nativeElement;
+        // Capture the row before selecting — aria-controls is only present on the selected row,
+        // so it can't be used to relocate the row once cancelSelection() deselects it.
+        const row = el.querySelector<HTMLButtonElement>('.github-issue-row');
+        expect(row).not.toBeNull();
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        component.cancelSelection();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        expect(document.activeElement).toBe(row);
+        expect(row?.getAttribute('aria-controls')).toBeNull();
+        expect(el.querySelector('.github-confirm-panel')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancels the pending focus timer on destroy', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      component.selectIssue(component.issues[0]);
+      expect(component['focusTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['focusTimer']).toBeNull();
+    });
+
+    it('cancelSelection falls back to the issue list when the originating row has been filtered out', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0]; // "Issue 1"
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        // Narrow the search to a term that excludes the selected issue's own row, mirroring
+        // what a real keystroke does (component.onIssueSearchChange()).
+        component.issueSearch = 'Issue 2';
+        component.onIssueSearchChange();
+        fixture.detectChanges();
+        const el: HTMLElement = fixture.nativeElement;
+        expect(el.querySelector(`[data-issue-number="${component.issueRowKey(issue.number)}"]`)).toBeNull();
+
+        // The row lookup can't find its target, so focus falls back to .github-issues-list
+        // rather than dropping to <body> — this pins that fallback, not just a non-throw.
+        expect(() => component.cancelSelection()).not.toThrow();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        expect(el.querySelector('.github-confirm-panel')).toBeNull();
+        expect(document.activeElement).toBe(el.querySelector('.github-issues-list'));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancelSelection falls back further to the search input when the search matches nothing at all', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        showView('github');
+        expandFirstRepo();
+        const issue = component.issues[0];
+
+        component.selectIssue(issue);
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        // A search matching zero issues removes .github-issues-list entirely (the template's
+        // "no matches" empty state renders instead), so the first-level fallback is also absent.
+        component.issueSearch = 'zzz-no-match';
+        component.onIssueSearchChange();
+        fixture.detectChanges();
+        const el: HTMLElement = fixture.nativeElement;
+        expect(el.querySelector('.github-issues-list')).toBeNull();
+
+        expect(() => component.cancelSelection()).not.toThrow();
+        fixture.detectChanges();
+        await vi.advanceTimersByTimeAsync(0);
+        fixture.detectChanges();
+
+        const searchInput = el.querySelector('.github-search-field input');
+        expect(searchInput).not.toBeNull();
+        expect(document.activeElement).toBe(searchInput);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

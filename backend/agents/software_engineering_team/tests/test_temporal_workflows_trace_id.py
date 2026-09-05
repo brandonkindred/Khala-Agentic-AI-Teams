@@ -19,7 +19,9 @@ import uuid
 from typing import Any
 from unittest import mock
 
+import pytest
 from temporalio import workflow as _wf
+from temporalio.exceptions import ApplicationError
 
 from software_engineering_team.temporal import workflows as wfmod
 
@@ -102,7 +104,7 @@ def test_run_team_workflow_v2_forwards_sprint_id_to_parse_spec_activity():
 def test_run_team_workflow_v2_pauses_and_resumes_on_planning_answer_signal():
     """Phase 2 durably waits for a ``submit_planning_answers`` signal instead of
     proceeding to Phase 3 with no answer, when ``plan_project_activity`` reports a
-    pause -- the workflow-side half of issue #7446's wiring (the activity-side half,
+    pause -- the workflow-side half of that wiring (the activity-side half,
     catching ``PlanningAnswerPauseSignal``, is covered in ``test_temporal_activities.py``).
     Mirrors ``CodingTeamWorkflow``'s equivalent pause-loop test but through
     ``PlanningAnswerSignalMixin``'s ``submit_planning_answers``/``wait_for_planning_answers``
@@ -139,12 +141,169 @@ def test_run_team_workflow_v2_pauses_and_resumes_on_planning_answer_signal():
         "plan_project_activity",
         "execute_coding_team_activity",
     ]
-    # The re-invocation carries the same resume_token and the resolved answers.
+    # The re-invocation carries the same resume_token, the resolved answers, and
+    # the pause budget still being open.
     _, _, second_plan_args = (c[1] for c in calls[:3])
-    assert second_plan_args[-2:] == [
+    # The allow_repause flag is `pause_round < MAX_PLANNING_PAUSE_ROUNDS`, so it
+    # is derived rather than hard-coded: a literal True here would only be right
+    # while the constant stays above 1, and lowering it would fail with a bare
+    # assertion diff that says nothing about the coupling.
+    assert second_plan_args[-3:] == [
         "job-7:tok1",
         [{"question_id": "q1", "selected_option_id": "a"}],
+        1 < wfmod.MAX_PLANNING_PAUSE_ROUNDS,
     ]
+
+
+def test_run_team_workflow_v2_accumulates_answers_across_pause_rounds():
+    """Two pause rounds must hand the activity every answer gathered so far.
+
+    Planning replays from scratch on every resume, so round 2's invocation
+    re-encounters round 1's questions. Carrying only the newest batch leaves
+    those unmatched, pauses on them again, and ping-pongs between the rounds
+    forever.
+    """
+    calls: list = []
+    plan_calls = {"n": 0}
+    current_token = {"value": ""}
+
+    def _fake_plan(args):
+        plan_calls["n"] += 1
+        if plan_calls["n"] == 1:
+            current_token["value"] = "job-8:tok1"
+            return {
+                "outcome": "paused",
+                "resume_token": current_token["value"],
+                "pending_questions": [{"id": "q1"}],
+            }
+        if plan_calls["n"] == 2:
+            current_token["value"] = "job-8:tok2"
+            return {
+                "outcome": "paused",
+                "resume_token": current_token["value"],
+                "pending_questions": [{"id": "q2"}],
+            }
+        return {"outcome": "completed", "requirements_title": "Widget"}
+
+    workflow_obj = wfmod.RunTeamWorkflowV2()
+    answers = {
+        "job-8:tok1": [{"question_id": "q1", "selected_option_id": "a"}],
+        "job-8:tok2": [{"question_id": "q2", "selected_option_id": "b"}],
+    }
+
+    async def _fake_wait_condition(pred, timeout=None):
+        # The token comes from the pause envelope the activity returned, which is
+        # what a real signal sender holds — not from the workflow's private state.
+        token = current_token["value"]
+        workflow_obj.submit_planning_answers({"resume_token": token, "answers": answers[token]})
+        assert pred()
+
+    with _driver({"plan_project_activity": _fake_plan}, calls):
+        with mock.patch.object(_wf, "wait_condition", _fake_wait_condition):
+            asyncio.run(workflow_obj.run("job-8", "/repo"))
+
+    plan_args = [c[1] for c in calls if c[0] == "plan_project_activity"]
+    assert len(plan_args) == 3
+    # Round 2 carries round 1's answer. The trailing flag is
+    # `pause_round < MAX_PLANNING_PAUSE_ROUNDS`, derived here for the same
+    # reason as above rather than pinned to the constant's current value.
+    assert plan_args[1][-3:] == [
+        "job-8:tok1",
+        answers["job-8:tok1"],
+        1 < wfmod.MAX_PLANNING_PAUSE_ROUNDS,
+    ]
+    # Round 3 carries BOTH rounds', in order.
+    assert plan_args[2][-3:] == [
+        "job-8:tok2",
+        answers["job-8:tok1"] + answers["job-8:tok2"],
+        2 < wfmod.MAX_PLANNING_PAUSE_ROUNDS,
+    ]
+
+
+def test_run_team_workflow_v2_bounds_the_planning_pause_loop():
+    """A run whose question ids drift on every replay must still finish.
+
+    Planning's ``OpenQuestion.id`` comes straight from LLM output, so a
+    from-scratch replay can mint a fresh id for a question the user already
+    answered. The pause test ("does this batch contain a question nobody has
+    seen?") is then true forever. The workflow bounds the loop and dispatches
+    its last round with ``allow_repause=False``, which forbids the activity
+    from pausing again -- without that, this test never returns.
+    """
+    calls: list = []
+    round_no = {"n": 0}
+    current_token = {"value": ""}
+
+    def _fake_plan(args):
+        round_no["n"] += 1
+        # Honour the flag the way the real activity does (its callback stops
+        # raising PlanningAnswerPauseSignal), and otherwise keep minting a
+        # brand-new question id -- the drift this bound exists for.
+        if len(args) > 6 and args[6] is False:
+            return {"outcome": "completed", "requirements_title": "Widget"}
+        current_token["value"] = f"job-9:tok{round_no['n']}"
+        return {
+            "outcome": "paused",
+            "resume_token": current_token["value"],
+            "pending_questions": [{"id": f"q-drifted-{round_no['n']}"}],
+        }
+
+    workflow_obj = wfmod.RunTeamWorkflowV2()
+
+    async def _fake_wait_condition(pred, timeout=None):
+        workflow_obj.submit_planning_answers(
+            {"resume_token": current_token["value"], "answers": []}
+        )
+        assert pred()
+
+    with _driver({"plan_project_activity": _fake_plan}, calls):
+        with mock.patch.object(_wf, "wait_condition", _fake_wait_condition):
+            asyncio.run(workflow_obj.run("job-9", "/repo"))
+
+    plan_args = [c[1] for c in calls if c[0] == "plan_project_activity"]
+    # One unpaused opening call plus exactly MAX_PLANNING_PAUSE_ROUNDS resumes.
+    assert len(plan_args) == wfmod.MAX_PLANNING_PAUSE_ROUNDS + 1
+    # Every resume but the last leaves the budget open; the last closes it.
+    assert [a[6] for a in plan_args[1:]] == [True] * (wfmod.MAX_PLANNING_PAUSE_ROUNDS - 1) + [False]
+    # And the run reached Phase 3 rather than dying in the loop.
+    assert calls[-1][0] == "execute_coding_team_activity"
+
+
+def test_run_team_workflow_v2_fails_if_planning_pauses_past_its_budget():
+    """``allow_repause=False`` is a contract, and a loop that trusts a broken
+    one spins forever. An activity that pauses after being told not to fails
+    the run instead."""
+    calls: list = []
+
+    current_token = {"value": "job-10:tok"}
+
+    def _fake_plan(args):
+        return {
+            "outcome": "paused",
+            "resume_token": current_token["value"],
+            "pending_questions": [],
+        }
+
+    workflow_obj = wfmod.RunTeamWorkflowV2()
+
+    async def _fake_wait_condition(pred, timeout=None):
+        workflow_obj.submit_planning_answers(
+            {"resume_token": current_token["value"], "answers": []}
+        )
+        assert pred()
+
+    with _driver({"plan_project_activity": _fake_plan}, calls):
+        with mock.patch.object(_wf, "wait_condition", _fake_wait_condition):
+            with pytest.raises(ApplicationError, match="MAX_PLANNING_PAUSE_ROUNDS") as exc_info:
+                asyncio.run(workflow_obj.run("job-10", "/repo"))
+
+    # Non-retryable is the load-bearing half: a plain ApplicationError would be
+    # re-run by the workflow's retry policy, which is the unbounded re-dispatch
+    # this guard exists to stop.
+    assert exc_info.value.non_retryable is True
+
+    plan_args = [c[1] for c in calls if c[0] == "plan_project_activity"]
+    assert len(plan_args) == wfmod.MAX_PLANNING_PAUSE_ROUNDS + 1
 
 
 def test_retry_failed_workflow_generates_and_forwards_a_trace_id():

@@ -24,6 +24,133 @@ MAIN_BRANCH = "main"
 DEFAULT_COMMIT_USER_NAME = "Khala"
 DEFAULT_COMMIT_USER_EMAIL = "brandon.kindred@gmail.com"
 
+DEFAULT_GIT_REMOTE_HOST = "github.com"
+
+
+def remote_url_matches(
+    remote_url: str, owner: str, repo: str, *, expected_host: str = DEFAULT_GIT_REMOTE_HOST
+) -> bool:
+    """True iff ``remote_url`` is an ``expected_host`` remote for ``owner/repo``.
+
+    Single source of truth for validating a checkout's ``origin`` remote
+    against expected repository coordinates before code gets committed and
+    pushed there — used both by the coding team's per-issue/per-PR checkout
+    guard and the unified API's clone-or-fetch reuse path. Keeping one
+    implementation avoids the two drifting apart on URL-parsing edge cases
+    (GHES, SSH URLs, case-folding) the way two independent copies would.
+
+    Preconditions:
+        - ``owner`` and ``repo`` are non-empty repository coordinates.
+        - ``expected_host`` MAY include a port (e.g. a GitHub Enterprise
+          Server host like ``"git.example.com:8443"``, as
+          ``web_host_for_api_base_url`` returns when the configured API base
+          URL's ``netloc`` carries one).
+    Postconditions:
+        - Accepts both remote URL forms: scheme-prefixed
+          (``https://host/owner/repo.git``, ``ssh://git@host/owner/repo.git``)
+          and scp-style SSH (``git@host:owner/repo.git``), with or without a
+          trailing ``.git`` and with or without userinfo credentials
+          (``https://x-access-token:TOKEN@host/owner/repo.git``, the form a
+          token-based clone produces). The inline comments below explain how
+          each form is normalized.
+        - Returns True iff BOTH: (a) the URL's host segment equals
+          ``expected_host``, and (b) its last two ``/``-separated path
+          segments equal ``owner``/``repo``. All three comparisons are
+          case-insensitive (GitHub owner/repo names are case-insensitive), as
+          is the trailing-``.git`` strip, and all are EXACT rather than
+          substring — ``acme/widget`` must not match ``acme/widget-extra``,
+          and matching the path segments alone would accept
+          ``https://evil.example.com/owner/repo.git``.
+        - The host comparison tolerates an incidental port on the URL only
+          when ``expected_host`` carries none: a port there (e.g.
+          ``ssh://git@github.com:22/owner/repo.git``) is stripped before
+          comparing. When ``expected_host`` DOES carry a port the comparison
+          stays exact, so scp-style remotes can never match it — scp syntax
+          cannot express a port, so such a remote's host segment is always
+          bare, and a caller pinning a ``host:port`` must expect URL-form
+          remotes.
+        - Returns False for a malformed, empty, or too-short value, a host
+          mismatch, or a scheme-less, colon-less value (e.g.
+          ``"github.com/owner/repo"``, which git reads as a LOCAL filesystem
+          path). This function gates pushes to a checkout's origin, so
+          anything unverifiable fails CLOSED rather than matching on its
+          trailing segments.
+    """
+    cleaned = remote_url.strip().rstrip("/")
+    # Case-INSENSITIVE, like every other identity comparison in this function:
+    # a remote spelled ``.../owner/repo.GIT`` would otherwise keep the suffix
+    # and fail to match ``repo``.
+    if cleaned.lower().endswith(".git"):
+        cleaned = cleaned[: -len(".git")]
+    # A scheme prefix (https://, ssh://, git://) is scp-style syntax's one
+    # distinguishing feature — scp syntax (`user@host:path`) never has one.
+    # Record whether one was present BEFORE stripping it, so the colon
+    # normalization below can tell a "host:port" URL apart from a genuine
+    # scp-style "host:path" — both look identical once the scheme is gone.
+    # Matched ONCE and sliced with the match object rather than a re.match plus
+    # a separate re.sub: the scp-colon normalization below is only correct while
+    # `had_scheme` and the strip agree exactly, and two copies of the same
+    # pattern can silently drift apart.
+    scheme_match = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned)
+    had_scheme = scheme_match is not None
+    if scheme_match is not None:
+        cleaned = cleaned[scheme_match.end() :]
+    # Strip userinfo (``user:token@`` or scp's bare ``git@``) BEFORE the
+    # scp-colon normalization below — otherwise the colon inside
+    # "x-access-token:ghp_xxx@host/..." gets converted to "/" first,
+    # splitting the token off into its own path segment and making the host
+    # segment resolve to the username instead.
+    # Guarded on "no '/' in the head": the scp form's pre-@ head is just "git"
+    # (never containing "/"), so its "git@" prefix IS stripped here too — the
+    # remaining "host:owner/repo" is left intact for the colon normalization
+    # below. Only an "@" that is path content (a "/"-containing head, e.g.
+    # "acme/w@idget") skips this strip and is left untouched.
+    if "@" in cleaned:
+        head, _sep, tail = cleaned.partition("@")
+        if "/" not in head:
+            cleaned = tail
+    if not had_scheme:
+        # No scheme AND no colon left is not a remote URL in either supported
+        # form: git reads such a value as a LOCAL filesystem path
+        # ("github.com/owner/repo" is a relative directory, not a host). Match
+        # it and this guard fails OPEN -- it gates pushes to a checkout's
+        # origin, so a path that merely happens to end in the expected
+        # host/owner/repo segments would be accepted as the real remote.
+        if ":" not in cleaned:
+            return False
+        # Normalize the scp-style "git@host:owner/repo" form to use "/"
+        # throughout so both URL styles split into path segments the same
+        # way. Safe here specifically because scp syntax has no scheme, so
+        # any colon reaching this point can only be its host/path separator
+        # — never a port.
+        cleaned = cleaned.replace(":", "/")
+    segments = [s for s in cleaned.split("/") if s]
+    if len(segments) < 3:
+        return False
+    host = segments[0].split("@")[-1]  # strip a "user@" prefix (e.g. "git@")
+    # A URL-form remote's host segment can carry an explicit port
+    # (`host:port`) whether or not that port is meaningful to the caller.
+    # `expected_host` itself carrying a colon (a GHES caller pinning an exact
+    # host:port) means the port IS meaningful, so the comparison above is
+    # left exact. Otherwise -- the common case, `expected_host` bare like
+    # "github.com" -- a port on the URL is incidental (an explicit default,
+    # or a custom SSH/HTTPS port) and must be stripped before comparing, or a
+    # perfectly valid `ssh://git@github.com:22/owner/repo.git` (or an HTTPS
+    # equivalent) would spuriously fail to match a bare expected host.
+    # KNOWN LIMITATION of leaving the ported comparison exact: scp syntax
+    # (`git@host:owner/repo`) cannot express a port at all, so its host segment
+    # is always bare and can never equal a port-carrying `expected_host`. A
+    # GHES deployment whose API base URL carries a nonstandard port but whose
+    # SSH endpoint listens on 22 therefore sees its scp-style remotes rejected
+    # here. Documented rather than normalized away: matching a bare host
+    # against a ported `expected_host` would discard the exactness the ported
+    # spelling was chosen to request.
+    if ":" not in expected_host and ":" in host:
+        host = host.rsplit(":", 1)[0]
+    if host.casefold() != expected_host.casefold():
+        return False
+    return segments[-2].casefold() == owner.casefold() and segments[-1].casefold() == repo.casefold()
+
 
 def _configured_commit_identity() -> Tuple[str, str]:
     """Resolve the configured platform commit identity.

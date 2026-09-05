@@ -88,9 +88,7 @@ flowchart LR
         PRA["ProductRequirements\nAnalysisAgent"]
         TL["TechLeadAgent"]
         ARCH["ArchitectureExpert"]
-        INT["IntegrationAgent"]
         SEC["CybersecurityExpert"]
-        DOC["DocumentationAgent"]
         REP["RepairExpertAgent"]
     end
 

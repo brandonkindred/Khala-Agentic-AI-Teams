@@ -1,10 +1,9 @@
 """Release notes agent — composes the markdown body for a sprint release.
 
-Sibling of ``documentation_agent`` inside the ``technical_writers``
-package. The ReleaseManagerAgent (in ``product_delivery``) calls
+Lives in the ``technical_writers`` package. The ReleaseManagerAgent (in ``product_delivery``) calls
 ``ReleaseNotesAgent.run`` to turn a structured set of shipped stories +
 collected Integration / DevOps / QA failures into the prose that lands
-in ``plan/releases/<version>.md``. Phase 3 of #243 / issue #371.
+in ``plan/releases/<version>.md``.
 """
 
 from software_engineering_team.technical_writers.release_notes_agent.agent import (

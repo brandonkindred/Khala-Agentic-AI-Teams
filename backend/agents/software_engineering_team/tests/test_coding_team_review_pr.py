@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+import software_engineering_team.github_source.client as client_module
 from software_engineering_team.github_source import (
     MAX_REVIEW_COMMENTS_TRAVERSED,
     GitHubAPIError,
@@ -141,6 +142,45 @@ class TestGetPullRequest:
         client = _client_with(lambda _req: httpx.Response(404, text="missing"))
         with pytest.raises(GitHubAPIError):
             client.get_pull_request("o", "r", 7)
+
+    def test_head_repo_full_name_missing_repo_is_empty(self) -> None:
+        """No head.repo at all parses as ''.
+
+        The head block is passed explicitly (``overrides`` REPLACES it
+        wholesale) so the case stands on its own: relying on the shared default
+        fixture to omit ``repo`` would make this test start failing --
+        confusingly, and for a scenario it no longer constructs -- the day
+        someone adds a ``repo`` key there for another test.
+        """
+        payload = _pr_payload(7, head={"ref": "feature", "sha": "abc123"})
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == ""
+
+    def test_head_repo_full_name_same_repo(self) -> None:
+        """An ordinary (non-fork) PR's head.repo is the PR's own repository."""
+        payload = _pr_payload(
+            7, head={"ref": "feature", "sha": "abc123", "repo": {"full_name": "o/r"}}
+        )
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == "o/r"
+
+    def test_head_repo_full_name_fork(self) -> None:
+        """A fork-opened PR's head.repo is the contributor's fork, not the base repo."""
+        payload = _pr_payload(
+            7, head={"ref": "feature", "sha": "abc123", "repo": {"full_name": "contributor/r"}}
+        )
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == "contributor/r"
+
+    def test_head_repo_full_name_deleted_fork_is_empty(self) -> None:
+        """GitHub reports head.repo as null when the fork was deleted after the PR opened."""
+        payload = _pr_payload(7, head={"ref": "feature", "sha": "abc123", "repo": None})
+        client = _client_with(lambda _req: httpx.Response(200, json=payload))
+        pr = client.get_pull_request("o", "r", 7)
+        assert pr.head_repo_full_name == ""
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +420,48 @@ class TestGetResolvedReviewThreadCommentIds:
     def test_degrades_to_empty_set_on_malformed_json(self) -> None:
         client = _client_with(lambda _req: httpx.Response(200, text="not json"))
         assert client.get_resolved_review_thread_comment_ids("o", "r", 7) == set()
+
+    @pytest.mark.parametrize(
+        "bad_comments",
+        [None, [], "nodes", {"nodes": None}, {"nodes": {"databaseId": 1}}],
+        ids=["none", "list", "str", "nodes-none", "nodes-dict"],
+    )
+    def test_unreadable_comments_payload_skips_the_thread(self, bad_comments) -> None:
+        """A thread whose `comments` payload cannot be read must be SKIPPED, not
+        yielded with an empty comment tuple.
+
+        Yielded with `()` it is indistinguishable from a thread that genuinely
+        has no comments, and every consumer reads THAT as "nothing outstanding
+        on this thread" -- enough for the address-comments flow to reply-and-
+        resolve a thread whose real comments were never read. The neighbouring
+        invalid-NODE path already skips for the same reason; this is the same
+        anomaly one level down.
+
+        Asserted on the generator directly because both public consumers project
+        the yield away: the non-strict one keeps only comment ids (empty either
+        way) and the strict one raises before reaching the yield, so skip vs
+        yield-empty is invisible from either.
+        """
+        good = {
+            "id": "T_ok",
+            "isResolved": True,
+            "comments": {"pageInfo": {"hasNextPage": False}, "nodes": [{"databaseId": 1}]},
+        }
+        bad = {"id": "T_bad", "isResolved": True, "comments": bad_comments}
+        client = _client_with(
+            lambda _req: httpx.Response(
+                200, json=_review_threads_response(nodes=[bad, good])
+            )
+        )
+
+        yielded = list(
+            client._iter_review_thread_nodes(
+                "o", "r", 7, query=client_module._REVIEW_THREADS_FULL_QUERY, strict=False
+            )
+        )
+
+        assert [t[0] for t in yielded] == ["T_ok"]
+        assert yielded[0][2] == (1,)
 
 
 # ---------------------------------------------------------------------------

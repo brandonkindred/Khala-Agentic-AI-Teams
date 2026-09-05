@@ -12,8 +12,11 @@ from __future__ import annotations
 import contextlib
 import threading
 
+from branding_team.api import background as background_mod
 from branding_team.api import main as api_main
+from branding_team.models import BrandPhase, HumanReview, StrategicCoreOutput
 from branding_team.shared import job_store
+from branding_team.tests.conftest import make_mission
 
 
 class _RecordingJobManager:
@@ -98,3 +101,86 @@ def test_run_branding_core_runs_without_job_manager(monkeypatch) -> None:
     _call_run_core()
 
     assert completed.get("status") == job_store.JOB_STATUS_COMPLETED
+
+
+def test_run_branding_core_mid_run_cancel_stops_remaining_phases(monkeypatch) -> None:
+    """A cancel detected between phases stops the thread-mode job from issuing
+    any further phase, symmetric to
+    test_temporal_unit.py::test_workflow_cancel_between_phases_skips_finalize.
+
+    Exercises the real should_continue gate (BrandingTeamOrchestrator.run /
+    _run_phases_with_cache, story #7837) through the real background-path
+    wiring (_run_branding_core -> _job_not_cancelled, story #7849) -- only
+    run_single_phase (the LLM/agent boundary) is faked, not the orchestrator
+    itself.
+    """
+    monkeypatch.setattr(api_main, "_job_manager", None)
+    job_id = "job-cancel-mid-run"
+
+    class _CancelState:
+        def __init__(self) -> None:
+            self.is_cancelled_calls = 0
+            self.cancelled = False
+
+    state = _CancelState()
+    seen_job_ids: list[str] = []
+
+    def _fake_is_job_cancelled(seen_job_id: str) -> bool:
+        seen_job_ids.append(seen_job_id)
+        state.is_cancelled_calls += 1
+        # Not cancelled for the check before strategic_core; cancelled from
+        # the check before narrative_messaging on -- mirrors
+        # _drive_workflow(cancel_after=1) in test_temporal_unit.py.
+        if state.is_cancelled_calls > 1:
+            state.cancelled = True
+        return state.cancelled
+
+    monkeypatch.setattr(background_mod, "is_job_cancelled", _fake_is_job_cancelled)
+
+    job_store_calls: list[dict] = []
+
+    def _fake_update_if_not_cancelled(seen_job_id, **kw):
+        seen_job_ids.append(seen_job_id)
+        if state.cancelled:
+            return False
+        job_store_calls.append(kw)
+        return True
+
+    monkeypatch.setattr(job_store, "update_job_if_not_cancelled", _fake_update_if_not_cancelled)
+
+    phases_run: list[str] = []
+
+    def _fake_run_single_phase(mission, phase, prior_outputs=None):
+        phases_run.append(phase.value)
+        # A gate regression that lets a later phase through must fail loudly
+        # here, not with a confusing type error deep inside the orchestrator
+        # from handing it a strategic-core output for e.g. narrative_messaging.
+        if phase is not BrandPhase.STRATEGIC_CORE:
+            raise AssertionError(f"phase issued after cancel: {phase.value}")
+        return StrategicCoreOutput(positioning_statement="cancel-test-core"), False
+
+    monkeypatch.setattr(api_main.orchestrator, "run_single_phase", _fake_run_single_phase)
+
+    api_main._run_branding_core(
+        job_id=job_id,
+        mission=make_mission(),
+        human_review=HumanReview(approved=True),
+        brand_checks=[],
+        client_id=None,
+        brand_id=None,
+        include_market_research=False,
+        include_design_assets=False,
+        target_phase=None,
+    )
+
+    assert phases_run == [BrandPhase.STRATEGIC_CORE.value]
+    assert job_store_calls == [{"status": job_store.JOB_STATUS_RUNNING}]
+    # The cancellation gate and the job-store writes must both act on this
+    # run's own job_id -- proving the id actually threads through
+    # _run_branding_core -> _job_not_cancelled -> is_job_cancelled, not just
+    # that some cancellation flag flipped.
+    assert seen_job_ids and set(seen_job_ids) == {job_id}
+    # The gate must actually have been re-consulted (and flipped) before
+    # narrative_messaging -- otherwise this would pass vacuously if the
+    # orchestrator simply stopped after one phase for an unrelated reason.
+    assert state.is_cancelled_calls >= 2 and state.cancelled

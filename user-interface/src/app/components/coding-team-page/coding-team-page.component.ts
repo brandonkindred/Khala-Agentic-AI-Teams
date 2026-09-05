@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnDestroy, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, ElementRef, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
@@ -20,6 +20,8 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
+import { SettleAnnouncer } from '../../shared/settle-announcer';
+import { EmptyStateComponent } from '../../shared/empty-state/empty-state.component';
 import { CodingTeamMonitorComponent } from '../coding-team-monitor/coding-team-monitor.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { OutOfScopeIssuesComponent } from './out-of-scope-issues/out-of-scope-issues.component';
@@ -27,13 +29,26 @@ import {
   PendingQuestionsComponent,
   type AnswersSubmittedStatus,
 } from '../pending-questions/pending-questions.component';
-import type { GitHubIssueItem, GitHubRepoItem, OutOfScopeProposalItem, RunGitHubIssueResponse } from '../../models/integrations.model';
-import type { CodingTeamGitHubContext, CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
+import type {
+  AddressPrCommentsResponse,
+  GitHubIssueItem,
+  GitHubPullRequestItem,
+  GitHubRepoItem,
+  OutOfScopeProposalItem,
+  RunGitHubIssueResponse,
+} from '../../models/integrations.model';
+import type {
+  CodingTeamGitHubContext,
+  CodingTeamJobListItem,
+  CodingTeamJobStatus,
+} from '../../models/coding-team.model';
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { deferFocus } from '../../shared/defer-focus';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
+import { resultCountAnnouncement } from '../../shared/result-count-announcement';
 import { NotificationService } from '../../core/notification.service';
 import {
   appendActivityNarrative,
@@ -45,7 +60,11 @@ import {
 /** How often the Runs list is re-fetched while the page is open. */
 const RUNS_POLL_MS = 15000;
 
-/** Quiet period after the last "thinking" update before announcing a settled line count. */
+/** Quiet period after the last "thinking" token before announcing a settled line count — tuned for
+ * a raw LLM token stream (many updates per second), not this page's HTTP poll cadence. Local to
+ * this component; NOT shared with coding-team-monitor.component.ts's summary announcer, which polls
+ * at a much slower, fixed cadence and needs its own differently-sized window (see
+ * SUMMARY_ANNOUNCE_SETTLE_MS there) — only the SettleAnnouncer timer mechanism is shared. */
 const THINKING_ANNOUNCE_SETTLE_MS = 1500;
 
 /** localStorage key for the last repo the user expanded, so it can be pre-expanded on return. */
@@ -81,6 +100,9 @@ interface RunRowVm {
  */
 type RunIdentity = { type: 'issue'; number: number } | { type: 'pr'; number: number };
 
+/** The coding-team page's available sub-views. */
+type CodingTeamPageView = 'chat' | 'github' | 'pulls' | 'jobs' | 'issues';
+
 /**
  * The run identity carried by a job's GitHub context, or null when it carries neither.
  * If both `issue_number` and `pr_number` are present, the issue identity wins so the Runs
@@ -100,6 +122,11 @@ function runIdentity(ctx: CodingTeamGitHubContext | undefined): RunIdentity | nu
 function runKey(owner: string | undefined, repo: string | undefined, identity: RunIdentity): string {
   const suffix = identity.type === 'pr' ? `pr-${identity.number}` : `${identity.number}`;
   return `${(owner ?? '').toLowerCase()}/${(repo ?? '').toLowerCase()}#${suffix}`;
+}
+
+/** Stable identity for an in-flight PR-comment remediation request. */
+function prAddressKey(owner: string, repo: string, prNumber: number): string {
+  return `${owner.toLowerCase()}/${repo.toLowerCase()}#${prNumber}`;
 }
 
 /**
@@ -149,6 +176,7 @@ interface IssueRowVm {
     RouterLink,
     HealthIndicatorComponent,
     LoadingSpinnerComponent,
+    EmptyStateComponent,
     CodingTeamMonitorComponent,
     TeamAssistantChatComponent,
     OutOfScopeIssuesComponent,
@@ -163,19 +191,29 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly integrationsApi = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly notifications = inject(NotificationService);
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   /** Which single view is visible. The page opens on the job Runs panel. */
-  private _activeView: 'chat' | 'github' | 'jobs' | 'issues' = 'jobs';
+  private _activeView: CodingTeamPageView = 'jobs';
 
-  get activeView(): 'chat' | 'github' | 'jobs' | 'issues' {
+  get activeView(): CodingTeamPageView {
     return this._activeView;
   }
 
-  set activeView(view: 'chat' | 'github' | 'jobs' | 'issues') {
+  set activeView(view: CodingTeamPageView) {
     this._activeView = view;
     // Auto-load out-of-scope issues when switching to the Issues tab with a repo selected.
     if (view === 'issues' && this.selectedRepo && this.oosProposals.length === 0 && !this.oosLoading) {
       this.loadOutOfScopeIssues();
+    }
+    // Auto-load open PRs when switching to the Pull Requests tab with a repo selected.
+    // Gated on `pullsLoaded`, NOT on `pulls.length === 0`: a repo with no open PRs
+    // is a successful load that legitimately leaves the array empty, and a
+    // length-based guard would re-fetch it on every single tab switch. The flag
+    // still permits a retry after a failure — `loadPulls` sets it only on success
+    // — and `selectRepo` clears it so a repo switch always re-fetches.
+    if (view === 'pulls' && this.selectedRepo && !this.pullsLoaded && !this.loadingPulls) {
+      this.loadPulls();
     }
   }
 
@@ -260,6 +298,20 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.selectedIssueOpenDepsText = issue ? this.openDepRefs(issue) : '';
   }
 
+  // Pull Requests tab — open PRs for the expanded repo, each with an "address
+  // unresolved comments" action.
+  /** Open pull requests for the expanded repo (GET /github/pulls). */
+  pulls: GitHubPullRequestItem[] = [];
+  loadingPulls = false;
+  pullsLoaded = false;
+  pullError: string | null = null;
+  /** PRs whose "address comments" job is currently being started, keyed by `owner/repo#number`
+   * (see {@link prAddressKey}) so a double-click can't submit the same PR twice and identical PR
+   * numbers across repos never collide. */
+  private readonly addressingPrs = new Set<string>();
+  // "Latest wins" guard so a slow PR load superseded by a newer one (repo switch) is discarded.
+  private readonly pullsLoad = new LatestOnly();
+
   // Runs panel — the persistent, non-dismissable status panel.
   /** Every coding-team run for this repo (running + recent terminal), newest snapshot from /jobs. */
   runs: CodingTeamJobListItem[] = [];
@@ -297,11 +349,31 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   jobStatusHasPendingQuestions = false;
   /** aria-live text for the "Agent thinking" panel: a streaming cue while output is still arriving,
    * then a settled line count once it's been quiet for `THINKING_ANNOUNCE_SETTLE_MS`. Empty when
-   * there's no thinking output to announce. */
+   * there's no thinking output to announce. Driven by `thinkingAnnouncer`, disposed in
+   * `ngOnDestroy`. */
   thinkingAnnouncement = '';
-  /** Debounce handle for the settled-count announcement; cleared/replaced on every new thinking token
-   * and on destroy so a stale timer never overwrites a later announcement or fires on a dead view. */
-  private thinkingAnnounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Owns the settle-timer bookkeeping for `thinkingAnnouncement` — see `shared/settle-announce.ts`.
+   * `onChange` flips to an immediate streaming cue on any differing, non-empty update; `onSettle`
+   * replaces it with a line count once the input has been quiet for `THINKING_ANNOUNCE_SETTLE_MS`. */
+  private readonly thinkingAnnouncer = new SettleAnnouncer(
+    THINKING_ANNOUNCE_SETTLE_MS,
+    (thinking) => {
+      if (!thinking.trim()) {
+        this.thinkingAnnouncement = '';
+        return;
+      }
+      const lineCount = thinking.split('\n').filter((line) => line.trim().length > 0).length;
+      this.thinkingAnnouncement = `${lineCount} line${lineCount === 1 ? '' : 's'} of reasoning`;
+    },
+    () => {
+      this.thinkingAnnouncement = 'Agent is thinking…';
+    },
+  );
+  /** True while `thinkingAnnouncer` has a pending settle timer — exposed so callers/tests can check
+   * debounce state without reaching into the private field. */
+  get thinkingAnnouncementPending(): boolean {
+    return this.thinkingAnnouncer.isPending;
+  }
   /** In-memory activity narrative for the selected run (Jobs thought-stream panel). */
   activityNarrative: ActivityNarrativeState = emptyActivityNarrative();
   /** Polite live-region cue for activity-only updates; never contains raw narrative lines. */
@@ -346,13 +418,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Setting the polled status refreshes the precomputed badge class, terminal flag, pending-questions
    * flag, thinking-panel announcement, and activity narrative. */
   set jobStatus(status: CodingTeamJobStatus | null) {
-    const previousThinking = this._jobStatus?.thinking ?? '';
     this._jobStatus = status;
     this.jobStatusBadgeClass = this.badgeClass(status?.status);
     this.jobStatusTerminal = isCodingTeamTerminalStatus(status?.status);
     this.jobStatusHasPendingQuestions =
       !!status?.waiting_for_answers && (status?.pending_questions?.length ?? 0) > 0;
-    this.updateThinkingAnnouncement(status?.thinking ?? '', previousThinking);
+    this.thinkingAnnouncer.update(status?.thinking ?? '');
     if (!status) {
       this.activityNarrative = emptyActivityNarrative();
       this.activityAnnouncement = '';
@@ -366,41 +437,6 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.activityAnnounceSeq += 1;
       this.activityAnnouncement = `Agent activity updated (${this.activityAnnounceSeq})`;
     }
-  }
-
-  /**
-   * Drive `thinkingAnnouncement` from a new `thinking` value without ever piping the raw (potentially
-   * very verbose) stream text into the live region.
-   *
-   * Preconditions: none.
-   * Postconditions: when `thinking` is empty, any pending settle timer is cleared and the announcement
-   * is cleared too. When `thinking` is unchanged from `previousThinking`, the announcement and any
-   * in-flight settle timer are left completely untouched — a re-render with no new output must not
-   * restart (or cancel) the debounce. When `thinking` has grown/changed, any pending settle timer is
-   * replaced, the announcement flips immediately to a streaming cue, and a new settle timer is armed
-   * to replace it with a line count after `THINKING_ANNOUNCE_SETTLE_MS` of no further change.
-   */
-  private updateThinkingAnnouncement(thinking: string, previousThinking: string): void {
-    if (!thinking) {
-      if (this.thinkingAnnounceTimer) {
-        clearTimeout(this.thinkingAnnounceTimer);
-        this.thinkingAnnounceTimer = null;
-      }
-      this.thinkingAnnouncement = '';
-      return;
-    }
-    if (thinking === previousThinking) {
-      return;
-    }
-    if (this.thinkingAnnounceTimer) {
-      clearTimeout(this.thinkingAnnounceTimer);
-    }
-    this.thinkingAnnouncement = 'Agent is thinking…';
-    this.thinkingAnnounceTimer = setTimeout(() => {
-      const lineCount = thinking.split('\n').filter(line => line.trim().length > 0).length;
-      this.thinkingAnnouncement = `${lineCount} line${lineCount === 1 ? '' : 's'} of reasoning`;
-      this.thinkingAnnounceTimer = null;
-    }, THINKING_ANNOUNCE_SETTLE_MS);
   }
 
   /**
@@ -425,6 +461,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private initialRunsLoad = true;
   /** Handle for the copy-confirmation reset, cleared on destroy so it never fires on a dead view. */
   private copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Handle for the pending confirm-panel/row focus move, cleared on destroy so it never fires on a dead view. */
+  private focusTimer: ReturnType<typeof setTimeout> | null = null;
 
   ngOnInit(): void {
     this.checkGitHubConfig();
@@ -444,10 +482,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       clearTimeout(this.copyResetTimer);
       this.copyResetTimer = null;
     }
-    if (this.thinkingAnnounceTimer) {
-      clearTimeout(this.thinkingAnnounceTimer);
-      this.thinkingAnnounceTimer = null;
-    }
+    this.thinkingAnnouncer.dispose();
+    this.clearFocusTimer();
     this.refreshTrigger$.complete();
   }
 
@@ -589,6 +625,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // configured default applied, and the toggle is a transient override for that repo only
     // (so turning it off for one repo doesn't silently unfilter every other repo).
     this.labelFilterActive = true;
+    // PR-tab state is repo-scoped too: clear it so switching repos re-fetches the new repo's
+    // open PRs (the Pull Requests tab auto-loads while `pullsLoaded` is false). The in-flight guard
+    // set is not cleared — a job already being started for the previous repo's PR must still
+    // clear its own key when its request settles.
+    this.pulls = [];
+    this.pullsLoaded = false;
+    this.pullError = null;
+    // Invalidate any in-flight loadPulls() for the PREVIOUS repo and reset the loading flag:
+    // without this, switching away mid-load leaves `loadingPulls` stuck true until that stale
+    // request settles, blocking the Pulls-tab auto-load guard (`!loadingPulls`) for the newly
+    // selected repo — its panel would stay blank until a manual Refresh. Advancing the token
+    // here (rather than only in loadPulls) makes the stale response's own `isCurrent` check
+    // fail too, so it can never overwrite the new repo's state even if it lands afterward.
+    this.pullsLoad.next();
+    this.loadingPulls = false;
   }
 
   /** Repos matching `repoSearch` (case-insensitive substring of `full_name`); all repos when empty. */
@@ -596,6 +647,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const query = this.repoSearch.trim().toLowerCase();
     if (!query) return this.repos;
     return this.repos.filter((repo) => repo.full_name.toLowerCase().includes(query));
+  }
+
+  /**
+   * Polite live-region text for how many repos `filteredRepos` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before `repos` has loaded or when the token has no repo access
+   * at all (`repos.length === 0`) — in both cases the search field isn't rendered, so there's
+   * nothing to announce and announcing "0 repositories shown" would contradict the no-access
+   * empty state. Otherwise returns
+   * `resultCountAnnouncement(filteredRepos.length, 'repository', 'repositories')`.
+   */
+  get repoCountAnnouncement(): string {
+    if (!this.reposLoaded || this.repos.length === 0) return '';
+    return resultCountAnnouncement(this.filteredRepos.length, 'repository', 'repositories');
   }
 
   /** True when there are repos to show but the search excludes every one. */
@@ -694,6 +760,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return this.issues.filter((issue) => issue.title.toLowerCase().includes(query));
   }
 
+  /**
+   * Polite live-region text for how many issues `filteredIssues` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before the expanded repo's issues have loaded or when it has no
+   * open issues at all (`issues.length === 0`) — in both cases the search field isn't rendered, so
+   * there's nothing to announce and announcing "0 issues shown" would contradict the no-open-issues
+   * empty state. Otherwise returns
+   * `resultCountAnnouncement(filteredIssues.length, 'issue', 'issues')`.
+   */
+  get issueCountAnnouncement(): string {
+    if (!this.issuesLoaded || this.issues.length === 0) return '';
+    return resultCountAnnouncement(this.filteredIssues.length, 'issue', 'issues');
+  }
+
   /** True when there are issues to show but the search excludes every one. */
   get hasFilteredOutIssues(): boolean {
     return this.issues.length > 0 && this.filteredIssues.length === 0;
@@ -732,14 +813,106 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.onIssueSearchChange();
   }
 
-  /** Select an issue, surfacing the run-confirmation affordance inline under its row. */
+  /**
+   * Select an issue, surfacing the run-confirmation affordance inline under its row.
+   *
+   * Preconditions: none enforced — selecting a different issue while one is already selected
+   *   simply moves the confirmation panel to the new row.
+   * Postconditions: `selectedIssue` (and its derived `selectedIssueOpenDepsText`) is set, which
+   *   renders `.github-confirm-panel` under this issue's row on the next change-detection pass;
+   *   once rendered, focus moves into that panel (named via `aria-labelledby` pointing at its
+   *   `<h3>`) so AT users hear the confirmation heading — and the blocked-dependency warning,
+   *   when present — instead of focus staying on the row button they just activated.
+   */
   selectIssue(issue: GitHubIssueItem): void {
     this.selectedIssue = issue;
+    this.moveFocusToConfirmPanel(issue.number);
   }
 
-  /** Clear the issue selection, collapsing the inline confirmation panel. */
+  /**
+   * Clear the issue selection, collapsing the inline confirmation panel.
+   *
+   * Preconditions: none enforced.
+   * Postconditions: `selectedIssue` is cleared, unmounting `.github-confirm-panel` (including the
+   *   Cancel button that currently holds focus) on the next change-detection pass; once the row
+   *   has re-rendered, focus returns to that issue's `.github-issue-row` button so it never drops
+   *   to `<body>`. If the issue search filter has removed that row from the list by the time the
+   *   deferred callback runs, focus falls back to `.github-issues-list`, or further to the issue
+   *   search input if the search matches nothing at all — never `<body>`.
+   */
   cancelSelection(): void {
+    const issueNumber = this.selectedIssue?.number ?? null;
     this.selectedIssue = null;
+    if (issueNumber !== null) {
+      this.moveFocusToIssueRow(issueNumber);
+    }
+  }
+
+  /**
+   * Repo-scope prefix shared by the confirm-panel ids and the row key below. Only one repo is
+   * ever expanded at a time (see `toggleRepo`), but scoping by repo full name here means this
+   * wiring stays correct even if that invariant ever changes — a bare issue number is only
+   * unique within a repo. Extracted to one place so the three sites below can't drift apart.
+   */
+  private get repoScope(): string {
+    return this.selectedRepo?.full_name ?? '';
+  }
+
+  /** Repo-scoped id for the confirm panel of `issueNumber` under the currently expanded repo. */
+  confirmPanelId(issueNumber: number): string {
+    return `confirm-panel-${this.repoScope}-${issueNumber}`;
+  }
+
+  /** Id for the confirm panel's heading, referenced by the panel's `aria-labelledby`. */
+  confirmPanelHeadingId(issueNumber: number): string {
+    return `confirm-panel-heading-${this.repoScope}-${issueNumber}`;
+  }
+
+  /** Repo-scoped key for a row's `data-issue-number` attribute. */
+  issueRowKey(issueNumber: number): string {
+    return `${this.repoScope}#${issueNumber}`;
+  }
+
+  /** Clear any pending focus-move timer, e.g. before scheduling a new one or on destroy. */
+  private clearFocusTimer(): void {
+    if (this.focusTimer !== null) {
+      clearTimeout(this.focusTimer);
+      this.focusTimer = null;
+    }
+  }
+
+  /**
+   * Supersede any pending focus move with a new one, deferred until the next render tick.
+   * `find` resolves the target element within this component's host once rendered.
+   */
+  private scheduleFocusMove(find: (root: HTMLElement) => HTMLElement | null): void {
+    this.clearFocusTimer();
+    this.focusTimer = deferFocus(this.host.nativeElement, find);
+  }
+
+  /** After the confirm panel for `issueNumber` renders, move focus into it. */
+  private moveFocusToConfirmPanel(issueNumber: number): void {
+    const id = this.confirmPanelId(issueNumber);
+    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[id="${id}"]`));
+  }
+
+  /**
+   * After the confirm panel for `issueNumber` unmounts, move focus back to its row's button
+   * (found via `data-issue-number`, which — unlike `aria-controls` — stays on the row regardless
+   * of selection state, since `aria-controls` is removed the same tick `selectedIssue` clears).
+   * Falls back to `.github-issues-list` when the row isn't found (e.g. filtered out by the issue
+   * search), and further to the issue search input when the list itself isn't rendered either
+   * (the search matches nothing) — the search input renders whenever the issue list section
+   * does at all, so focus never drops to `<body>` in either edge case.
+   */
+  private moveFocusToIssueRow(issueNumber: number): void {
+    const key = this.issueRowKey(issueNumber);
+    this.scheduleFocusMove(
+      (root) =>
+        root.querySelector<HTMLElement>(`[data-issue-number="${key}"]`) ??
+        root.querySelector<HTMLElement>('.github-issues-list') ??
+        root.querySelector<HTMLElement>('.github-search-field input'),
+    );
   }
 
   /** True when the issue is blocked by, or depends on, one or more other issues. */
@@ -1417,6 +1590,90 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         error: (err) => {
           this.oosError = extractErrorDetail(err, 'Failed to load out-of-scope issues.');
           this.oosLoading = false;
+        },
+      });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pull Requests (Pull Requests tab)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Load the open pull requests for the currently expanded repo.
+   *
+   * Preconditions: `selectedRepo` is set (a repo was expanded in the GitHub tab).
+   * Postconditions: on success `pulls` holds every open PR for the repo and `pullsLoaded`
+   * is true; on error `pullError` is set. A slow load superseded by a repo switch is
+   * discarded (latest-wins), and the loading flag is always cleared by the current handler.
+   */
+  loadPulls(): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
+    const token = this.pullsLoad.next();
+    this.loadingPulls = true;
+    this.pullError = null;
+    this.integrationsApi
+      .getGitHubPullRequests({ owner: repo.owner, repo: repo.name })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (pulls) => {
+          if (!this.pullsLoad.isCurrent(token)) return;
+          this.loadingPulls = false;
+          // Guard against a repo switch mid-flight (pullError/pulls belong to the expanded repo).
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
+          this.pulls = pulls;
+          this.pullsLoaded = true;
+        },
+        error: (err) => {
+          if (!this.pullsLoad.isCurrent(token)) return;
+          this.loadingPulls = false;
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
+          this.pullError = extractErrorDetail(err, 'Failed to load pull requests.');
+        },
+      });
+  }
+
+  /** True while the "address comments" job for `pr` in the expanded repo is being started. */
+  isAddressingPr(pr: GitHubPullRequestItem): boolean {
+    const repo = this.selectedRepo;
+    if (!repo) return false;
+    return this.addressingPrs.has(prAddressKey(repo.owner, repo.name, pr.number));
+  }
+
+  /**
+   * Start the flow that addresses & responds to every unresolved review comment on `pr`.
+   *
+   * Preconditions: none enforced — a no-op when no repo is expanded or a job for this PR is
+   * already starting (`isAddressingPr`), so a double-click can't submit the same PR twice.
+   * Postconditions: on success a toast reports the started job and its unresolved-comment count,
+   * and the Runs list is refreshed so the job appears there; on error `pullError` is surfaced
+   * (only while still on the PR's repo). The per-PR in-flight flag is cleared across the call.
+   */
+  addressPrComments(pr: GitHubPullRequestItem): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
+    const key = prAddressKey(repo.owner, repo.name, pr.number);
+    if (this.addressingPrs.has(key)) return;
+    this.addressingPrs.add(key);
+    this.pullError = null;
+    this.integrationsApi
+      .addressPrComments(pr.number, { owner: repo.owner, repo: repo.name })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp: AddressPrCommentsResponse) => {
+          this.addressingPrs.delete(key);
+          this.notifications.saved(
+            `Addressing ${resp.unresolved_comment_count} unresolved comment(s) on PR #${resp.pr_number} — run ${resp.job_id}.`,
+          );
+          // The new job shows in the Runs list; nudge its poll so it appears promptly.
+          this.refreshTrigger$.next();
+        },
+        error: (err: unknown) => {
+          this.addressingPrs.delete(key);
+          // Only surface the failure while still on the repo the PR belongs to (see confirmAndRun).
+          if (this.selectedRepo?.full_name === repo.full_name) {
+            this.pullError = extractErrorDetail(err, 'Failed to start addressing comments.');
+          }
         },
       });
   }

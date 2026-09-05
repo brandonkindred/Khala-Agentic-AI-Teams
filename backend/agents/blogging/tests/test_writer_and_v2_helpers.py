@@ -11,48 +11,6 @@ from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# blog_writer_agent.agent helpers
-# ---------------------------------------------------------------------------
-
-
-def test_extract_draft_after_marker_marker_present() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = '{"draft": 0}\n---DRAFT---\n# Hello\n\nBody\n'
-    assert _extract_draft_after_marker(raw).startswith("# Hello")
-
-
-def test_extract_draft_after_marker_marker_inline() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = "---DRAFT---# Hi"
-    assert _extract_draft_after_marker(raw).startswith("# Hi")
-
-
-def test_extract_draft_after_marker_falls_back_to_json() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = '{"draft": "# Title\\n\\nBody"}'
-    out = _extract_draft_after_marker(raw)
-    assert "Title" in out
-
-
-def test_extract_draft_after_marker_falls_back_to_fenced_json() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    raw = '```json\n{"draft": "# Fenced\\n\\nBody"}\n```'
-    out = _extract_draft_after_marker(raw)
-    assert "Fenced" in out
-
-
-def test_extract_draft_after_marker_empty_inputs() -> None:
-    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
-
-    assert _extract_draft_after_marker("") == ""
-    assert _extract_draft_after_marker(None) == ""  # type: ignore[arg-type]
-    assert _extract_draft_after_marker("not json and no marker") == ""
-
 
 def test_write_draft_to_path_creates_parents(tmp_path: Path) -> None:
     from agents.blogging.blog_writer_agent.agent import _write_draft_to_path
@@ -96,25 +54,6 @@ def test_writer_agent_raises_on_none_llm() -> None:
     # Direct construction intentional: make_writer_agent() replaces None with DummyLLMClient.
     with pytest.raises(ValueError, match="llm_client"):
         BlogWriterAgent(llm_client=None)
-
-
-def test_writer_agent_system_prompt_content_merge() -> None:
-    from llm_service import CacheBreakpoint
-
-    from .conftest import make_writer_agent
-
-    a = make_writer_agent(
-        writing_style_guide_content="Style A",
-        brand_spec_content="Brand B",
-    )
-    assert len(a._system_prompt_content) == 1
-    segment = a._system_prompt_content[0]
-    assert isinstance(segment, CacheBreakpoint)
-    segment_text = segment.text
-    assert "BRAND SPEC" in segment_text
-    assert "Brand B" in segment_text
-    assert "WRITING STYLE GUIDE" in segment_text
-    assert "Style A" in segment_text
 
 
 def test_writer_agent_deterministic_self_check() -> None:

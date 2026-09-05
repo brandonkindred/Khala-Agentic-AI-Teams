@@ -626,7 +626,7 @@ def test_cross_attempt_resume_llm_call_count_bounded_to_resumed_portion(
     fails at the synthesis boundary with ``spec_implicated=False``. Attempt 1
     resumes past DESIGN+REVIEW (``last_resume_determination is
     PipelineStage.SYNTHESIS`` -- the one resume shape ``run_cycle`` consumes
-    today, per #7315/PR #7469) straight into synthesis, which is free. The
+    today, a REVIEW-stage checkpoint) straight into synthesis, which is free. The
     cycle's *total* LLM-call cost must equal exactly one design attempt's
     worth of charges -- proving design+review's cost was not paid again on
     re-entry, i.e. the re-entry's cost is bounded to the resumed portion of

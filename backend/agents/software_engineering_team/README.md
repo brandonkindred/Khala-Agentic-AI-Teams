@@ -161,6 +161,15 @@ deciding when a gate's finding counts as matching one of those labels —
 location resolution, defect-class resolution, line tolerance, and
 deterministic tie-breaking — is specified in
 [`docs/GATE_FINDING_MATCHING_RULE.md`](docs/GATE_FINDING_MATCHING_RULE.md).
+How a case positively declares false-positive resistance — a
+`must_not_find` label scoped to a region rather than the absence of
+labels — and how that plays out against the matching rule, with worked
+`must_find`/`must_not_find` examples, are specified in
+[`docs/CORPUS_FALSE_POSITIVE_RESISTANCE.md`](docs/CORPUS_FALSE_POSITIVE_RESISTANCE.md).
+The selection plan that fixes the corpus's defect-class distribution,
+per-class case counts, and backend/frontend proportion the case-authoring
+stories fill — justified against that inventory and format — is specified
+in [`docs/CORPUS_SELECTION_PLAN.md`](docs/CORPUS_SELECTION_PLAN.md).
 
 ## Plan folder
 

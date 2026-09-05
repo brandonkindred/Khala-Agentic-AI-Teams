@@ -1534,7 +1534,7 @@ class FillSimulator:
     ) -> None:
         """Submit every attached ``StopAttachment`` / ``LimitAttachment`` leg
         (the fixed ``attached_stop_loss``/``attached_take_profit`` bracket
-        fields, plus any additional legs in ``attached_exits`` — #7509) as
+        fields, plus any additional legs in ``attached_exits``) as
         OCO children.
 
         Called once per parent on a successful terminal-fill entry slice.
@@ -1598,7 +1598,7 @@ class FillSimulator:
                 tp=req.attached_take_profit,
                 reason=f"{ENGINE_EXIT_REASON_PREFIX}bracket_tp",
             )
-        # Generalized non-bracket legs (#7509): reuses the exact same
+        # Generalized non-bracket legs: reuses the exact same
         # per-kind materializers as the two fixed bracket fields above, so
         # arm/latch/gap-through/trailing behavior for these legs is
         # identical to a bracket leg's — nothing about the fill-simulator
@@ -1608,6 +1608,13 @@ class FillSimulator:
         # request carries both (e.g. a test exercising the combination).
         for idx, leg in enumerate(req.attached_exits):
             if isinstance(leg, StopAttachment):
+                # ``leg.reason``, when set, is a rule-aware attribution its
+                # resolver stamped (e.g. the resting stop-loss migration's
+                # ``engine_exit:stop_loss`` — see ``StopAttachment.reason``)
+                # that must survive being routed through this rule-agnostic
+                # leg list rather than a fixed, rule-specific field. Falls
+                # back to the generic per-index label for every other
+                # producer, unchanged from before.
                 self._materialize_stop_child(
                     req=req,
                     po=po,
@@ -1617,7 +1624,7 @@ class FillSimulator:
                     filled_qty=filled_qty,
                     entry_fill_price=entry_fill_price,
                     sl=leg,
-                    reason=f"{ENGINE_EXIT_REASON_PREFIX}exit_leg_{idx}",
+                    reason=leg.reason or f"{ENGINE_EXIT_REASON_PREFIX}exit_leg_{idx}",
                     default_client_order_id=f"{req.client_order_id}_exit{idx}",
                 )
             else:

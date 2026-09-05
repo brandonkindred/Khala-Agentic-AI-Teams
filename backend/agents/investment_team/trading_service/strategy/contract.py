@@ -165,6 +165,18 @@ class StopAttachment(BaseModel):
     # Precondition: 0 < entry_price_pct < 1.0 (same bound as ExitLegSpec.pct /
     # _is_resting_stop_loss); enforced in OrderRequest.validate_prices.
     entry_price_pct: Optional[float] = None
+    # When set, the fill-simulator materializer (``_materialize_attached_exit_children``)
+    # uses this verbatim as the materialized child's ``reason`` instead of deriving
+    # the generic ``engine_exit:exit_leg_{idx}`` label — same override-else-default
+    # idiom as ``client_order_id`` above. Exists so a leg that carries semantic
+    # meaning beyond "generic attached exit" (e.g. a resting stop-loss routed
+    # through this rule-agnostic ``attached_exits`` plumbing rather than the
+    # rule-aware fixed ``attached_stop_loss`` bracket field) can still preserve its
+    # canonical ``engine_exit:<kind>`` attribution — several quality gates
+    # (``alignment_checks``, ``exit_rule_conformance``) match that literal exactly.
+    # Unused (``None``) by every other producer, including bracket legs (which
+    # never go through ``attached_exits`` at all).
+    reason: Optional[str] = None
 
 
 class LimitAttachment(BaseModel):
@@ -377,7 +389,7 @@ class OrderRequest(BaseModel):
         # standalone TRAILING_STOP; non-negative ``trail_offset``).
         # Applies to every ``StopAttachment`` leg — the fixed
         # ``attached_stop_loss`` field and each ``StopAttachment`` in the
-        # generalized ``attached_exits`` list (#7509) — so a leg attached
+        # generalized ``attached_exits`` list — so a leg attached
         # via the list can't skip the offset checks the fixed field
         # enforces. ``label`` names the offending leg in the error so a
         # bad ``attached_exits`` entry is as easy to locate as a bad
