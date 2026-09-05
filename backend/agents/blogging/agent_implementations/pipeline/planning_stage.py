@@ -26,6 +26,7 @@ from ._common import (
     _extract_plan_keywords,
     _make_update,
     _persist_content_plan_artifacts,
+    _run_title_selection,
     _save_narratives_to_story_bank,
     _wait_for_hitl,
     planning_llm_client,
@@ -44,7 +45,8 @@ def run_planning_stage(
         ctx: The shared ``PipelineContext``. Reads ``brief``, ``work_dir``,
             ``llm_client``, ``length_policy``, ``series_context``, ``job_id``, and
             ``job_updater``; writes ``planning_phase_result``/``plan``/
-            ``elicited_stories_text``/``covered_sections`` (and ``status`` on abort).
+            ``elicited_stories_text``/``covered_sections``/``selected_title`` (and
+            ``status`` on abort).
     Preconditions:
         - ``ctx.llm_client`` and ``ctx.length_policy`` are resolved.
     Postconditions:
@@ -60,12 +62,17 @@ def run_planning_stage(
           only if the failure occurs before any section is collected) —
           reproducing today's behavior exactly since nothing downstream reads the
           field yet.
+        - On success also sets ``ctx.selected_title`` from the title-selection
+          round run immediately after outline approval (``_run_title_selection``):
+          the author-loved title string, or ``None`` when title selection is
+          skipped (no ``job_id``/``job_updater``) or no title is ultimately chosen.
         - Returns a terminal ``(planning_phase_result, None, "FAIL")`` tuple if the
           HITL wait ends without a human response — either the job was
           cancelled/failed while awaiting outline approval, or the job record
           disappeared from the store mid-wait. This tuple sentinel mirrors
           ``run_pipeline``'s return shape so the sequencer forwards it unchanged
-          (see ``run_draft_stage`` for the rationale).
+          (see ``run_draft_stage`` for the rationale). Title selection never runs
+          in this case — the function returns before reaching it.
         - Each outline-feedback re-plan round refreshes ``content_plan.json``,
           ``content_plan.md``, ``outline.md``, ``content_brief.md``, and
           ``allowed_claims.json`` together (via the same
@@ -79,9 +86,15 @@ def run_planning_stage(
         LLMRateLimitError / LLMTemporaryError: transient LLM-transport failures
             from ``run_planning`` (including the plan critic) propagate unwrapped
             for Temporal retry.
-        CancelledError: a Temporal-native cancellation propagates (never swallowed);
-            a cancellation surfaced *while awaiting outline approval* instead
-            short-circuits to the FAIL tuple above.
+        CancelledError: a Temporal-native cancellation propagates (never swallowed)
+            from either the outline-approval wait or the title-selection wait — this
+            stage adds no handler around ``_run_title_selection`` that could swallow
+            it. A cancellation surfaced *while awaiting outline approval* (job status
+            flips to failed/cancelled, rather than a raised ``CancelledError``)
+            instead short-circuits to the FAIL tuple above; the same during title
+            selection resolves to ``ctx.selected_title`` staying ``None`` and the
+            stage completing normally, matching how the other optional HITL phases
+            here degrade.
     """
     # Deferred import: see agents.blogging.agent_implementations.pipeline._common's
     # module docstring — keeps monkeypatch.setattr(shim, "run_planning", ...) /
@@ -409,6 +422,18 @@ def run_planning_stage(
             raise
         except Exception as e:
             logger.warning("Outline approval phase error (skipping): %s", e)
+
+    # ------------------------------------------------------------------
+    # Title selection: author picks the title while the draft hasn't been
+    # written yet, so the choice can flow into the draft/revision prompts.
+    # ------------------------------------------------------------------
+    ctx.selected_title = _run_title_selection(
+        plan=plan,
+        llm_client=llm_client,
+        job_id=job_id,
+        job_updater=job_updater,
+        _update=_update,
+    )
 
     ctx.planning_phase_result = planning_phase_result
     ctx.plan = plan

@@ -41,14 +41,19 @@ class PipelineContext:
           ``draft_stage_activity`` nor ``gates_stage_activity`` re-seed it
           (unlike ``elicited_stories_text``, which both do) — so today nothing
           reads this field in either execution mode.
-        - ``selected_title`` has no in-pipeline producer: no stage writes it, so it
-          holds whatever the caller passed at construction (``None`` by default).
-          The draft stage reads it and threads it into the writer/revision inputs;
-          at ``None`` the writer picks its own title, which is what every current
-          entry point gets. Title selection today runs in the *gates* stage
-          (``_run_title_selection``), after the draft is final, and feeds only
-          ``PublishingPack.title_options`` — pinning a title before drafting would
-          require moving that gate ahead of the draft stage.
+        - ``selected_title`` is populated by the planning stage, after outline
+          approval (``_run_title_selection``, a no-op without a configured job
+          store). The draft stage reads it and threads it into the writer/revision
+          inputs; at ``None`` (no job store, or no title chosen) the writer picks
+          its own title. The gates stage also still runs its own, independent
+          selection round today, whose result feeds only
+          ``PublishingPack.title_options`` — it does not touch the
+          already-written draft. Unlike ``plan``/``elicited_stories_text``,
+          ``selected_title`` does not yet cross the Temporal activity boundary:
+          ``draft_stage_activity``/``gates_stage_activity`` re-seed the context
+          without it, so a Temporal-mode run sees it stay at its ``None`` default
+          regardless of what the planning stage selected — only thread mode
+          carries the planning stage's choice through today.
         - ``draft_result`` is populated by the draft stage before the gates stage
           reads it.
     """

@@ -55,6 +55,14 @@ def _make_ctx(monkeypatch, *, job_id="job-1", **ctx_overrides):
     from agents.blogging.agent_implementations.pipeline import planning_stage
 
     monkeypatch.setattr(planning_stage, "_wait_for_hitl", lambda *_a, **_kw: False)
+    # job_id="job-1" was never created in the real job store, so the unmocked
+    # title-selection wait's own internal _wait_for_hitl call (in _common.py,
+    # not this module's patched reference) would busy-loop forever: it uses
+    # the real is_waiting_for_title_selection, which returns False immediately
+    # for a missing job, while get_blog_job below is mocked to always return a
+    # present-but-title-less dict, so the "missing job" terminal case never
+    # triggers either. Not the behavior under test here.
+    monkeypatch.setattr(planning_stage, "_run_title_selection", lambda *_a, **_kw: None)
 
     import agents.blogging.shared.blog_job_store as blog_job_store
 
