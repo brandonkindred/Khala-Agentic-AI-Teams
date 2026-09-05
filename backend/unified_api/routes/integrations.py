@@ -3265,11 +3265,17 @@ async def address_github_pr_comments(pr_number: int, body: AddressPrCommentsRequ
           :class:`CloneLockAcquisitionError` and maps to 503 (a local,
           retryable serialization problem). Any OTHER ``OSError`` escaping the
           locked section maps to 500 with an operation-neutral detail —
-          identical split to ``run_github_issue``'s, and load-bearing here in
-          particular because ``aiohttp.ClientOSError`` subclasses ``OSError``:
-          a failed FORWARD (by which point the coding-team job may already have
-          started) must not be reported as "could not acquire clone lock", i.e.
-          as though nothing had happened at all.
+          identical split to ``run_github_issue``'s. A failed FORWARD (by which
+          point the coding-team job may already have started) must not be
+          reported as "could not acquire clone lock", i.e. as though nothing
+          had happened at all. Today no forward failure can reach the
+          ``OSError`` handler at all: ``_forward_to_coding_team`` is
+          httpx-based and converts every ``httpx.HTTPError`` into an
+          ``HTTPException`` (see the comment at its call site below). The split
+          is kept because it is what makes that property a local, checkable one
+          rather than a transport detail this handler silently depends on — a
+          future transport whose errors DO subclass ``OSError`` would otherwise
+          reintroduce the misreport.
     """
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
 

@@ -252,6 +252,23 @@ def get_running_job_on_checkout(repo_path: str) -> dict[str, object] | None:
     return _running_sibling_on_checkout(repo_path)
 
 
+def review_author() -> str:
+    """Return the author handle to stamp on a review row.
+
+    The third of this module's public wrappers over a ``pr_review.py``
+    underscore-prefixed helper (alongside :func:`get_running_job_on_checkout`
+    and :func:`get_running_review_for_pr`), for the same reason: a route module
+    should depend on a stable, documented public function rather than reach
+    across a module boundary into another module's private symbol.
+
+    Postconditions:
+        - Returns :func:`_review_author`'s handle verbatim, which is the
+          resolved author or ``"anonymous"`` when author resolution is
+          unavailable or fails. Never raises.
+    """
+    return _review_author()
+
+
 def get_running_review_for_pr(owner: str, repo: str, pr_number: int) -> str | None:
     """Return the id of a review/address-comments job already running for this PR.
 

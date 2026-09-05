@@ -351,6 +351,16 @@ def _running_sibling_on_checkout(
             continue
         sibling_path = j.get("repo_path")
         if not sibling_path:
+            # Same class of event as the unresolvable-path branch below, and
+            # skipped for the same reason -- so it is skipped just as loudly.
+            # A row with no repo_path cannot be shown to name THIS checkout,
+            # but if a collision ever does slip past this scan, the warning is
+            # the only record of which row the scan declined to consider.
+            logger.warning(
+                "job %s has no repo_path; skipping during sibling scan on checkout %s",
+                j.get("job_id"),
+                repo_path,
+            )
             continue
         try:
             same_checkout = os.path.realpath(sibling_path) == target

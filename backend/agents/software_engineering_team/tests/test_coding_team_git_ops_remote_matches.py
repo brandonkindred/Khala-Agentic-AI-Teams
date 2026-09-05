@@ -92,6 +92,29 @@ def test_mismatched_push_url_fails_even_when_fetch_url_matches(monkeypatch) -> N
     assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
 
 
+def test_push_url_same_repo_name_different_owner_fails(monkeypatch) -> None:
+    """A push URL naming the SAME repo under a DIFFERENT owner must fail.
+
+    The other mismatch cases in this file differ in both owner and repo, so a
+    regression that compared only host + repo NAME would still satisfy them.
+    Owner-confusion (`evil/widget` vs. the expected `acme/widget`) is the
+    natural attack shape against exactly this guard — a repo an attacker can
+    create at will — so it is pinned separately.
+    """
+    _patch_git(
+        monkeypatch,
+        {
+            ("remote", "get-url", "origin"): (0, "https://github.com/acme/widget.git"),
+            ("remote", "get-url", "--push", "--all", "origin"): (
+                0,
+                "https://github.com/evil/widget.git",
+            ),
+        },
+    )
+
+    assert git_ops._checkout_remote_matches("/repo", "acme", "widget") is False
+
+
 def test_mismatched_fetch_url_fails_without_checking_push_url(monkeypatch) -> None:
     """A fetch URL naming a different repo fails immediately, without spending a
     second git call on the push URL it can no longer rescue."""

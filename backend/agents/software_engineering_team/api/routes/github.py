@@ -27,6 +27,7 @@ from software_engineering_team.github_source import (
     issue_to_plan_input,
     pick_ready_issue,
     redact_secret,
+    scrub_token_from_text,
 )
 from software_engineering_team.models import JobStatus
 from software_engineering_team.temporal.coding_team_start_workflow import (
@@ -81,6 +82,11 @@ def _fail_new_job(
         - The job is marked ``FAILED`` with ``error`` and ``current_activity``
           cleared, then raises ``HTTPException(status_code=http_status,
           detail=detail or error)`` — it never returns normally.
+        - Both the persisted ``error`` and the response ``detail`` are passed
+          through ``scrub_token_from_text`` first. This is a backstop for the
+          ``error`` precondition, not a replacement for it: the pattern pass is
+          best-effort and cannot recognise every secret shape, so callers must
+          still pass a sanitized summary rather than relying on this.
         - If the job-store update itself raises (the store is down, the row
           vanished), THAT exception propagates instead: the row may be left
           non-terminal and the caller's intended ``http_status`` is replaced by
@@ -88,13 +94,25 @@ def _fail_new_job(
           failure from the one being reported, and surfacing the real error is
           the more useful signal than masking it behind a tidy 4xx/503.
     """
+    # Defense in depth for the ``error`` precondition above. That precondition
+    # is the real contract -- a caller must pass a sanitized summary, not raw
+    # exception text -- but it is enforced only by documentation, and a single
+    # caller slip would persist a credential onto a row the generic
+    # ``GET /api/jobs/{team}`` route echoes verbatim. The pattern scrubber is
+    # the CHOKEPOINT pass here rather than ``redact_secret``: this helper holds
+    # no token in scope to remove by value, and the pattern pass is exactly the
+    # best-effort net that catches a credential the caller failed to strip.
+    safe_error = scrub_token_from_text(error)
     _main.update_job(
         job_id,
         status=JobStatus.FAILED.value,
-        error=error,
+        error=safe_error,
         current_activity=None,
     )
-    exc = HTTPException(status_code=http_status, detail=detail or error)
+    exc = HTTPException(
+        status_code=http_status,
+        detail=scrub_token_from_text(detail) if detail else safe_error,
+    )
     # `from cause` only when there IS a cause: `from None` is not "no chaining",
     # it actively SUPPRESSES the implicit context (see the precondition above).
     if cause is not None:

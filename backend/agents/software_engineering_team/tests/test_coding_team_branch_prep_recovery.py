@@ -1389,8 +1389,9 @@ class TestEnsureNamedRemote:
         api._ensure_named_remote(clone, fork_url)
 
         fork2 = str(tmp_path / "fork2")
-        r = subprocess.run(["git", "clone", "-q", fork, fork2], capture_output=True, text=True)
-        assert r.returncode == 0, r.stderr
+        # Through `_must` like every other git call in this file: a failure then
+        # names the command and git's stderr instead of a bare returncode.
+        _must(fork, "clone", "-q", fork, fork2)
         fork2_url = f"file://{fork2}"
 
         name, err = api._ensure_named_remote(clone, fork2_url)

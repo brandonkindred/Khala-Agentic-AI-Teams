@@ -323,6 +323,13 @@ _PAT = f"github_pat_{'F' * 12}_{'G' * 12}"
         f"https://{_FAKE}@example.com/path plus {_GHP2}",
         f"fine-grained {_PAT} quoted inside a finding",
         "short ghp_tooshort is left alone",
+        # Two more benign near-misses. A bare prefix with NO body must not be
+        # redacted (the length bound is what separates a credential from a
+        # word), and an ordinary word merely CONTAINING the "gh" digraph must
+        # not trip the classic alternative -- a scrubber that mangled either
+        # would corrupt finding text while redacting nothing.
+        "bare github_pat_ prefix with no body",
+        "rough_estimate and through_put are ordinary words",
     ],
 )
 def test_local_scrubber_stays_in_lockstep_with_github_source(text: str) -> None:

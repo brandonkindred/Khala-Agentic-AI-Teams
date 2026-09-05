@@ -124,6 +124,12 @@ def _git(
           URL-embedded token redacted via ``scrub_token_from_text`` and, when
           an auth env was supplied, the transient Authorization header value
           (including its base64 form) redacted as well.
+        - The message is STRIPPED of surrounding whitespace, so callers can
+          compare it against an expected value directly without re-normalizing
+          the trailing newline git emits. Callers such as
+          ``_checkout_remote_matches`` rely on this: they pass the returned
+          value into a URL predicate whole, and a retained trailing newline
+          would make every comparison fail closed.
         - ``env=None`` (default) inherits the parent environment, preserving the
           prior behaviour for local-only operations. Pass an auth env (see
           ``_git_auth_env``) for network operations against a private remote.
@@ -1265,7 +1271,18 @@ def _prepare_issue_branch(
     remote, remote_err = _ensure_named_remote(repo_path, remote)
     if remote_err:
         return False, remote_err, notes
-    is_fork_remote = remote != original_remote
+    # The `"://"` half is NOT redundant with the inequality: on its own, the
+    # inequality infers "a URL was resolved" from the mere fact that
+    # `_ensure_named_remote` returned a different string. That holds only while
+    # that helper passes plain names through byte-for-byte, which is its
+    # documented contract but not something this call site can enforce. Were it
+    # ever to normalize a plain NAME (trim, case-fold, alias-map), a non-fork
+    # caller would be silently reclassified as a fork and its `default_branch`
+    # fetched from `base_remote` instead of the caller's own remote -- changing
+    # which repository the plan is grounded on, with no error. Testing the
+    # ORIGINAL value for `"://"` mirrors the exact predicate
+    # `_ensure_named_remote` branches on, so only a genuine URL can set this.
+    is_fork_remote = remote != original_remote and "://" in original_remote
 
     # default_branch always lives in the checkout's own base remote — the PR's
     # (or issue's) BASE repository, which unified_api's _ensure_repo_clone always

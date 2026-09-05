@@ -950,8 +950,8 @@ class GitHubClient(_GitHubHttpMixin):
               returns 422 for other validation failures (e.g. an invalid
               ``color``) — those are inspected for the ``already_exists`` code
               first and, when absent, still raise ``GitHubAPIError`` via
-              ``_check``, matching this docstring's contract that an invalid
-              color raises rather than being swallowed as "already exists".
+              ``_check`` (an invalid ``color`` raises rather than being
+              swallowed).
               Raises ``GitHubAPIError`` for any other non-2xx (auth, rate limit,
               server error) as well.
         """
@@ -1363,11 +1363,23 @@ class GitHubClient(_GitHubHttpMixin):
             if payload.get("errors"):
                 _unavailable(f"GraphQL errors: {payload['errors']}")
                 return
+            # Unwrapped in three guarded steps rather than one collapsed check:
+            # a malformed envelope, a failed `repository` alias, and an absent
+            # `pullRequest` (a deleted PR returns `pullRequest: null`) are three
+            # different operational failures, and a single shared message cannot
+            # tell them apart in a log. Each names its field and previews the
+            # offending value, matching every sibling diagnostic in this method.
             data = payload.get("data")
-            repository = data.get("repository") if isinstance(data, dict) else None
-            pr_data = repository.get("pullRequest") if isinstance(repository, dict) else None
+            if not isinstance(data, dict):
+                _unavailable(f"missing or invalid data payload: {_preview(data)}")
+                return
+            repository = data.get("repository")
+            if not isinstance(repository, dict):
+                _unavailable(f"missing or invalid repository payload: {_preview(repository)}")
+                return
+            pr_data = repository.get("pullRequest")
             if not isinstance(pr_data, dict):
-                _unavailable("missing pullRequest payload")
+                _unavailable(f"missing or invalid pullRequest payload: {_preview(pr_data)}")
                 return
             review_threads = pr_data.get("reviewThreads")
             if not isinstance(review_threads, dict) or not isinstance(
@@ -1676,6 +1688,13 @@ class GitHubClient(_GitHubHttpMixin):
               Raises ``ValueError`` for an empty ``body`` (rather than sending a
               request GitHub would reject with an opaque 422) and
               ``GitHubAPIError`` on any non-2xx response.
+            - JSON decoding is NOT wrapped: a 2xx response whose body is not
+              valid JSON raises ``requests.exceptions.JSONDecodeError`` (a
+              ``ValueError`` subclass) straight out of ``response.json()``, not
+              ``GitHubAPIError`` — matching :meth:`_execute_graphql` and
+              :meth:`get_file_contents_detailed`. A caller that distinguishes
+              the empty-``body`` ``ValueError`` from a decode failure must
+              inspect the exception type, not merely catch ``ValueError``.
             - Posts ``body`` with :data:`KHALA_COMMENT_MARKER` appended when not
               already present (matching :meth:`add_issue_comment`/
               :meth:`create_issue`'s provenance convention) so a caller that

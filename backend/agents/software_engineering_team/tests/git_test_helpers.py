@@ -8,6 +8,7 @@ own fixtures/helpers need them) and test modules can import these directly.
 from __future__ import annotations
 
 import base64
+import os
 import subprocess
 from pathlib import Path
 
@@ -37,10 +38,29 @@ def _run_git(repo: str, *args: str) -> str:
     Postconditions:
         - Returns the command's stdout with surrounding whitespace stripped.
     Raises:
-        AssertionError: git exited non-zero; the message names the command,
+        AssertionError: git exited non-zero OR did not finish within the
+            timeout; the message names the command and, for a non-zero exit,
             the exit code and stderr.
     """
-    result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    # Every helper in this module funnels through here, so the timeout and the
+    # prompt suppression are set once for all of them. Without the timeout a
+    # blocked git -- a stale `.git/index.lock` from a crashed prior test
+    # process is the realistic case -- hangs the test run with no diagnostic
+    # instead of failing through this function's own AssertionError reporting.
+    # GIT_TERMINAL_PROMPT/GIT_EDITOR are belt-and-braces for any future
+    # subcommand added here that touches a remote or would open an editor.
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo, *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_EDITOR": "true"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"git -C {repo} {' '.join(args)} timed out after 60s: {exc}"
+        ) from exc
     if result.returncode != 0:
         raise AssertionError(
             f"git -C {repo} {' '.join(args)} failed (exit {result.returncode}): {result.stderr}"

@@ -106,7 +106,7 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     # The returned server-clock start time is surfaced on the response so the UI computes
     # a live duration on one clock (this start + the completion from job status).
     created_at = _main.record_review_start(
-        job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main._review_author()
+        job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main.review_author()
     )
     _main._start_pr_review_thread(job_id, request, token)
     return ReviewPrResponse(
@@ -197,6 +197,17 @@ def post_address_comments(
             # genuinely not existing, so this falls into the 400 branch below
             # instead of surfacing as an unhandled 500.
             has_git = False
+    if stripped and has_git:
+        # Coerce the VALIDATED spelling back onto the request, exactly as
+        # pr_number is coerced from the path above and for the same reason:
+        # everything downstream (create_job, the checkout admission lock,
+        # raise_if_checkout_occupied, the worker's own repo_path) reads
+        # request.repo_path, so the value that was validated and the value
+        # that is consumed must not be allowed to diverge. Without this a
+        # whitespace-padded path passes admission on its stripped form and
+        # then fails in the worker against the unstripped one -- a job that
+        # admits cleanly and dies later with a confusing path error.
+        request = request.model_copy(update={"repo_path": stripped})
     if not stripped or not has_git:
         # A non-empty path naming a non-existent directory or an ordinary
         # (non-git) folder is exactly as unusable to every real-issue child as
@@ -349,7 +360,7 @@ def post_address_comments(
                     request.repo,
                     pr_number,
                     pr.html_url,
-                    _main._review_author(),
+                    _main.review_author(),
                 )
                 _address.start_address_comments_thread(job_id, request, token)
             except Exception as e:
