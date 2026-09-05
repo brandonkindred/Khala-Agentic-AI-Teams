@@ -609,6 +609,10 @@ class FillSimulator:
         or ``order_book.requeue`` based on the order's ``unfilled_policy``.
         The rejection reason is consumed by ``process_bar`` to emit a
         ``FillDiagnosticEvent`` (#410) for downstream zero-trade analysis.
+        When the order carries a resting stop-loss attachment
+        (``sl.entry_price_pct`` is not ``None``), an ``engine_exit_attached``
+        ``FillDiagnosticEvent`` is appended to ``events`` at materialization
+        time so the conformance gate credits the firing.
         """
         req = po.request
         ref_price = terms.reference_price
@@ -1537,6 +1541,11 @@ class FillSimulator:
         po: PendingOrder,
         bar: Bar,
         filled_qty: float,
+        # Optional: unlike ``_fill_entry``/``_continue_entry`` (always called
+        # from ``process_bar``, where an ``events`` list is always in scope),
+        # this method's ``_maybe_materialize_brackets_on_abandon`` call sites
+        # are deliberately left un-wired (a narrow, documented scope
+        # boundary), so they call without an ``events`` list.
         events: Optional[List[FillDiagnosticEvent]] = None,
     ) -> None:
         """Submit every attached ``StopAttachment`` / ``LimitAttachment`` leg

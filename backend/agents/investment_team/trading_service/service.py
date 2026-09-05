@@ -1857,6 +1857,12 @@ def resolve_bracket_attachments(
     return _as_bracket_attachment_pair(attachments)
 
 
+# The only ``StopLossRule.basis`` value ``_is_resting_stop_loss`` admits;
+# shared with the ``engine_exit_attached`` branch of
+# ``_apply_fill_outcome_events`` so the basis-label literal has one home.
+_RESTING_STOP_LOSS_BASIS = "entry_price"
+
+
 def _is_resting_stop_loss(rule: Any) -> bool:
     """Return True for the resting-eligible stop-loss variant migrated here.
 
@@ -1873,7 +1879,7 @@ def _is_resting_stop_loss(rule: Any) -> bool:
     """
     return (
         isinstance(rule, StopLossRule)
-        and rule.basis == "entry_price"
+        and rule.basis == _RESTING_STOP_LOSS_BASIS
         and rule.style == "market"
         and 0.0 < rule.pct < 1.0
     )
@@ -2623,7 +2629,7 @@ def _apply_fill_outcome_events(
             diagnostics.exit_rule_firings[kind] = diagnostics.exit_rule_firings.get(kind, 0) + 1
             sym_firings = diagnostics.exit_rule_firings_by_symbol.setdefault(ev.symbol, {})
             sym_firings[kind] = sym_firings.get(kind, 0) + 1
-            basis_label = f"{kind}:entry_price"
+            basis_label = f"{kind}:{_RESTING_STOP_LOSS_BASIS}"
             diagnostics.exit_rule_firings_by_basis[basis_label] = (
                 diagnostics.exit_rule_firings_by_basis.get(basis_label, 0) + 1
             )

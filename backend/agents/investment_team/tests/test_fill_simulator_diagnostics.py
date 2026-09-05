@@ -33,6 +33,7 @@ from investment_team.trading_service.engine.execution_model import (
     RealisticExecutionModel,
 )
 from investment_team.trading_service.engine.fill_simulator import (
+    FillDiagnosticEvent,
     FillSimulator,
     FillSimulatorConfig,
 )
@@ -855,9 +856,7 @@ def test_reconciled_strategy_close_is_not_counted_as_engine_fill() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _engine_exit_attached_event(*, symbol: str, reason: str):
-    from investment_team.trading_service.engine.fill_simulator import FillDiagnosticEvent
-
+def _engine_exit_attached_event(*, symbol: str, reason: str) -> FillDiagnosticEvent:
     return FillDiagnosticEvent(
         kind="engine_exit_attached",
         order_id="sl1",
