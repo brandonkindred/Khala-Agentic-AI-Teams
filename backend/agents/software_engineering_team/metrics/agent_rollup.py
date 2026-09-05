@@ -278,7 +278,8 @@ def compute_from_traces(
         by_agent_phase_rows[agent_key][phase].append(row)
 
     if expected_agent_keys is not None:
-        for agent_key in expected_agent_keys:
+        expected_agent_key_list = list(expected_agent_keys)
+        for agent_key in expected_agent_key_list:
             by_agent_rows.setdefault(agent_key, [])
             by_agent_phase_rows.setdefault(agent_key, defaultdict(list))
 

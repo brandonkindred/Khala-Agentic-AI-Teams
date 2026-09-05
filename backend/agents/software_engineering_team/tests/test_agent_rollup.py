@@ -335,6 +335,23 @@ def test_zero_call_group_equals_empty_group_rollup() -> None:
     m = compute_from_traces([], window_days=1.0, expected_agent_keys=["backend"])
 
     assert m.by_agent["backend"] == CallRollup()
+    # expected_agent_keys alone (no expected_phases) gives the agent an empty
+    # by_agent_phase entry, not a densified one.
+    assert m.by_agent_phase["backend"] == {}
+
+
+def test_expected_phases_only_densifies_observed_agents() -> None:
+    """Passing expected_phases without expected_agent_keys densifies only observed agents."""
+    rows = [_row(agent_key="backend", phase="execution")]
+
+    m = compute_from_traces(rows, window_days=1.0, expected_phases=["design"])
+
+    # Observed agent gets the declared phase as a zero-call group.
+    assert m.by_agent_phase["backend"]["design"].call_count == 0
+    # No new agent keys are synthesized.
+    assert list(m.by_agent_phase.keys()) == ["backend"]
+    # by_phase includes the declared phase.
+    assert m.by_phase["design"].call_count == 0
 
 
 def test_empty_window_with_expected_keys_yields_full_zero_call_grid() -> None:
