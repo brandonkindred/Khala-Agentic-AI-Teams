@@ -809,6 +809,76 @@ def test_run_agent_via_reasoning_omits_max_tokens_when_model_has_no_pin(
     assert "max_tokens" not in format_calls[0]
 
 
+def test_run_agent_via_reasoning_wraps_the_reasoning_model_only_with_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool-call cap must be wired to the reasoning pass iff tools are attached.
+
+    Without this, only the end-to-end looping-model test would notice the
+    wiring being inverted or dropped in a refactor — and what it protects is a
+    production hang, not a wrong answer. The formatting pass never gets tools,
+    so it must never carry the wrapper either (its clone is what
+    `_extract_llm_client`/`model_label` read).
+    """
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+    from software_engineering_team.code_review_agent.tool_call_budget import (
+        ToolCallBudgetModel,
+    )
+
+    agent_calls: list[dict[str, Any]] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            # Each instance remembers its OWN model, so what it returns depends on
+            # which agent is called rather than on how many have been constructed.
+            # A construction count only works while the wiring builds agent 1,
+            # calls it, then builds agent 2; construct both up front or reuse one
+            # instance and the prose reaches the JSON-parsing pass, failing as an
+            # opaque validation error instead of naming the wiring change this
+            # test exists to pin.
+            model = kwargs.get("model")
+            inner = getattr(model, "inner", model)
+            self._wants_json = getattr(inner, "config", {}).get("response_format") == "json"
+            agent_calls.append(kwargs)
+
+        def __call__(self, prompt: str) -> str:
+            return '{"approved": true, "summary": "ok"}' if self._wants_json else "REVIEW PROSE"
+
+    class _ClonableModel:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {"response_format": "json"}
+
+        def clone(self, **overrides: Any) -> "_ClonableModel":
+            cloned = _ClonableModel()
+            cloned.config = {**self.config, **overrides}
+            return cloned
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+
+    def _run(tools: Any) -> list[dict[str, Any]]:
+        agent_calls.clear()
+        run_agent_via_reasoning(
+            model=_ClonableModel(),
+            reasoning_prompt="Review this",
+            reasoning_system_prompt="Prose reviewer",
+            formatting_instructions='Return {"approved": bool, "summary": str}',
+            parse=lambda raw: _Out.model_validate_json(raw),
+            tools=tools,
+        )
+        return list(agent_calls)
+
+    with_tools = _run([{"name": "list_files"}])
+    assert isinstance(with_tools[0]["model"], ToolCallBudgetModel)
+    # The formatting pass has no tools, so nothing to cap.
+    assert not isinstance(with_tools[1]["model"], ToolCallBudgetModel)
+
+    for no_tools in (None, []):
+        calls = _run(no_tools)
+        assert not any(isinstance(call["model"], ToolCallBudgetModel) for call in calls), (
+            f"a toolless run was wrapped (tools={no_tools!r})"
+        )
+
+
 def test_run_agent_via_reasoning_second_call_has_no_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

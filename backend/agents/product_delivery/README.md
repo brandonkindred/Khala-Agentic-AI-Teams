@@ -23,7 +23,7 @@ If every planned story has reached a terminal status the
 
 1. Composes a markdown release note via
    `software_engineering_team/technical_writers/release_notes_agent/`
-   (a sibling of `documentation_agent`, sharing its Strands
+   (in the `technical_writers` package, sharing its Strands
    `documentation` model). The writer has a deterministic fallback
    body so the release event is observable even when the LLM is down.
 2. Writes `plan/releases/<version>.md` (`<version>` defaults to today's

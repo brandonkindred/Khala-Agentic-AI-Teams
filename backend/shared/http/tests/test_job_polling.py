@@ -275,6 +275,53 @@ def test_poll_short_circuits_on_on_poll_exception(monkeypatch):
     assert result == {"status": "failed", "error": "Progress callback failed"}
 
 
+class _PauseSignal(Exception):
+    """Stand-in for a caller's control-flow signal (e.g. a durable HITL pause)."""
+
+
+def test_poll_propagates_a_declared_passthrough_exception(monkeypatch):
+    """A caller can nominate exceptions ``on_poll`` raises as control flow, not
+    failure. Folding those into a failed status silently disables whatever they
+    drive, since the caller never sees the signal it is waiting for."""
+    monkeypatch.setattr(
+        "shared.http.job_polling.time.sleep",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+
+    def _on_poll(_status):
+        raise _PauseSignal("waiting on a human")
+
+    with pytest.raises(_PauseSignal, match="waiting on a human"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            on_poll=_on_poll,
+            passthrough_exceptions=(_PauseSignal,),
+            poll_interval=0.01,
+            total_timeout=10,
+        )
+
+
+def test_poll_still_swallows_an_undeclared_exception_when_passthrough_is_set(monkeypatch):
+    """The passthrough is a whitelist, not a switch: anything outside it keeps
+    failing closed."""
+    monkeypatch.setattr(
+        "shared.http.job_polling.time.sleep",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+
+    def _on_poll(_status):
+        raise RuntimeError("progress sink failed")
+
+    result = poll_until_terminal(
+        lambda: {"status": "running"},
+        on_poll=_on_poll,
+        passthrough_exceptions=(_PauseSignal,),
+        poll_interval=0.01,
+        total_timeout=10,
+    )
+    assert result == {"status": "failed", "error": "Progress callback failed"}
+
+
 def test_poll_respects_custom_status_key_and_terminal_statuses():
     result = poll_until_terminal(
         lambda: {"state": "cancelled"},
@@ -292,6 +339,48 @@ def test_poll_rejects_non_positive_poll_interval():
 def test_poll_rejects_non_positive_total_timeout():
     with pytest.raises(AssertionError):
         poll_until_terminal(lambda: {"status": "completed"}, total_timeout=0)
+
+
+def test_poll_rejects_a_non_exception_passthrough_entry():
+    """A bad entry would otherwise surface as a TypeError chained onto whatever
+    on_poll actually raised, mid-poll and far from the call site — the failure
+    mode the file's other preconditions use asserts to avoid."""
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=(str,),  # type: ignore[arg-type]
+        )
+
+
+def test_poll_rejects_a_bare_class_passed_as_passthrough_exceptions():
+    """The parameter is a tuple of types, not a single class.
+
+    Unlike the list and bad-element cases, a bare class would actually WORK at
+    ``except passthrough_exceptions:`` -- a single exception class is a valid
+    except operand -- so there is no mid-poll failure to prevent here. The
+    precondition exists to enforce the declared tuple contract: rejected at the
+    call site with a message naming the parameter, instead of being silently
+    accepted, or tripping an element-only check with an unrelated
+    ``'type' object is not iterable``. (The shipped assert checks
+    ``isinstance(..., tuple)`` first and short-circuits, so it never iterates
+    the class.)
+    """
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=_PauseSignal,  # type: ignore[arg-type]
+        )
+
+
+def test_poll_rejects_a_list_of_exception_types():
+    """A LIST of real exception types is the input an element-only check lets
+    through — and the only one that still reaches ``except passthrough_exceptions:``,
+    where it raises TypeError chained onto whatever on_poll actually threw."""
+    with pytest.raises(AssertionError, match="passthrough_exceptions"):
+        poll_until_terminal(
+            lambda: {"status": "running"},
+            passthrough_exceptions=[_PauseSignal],  # type: ignore[arg-type]
+        )
 
 
 def test_default_terminal_statuses_include_completed_failed_cancelled():

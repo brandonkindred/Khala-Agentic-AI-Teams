@@ -173,3 +173,32 @@ def test_fails_closed_on_an_unrecognized_conversation_attach_result() -> None:
     with pytest.raises(RuntimeError, match="unrecognized ConversationAttachResult"):
         attach_conversation_to_brand(store, conv_store, "client_x", "brand_x", "conv_x")
     assert store.patch_calls == []
+
+
+def test_ok_restamps_updated_at_with_the_shared_formatter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The restamp must come from ``store.now_iso``, not a hand-rolled formatter.
+
+    That is the whole reason ``now_iso`` is public: this path writes brand rows
+    through its own transaction, so a second formatter here would drift the
+    moment the shared one changes and leave rows in this column formatted
+    differently from every other write path. ``test_now_iso_is_utc_...`` pins the
+    formatter's output but would keep passing if this call site stopped using it,
+    so the wiring needs its own test.
+
+    Patches ``branding_team.store.now_iso`` rather than the coordination module:
+    the import is function-scoped, so the name is resolved from ``store`` at call
+    time and the coordination module has no such attribute to patch.
+    """
+    from branding_team import store as store_module
+
+    monkeypatch.setattr(store_module, "now_iso", lambda: "STAMP-FROM-SHARED-FORMATTER")
+
+    conv_store = _StubConversationStore(ConversationAttachResult.OK)
+    store = _StubBrandingStore()
+
+    result, brand = attach_conversation_to_brand(store, conv_store, "client_x", "brand_x", "conv_x")
+
+    assert result is AttachConversationResult.OK
+    assert brand == "patched-brand"
+    (_cur, _brand_id, _client_id, patch) = store.patch_calls[0]
+    assert patch["updated_at"] == "STAMP-FROM-SHARED-FORMATTER"

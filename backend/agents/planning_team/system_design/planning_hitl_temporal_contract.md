@@ -85,7 +85,7 @@ workflow class.
 
 Naively "re-invoking Planning's phase" in step 4 above does **not** work for
 `document_production_activity`'s PRA path, and the deferred wiring work
-(#7446) must not implement it that way. `DocumentProductionAgent.run`
+must not implement it that way. `DocumentProductionAgent.run`
 (`planning_team/agents/document_production/agent.py`) calls
 `run_pra(...)` to mint a PRA `job_id` first, and only *then* calls
 `wait_pra(job_id=job_id, answer_callback=answer_callback)` — `answer_callback`

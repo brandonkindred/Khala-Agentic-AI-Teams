@@ -1539,6 +1539,10 @@ def test_process_one_bar_binds_engine_exit_to_entry() -> None:
         unfilled_policy=None,
         attached_stop_loss=None,
         attached_take_profit=None,
+        # `_process_one_bar` reads OrderRequest's own `has_attached_exits`
+        # predicate (which also covers the generalized `attached_exits` list),
+        # not the two bracket fields directly — so the stand-in has to carry it.
+        has_attached_exits=False,
         symbol="AAPL",
         side=SimpleNamespace(value="buy"),
         order_type=SimpleNamespace(value="market"),
@@ -1578,6 +1582,95 @@ def test_process_one_bar_binds_engine_exit_to_entry() -> None:
     assert submitted_po.working_against_entry_order_id == "entry-123"
     assert engine_exits.engine_exit_bindings == {}  # binding consumed via pop
     assert result.execution_diagnostics.orders_accepted == 1
+
+
+def test_process_one_bar_registers_an_attached_exits_only_entry_as_a_bracket_parent() -> None:
+    """The service must derive `expect_brackets` from `has_attached_exits`.
+
+    `OrderBook.submit` registers an id as an eligible bracket parent only when
+    `expect_brackets` is True, and `submit_attached` rejects anything else — so
+    an entry whose exit legs live only in `attached_exits` (no
+    `attached_stop_loss`/`attached_take_profit`) that is submitted with a
+    hand-rolled two-field OR is never registered, and materializing its
+    children on fill raises "not a known top-level order id".
+
+    This drives `_process_one_bar`, so it fails if the service reverts to that
+    OR — asserting the predicate at the OrderBook level instead would just
+    re-compute it and pass either way.
+    """
+    from investment_team.trading_service.strategy.contract import (
+        OrderRequest,
+        OrderSide,
+        OrderType,
+        StopAttachment,
+        TimeInForce,
+    )
+
+    svc = _bare_service()
+    svc._exit_rules = []
+    svc._default_unfilled_policy = None
+    result = TradingServiceResult()
+    prev_bar = SimpleNamespace(timestamp="2024-01-03T00:00:00")
+    cur_bar = SimpleNamespace(symbol="AAA", timestamp="2024-01-03T12:00:00", close=12.0)
+    req = OrderRequest(
+        client_order_id="co-1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        attached_exits=[StopAttachment(stop_price=90.0)],
+    )
+    assert req.attached_stop_loss is None and req.attached_take_profit is None
+    # The complement, submitted through the same call: an entry with no exits at
+    # all must NOT be registered as a bracket parent. Without it, a service that
+    # hardcoded expect_brackets=True — over-registering every plain entry — would
+    # satisfy the positive assertion below.
+    plain_req = OrderRequest(
+        client_order_id="co-plain",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+    )
+    assert not plain_req.has_attached_exits
+
+    submitted: dict = {}
+
+    def _submit(request, *, submitted_at, submitted_equity, expect_brackets=False):
+        submitted[request.client_order_id] = expect_brackets
+        return SimpleNamespace(working_against_entry_order_id=None)
+
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    with (
+        patch.object(svc, "_append_streaming_bar"),
+        patch.object(svc, "_process_bar_strategy_response"),
+    ):
+        svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=prev_bar,
+            is_warmup=False,
+            fetch_response=lambda: ([], []),
+            pending_for_prev=[req, plain_req],
+            portfolio=SimpleNamespace(
+                update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0
+            ),
+            order_book=SimpleNamespace(submit=_submit),
+            fill_sim=SimpleNamespace(process_bar=lambda _cur, next_bar=None: outcome),
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=SimpleNamespace(record=lambda *a: None),
+            position_tracker={},
+            engine_exits=SimpleNamespace(engine_exit_bindings={}),
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    assert submitted["co-1"] is True
+    assert submitted["co-plain"] is False
 
 
 def test_process_one_bar_updates_position_tracker_when_exit_rules_present() -> None:

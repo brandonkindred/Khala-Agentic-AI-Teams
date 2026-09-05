@@ -745,6 +745,34 @@ describe('CodingTeamPageComponent', () => {
       expect(clearBtn).toBeTruthy();
     });
 
+    // The repo search field is the only one in the DOM while no repo is expanded, so this
+    // selector is unambiguous here; the issue-search announcer is nested in .github-repo-issues.
+    function repoAnnouncer(): string {
+      const el: HTMLElement = fixture.nativeElement;
+      return el.querySelector('.github-search-field p[role="status"]')?.textContent?.trim() ?? '';
+    }
+
+    it('announces the filtered repo count in a polite live region as the search narrows the list', async () => {
+      await setup();
+      showView('github');
+      expect(repoAnnouncer()).toBe('3 repositories shown');
+      component.repoSearch = 'gadgets';
+      fixture.detectChanges();
+      expect(repoAnnouncer()).toBe('1 repository shown');
+      component.repoSearch = 'nonexistent-repo-xyz';
+      fixture.detectChanges();
+      expect(repoAnnouncer()).toBe('0 repositories shown');
+    });
+
+    it('announces nothing when the token has no repository access (the search field is not rendered)', async () => {
+      integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      expect(component.repoCountAnnouncement).toBe('');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-search-field p[role="status"]')).toBeNull();
+    });
+
     it('preserves aria-expanded/aria-controls semantics for a row that survives a search, even when its list index shifts', async () => {
       await setup();
       showView('github');
@@ -811,6 +839,35 @@ describe('CodingTeamPageComponent', () => {
       expect(el.textContent).toContain('No issues match');
       const clearBtn = Array.from(el.querySelectorAll('button')).find((b) => b.textContent?.includes('Clear search'));
       expect(clearBtn).toBeTruthy();
+    });
+
+    // Scoped to the expanded repo's panel: the repo-search announcer is also in the DOM here.
+    function issueAnnouncer(): string {
+      const el: HTMLElement = fixture.nativeElement;
+      return (
+        el.querySelector('.github-repo-issues .github-search-field p[role="status"]')?.textContent?.trim() ?? ''
+      );
+    }
+
+    it('announces the filtered issue count in a polite live region as the search narrows the list', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      expect(issueAnnouncer()).toBe('3 issues shown');
+      setIssueSearch('Issue 2');
+      expect(issueAnnouncer()).toBe('1 issue shown');
+      setIssueSearch('nonexistent-issue-xyz');
+      expect(issueAnnouncer()).toBe('0 issues shown');
+    });
+
+    it('announces nothing when the repo has no open issues (the search field is not rendered)', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(of([]));
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      expect(component.issueCountAnnouncement).toBe('');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-repo-issues .github-search-field p[role="status"]')).toBeNull();
     });
 
     it('resets to the first page when a search narrows the list below the current page', async () => {
@@ -2212,9 +2269,22 @@ describe('CodingTeamPageComponent', () => {
     it('cancels the thinking-announcement settle timer on destroy', async () => {
       await setup();
       component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
-      expect(component['thinkingAnnounceTimer']).not.toBeNull();
+      expect(component.thinkingAnnouncementPending).toBe(true);
       fixture.destroy();
-      expect(component['thinkingAnnounceTimer']).toBeNull();
+      expect(component.thinkingAnnouncementPending).toBe(false);
+    });
+
+    it('settles a whitespace-only thinking value to an empty announcement, not "0 lines"', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        component.jobStatus = { job_id: 'j1', status: 'running', thinking: '   ' };
+        expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(component.thinkingAnnouncement).toBe('');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

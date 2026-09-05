@@ -58,7 +58,7 @@ from branding_team.shared.phase_output_cache import PhaseOutputCache
 from branding_team.store import get_default_store
 from job_service_client import JobServiceClient, start_stale_job_monitor
 from shared.app import create_team_app
-from shared.concurrency import BackgroundHeartbeat
+from shared.concurrency import BackgroundHeartbeat, LazySingleton
 from shared.env_config import env_float, env_int
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,17 @@ conversation_store = get_conversation_store()
 
 # Public name so tests can patch 'branding_team.api.main.assistant_agent'.
 assistant_agent: Optional[BrandingAssistantAgent] = None
-_assistant_agent_lock = threading.Lock()
+_assistant_agent_singleton: LazySingleton[BrandingAssistantAgent] = LazySingleton()
+
+
+def _build_assistant_agent() -> BrandingAssistantAgent:
+    try:
+        return BrandingAssistantAgent()
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Branding assistant is temporarily unavailable. LLM service may not be configured.",
+        )
 
 
 def _get_assistant_agent() -> BrandingAssistantAgent:
@@ -152,21 +162,24 @@ def _get_assistant_agent() -> BrandingAssistantAgent:
 
     Thread-safe: the chat endpoints run in worker threads (via
     ``background._run_in_pipeline_executor``), so first-use initialization is
-    guarded by a ``threading.Lock`` with double-checked locking to avoid
-    constructing several ``BrandingAssistantAgent`` instances under concurrent
-    first requests.
+    delegated to ``LazySingleton.get_or_create``, which serializes concurrent
+    first requests under its own internal lock instead of constructing several
+    ``BrandingAssistantAgent`` instances.
+
+    Postconditions:
+        Returns the same ``BrandingAssistantAgent`` for the process lifetime
+        once construction succeeds. If ``BrandingAssistantAgent()`` raises,
+        ``_build_assistant_agent`` converts it to ``HTTPException(503)``,
+        which propagates to the caller without marking the singleton
+        constructed — matching the prior hand-rolled behavior, the next call
+        retries construction. Also honors direct test monkeypatching of the
+        module-level ``assistant_agent`` name above: if it is already
+        non-``None`` when this is called, that value is returned without
+        touching the singleton.
     """
     global assistant_agent
     if assistant_agent is None:
-        with _assistant_agent_lock:
-            if assistant_agent is None:
-                try:
-                    assistant_agent = BrandingAssistantAgent()
-                except Exception:
-                    raise HTTPException(
-                        status_code=503,
-                        detail="Branding assistant is temporarily unavailable. LLM service may not be configured.",
-                    )
+        assistant_agent = _assistant_agent_singleton.get_or_create(_build_assistant_agent)
     return assistant_agent
 
 

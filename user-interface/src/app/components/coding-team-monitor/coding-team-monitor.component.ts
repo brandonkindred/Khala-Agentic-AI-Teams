@@ -1,8 +1,9 @@
-import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, Input, OnDestroy, signal } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
+import { SettleAnnouncer } from '../../shared/settle-announcer';
 
 /** One step of the phase stepper. Local, to keep the monitor decoupled from other features. */
 interface PhaseDefinition {
@@ -21,6 +22,17 @@ const CODING_TEAM_PHASES: PhaseDefinition[] = [
 /** Char bound for the objective portion of the live-region summary — kept short since it's spoken
  *  by assistive tech, not read visually; longer text is truncated with an ellipsis. */
 const SUMMARY_OBJECTIVE_MAX_CHARS = 60;
+
+/** Quiet period a differing summary must hold before the live region's announcement settles.
+ * `status` is fed by the parent page's `pollJobStatus` poll (job-status-poller.ts, default
+ * `intervalMs = 5000`, used unmodified by coding-team-page.component.ts's `startPolling`), so this
+ * must exceed 5000ms — otherwise a status that changes on every poll would still restart and
+ * re-fire the timer once per poll (a fixed delay, not real coalescing). Sized at the poll interval
+ * plus a margin, so a run whose progress changes on every single poll stays silent until it
+ * actually plateaus for a beat, and only a genuine lull produces an announcement. NOT shared with
+ * coding-team-page.component.ts's THINKING_ANNOUNCE_SETTLE_MS, which is tuned for a much faster
+ * raw token stream — only the SettleAnnouncer timer mechanism is shared, not this value. */
+const SUMMARY_ANNOUNCE_SETTLE_MS = 6000;
 
 /**
  * One-sentence live-region summary of a coding-team run's objective and overall progress, for the
@@ -48,7 +60,9 @@ export function codingTeamStatusSummary(objective: string, progressPercent: numb
  * progress bar + phase stepper, the live sub-agent activity, and a per-agent roster (who is
  * working now and each agent's status). Purely `@Input()`-driven — the parent page polls
  * `/status` and re-feeds `status`, so the monitor re-renders for free. Every block is guarded so
- * a minimal/early status (no agents/progress/activity) renders cleanly.
+ * a minimal/early status (no agents/progress/activity) renders cleanly. Debounces its own
+ * live-region announcement via a shared `SettleAnnouncer` (see `shared/settle-announce.ts`), so
+ * `ngOnDestroy` disposes it.
  */
 @Component({
   selector: 'app-coding-team-monitor',
@@ -60,9 +74,45 @@ export function codingTeamStatusSummary(objective: string, progressPercent: numb
   // re-renders on that reference change and skips redundant change-detection cycles in between.
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class CodingTeamMonitorComponent {
-  /** Latest polled job status; null until the first poll lands. */
-  @Input() status: CodingTeamJobStatus | null = null;
+export class CodingTeamMonitorComponent implements OnDestroy {
+  private _status: CodingTeamJobStatus | null = null;
+
+  /**
+   * Preconditions: `value` is the latest polled job status, or null before the first poll / after
+   * the parent clears it.
+   * Postconditions: `status` reads back `value` immediately, so every other reader (objectiveText,
+   * overallProgress, the stepper/activity/roster helpers) reflects it synchronously. For a non-null
+   * `value` the live-region announcement is NOT updated synchronously — it is handed to
+   * `announcer.update()`, which decides whether this change starts, replaces, or leaves untouched
+   * the pending settle timer. A null `value` clears the announcement immediately, with no settle
+   * delay.
+   */
+  @Input()
+  set status(value: CodingTeamJobStatus | null) {
+    this._status = value;
+    this.announcer.update(
+      value ? codingTeamStatusSummary(this.objectiveText(), this.overallProgress()) : '',
+    );
+  }
+  get status(): CodingTeamJobStatus | null {
+    return this._status;
+  }
+
+  private readonly _announcedSummary = signal('');
+  /** Debounced text for the hidden live region — settled by `announcer`, see
+   * `shared/settle-announce.ts`. */
+  readonly announcedSummary = this._announcedSummary.asReadonly();
+  /** Owns the settle-timer bookkeeping for `announcedSummary`; disposed in `ngOnDestroy`. No
+   * `onChange` cue — unlike the parent page's thinking announcer, this region stays silent until
+   * a summary actually settles, rather than showing an immediate provisional cue. */
+  private readonly announcer = new SettleAnnouncer(SUMMARY_ANNOUNCE_SETTLE_MS, (value) =>
+    this._announcedSummary.set(value),
+  );
+  /** True while `announcer` has a pending settle timer — exposed so callers/tests can check
+   * debounce state without reaching into the private field. */
+  get announcementPending(): boolean {
+    return this.announcer.isPending;
+  }
 
   readonly ALL_PHASES = CODING_TEAM_PHASES;
 
@@ -109,13 +159,12 @@ export class CodingTeamMonitorComponent {
   }
 
   /**
-   * Sentence for the hidden `aria-live="polite"` region. Empty until the first poll lands —
-   * `objectiveText()`'s "Coding team run" placeholder is for the visible objective line only and
-   * must never be spoken as a premature announcement.
+   * Preconditions: none.
+   * Postconditions: `announcer`'s pending settle timer, if any, is cleared and its handle set to
+   * null, so it can never fire against a destroyed view.
    */
-  statusSummary(): string {
-    if (!this.status) return '';
-    return codingTeamStatusSummary(this.objectiveText(), this.overallProgress());
+  ngOnDestroy(): void {
+    this.announcer.dispose();
   }
 
   /** Indeterminate while a started job has no numeric progress yet; else determinate. */

@@ -986,7 +986,7 @@ def test_plan_project_activity_pauses_on_planning_clarification_question(
 ) -> None:
     """A fresh clarification question durably pauses instead of blocking or auto-answering.
 
-    Regression guard for the Temporal-mode HITL gap (issue #7446): when Planning's
+    Regression guard for the Temporal-mode HITL gap: when Planning's
     ``answer_callback`` is invoked with no ``submitted_answers`` yet, the primitive from
     ``planning_team.temporal.answer_signal`` raises ``PlanningAnswerPauseSignal`` instead of
     returning a default. The activity must catch it, persist the question via
@@ -1112,6 +1112,96 @@ def test_plan_project_activity_resumes_with_submitted_answers(
     assert result["requirements_title"] == "Test"
 
     job = js.get_job("pp-resume")
+    assert job["waiting_for_answers"] is False
+    assert job["pending_questions"] == []
+    assert job["resume_token"] is None
+
+
+def test_plan_project_activity_final_round_resolves_a_drifted_question_instead_of_pausing(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """``allow_repause=False`` is how the workflow's bounded pause loop terminates.
+
+    Planning's question ids come straight from LLM output, so a from-scratch
+    replay can present an id nobody has been shown even though the user has
+    already answered the same question. With the pause budget spent the
+    activity must return a PlanResult rather than a fourth-and-forever
+    ``{"outcome": "paused"}``.
+    """
+    from unittest.mock import MagicMock
+
+    from shared.dev_models.models import ProductRequirements
+    from software_engineering_team.planning_adapter import PlanningAdapterResult
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-final", repo_path=str(tmp_path), job_type="run_team")
+    js.update_job(
+        "pp-final",
+        waiting_for_answers=True,
+        resume_token="pp-final:abc123",
+        pending_questions=[{"id": "q1", "question_text": "Which auth provider?"}],
+    )
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": MagicMock()},
+    )
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_run_workflow(*args, **kwargs):
+        # The replay minted a different id for the same question.
+        captured["answers"] = kwargs["answer_callback"](
+            [{"id": "q1-regenerated", "question_text": "Which auth provider?"}]
+        )
+        return {
+            "success": True,
+            "summary": "done",
+            "handoff_package": {"summary": "Build a widget API."},
+            "open_questions": [],
+            "resolved_questions": [],
+        }
+
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(
+        "software_engineering_team.planning_adapter.adapt_planning_result",
+        lambda *a, **kw: PlanningAdapterResult(
+            requirements=ProductRequirements(
+                title="Test", description="Desc", acceptance_criteria=["Ship it"], constraints=[]
+            ),
+            project_overview={"goals": "Ship", "features_and_functionality_doc": "API"},
+            open_questions=[],
+            assumptions=[],
+        ),
+    )
+
+    result = activities.plan_project_activity(
+        "pp-final",
+        str(tmp_path),
+        {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+        resume_token="pp-final:abc123",
+        submitted_answers=[{"question_id": "q1", "selected_option_id": "okta"}],
+        allow_repause=False,
+    )
+
+    # The drifted id matches no submitted answer, so the final round defaults it
+    # rather than submitting a short set the answers route would reject -- the
+    # compromise the warning in build_temporal_planning_answer_callback names.
+    assert captured["answers"] == [
+        {"question_id": "q1-regenerated", "selected_option_id": None, "other_text": None}
+    ]
+    assert result.get("outcome") != "paused"
+    assert result["requirements_title"] == "Test"
+
+    # The job record too, matching the sibling pause test's pattern: a final round
+    # that returned a PlanResult but left the pause envelope standing, or marked
+    # the job failed through the generic handler, would pass the assertions above.
+    # NB the answered-token marker is written by the answers ROUTE, not by this
+    # activity, so it is not assertable here; what the activity guarantees is that
+    # it consumed the envelope it re-entered on.
+    job = js.get_job("pp-final")
+    assert job["status"] != js.JOB_STATUS_FAILED
     assert job["waiting_for_answers"] is False
     assert job["pending_questions"] == []
     assert job["resume_token"] is None

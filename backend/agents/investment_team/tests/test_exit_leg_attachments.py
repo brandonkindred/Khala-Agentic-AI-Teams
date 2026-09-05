@@ -1,4 +1,4 @@
-"""Tests for the generalized exit-leg attachment API (issue #7494, step 1 of 3).
+"""Tests for the generalized exit-leg attachment API.
 
 Covers :func:`resolve_exit_leg_attachments` — the rule-agnostic replacement
 for the OCO-bracket-only price math previously inlined in

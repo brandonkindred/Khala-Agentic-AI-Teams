@@ -153,7 +153,6 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     token = resolve_github_token(request)
     if not Path(request.repo_path).is_dir():
         raise HTTPException(status_code=400, detail=f"repo_path not found: {request.repo_path}")
-
     with _main.GitHubClient(token=token) as client:
         try:
             if request.issue_number is not None:

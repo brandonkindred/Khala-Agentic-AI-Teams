@@ -4206,3 +4206,57 @@ class TestGitHubRepoReader:
 
         assert calls["tree"] == 1  # single-flight: only the leader fetched the tree
         assert all(r == ["a.py"] for r in results)  # every waiter got the same listing
+
+
+def test_resolve_remote_branch_sha_validates_at_the_choke_point() -> None:
+    """Every authenticated fetch passes through here, not just the route.
+
+    `_prepare_issue_branch` reaches the same fetch with a `remote` taken from
+    the workflow payload, and validated only `default_branch`/
+    `integration_branch` — so a guard living solely on the route left that path
+    open. This is the shared choke point; validating here covers both.
+    """
+    from software_engineering_team.api import git_ops
+
+    for hostile in ("https://attacker.example/x.git", "ext::sh -c id", "--upload-pack=id"):
+        ok, msg = git_ops.resolve_remote_branch_sha("/nonexistent", hostile, "main", "tok")
+        assert ok is False
+        assert "unsafe remote name" in msg, hostile
+
+    ok, msg = git_ops.resolve_remote_branch_sha("/nonexistent", "origin", "--upload-pack=id", "tok")
+    assert ok is False
+    assert "unsafe branch ref" in msg
+
+
+def test_prepare_issue_branch_routes_its_fetch_through_the_choke_point() -> None:
+    """The test above pins the validator; this pins that ``_prepare_issue_branch``
+    still goes through it.
+
+    That routing is the whole basis for validating in one place rather than at
+    each call site — and it is exactly what a refactor could undo silently, since
+    a direct fetch here would leave every assertion above still passing while the
+    guard no longer covers this path.
+    """
+    from unittest.mock import patch
+
+    # ``git_ops`` first, then its already-bound ``_main``: the two modules import
+    # each other, so importing ``coding_team_main`` directly here leaves a
+    # partially-initialized ``git_ops`` behind and breaks the sibling test.
+    from software_engineering_team.api import git_ops
+
+    with patch.object(git_ops._main, "resolve_remote_branch_sha") as resolver:
+        resolver.return_value = (False, "unsafe remote name: 'ext::sh -c id'")
+        ok, msg, _notes = git_ops._prepare_issue_branch(
+            "/nonexistent", "ext::sh -c id", "main", "khala/issue-1", token="tok"
+        )
+
+    # The arguments matter as much as the call: a refactor that validated a
+    # substituted value (a hardcoded "origin", say) while still fetching with
+    # the payload's raw remote would leave ``resolver.called`` true and reopen
+    # the validate-one-value/fetch-with-another hole. Pinning the exact call
+    # means such a change fails here rather than passing silently -- and a
+    # deliberate signature change is a security-relevant edit that should have
+    # to come back through this test.
+    resolver.assert_called_once_with("/nonexistent", "ext::sh -c id", "main", "tok")
+    assert ok is False
+    assert "unsafe remote name" in msg

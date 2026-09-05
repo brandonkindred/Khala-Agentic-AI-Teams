@@ -279,7 +279,15 @@ def build_job_status_response(job_id: str, data: Dict[str, Any]) -> JobStatusRes
     Postconditions: returns a fully populated ``JobStatusResponse``; every field
         degrades to a safe default (``None``/``[]``/``False``) rather than raising when
         the underlying stored value is missing or malformed. ``server_time`` is always
-        the current UTC instant, not a stored value.
+        the current UTC instant, not a stored value. When the record carries a NON-EMPTY
+        ``resume_token`` equal to its ``answers_submitted_for_token`` — answers for the
+        current pause were accepted and durably signaled, but the pause envelope is not
+        the answers route's to clear — the pause is reported as resolved
+        (``waiting_for_answers`` False, no ``pending_questions``, no ``resume_token``)
+        even though the stored envelope still stands. A record with no ``resume_token``
+        is projected verbatim: resolution is never synthesized for one that advertises
+        waiting without a token to have answered, which two unset fields would otherwise
+        satisfy by equality alone.
     """
     raw_failed = data.get("failed_tasks") or []
     failed_tasks = [
@@ -298,10 +306,29 @@ def build_job_status_response(job_id: str, data: Dict[str, Any]) -> JobStatusRes
     task_states_parsed = _parse_task_states(data.get("task_states"))
     team_progress_parsed = _parse_team_progress(data.get("team_progress"))
 
+    # A Temporal-native pause's envelope (waiting_for_answers/pending_questions/
+    # resume_token) is the orchestrator's to clear on its next re-entry, never the
+    # answers route's -- clearing it at submission time would race a worker crash
+    # into dropping the human's answer. So the record still advertises the pause
+    # for the minutes between a valid submission and the activity picking it up.
+    # Reporting that verbatim tells a client its answers did not land: the poll
+    # keeps returning the same questions and the same token it just answered, and
+    # a re-submit is either rejected as a duplicate or silently dropped by the
+    # workflow's first-wins signal rule. Project the pause as resolved once the
+    # record says answers for THIS token were accepted; the raw envelope is
+    # untouched, so re-entry classification is unaffected.
+    # Read once and reuse: the gate below and the projection at the bottom must
+    # agree about WHICH token they are talking about, and three independent
+    # lookups let a normalization added to one site drift from the others.
+    resume_token = data.get("resume_token")
+    answers_accepted = bool(
+        resume_token and data.get("answers_submitted_for_token") == resume_token
+    )
+
     # Materialize via the shared helper: model_validate keeps EVERY stored field
     # (including recommendation/allow_multiple, which a hand-enumeration would
     # silently drop) and still defensively skips non-dict entries.
-    raw_pending_questions = data.get("pending_questions", [])
+    raw_pending_questions = [] if answers_accepted else data.get("pending_questions", [])
     pending_questions_parsed = pending_questions_from_raw(raw_pending_questions)
 
     payload: Dict[str, Any] = {
@@ -327,8 +354,10 @@ def build_job_status_response(job_id: str, data: Dict[str, Any]) -> JobStatusRes
         if team_progress_parsed
         else None,
         "pending_questions": [pq.model_dump() for pq in pending_questions_parsed],
-        "waiting_for_answers": bool(data.get("waiting_for_answers", False)),
-        "resume_token": data.get("resume_token"),
+        "waiting_for_answers": (
+            False if answers_accepted else bool(data.get("waiting_for_answers", False))
+        ),
+        "resume_token": None if answers_accepted else resume_token,
         "planning_subprocess": data.get("planning_subprocess"),
         "planning_completed_phases": data.get("planning_completed_phases") or [],
         "analysis_subprocess": data.get("analysis_subprocess"),

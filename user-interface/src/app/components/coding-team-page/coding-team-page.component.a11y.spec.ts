@@ -363,6 +363,34 @@ describe('CodingTeamPageComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
+  // Regression guards on the filtered markup, not proof of WCAG 4.1.3 — axe-core has no rule for
+  // status-message announcements; see coding-team-page.component.spec.ts for the role="status"
+  // DOM assertions on the result-count announcers that are the actual proof.
+  it('has no axe violations on the GitHub view with a search narrowing the repo and issue lists', async () => {
+    await setup();
+    showView('github');
+    expandFirstRepo();
+    component.repoSearch = 'acme'; // still matches the expanded repo, so both filters are active
+    component.issueSearch = 'Issue 2';
+    component.onIssueSearchChange();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelectorAll('.github-repo-row').length).toBe(1);
+    expect(el.querySelectorAll('.github-issue-row').length).toBe(1);
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('has no axe violations on the GitHub view when a search matches no repositories', async () => {
+    await setup();
+    showView('github');
+    component.repoSearch = 'nonexistent-repo-xyz';
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelectorAll('.github-repo-row').length).toBe(0);
+    expect(el.querySelector('.github-empty')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
   it('has no axe violations on the GitHub view with no open issues', async () => {
     integrationsSpy.getGitHubIssues.mockReturnValue(of([]));
     await setup();
