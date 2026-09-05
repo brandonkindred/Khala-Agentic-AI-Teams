@@ -16,7 +16,12 @@ import logging
 import re
 from typing import Callable, Optional
 
-from strands.types.exceptions import EventLoopException
+from agents.blogging.shared.text_parsing import (
+    extract_draft_after_marker,
+    extract_json_array_from_text,
+    looks_like_top_level_json_object,
+    unwrap_llm_cause,
+)
 
 from llm_service import (
     LLMError,
@@ -148,142 +153,6 @@ def _split_sentences_for_staccato(para: str) -> list[str]:
     return re.split(r"(?<=[.!?])\s+", protected)
 
 
-def _unwrap_llm_cause(exc: BaseException) -> BaseException:
-    """Return the underlying model error when strands wraps it in EventLoopException.
-
-    Preconditions:
-        - ``exc`` is the exception caught at an LLM call boundary.
-    Postconditions:
-        - If ``exc`` is an ``EventLoopException`` whose ``original_exception``
-          is itself a ``BaseException``, returns that original exception.
-        - Otherwise (not an ``EventLoopException``, or its ``original_exception``
-          is ``None`` or not a ``BaseException``) returns ``exc`` unchanged.
-    """
-    if isinstance(exc, EventLoopException):
-        original = getattr(exc, "original_exception", None)
-        if isinstance(original, BaseException):
-            return original
-    return exc
-
-
-def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
-    """
-    Extract draft content from model output that uses the hybrid format:
-    first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
-    Falls back to scanning the response for extractable JSON (whole-response,
-    fenced, or prose-wrapped, via ``extract_json_from_response``) and returning
-    the value of its \"draft\" key, but only when that value is a non-empty
-    string; a non-string value (including the literal ``0`` sentinel used in
-    the hybrid marker line) or an empty string is treated the same as no
-    fallback match and yields ``\"\"``.
-    """
-    if not raw_response or not isinstance(raw_response, str):
-        return ""
-    text = raw_response.strip()
-    for marker in ("\n---DRAFT---\n", "\n---DRAFT---", "---DRAFT---\n", "---DRAFT---"):
-        if marker in text:
-            after = text.split(marker, 1)[1].strip()
-            if after:
-                return after
-    try:
-        data = extract_json_from_response(text)
-        if isinstance(data, dict):
-            d = data.get("draft")
-            if isinstance(d, str) and d.strip():
-                return d.strip()
-    except LLMJsonParseError:
-        pass
-    return ""
-
-
-def _extract_json_array_from_text(
-    text: str, *, required_keys: tuple[str, ...] = ()
-) -> Optional[list]:
-    """Parse a JSON array of objects from ``text``, including when prefixed by prose.
-
-    Preconditions:
-        - ``text`` is a string (may be empty).
-        - ``required_keys``, if given, are the keys used to recognize the real
-          payload (e.g. ``("issue",)`` for self-review issues), at least one
-          element of a candidate array must contain all of them. This rejects an
-          unrelated dict array (e.g. a ``references`` list salvaged from
-          surrounding prose) that would otherwise pass a bare "is it a list of
-          dicts" check, while still tolerating a real payload where some items
-          are individually malformed (the caller's own per-item validation
-          skips those).
-    Postconditions:
-        - Returns the dict elements of the first decoded JSON array containing at
-          least one dict with every key in ``required_keys``, found by scanning
-          for ``[`` and using ``json.JSONDecoder.raw_decode``. Non-dict elements
-          in that array (e.g. a stray string) are dropped rather than rejecting
-          the whole array — callers already tolerate individually malformed dict
-          items via their own per-item validation.
-        - A syntactically valid but schema-mismatched non-empty array (e.g. a
-          numeric citation like ``[1]``, or a dict array none of whose elements
-          have ``required_keys``) does not short-circuit the scan; scanning
-          continues past it toward the real payload.
-        - If no matching array of dicts is found, returns the first syntactically
-          valid empty ``[]`` encountered — this cannot be distinguished from a
-          literally empty Markdown link ``[]()`` (an empty pair of brackets is
-          valid JSON), so a response containing only such a link and no real
-          array-of-dicts payload also returns ``[]`` here. A Markdown link with
-          non-empty text, e.g. ``[label](url)``, is not valid JSON at that
-          ``[`` and is simply skipped like any other non-match. Returns
-          ``None`` if no array matched at all.
-
-    Limitation: the scan looks for a literal ``[`` anywhere in ``text``,
-    including inside a JSON string value (e.g. an object field whose value is
-    the literal text ``"[{...}]"``), so it can extract an array nested inside
-    a string rather than only a true top-level/prose array. This has not been
-    observed in practice for the reviewer response shape this is used for, but
-    is a known edge case if a future prompt's schema puts JSON-looking text
-    inside a string field.
-    """
-    decoder = json.JSONDecoder()
-    search_from = 0
-    empty_fallback = None
-    while True:
-        i = text.find("[", search_from)
-        if i == -1:
-            break
-        try:
-            value, end = decoder.raw_decode(text, i)
-        except json.JSONDecodeError:
-            search_from = i + 1
-            continue
-        if isinstance(value, list):
-            dict_elements = [el for el in value if isinstance(el, dict)]
-            if dict_elements and any(all(k in el for k in required_keys) for el in dict_elements):
-                return dict_elements
-            if not value and empty_fallback is None:
-                empty_fallback = value
-        # Resume scanning past the decoded value's end, not from i + 1: a
-        # non-matching value can itself contain a nested "[" (e.g. a sub-array
-        # or a string literal that reads as one) that would otherwise be
-        # re-entered and salvaged as if it were a real top-level match.
-        search_from = end
-    return empty_fallback
-
-
-def _looks_like_top_level_json_object(text: str) -> bool:
-    """Return True when ``text``'s JSON payload appears to be a top-level object.
-
-    Preconditions:
-        - ``text`` is a string (may be empty).
-    Postconditions:
-        - Returns True only when the entire stripped response is a JSON object;
-          prose and fenced snippets are not treated as top-level objects.
-    """
-    candidate = text.strip()
-    if not candidate.startswith("{"):
-        return False
-    try:
-        value, end = json.JSONDecoder().raw_decode(candidate)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(value, dict) and not candidate[end:].strip()
-
-
 def deterministic_self_check(draft: str) -> list[str]:
     """Scan draft for mechanical violations. Returns list of violation descriptions.
 
@@ -408,12 +277,12 @@ def fix_deterministic_violations(
     )
     try:
         raw = call_text(prompt, WRITING_SYSTEM_PROMPT)
-        fixed = _extract_draft_after_marker(raw)
+        fixed = extract_draft_after_marker(raw)
         if fixed and fixed.strip():
             logger.info("Deterministic self-check: fixed %s violations", len(violations))
             return fixed.strip()
     except Exception as e:
-        cause = _unwrap_llm_cause(e)
+        cause = unwrap_llm_cause(e)
         if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
             raise cause
         if isinstance(
@@ -455,7 +324,7 @@ def llm_self_review(
           original ``draft`` unchanged without further rescanning; (3) it
           parses to anything else (a scalar, a malformed object, or fails to
           parse as JSON at all), in which case a prose-rescan
-          (``_extract_json_array_from_text``) attempts to salvage an issues
+          (``extract_json_array_from_text``) attempts to salvage an issues
           array from the raw text, returning the original ``draft`` unchanged
           only if no array is recoverable that way either.
         - Whichever path above produces the list, elements lacking a truthy
@@ -483,17 +352,17 @@ def llm_self_review(
         try:
             parsed = extract_json_from_response(cleaned)
         except LLMJsonParseError:
-            issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
+            issues = extract_json_array_from_text(cleaned, required_keys=("issue",))
             if issues is not None:
                 issues = [iss for iss in issues if iss.get("issue")]
         else:
             if isinstance(parsed, list):
                 issues = [iss for iss in parsed if isinstance(iss, dict) and iss.get("issue")]
-            elif _looks_like_top_level_json_object(cleaned):
+            elif looks_like_top_level_json_object(cleaned):
                 logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft
             else:
-                issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
+                issues = extract_json_array_from_text(cleaned, required_keys=("issue",))
                 if issues is not None:
                     issues = [iss for iss in issues if iss.get("issue")]
         if issues is None:
@@ -520,12 +389,12 @@ def llm_self_review(
             "then the full fixed blog post in Markdown."
         )
         raw_fix = call_text(fix_prompt, WRITING_SYSTEM_PROMPT)
-        fixed = _extract_draft_after_marker(raw_fix)
+        fixed = extract_draft_after_marker(raw_fix)
         if fixed and fixed.strip():
             logger.info("LLM self-review: applied fixes, new length=%s", len(fixed.strip()))
             return fixed.strip()
     except Exception as e:
-        cause = _unwrap_llm_cause(e)
+        cause = unwrap_llm_cause(e)
         if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
             raise cause
         if isinstance(

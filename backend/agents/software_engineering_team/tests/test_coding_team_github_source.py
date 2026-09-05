@@ -14,11 +14,13 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -37,13 +39,18 @@ from software_engineering_team.github_source import (
 from software_engineering_team.github_source.client import (
     MAX_ISSUES_TRAVERSED,
     _is_safe_ref,
+    configured_web_host,
 )
 from software_engineering_team.github_source.client_http import (
     SECONDARY_RATE_LIMIT_MAX_RETRIES,
     _parse_next_link,
 )
 from software_engineering_team.models import CodingTeamPlanInput
-from software_engineering_team.tests.conftest import _expected_basic_header
+from software_engineering_team.tests.git_test_helpers import (
+    commit_on_branch,
+    current_branch,
+    expected_basic_header,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,6 +64,33 @@ def _client_with(handler: Callable[[httpx.Request], httpx.Response]) -> GitHubCl
     client._client.close()  # type: ignore[attr-defined]
     client._client = httpx.Client(transport=transport, timeout=client._timeout)  # type: ignore[attr-defined]
     return client
+
+
+@contextmanager
+def _real_client(**kwargs: Any) -> Iterator[GitHubClient]:
+    """Yield a real GitHubClient, closing its httpx.Client on exit.
+
+    Companion to :func:`_client_with`, which cannot serve these tests: it
+    installs a MockTransport and takes no ``base_url``, whereas the host- and
+    URL-derivation tests need a genuine client built with a specific
+    ``base_url`` and make no requests at all. Extracted so the five such tests
+    share ONE teardown (and one ``type: ignore``) rather than five copies that
+    can drift.
+
+    Preconditions:
+        - ``kwargs`` are GitHubClient keyword arguments (typically
+          ``base_url``); ``token`` and a no-op ``sleep`` are supplied here.
+    Postconditions:
+        - Closes the client's underlying ``httpx.Client`` on exit, on the
+          exception path too, so no test leaks its connection pool.
+        - Makes no request and installs no transport: the client is exactly as
+          constructed.
+    """
+    client = GitHubClient(token="t", sleep=lambda _s: None, **kwargs)
+    try:
+        yield client
+    finally:
+        client._client.close()  # type: ignore[attr-defined]
 
 
 def _issue_payload(number: int, **overrides: Any) -> dict[str, Any]:
@@ -367,6 +401,36 @@ class TestClientLifecycle:
         assert client._client.is_closed  # type: ignore[attr-defined]
 
 
+class TestClientWebHost:
+    def test_default_api_host_maps_to_github_com(self, monkeypatch) -> None:
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        with _real_client() as client:
+            assert client.web_host == "github.com"
+
+    def test_ghes_api_host_is_returned_unchanged(self, monkeypatch) -> None:
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        with _real_client(base_url="https://ghes.example.com/api/v3") as client:
+            assert client.web_host == "ghes.example.com"
+
+    def test_honors_github_api_url_env_var(self, monkeypatch) -> None:
+        monkeypatch.setenv("GITHUB_API_URL", "https://ghes.other.com/api/v3")
+        with _real_client() as client:
+            assert client.web_host == "ghes.other.com"
+
+
+class TestConfiguredWebHost:
+    """`configured_web_host()` derives the same host as `GitHubClient.web_host`
+    for callers (e.g. remote-URL validation) with no live client instance."""
+
+    def test_defaults_to_github_com_with_no_env_var(self, monkeypatch) -> None:
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        assert configured_web_host() == "github.com"
+
+    def test_honors_github_api_url_env_var_for_ghes(self, monkeypatch) -> None:
+        monkeypatch.setenv("GITHUB_API_URL", "https://ghes.other.com/api/v3")
+        assert configured_web_host() == "ghes.other.com"
+
+
 class TestClientTransportErrorRetry:
     def test_retries_on_transport_error_then_succeeds(self) -> None:
         calls = {"n": 0}
@@ -654,6 +718,23 @@ class TestAbsoluteUrl:
         client = _client_with(lambda _req: httpx.Response(200, json={}))
         assert client._absolute_url("repos/o/r") == f"{client._base_url}/repos/o/r"  # type: ignore[attr-defined]
 
+    def test_graphql_url_unchanged_for_github_cloud(self, monkeypatch) -> None:
+        """github.com Cloud's REST base (api.github.com, no "/api/v3" suffix)
+        already joins "/graphql" onto the same host correctly — no special
+        case needed there."""
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        with _real_client() as client:
+            assert client._absolute_url("/graphql") == "https://api.github.com/graphql"  # type: ignore[attr-defined]
+
+    def test_graphql_url_derived_separately_for_ghes(self, monkeypatch) -> None:
+        """GitHub Enterprise Server's REST base is "https://host/api/v3", but
+        GHES exposes GraphQL at "https://host/api/graphql" — not
+        "https://host/api/v3/graphql". Naively joining "/graphql" onto the
+        REST base would target a URL GHES doesn't serve GraphQL from."""
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        with _real_client(base_url="https://ghes.example.com/api/v3") as client:
+            assert client._absolute_url("/graphql") == "https://ghes.example.com/api/graphql"  # type: ignore[attr-defined]
+
 
 class TestClientIssueCommentMarker:
     def test_add_issue_comment_appends_khala_marker(self) -> None:
@@ -896,6 +977,74 @@ class TestCreateIssueReaction:
             _client_with(handler).create_issue_reaction("acme", "widget", 555)
 
 
+class TestClientCreateLabel:
+    def test_creates_label_with_default_color(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["path"] = req.url.path
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(201, json={"id": 1, "name": "waiting for review"})
+
+        client = _client_with(handler)
+        result = client.create_label("acme", "widget", "waiting for review")
+        assert seen["method"] == "POST"
+        assert seen["path"] == "/repos/acme/widget/labels"
+        assert seen["body"]["name"] == "waiting for review"
+        # Pins the actual default color create_label sends (its `color: str =
+        # "ededed"` parameter default) -- this test's name promises exactly
+        # this, but previously never asserted it.
+        assert seen["body"]["color"] == "ededed"
+        assert result is None
+
+    def test_already_exists_422_is_swallowed(self) -> None:
+        """GitHub responds 422 with an `already_exists` error code when a label
+        with this name already exists -- this is treated as success (idempotent
+        create-if-missing), not re-raised, so callers can call this
+        unconditionally as a guard. Uses a realistic already-exists payload
+        (GitHub's actual shape for this case), not a generic 422 body, so this
+        test can't pass merely because ANY 422 was swallowed."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422,
+                json={
+                    "message": "Validation Failed",
+                    "errors": [{"resource": "Label", "code": "already_exists", "field": "name"}],
+                },
+            )
+
+        result = _client_with(handler).create_label("acme", "widget", "waiting for review")
+        assert result is None
+
+    def test_non_already_exists_422_still_raises(self) -> None:
+        """A 422 for a genuine validation failure (e.g. an invalid `color`,
+        not a name conflict) must still raise -- create_label only swallows
+        the specific `already_exists` case, not every 422."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422,
+                json={
+                    "message": "Validation Failed",
+                    "errors": [{"resource": "Label", "code": "invalid", "field": "color"}],
+                },
+            )
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).create_label(
+                "acme", "widget", "waiting for review", color="zzzzzz"
+            )
+
+    def test_other_error_raises(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"message": "Forbidden"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).create_label("acme", "widget", "waiting for review")
+
+
 class TestScrubTokenFromText:
     def test_redacts_user_at_url(self) -> None:
         # Build the credentialed URL at runtime so the literal `user:pwd@host`
@@ -911,6 +1060,22 @@ class TestScrubTokenFromText:
         assert pwd not in out
         assert user not in out
         assert "https://***@example.com/repo.git" in out
+
+    def test_redacts_a_fine_grained_pat(self) -> None:
+        """Fine-grained PATs (``github_pat_``) carry underscores in their body,
+        so the classic ``gh[pousr]_[A-Za-z0-9]+`` shape can never match them --
+        they need their own alternative or a finding quoting one would be posted
+        verbatim to a public PR comment. Built by interpolation, never as one
+        contiguous literal."""
+        token = f"github_pat_{'F' * 12}_{'G' * 12}"
+        out = scrub_token_from_text(f"leaked: {token} in config.py")
+        # Pinned on the FULL output, not just "the exact input string is gone":
+        # a scrubber that redacted only part of the token (leaving the
+        # `github_pat_` head or a trailing body segment behind) would satisfy
+        # both weaker assertions while still leaking most of the secret.
+        assert out == "leaked: *** in config.py"
+        assert token not in out
+        assert "github_pat_" not in out
 
     def test_idempotent_on_clean_text(self) -> None:
         assert scrub_token_from_text("nothing sensitive here") == "nothing sensitive here"
@@ -1409,6 +1574,79 @@ def _post_run_from_github_then_run_legacy_hooks(patched_app, json: dict[str, Any
 _post_run_from_github_and_run_hooks = _post_run_from_github_then_run_legacy_hooks
 
 
+class TestCheckoutRunningRoute:
+    """GET /checkout/running: the generic checkout-wide admission pre-check
+    run_github_issue relies on (it has no PR-scoped admission of its own to
+    piggyback on, unlike address_github_pr_comments)."""
+
+    def test_reports_none_when_nothing_running(self, patched_app) -> None:
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": "/tmp/nonexistent-checkout"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}
+
+    def test_reports_running_sibling_job(self, patched_app) -> None:
+        patched_app["jobs"].create_job(
+            "sibling-job",
+            status="running",
+            repo_path=patched_app["repo_path"],
+            github_context={"owner": "o", "repo": "r", "issue_number": 5},
+        )
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": "sibling-job"}
+
+    def test_does_not_report_a_terminal_job_on_the_same_checkout(self, patched_app) -> None:
+        """A completed/failed job on the SAME repo_path is not "running" — the
+        route's scan is over active jobs only, so a finished job must never keep
+        a checkout looking occupied forever."""
+        for job_id, status in (("done-job", "completed"), ("dead-job", "failed")):
+            patched_app["jobs"].create_job(
+                job_id,
+                status=status,
+                repo_path=patched_app["repo_path"],
+                github_context={"owner": "o", "repo": "r", "issue_number": 5},
+            )
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}
+
+    def test_does_not_report_a_running_job_on_a_different_checkout(
+        self, patched_app, tmp_path
+    ) -> None:
+        """The scan is scoped to the QUERIED checkout: a job running on a
+        different repo_path must not be reported, or every unrelated concurrent
+        job would falsely block this checkout."""
+        other_checkout = tmp_path / "other-checkout"
+        other_checkout.mkdir()
+        patched_app["jobs"].create_job(
+            "elsewhere-job",
+            status="running",
+            repo_path=str(other_checkout),
+            github_context={"owner": "o", "repo": "r", "issue_number": 6},
+        )
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"running_job_id": None}
+
+    def test_is_read_only_and_creates_no_job(self, patched_app) -> None:
+        """The pre-check is a QUERY: asking who holds a checkout must never
+        itself create a job row that a later scan would then report."""
+        before = len(patched_app["jobs"].list_jobs())
+        resp = patched_app["client"].get(
+            "/checkout/running", params={"repo_path": patched_app["repo_path"]}
+        )
+        assert resp.status_code == 200
+        assert len(patched_app["jobs"].list_jobs()) == before
+
+
 class TestEndpointHappyPath:
     def test_run_from_github_starts_coding_team_workflow(self, patched_app, monkeypatch) -> None:
         import software_engineering_team.api.routes.github as gh_routes
@@ -1451,11 +1689,16 @@ class TestEndpointHappyPath:
         assert resp.status_code == 200, resp.text
         assert started["repo_path"] == patched_app["repo_path"]
         assert started["plan_input"]["requirements_title"] == "Add feature"
+        # The dispatch payload is the persisted ``github_context`` plus the
+        # run-scoped keys only the workflow needs -- built from ONE dict, so a
+        # field can never be present for one consumer and missing for the other.
         assert started["github"] == {
             "owner": "o",
             "repo": "r",
             "issue_number": 1,
+            "issue_url": "https://example/issues/1",
             "issue_title": "Add feature",
+            "base_branch": None,
             "remote": "upstream",
             "base": "trunk",
             "integration_branch": "khala/issue-1",
@@ -1463,6 +1706,13 @@ class TestEndpointHappyPath:
             "cleanup_checkout_on_success": True,
         }
         assert "token" not in started["github"]
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        # Assert-then-subscript, like the failure-path sibling below: a missing
+        # row would otherwise fail as a TypeError on ``None[...]`` instead of
+        # naming what actually went wrong.
+        assert job is not None
+        persisted = job["github_context"]
+        assert persisted.items() <= started["github"].items()
         assert gh.get_repo_calls == 1
 
     def test_run_from_github_skips_get_repo_when_base_branch_supplied(
@@ -1529,15 +1779,69 @@ class TestEndpointHappyPath:
         assert job["status"] == "failed"
         assert "Temporal dispatch failed" in job["error"]
 
-    def test_run_from_github_returns_502_when_base_sha_unresolvable(
+    def test_fail_new_job_without_cause_keeps_implicit_exception_context(
         self, patched_app, monkeypatch
     ) -> None:
+        """Omitting ``cause`` must not SUPPRESS the exception being handled.
+
+        ``raise ... from None`` is not "leave chaining alone" -- it sets
+        ``__suppress_context__``, so a caller that invokes this helper from
+        inside an ``except`` block without passing an explicit ``cause`` would
+        lose the original traceback from the rendered chain, which is precisely
+        the diagnostic an operator needs for an unanticipated failure.
+        """
+        import software_engineering_team.api.routes.github as gh_routes
+
+        monkeypatch.setattr(gh_routes._main, "update_job", lambda *a, **kw: None)
+
+        original = RuntimeError("original failure")
+        with pytest.raises(HTTPException) as excinfo:
+            try:
+                raise original
+            except RuntimeError:
+                gh_routes._fail_new_job("job-1", 503, "sanitized summary")
+
+        assert excinfo.value.__suppress_context__ is False
+        assert excinfo.value.__context__ is original
+
+    def test_fail_new_job_with_cause_chains_it_explicitly(self, patched_app, monkeypatch) -> None:
+        """The explicit-``cause`` path still chains, unchanged."""
+        import software_engineering_team.api.routes.github as gh_routes
+
+        monkeypatch.setattr(gh_routes._main, "update_job", lambda *a, **kw: None)
+
+        cause = RuntimeError("dispatch blew up")
+        with pytest.raises(HTTPException) as excinfo:
+            gh_routes._fail_new_job("job-1", 503, "sanitized summary", cause=cause)
+
+        assert excinfo.value.__cause__ is cause
+
+    def test_run_from_github_returns_502_when_base_sha_unresolvable(
+        self, patched_app, monkeypatch, caplog
+    ) -> None:
         """When the base branch's HEAD SHA can't be resolved, fail before dispatch
-        rather than starting a workflow with no freshness anchor."""
+        rather than starting a workflow with no freshness anchor.
+
+        The raw git output is deliberately NOT echoed into the response or the
+        stored job ``error``: ``_fail_new_job``'s safe-to-disclose contract
+        applies (``GET /api/jobs/{team}`` returns a job's ``error`` verbatim),
+        and remote-supplied git stderr is not a sanitized summary. The
+        diagnostic must still reach the log, where it belongs for operators --
+        but REDACTED, not verbatim: a log is the longest-lived copy of any text
+        that passes through it (aggregation, retention), so a credential echoed
+        in git stderr must not survive into it.
+        """
         import software_engineering_team.api.coding_team_main as api_main
 
+        # A realistic credential length: `redact_secret`/`scrub_token_from_text`
+        # deliberately ignore sub-8-char literals and sub-20-char bare tokens so
+        # ordinary prose is not mangled.
+        raw_git_error = (
+            "fatal: could not read from "
+            "https://x-access-token:ghp_SECRETSECRETSECRETSECRET@example/r"
+        )
         monkeypatch.setattr(
-            api_main, "resolve_remote_branch_sha", lambda *a, **kw: (False, "fetch failed")
+            api_main, "resolve_remote_branch_sha", lambda *a, **kw: (False, raw_git_error)
         )
 
         gh = _FakeClient(
@@ -1553,16 +1857,138 @@ class TestEndpointHappyPath:
         )
 
         assert resp.status_code == 502
-        assert "fetch failed" in resp.json()["detail"]
+        assert resp.json()["detail"] == "unable to resolve base branch head sha"
+        assert raw_git_error not in resp.text
+        assert "ghp_SECRETSECRETSECRETSECRET" not in resp.text
 
-        # The job row was already created before the SHA check ran; it must be
-        # marked failed here or every retry for this issue would 409 forever
-        # against an orphaned 'pending' job that nothing ever dispatched.
-        jobs = patched_app["jobs"].list_jobs()
-        assert len(jobs) == 1
-        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
-        assert job["status"] == "failed"
-        assert "fetch failed" in job["error"]
+        # NO job row exists: the row is written only after every fallible
+        # preparation step has succeeded, so this failure leaves nothing that a
+        # later retry could be 409-wedged against. (A row created before the SHA
+        # check would have to be terminalized here, and any UNANTICIPATED
+        # failure in the same span would strand it in 'pending' forever.)
+        assert patched_app["jobs"].list_jobs() == []
+        # Sanitized in the disclosed surfaces, and the diagnostic that reaches
+        # the operator through the log is redacted too: the surrounding git
+        # message survives (it is what makes the log useful), the credential
+        # does not.
+        assert "fatal: could not read from" in caplog.text
+        assert "ghp_SECRETSECRETSECRETSECRET" not in caplog.text
+        assert "example/r" in caplog.text
+
+    def test_run_from_github_creates_no_job_when_preparation_raises_unexpectedly(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """An UNEXPECTED exception during preparation must leave no job row.
+
+        The two designed preparation failures (unresolvable base, unresolvable
+        base SHA) are handled explicitly, but an exception escaping
+        ``resolve_remote_branch_sha``'s ``(ok, err)`` tuple contract (a git
+        subprocess timeout, a missing binary) is handled by NOT having created
+        the row yet: there is no orphaned 'pending' job to 409-wedge every later
+        retry for this issue against.
+        """
+        import software_engineering_team.api.coding_team_main as api_main
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("git subprocess timed out")
+
+        monkeypatch.setattr(api_main, "resolve_remote_branch_sha", _boom)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        with pytest.raises(RuntimeError, match="git subprocess timed out"):
+            patched_app["client"].post(
+                "/run-from-github",
+                json=_body(1, repo_path=patched_app["repo_path"]),
+            )
+
+        assert patched_app["jobs"].list_jobs() == []
+
+    def test_run_from_github_persists_github_context_in_the_create_call(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """The context is written WITH the row, not by a follow-up update.
+
+        A create-then-update pair leaves a window -- an exception, but also a
+        hard crash between two adjacent service calls -- in which the row exists
+        as 'pending' with no github_context. ``_running_job_for_issue`` treats a
+        pending row as active, so every retry for that issue would 409 forever
+        with nothing left to terminalize it. One write removes the window: if it
+        raises, there is no row to orphan.
+        """
+        import software_engineering_team.api.coding_team_main as api_main
+
+        updates: list[dict] = []
+        real_update_job = api_main.update_job
+
+        def _record_update(job_id: str, **fields):
+            updates.append(fields)
+            return real_update_job(job_id, **fields)
+
+        monkeypatch.setattr(api_main, "update_job", _record_update)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200, resp.text
+
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["github_context"]["owner"] == "o"
+        assert job["github_context"]["issue_number"] == 1
+        # Nothing had to be patched in afterwards.
+        assert not [u for u in updates if "github_context" in u]
+
+    def test_run_from_github_returns_500_and_creates_no_job_when_base_branch_unresolvable(
+        self, patched_app
+    ) -> None:
+        """When neither request.base_branch nor the repo's default_branch is
+        available, NO job row may be created -- an orphaned pending job is
+        non-terminal, so it would wedge this checkout's admission lock for every
+        later run-from-github/address-comments request until manually cleaned
+        up. The route defers ``create_job`` until after this resolution, so the
+        window does not exist rather than being handled."""
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch=""),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+
+        assert resp.status_code == 500
+        assert "unable to resolve base branch" in resp.json()["detail"]
+
+        assert patched_app["jobs"].list_jobs() == []
+
+        # Prove the docstring's rationale rather than merely asserting the row
+        # is absent: an identical retry must NOT be 409-wedged by the first
+        # attempt. It re-fails the same way (500) and still leaves no row --
+        # which it could not do if the first attempt had persisted a
+        # non-terminal 'pending' job holding admission.
+        retry = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert retry.status_code == 500
+        assert "unable to resolve base branch" in retry.json()["detail"]
+        assert patched_app["jobs"].list_jobs() == []
 
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
@@ -2255,14 +2681,8 @@ class TestPrepareIssueBranch:
         self._git(repo, "fetch", "origin", "main")
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
-        import subprocess
 
-        head = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        head = current_branch(repo)
         assert head == "khala/issue-9"
 
     def test_unsafe_default_branch_rejected(self, api, tmp_path) -> None:
@@ -2276,6 +2696,21 @@ class TestPrepareIssueBranch:
         ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
         assert ok is False
         assert "unsafe" in (msg or "")
+
+    def test_expected_head_sha_matching_live_remote_tip_succeeds(self, api, tmp_path) -> None:
+        """When the caller's ``expected_head_sha`` matches what a fresh fetch
+        reports as the branch's live tip, prep proceeds exactly as without the
+        check (proving the check does not misfire on the ordinary case)."""
+        repo = self._init_repo(tmp_path)
+        live_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_head_sha=live_sha
+        )
+        assert ok is True, msg
+
+        head = current_branch(repo)
+        assert head == "khala/issue-9"
 
     def test_matching_expected_base_sha_succeeds(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
@@ -2294,9 +2729,70 @@ class TestPrepareIssueBranch:
         )
         assert ok is True, msg
 
+    def test_uppercase_expected_base_sha_matches_same_commit(self, api, tmp_path) -> None:
+        """A case-mismatched but IDENTICAL base SHA is not "moved".
+
+        Git SHAs are hex and case-insensitive, and the caller's snapshotted
+        SHA does not come from this module's ``rev-parse``, so comparing them
+        case-sensitively would abort a perfectly fresh plan. The
+        ``expected_head_sha`` check already compares with ``casefold``; this
+        pins the base check to the same rule.
+        """
+        repo = self._init_repo(tmp_path)
+        self._git(repo, "fetch", "origin", "main")
+        import subprocess
+
+        head_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha=head_sha.upper()
+        )
+        assert ok is True, msg
+
+    def test_empty_expected_base_sha_is_treated_as_provided(self, api, tmp_path) -> None:
+        """``""`` means "provided", not "absent" -- the same convention
+        ``expected_head_sha`` uses.
+
+        A SHA is never legitimately empty, so a truthiness guard here would
+        silently DISABLE the freshness check a caller asked for (and the two
+        optional SHA parameters would answer the same question two different
+        ways). Failing closed surfaces the caller bug instead.
+        """
+        repo = self._init_repo(tmp_path)
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_base_sha=""
+        )
+        assert ok is False
+        assert "moved" in (msg or "")
+
+    def test_empty_expected_head_sha_is_treated_as_provided(self, api, tmp_path) -> None:
+        """``""`` for ``expected_head_sha`` means "provided", not "absent" --
+        the mirror of ``test_empty_expected_base_sha_is_treated_as_provided``.
+
+        Both optional SHA parameters must answer this the same way: a
+        truthiness guard (``if expected_head_sha:``) instead of ``is not None``
+        would silently SKIP the freshness check a caller explicitly asked for,
+        and nothing else in this class would notice.
+        """
+        repo = self._init_repo(tmp_path)
+        commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_head_sha=""
+        )
+        assert ok is False, msg
+        # The failure names the (empty) expectation it failed closed on,
+        # whichever head-check branch fires -- "moved" or "not resolvable".
+        assert "''" in (msg or "")
+
     def test_stale_expected_base_sha_rejected_before_any_checkout(self, api, tmp_path) -> None:
         """The base moved since triage: fail closed, before touching the checkout."""
-        import subprocess
 
         repo = self._init_repo(tmp_path)
         # Advance origin/main past the SHA the (fake) triage step observed.
@@ -2305,12 +2801,7 @@ class TestPrepareIssueBranch:
         self._git(repo, "add", "README.md")
         self._git(repo, "commit", "-q", "--no-gpg-sign", "-m", "advance")
 
-        original_head_on_disk = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        original_head_on_disk = current_branch(repo)
 
         ok, msg, _notes = api._prepare_issue_branch(
             repo, "origin", "main", "khala/issue-9", expected_base_sha="0" * 40
@@ -2320,13 +2811,84 @@ class TestPrepareIssueBranch:
         assert "0" * 40 in (msg or "")
 
         # No checkout switch happened -- HEAD is exactly where the test left it.
-        head_after = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        head_after = current_branch(repo)
         assert head_after == original_head_on_disk
+
+    def test_expected_head_sha_mismatch_blocks_prep_without_mutating_checkout(
+        self, api, tmp_path
+    ) -> None:
+        """Simulates the P1 race: a caller's plan was grounded on ``stale_sha``,
+        but by the time branch prep actually runs (this fetch) a newer commit
+        has landed on the PR branch. Prep must fail closed -- proceeding would
+        apply the caller's plan to code newer than what it was grounded on --
+        and must not touch the checkout on its way to failing."""
+        repo = self._init_repo(tmp_path)
+        stale_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        live_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+        assert stale_sha != live_sha
+
+        import subprocess
+
+        def _local_branches() -> str:
+            return subprocess.run(
+                ["git", "-C", repo, "for-each-ref", "refs/heads", "--format=%(refname:short)"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        def _status() -> str:
+            return subprocess.run(
+                ["git", "-C", repo, "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        branches_before = _local_branches()
+
+        ok, msg, _notes = api._prepare_issue_branch(
+            repo, "origin", "main", "khala/issue-9", expected_head_sha=stale_sha
+        )
+
+        assert ok is False
+        assert stale_sha in (msg or "")
+        assert live_sha in (msg or "")
+
+        # The checkout must be left exactly where _init_repo put it -- no
+        # branch switch, no local integration/rescue branch created, no
+        # uncommitted changes left behind.
+        head = current_branch(repo)
+        assert head == "main"
+        assert _local_branches() == branches_before
+        assert _status() == ""
+
+    def test_expected_head_sha_none_skips_check(self, api, tmp_path) -> None:
+        """The default (``None``, used by the plain issue-driven flow) must not
+        perform the check at all -- prep succeeds regardless of the branch's
+        live tip, exactly as before this parameter existed.
+
+        Regression coverage: the branch already carries several commits when
+        prep runs, so a check that fired despite the ``None`` default (comparing
+        ``None``, or anything else it resolved internally, against the live tip)
+        would fail here -- proving the check is gated on the parameter rather
+        than merely unexercised. No caller-observed SHA is captured because with
+        ``expected_head_sha=None`` there is nothing for a misfiring check to
+        compare against."""
+        repo = self._init_repo(tmp_path)
+        commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+        commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is True, msg
+
+        # Same end-state assertion the sibling success tests make
+        # (``test_clean_tree_succeeds``,
+        # ``test_expected_head_sha_matching_live_remote_tip_succeeds``):
+        # ``ok is True`` alone would still pass if a regression reported
+        # success without ever performing the checkout.
+        head = current_branch(repo)
+        assert head == "khala/issue-9"
 
     def test_stale_expected_base_sha_rejected_before_dirty_tree_recovery(
         self, api, tmp_path
@@ -2474,7 +3036,7 @@ class TestGitCredentialThreading:
         assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
         # GitHub's git smart-HTTP endpoint rejects `Bearer` (401) even for a
         # valid token — only Basic with the x-access-token username works.
-        assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("secret-tok")
+        assert env["GIT_CONFIG_VALUE_0"] == expected_basic_header("secret-tok")
         # Disable interactive prompts so a bad credential fails fast.
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         # Inherits the parent environment (PATH etc. survive).
@@ -2512,7 +3074,7 @@ class TestGitCredentialThreading:
         assert len(fetches) == 1
         for _args, env in fetches:
             assert env is not None
-            assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
+            assert env["GIT_CONFIG_VALUE_0"] == expected_basic_header("tok-123")
         # Local-only git ops never carry the credential.
         assert all(env is None for args, env in calls if args[0] != "fetch")
 
@@ -2549,7 +3111,7 @@ class TestGitCredentialThreading:
         ok, msg = api._push_branch("/repo", "origin", "khala/issue-1", "tok-xyz")
         assert ok is True, msg
         assert captured["args"][0] == "push"
-        assert captured["env"]["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-xyz")
+        assert captured["env"]["GIT_CONFIG_VALUE_0"] == expected_basic_header("tok-xyz")
 
     def test_push_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
         captured = {}
@@ -2753,15 +3315,41 @@ class TestStatusResponseSurfacing:
 
 
 class TestBusyCheckoutGuard:
-    """Auto-recovery must never mutate a sibling job's live working tree:
-    prep on a checkout with another non-terminal job fails fast (the old
-    dirty-guard behavior for the live case), while crashed-job leftovers
-    (no running sibling) still recover."""
+    """A checkout with another non-terminal job on it must never be admitted
+    onto by a second job — the route's own checkout-wide admission (mirroring
+    `address_github_pr_comments`) now blocks with 409 before a job row is
+    even created, rather than creating one and detecting the conflict later
+    during branch prep (the old post-hoc dirty-guard behavior). Crashed-job
+    leftovers (no running sibling) still recover during prep, unaffected."""
 
-    def test_running_sibling_on_same_checkout_fails_job(self, patched_app, monkeypatch) -> None:
+    def _stub_blocked_admission(self, patched_app, monkeypatch, reached_calls: list) -> None:
+        """Stub the two hooks a blocked-admission test must never actually reach:
+        `_prepare_issue_branch` (would mutate the sibling's working tree if the
+        409 guard ever failed open) and `_clear_active_issue_if_matches` (the
+        publish-time marker clear, irrelevant to admission itself).
+
+        BOTH stubs append to ``reached_calls``, so ``reached_calls == []``
+        enforces the claim this docstring makes about both of them. A silent
+        stub for the second hook would have left it merely neutralized, not
+        guarded: a regression that reached it would have gone unnoticed.
+        Entries are ``(hook_name, args)`` so a failure names which one ran."""
+        api = patched_app["api"]
+        monkeypatch.setattr(
+            api,
+            "_prepare_issue_branch",
+            lambda *a, **kw: reached_calls.append(("_prepare_issue_branch", a)) or (True, None, []),
+        )
+        monkeypatch.setattr(
+            api,
+            "_clear_active_issue_if_matches",
+            lambda *a: reached_calls.append(("_clear_active_issue_if_matches", a)),
+        )
+
+    def test_running_sibling_on_same_checkout_blocks_admission(
+        self, patched_app, monkeypatch
+    ) -> None:
         from software_engineering_team.job_store import create_job, update_job
 
-        api = patched_app["api"]
         repo_path = patched_app["repo_path"]
         create_job(job_id="sibling-1", repo_path=repo_path, plan_input=None)
         update_job(
@@ -2769,19 +3357,18 @@ class TestBusyCheckoutGuard:
             status="running",
             github_context={"owner": "o", "repo": "r", "issue_number": 99},
         )
-        prep_calls: list = []
-        monkeypatch.setattr(
-            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
-        )
-        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        reached_calls: list = []
+        self._stub_blocked_admission(patched_app, monkeypatch, reached_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
-        assert resp.status_code == 200
-        job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["status"] == "failed"
-        assert "busy" in (job["error"] or "").lower()
-        assert prep_calls == []  # the sibling's tree was never touched
+        jobs_before = len(patched_app["jobs"].list_jobs())
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 409
+        assert "sibling-1" in resp.json()["detail"]
+        # No new job row was ever created for the blocked request, and the
+        # sibling's own working tree was never touched.
+        assert len(patched_app["jobs"].list_jobs()) == jobs_before
+        assert reached_calls == []
 
     def test_sibling_under_alias_spelling_still_blocks(self, patched_app, monkeypatch) -> None:
         """The guard compares canonical paths: a sibling registered under a
@@ -2790,7 +3377,6 @@ class TestBusyCheckoutGuard:
         guard matters."""
         from software_engineering_team.job_store import create_job, update_job
 
-        api = patched_app["api"]
         repo_path = patched_app["repo_path"]
         alias = os.path.join(os.path.dirname(repo_path), "repo-alias")
         os.symlink(repo_path, alias)
@@ -2800,19 +3386,16 @@ class TestBusyCheckoutGuard:
             status="running",
             github_context={"owner": "o", "repo": "r", "issue_number": 99},
         )
-        prep_calls: list = []
-        monkeypatch.setattr(
-            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
-        )
-        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        reached_calls: list = []
+        self._stub_blocked_admission(patched_app, monkeypatch, reached_calls)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
-        assert resp.status_code == 200
-        job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["status"] == "failed"
-        assert "busy" in (job["error"] or "").lower()
-        assert prep_calls == []
+        jobs_before = len(patched_app["jobs"].list_jobs())
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 409
+        assert "sibling-3" in resp.json()["detail"]
+        assert len(patched_app["jobs"].list_jobs()) == jobs_before
+        assert reached_calls == []
 
     def test_terminal_sibling_does_not_block(self, patched_app, monkeypatch) -> None:
         from software_engineering_team.job_store import create_job, update_job
@@ -2828,6 +3411,40 @@ class TestBusyCheckoutGuard:
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
+
+    def test_running_pr_remediation_sibling_blocks_issue_admission(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """The exact cross-route race this admission check exists for: an
+        address-comments remediation job (identified by `pr_number`, not
+        `issue_number`, in its github_context) already running on a shared,
+        operator-pinned checkout must block a direct `/run-from-github` for
+        an unrelated issue on that same checkout."""
+        from software_engineering_team.job_store import create_job, update_job
+
+        repo_path = patched_app["repo_path"]
+        create_job(job_id="pr-sibling", repo_path=repo_path, plan_input=None)
+        update_job(
+            "pr-sibling",
+            status="running",
+            github_context={"owner": "o", "repo": "r", "pr_number": 42},
+        )
+        # Same isolation as the sibling tests above: if the admission guard
+        # ever fails to block, this must fail cleanly on the status-code
+        # assertion below rather than actually run the real issue workflow
+        # against the sibling's working tree.
+        reached_calls: list = []
+        self._stub_blocked_admission(patched_app, monkeypatch, reached_calls)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        jobs_before = len(patched_app["jobs"].list_jobs())
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 409
+        assert "pr-sibling" in resp.json()["detail"]
+        assert "PR #42" in resp.json()["detail"]
+        assert len(patched_app["jobs"].list_jobs()) == jobs_before
+        # The sibling's own working tree was never touched.
+        assert reached_calls == []
 
 
 class TestPublishWindowLiveness:
@@ -2868,8 +3485,8 @@ class TestPublishWindowLiveness:
 
 
 class TestEphemeralCheckoutCleanup:
-    """The per-issue clone is deleted only on a clean completion when the
-    caller flagged the checkout as platform-owned and ephemeral."""
+    """The per-issue and per-PR clones are deleted only on a clean completion
+    when the caller flagged the checkout as platform-owned and ephemeral."""
 
     def test_request_default_cleanup_flag_is_false(self) -> None:
         """RunFromGitHubRequest defaults cleanup_checkout_on_success to False."""
@@ -2894,13 +3511,31 @@ class TestEphemeralCheckoutCleanup:
         api._cleanup_issue_checkout(str(target))
         assert not target.exists()
 
+    def test_cleanup_helper_removes_per_pr_directory(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        """A real per-PR checkout (the address-comments flow's pr-{N} shape) under
+        an ephemeral root is removed, same as a per-issue checkout."""
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
+        target = tmp_path / "pr-42"  # the auto-derived per-PR shape
+        target.mkdir()
+        (target / ".git").mkdir()
+        (target / "file.txt").write_text("x", encoding="utf-8")
+        assert api._is_ephemeral_checkout_path(str(target)) is True
+        api._cleanup_issue_checkout(str(target))
+        assert not target.exists()
+
     def test_cleanup_refuses_repo_level_path_under_root(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
-        """A repo-level checkout (no issue-N component) under a root is never removed."""
-        # A repo-level checkout (no ``issue-N`` final component) that merely sits
-        # under an ephemeral root must NOT be removed even with .git and the flag —
-        # only per-issue clones are reclaimable (the PR-review path lives here).
+        """A repo-level checkout (no ``issue-N``/``pr-N`` final component) that
+        merely sits under an ephemeral root is never removed, even with ``.git``
+        present: per-issue AND per-PR clones are
+        reclaimable, but a bare repo-level checkout — where the PR-review flow's
+        own checkout lives — is not."""
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -2960,6 +3595,34 @@ class TestEphemeralCheckoutCleanup:
         api = patched_app["api"]
         # An embedded null byte makes Path.resolve() raise ValueError → treated as unsafe.
         assert api._is_ephemeral_checkout_path("bad\x00path") is False
+
+    def test_ephemeral_path_gate_logs_the_swallowed_oserror(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """A filesystem read failure in the content gate returns False AND logs.
+
+        Without the log an operator cannot tell an ordinary refusal ("this is
+        not a platform-owned per-issue/per-PR checkout") from an environmental
+        one (a permission error stopped the safety check) -- the caller only
+        reports "unsafe path, left in place" either way.
+        """
+        import logging
+
+        from software_engineering_team.api import git_ops
+
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        target = tmp_path / "issue-7"
+        target.mkdir()
+        (target / ".git").mkdir()
+
+        def _boom(*_a, **_kw):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(git_ops, "_is_deletable_ephemeral_checkout", _boom)
+
+        with caplog.at_level(logging.DEBUG, logger=git_ops.__name__):
+            assert git_ops._is_ephemeral_checkout_path(str(target)) is False
+        assert "permission denied" in caplog.text
 
     def test_cleanup_helper_swallows_rmtree_failure_and_keeps_lock(
         self, patched_app, tmp_path, monkeypatch
@@ -3035,6 +3698,47 @@ class TestEphemeralCheckoutCleanup:
         monkeypatch.setattr(api.fcntl, "flock", _flock_boom)
         api._cleanup_issue_checkout(str(target))  # must not raise
         assert target.exists()  # not deleted because the lock was never held
+
+    def test_cleanup_lock_failure_names_the_checkout_it_skipped(
+        self, patched_app, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """Every log line from this cleanup names ``target``.
+
+        An operator traces a cleanup by grepping the checkout path; a skip
+        message naming only the lock file (which lives in the parent directory
+        under a different name) is invisible to that search.
+
+        The skip must also LEAVE the checkout intact: a regression that logged
+        the skip and then deleted anyway would satisfy the message assertion
+        alone, so the survival of both the directory and its ``.git`` marker is
+        pinned here too.
+        """
+        import logging
+
+        api = patched_app["api"]
+        # Pin the ephemeral roots to this tmp_path: an ambient SE_WORKSPACE_DIR
+        # or AGENT_CACHE would add roots this test does not control, which can
+        # steer the cleanup down the unsafe-path branch instead of the flock
+        # one it means to exercise (same hermeticity the sibling
+        # resolved-path test establishes).
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
+        target = tmp_path / "issue-7"
+        target.mkdir()
+        (target / ".git").mkdir()
+
+        def _flock_boom(fd, op):
+            raise OSError("ENOLCK")
+
+        monkeypatch.setattr(api.fcntl, "flock", _flock_boom)
+        with caplog.at_level(logging.WARNING):
+            api._cleanup_issue_checkout(str(target))
+        skips = [r.getMessage() for r in caplog.records if "Skipping checkout cleanup" in r.getMessage()]
+        assert skips and all(str(target.resolve()) in m for m in skips)
+        # Skipped means SKIPPED: the checkout survives, .git and all.
+        assert target.is_dir()
+        assert (target / ".git").is_dir()
 
     def test_cleanup_deletes_resolved_path_not_raw_symlinked_string(
         self, patched_app, tmp_path, monkeypatch
@@ -3237,6 +3941,121 @@ class TestFileContentsAndTree:
         with pytest.raises(GitHubAPIError):
             _client_with(handler).get_file_contents("o", "r", "a.py", "sha1")
 
+    def test_get_file_contents_detailed_success_is_not_missing(self) -> None:
+        """A decodable file payload reports (decoded_text, missing=False).
+
+        The most common case, and the one the flag is load-bearing for: an
+        address-comments caller reads ``missing=True`` as "the file is gone".
+        Pinned explicitly rather than left implied by the sibling
+        ``get_file_contents`` test, which discards the second tuple element.
+        """
+        body = "class Model:\n    pass\n"
+        encoded = base64.b64encode(body.encode()).decode()
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"type": "file", "encoding": "base64", "content": encoded}
+            )
+
+        content, missing = _client_with(handler).get_file_contents_detailed(
+            "o", "r", "pkg/models.py", "sha1"
+        )
+        assert content == body
+        assert missing is False
+
+    def test_get_file_contents_detailed_confirms_404_as_missing(self) -> None:
+        """A 404 is reported as (None, missing=True) -- distinguishable from a
+        directory or an undecodable payload, which report missing=False."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+        content, missing = _client_with(handler).get_file_contents_detailed(
+            "o", "r", "missing.py", "sha1"
+        )
+        assert content is None
+        assert missing is True
+
+    def test_get_file_contents_detailed_directory_is_not_missing(self) -> None:
+        """A directory path is unreadable but NOT a confirmed-absent path --
+        missing must stay False so callers don't treat it as "file deleted"."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"type": "file", "name": "a.py"}])
+
+        content, missing = _client_with(handler).get_file_contents_detailed("o", "r", "pkg", "sha1")
+        assert content is None
+        assert missing is False
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {"type": "file", "encoding": "none", "content": "plain text"},
+                id="unsupported-encoding",
+            ),
+            pytest.param(
+                {"type": "file", "encoding": "base64", "content": {"nested": "object"}},
+                id="content-not-a-string",
+            ),
+            pytest.param(
+                {"type": "file", "encoding": "base64", "content": "a"},
+                id="content-not-valid-base64",
+            ),
+        ],
+    )
+    def test_get_file_contents_detailed_undecodable_payload_is_not_missing(self, payload) -> None:
+        """The documented "undecodable payload" branch: a 200 whose body IS a file
+        entry but whose content cannot be decoded reports ``(None, False)``.
+
+        ``missing`` staying False is the load-bearing half. It is what separates
+        this from the confirmed-404 case
+        (``test_get_file_contents_detailed_confirms_404_as_missing``): the file
+        may well still exist at this ref, so a caller must not read
+        ``content is None`` as "deleted". ``address_comments._cited_code`` relies
+        on exactly that split -- ``missing=True`` lets triage proceed with a
+        "file was deleted" note, while this branch raises
+        ``CitedCodeUnavailableError`` instead of silently triaging on prose
+        alone.
+
+        All three ways a payload can be undecodable are covered: GitHub
+        returning an encoding this client cannot read, a ``content`` field that
+        is not a string at all, and a ``content`` string that is not valid
+        base64 (``binascii.Error``).
+        """
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=payload)
+
+        content, missing = _client_with(handler).get_file_contents_detailed(
+            "o", "r", "a.py", "sha1"
+        )
+        assert content is None
+        assert missing is False
+
+    def test_get_file_contents_delegates_to_get_file_contents_detailed(self, monkeypatch) -> None:
+        """`get_file_contents` is the content half of `get_file_contents_detailed`,
+        not a parallel implementation: it must forward its arguments verbatim and
+        return whatever that call's first element is. Stubbing the detailed method
+        pins the delegation itself -- asserting only that both decode the same
+        payload would still pass if the delegation were replaced by a duplicate
+        request/decode of its own."""
+
+        def handler(_req: httpx.Request) -> httpx.Response:  # pragma: no cover - never called
+            raise AssertionError("get_file_contents must delegate, not issue its own request")
+
+        client = _client_with(handler)
+        calls: list[tuple[str, str, str, str]] = []
+
+        def _fake_detailed(owner: str, repo: str, path: str, ref: str) -> tuple[str, bool]:
+            calls.append((owner, repo, path, ref))
+            return "delegated body", False
+
+        monkeypatch.setattr(client, "get_file_contents_detailed", _fake_detailed)
+
+        assert client.get_file_contents("o", "r", "a.py", "sha1") == "delegated body"
+        assert calls == [("o", "r", "a.py", "sha1")]
+
     def test_get_repository_tree_returns_blob_paths(self) -> None:
         """Only blob (file) entries are returned; tree (directory) entries are excluded."""
 
@@ -3420,24 +4239,50 @@ def test_prepare_issue_branch_routes_its_fetch_through_the_choke_point() -> None
     """
     from unittest.mock import patch
 
-    # ``git_ops`` first, then its already-bound ``_main``: the two modules import
-    # each other, so importing ``coding_team_main`` directly here leaves a
-    # partially-initialized ``git_ops`` behind and breaks the sibling test.
+    # Patch the attribute on the ``coding_team_main`` MODULE OBJECT, reached
+    # directly rather than through a ``git_ops._main`` alias. ``git_ops`` no
+    # longer binds ``_main`` at module scope -- it imports it inside each
+    # function that needs it, deliberately, to break the
+    # git_ops <-> coding_team_main import cycle in production code (an entry
+    # point reaching ``git_ops`` first used to hit a partially-initialized
+    # module). Because both spellings resolve to the same object in
+    # ``sys.modules``, patching it here is still seen by those function-local
+    # imports, so this pins the routing exactly as before. Import order between
+    # the two modules no longer matters here for the same reason the alias is
+    # gone: with the cycle broken, neither can be reached half-initialized.
+    from software_engineering_team.api import coding_team_main as _main
     from software_engineering_team.api import git_ops
 
-    with patch.object(git_ops._main, "resolve_remote_branch_sha") as resolver:
-        resolver.return_value = (False, "unsafe remote name: 'ext::sh -c id'")
+    # A SAFE remote is used to exercise the routing, because an unsafe one no
+    # longer gets this far: ``_prepare_issue_branch`` now rejects a malicious
+    # remote at its own ``_is_safe_ref`` guard ("unsafe base remote"), before
+    # any fetch is attempted. That earlier rejection is asserted separately
+    # below, so both properties stay pinned -- the routing here, and the
+    # fail-closed guard there.
+    with patch.object(_main, "resolve_remote_branch_sha") as resolver:
+        resolver.return_value = (False, "boom from the choke point")
         ok, msg, _notes = git_ops._prepare_issue_branch(
-            "/nonexistent", "ext::sh -c id", "main", "khala/issue-1", token="tok"
+            "/nonexistent", "origin", "main", "khala/issue-1", token="tok"
         )
 
     # The arguments matter as much as the call: a refactor that validated a
-    # substituted value (a hardcoded "origin", say) while still fetching with
-    # the payload's raw remote would leave ``resolver.called`` true and reopen
-    # the validate-one-value/fetch-with-another hole. Pinning the exact call
+    # substituted value while still fetching with the payload's raw remote
+    # would leave ``resolver.called`` true and reopen the
+    # validate-one-value/fetch-with-another hole. Pinning the exact call
     # means such a change fails here rather than passing silently -- and a
     # deliberate signature change is a security-relevant edit that should have
     # to come back through this test.
-    resolver.assert_called_once_with("/nonexistent", "ext::sh -c id", "main", "tok")
+    resolver.assert_called_once_with("/nonexistent", "origin", "main", "tok")
     assert ok is False
-    assert "unsafe remote name" in msg
+    assert msg == "boom from the choke point"
+
+    # The unsafe remote the routing guard was originally written against is
+    # now refused before the choke point is reached at all -- strictly earlier
+    # than a fetch-time rejection, and never routed to git.
+    with patch.object(_main, "resolve_remote_branch_sha") as resolver:
+        ok, msg, _notes = git_ops._prepare_issue_branch(
+            "/nonexistent", "ext::sh -c id", "main", "khala/issue-1", token="tok"
+        )
+    assert resolver.called is False
+    assert ok is False
+    assert "unsafe base remote" in msg

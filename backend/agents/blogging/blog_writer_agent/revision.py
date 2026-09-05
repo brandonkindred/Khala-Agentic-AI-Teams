@@ -16,8 +16,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from agents.blogging.shared.text_parsing import format_feedback_item_line, unwrap_llm_cause
 from pydantic import ValidationError
-from strands.types.exceptions import EventLoopException
 
 from llm_service import (
     LLMError,
@@ -48,53 +48,6 @@ CallJson = Callable[[str, str], dict]
 COMPACT_OUTLINE_CHARS = 200_000
 
 
-def _unwrap_llm_cause(exc: BaseException) -> BaseException:
-    """Return the underlying model error when strands wraps it in EventLoopException.
-
-    Preconditions:
-        - ``exc`` is the exception caught at an LLM call boundary.
-    Postconditions:
-        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
-          returns that original exception.
-        - Otherwise returns ``exc`` unchanged.
-    """
-    if isinstance(exc, EventLoopException):
-        original = getattr(exc, "original_exception", None)
-        if isinstance(original, BaseException):
-            return original
-    return exc
-
-
-def _format_feedback_item_line(item: Any, index: int) -> str:
-    """One numbered feedback line (+ optional suggestion) for batch revise prompts.
-
-    Preconditions:
-        ``index`` is a positive int. ``item`` exposes ``severity``, ``category``,
-        and ``issue`` (via attribute or duck typing); empty/missing values are
-        rejected. ``location`` and ``suggestion`` are optional.
-    Postconditions:
-        Returns a numbered feedback line; includes a location bracket and a
-        suggestion sub-line when those optional fields are present.
-    Raises:
-        ValueError: if ``index`` is not a positive int, or required item
-            fields are missing.
-    """
-    if not isinstance(index, int) or index <= 0:
-        raise ValueError(f"index must be a positive int, got {index!r}")
-    severity = getattr(item, "severity", None)
-    category = getattr(item, "category", None)
-    issue = getattr(item, "issue", None)
-    if not all([severity, category, issue]):
-        raise ValueError(f"Feedback item missing required fields: {item!r}")
-    location = getattr(item, "location", None)
-    loc = f" [{location}]" if location else ""
-    line = f"{index}. [{severity}] {category}{loc}: {issue}"
-    suggestion = getattr(item, "suggestion", None)
-    if suggestion:
-        line += f"\n   Suggestion: {suggestion}"
-    return line
-
-
 def build_revision_plan_prompt(
     draft: str, feedback_items: list[Any], revise_input: ReviseWriterInput, *, llm: Any
 ) -> str:
@@ -104,7 +57,7 @@ def build_revision_plan_prompt(
         - ``draft`` is the current Markdown draft text.
         - ``feedback_items`` is a sequence of items that each expose
           ``severity``, ``category``, and ``issue`` (and optionally
-          ``location`` / ``suggestion``) for ``_format_feedback_item_line``.
+          ``location`` / ``suggestion``) for ``format_feedback_item_line``.
         - ``revise_input`` provides the content plan via
           ``outline_for_prompt()``.
         - ``llm`` is the ``LLMClient`` passed to ``compact_text`` when the
@@ -118,7 +71,7 @@ def build_revision_plan_prompt(
           1-based index and ``must_fix`` severity prioritized.
     """
     feedback_lines = [
-        _format_feedback_item_line(item, i) for i, item in enumerate(feedback_items, start=1)
+        format_feedback_item_line(item, i) for i, item in enumerate(feedback_items, start=1)
     ]
     cp = compact_text(revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, llm, "content plan")
     parts = [
@@ -185,7 +138,7 @@ def build_revise_all_items_prompt(
     Postconditions:
         - Returns a prompt string embedding ``REVISION_TASK_INSTRUCTIONS``, the
           content plan, every feedback item formatted via
-          ``_format_feedback_item_line``, ``revision_plan`` as planning
+          ``format_feedback_item_line``, ``revision_plan`` as planning
           context, a length block (``length_guidance`` when supplied,
           otherwise a target-word-count range derived from
           ``target_word_count``), and the current draft.
@@ -201,7 +154,7 @@ def build_revise_all_items_prompt(
           omitted rather than left blank.
     """
     feedback_lines = [
-        _format_feedback_item_line(item, i) for i, item in enumerate(feedback_items, start=1)
+        format_feedback_item_line(item, i) for i, item in enumerate(feedback_items, start=1)
     ]
     feedback_block = "\n\n".join(feedback_lines)
 
@@ -415,7 +368,7 @@ def generate_revision_plan(
                 response_preview=repr(data)[:200],
             ) from plan_exc
     except Exception as e:
-        cause = _unwrap_llm_cause(e)
+        cause = unwrap_llm_cause(e)
         if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
             raise cause
         if not isinstance(cause, LLMError):
@@ -428,7 +381,7 @@ def generate_revision_plan(
             plain = call_text(prompt, WRITING_SYSTEM_PROMPT)
             return RevisionPlan(summary=(plain or "").strip(), changes=[], risks=[])
         except Exception as fallback_exc:
-            fallback_cause = _unwrap_llm_cause(fallback_exc)
+            fallback_cause = unwrap_llm_cause(fallback_exc)
             if isinstance(fallback_cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise fallback_cause
             if not isinstance(fallback_cause, LLMError):

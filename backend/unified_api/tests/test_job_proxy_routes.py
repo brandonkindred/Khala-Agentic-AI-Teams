@@ -9,6 +9,9 @@ and the ``/api/se/metrics`` DORA-metrics alias. Each handler opens a fresh
 
 from __future__ import annotations
 
+import inspect
+import logging
+import re
 import sys
 from functools import partial
 from pathlib import Path
@@ -25,6 +28,7 @@ if str(_agents) not in sys.path:
 
 from fastapi.testclient import TestClient
 
+from unified_api import main
 from unified_api.main import app
 
 client = TestClient(app)
@@ -75,6 +79,162 @@ def test_list_team_jobs_running_only_adds_status_filters(monkeypatch: pytest.Mon
     assert resp.status_code == 200
     assert "statuses=pending" in seen["url"]
     assert "statuses=running" in seen["url"]
+
+
+def test_list_team_jobs_redacts_encrypted_github_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The persisted resume credential never leaves this API, even as ciphertext.
+
+    Teams store ``github_token_encrypted`` on the job row so a worker can resume
+    after its orchestrator thread dies; every legitimate reader loads it from the
+    job SERVICE directly, never from this proxy's response. Forwarding it here
+    would spray the ciphertext across every job reader, their caches and any
+    intermediary's access logs for no consumer's benefit.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "jobs": [
+                    {"job_id": "abc", "status": "running", "github_token_encrypted": "gAAAAAsecret"},
+                    {"job_id": "def", "status": "completed"},
+                ]
+            },
+        )
+
+    _patch_async_client(monkeypatch, handler)
+    resp = client.get("/api/jobs/software-engineering")
+    assert resp.status_code == 200
+    jobs = resp.json()["jobs"]
+    # Removed outright, not blanked: a placeholder could be mistaken for a value.
+    assert "github_token_encrypted" not in jobs[0]
+    assert "gAAAAAsecret" not in resp.text
+    # Every other field is still forwarded verbatim, and a job without the
+    # field is untouched.
+    assert jobs[0] == {"job_id": "abc", "status": "running"}
+    assert jobs[1] == {"job_id": "def", "status": "completed"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["cancel", "interrupt", "resume", "restart"],
+)
+def test_single_job_routes_redact_encrypted_github_token(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    """The single-job mutation proxies echo a whole job record too, so they get the
+    same redaction as the list route -- redacting only the list would leave four
+    equivalent leaks open."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"job": {"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}},
+        )
+
+    _patch_async_client(monkeypatch, handler)
+    resp = client.post(f"/api/jobs/software-engineering/abc/{path}")
+    assert resp.status_code == 200
+    assert resp.json() == {"job": {"job_id": "abc"}}
+    assert "gAAAAAsecret" not in resp.text
+
+
+def test_redact_job_secrets_redacts_and_warns_on_unrecognized_wrapper_key(caplog) -> None:
+    """An unrecognized wrapper must be REDACTED, and must not pass in silence.
+
+    Redaction is keyed on the credential FIELD NAMES, not on the envelope, so a
+    job service that renamed its wrapper cannot silently resume serving
+    credentials -- the field is stripped wherever it sits. The warning is
+    retained on top of that as a contract-drift tripwire, not as the control.
+    """
+    payload = {"records": [{"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}]}
+    with caplog.at_level(logging.WARNING, logger="unified_api"):
+        out = main._redact_job_secrets(payload)
+    assert out == {"records": [{"job_id": "abc"}]}
+    # Not mutated in place: the caller's own object still carries what it had.
+    assert payload["records"][0]["github_token_encrypted"] == "gAAAAAsecret"
+    assert any("neither 'jobs' nor 'job'" in r.getMessage() for r in caplog.records)
+    # The tripwire names the KEYS it saw, never a credential value.
+    assert "gAAAAAsecret" not in caplog.text
+
+
+def test_redact_job_secrets_redacts_and_warns_when_jobs_is_not_a_list(caplog) -> None:
+    payload = {"jobs": {"job_id": "abc", "github_token_encrypted": "gAAAAAsecret"}}
+    with caplog.at_level(logging.WARNING, logger="unified_api"):
+        out = main._redact_job_secrets(payload)
+    assert out == {"jobs": {"job_id": "abc"}}
+    assert any("not a list" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        # A job nested one level deeper than either known envelope.
+        (
+            {"page": {"items": [{"job_id": "a", "github_token_encrypted": "s"}]}},
+            {"page": {"items": [{"job_id": "a"}]}},
+        ),
+        # A bare list body (no envelope at all).
+        ([{"job_id": "a", "github_token_encrypted": "s"}], [{"job_id": "a"}]),
+        # A bare job object.
+        ({"job_id": "a", "github_token_encrypted": "s"}, {"job_id": "a"}),
+        # The credential inside a known envelope but under a sub-object.
+        (
+            {"job": {"job_id": "a", "meta": {"github_token_encrypted": "s"}}},
+            {"job": {"job_id": "a", "meta": {}}},
+        ),
+        # Non-container bodies are returned untouched rather than crashing.
+        ("plain", "plain"),
+        (None, None),
+        (7, 7),
+    ],
+    ids=["nested", "bare-list", "bare-job", "sub-object", "str", "none", "int"],
+)
+def test_redact_job_secrets_is_shape_agnostic(payload, expected) -> None:
+    """The redaction must depend on the KEY it strips, not on where the job sits.
+
+    The previous shape-specific version fixed the two known envelopes and
+    forwarded everything else untouched, so any job-service envelope change was
+    a silent credential leak. Every case here would leak under that version.
+    """
+    assert main._redact_job_secrets(payload) == expected
+
+
+def test_redact_job_secrets_stays_quiet_on_recognized_shapes(caplog) -> None:
+    """The tripwire must not cry wolf on the two shapes it DOES handle, or the
+    warning becomes noise no operator reads."""
+    with caplog.at_level(logging.WARNING, logger="unified_api"):
+        main._redact_job_secrets({"jobs": [{"job_id": "a"}]})
+        main._redact_job_secrets({"job": {"job_id": "a"}})
+    assert not [r for r in caplog.records if "_redact_job_secrets" in r.getMessage()]
+
+
+def test_every_job_returning_proxy_route_redacts() -> None:
+    """Completeness guard for the redaction added alongside these proxies.
+
+    A future job-returning proxy added without ``_redact_job_secrets`` is a
+    silent credential leak, and no per-route test would catch its absence. So
+    assert it structurally: every ``/api/jobs`` route whose upstream returns a
+    job record must CALL the redactor in its own source.
+
+    The call syntax (``_redact_job_secrets(``) is required, not the bare name:
+    a route that merely mentions the redactor in a comment or a TODO would
+    otherwise satisfy this guard while forwarding the payload untouched.
+
+    ``delete_job`` and ``mark_all_interrupted`` are deliberately exempt --
+    their job-service counterparts return ``{"deleted": bool}`` and
+    ``{"interrupted_job_ids": [...]}``, neither of which carries a job record.
+    """
+    exempt = {"delete_job", "mark_all_interrupted"}
+    unredacted: list[str] = []
+    for route in main.app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        path = getattr(route, "path", "")
+        if endpoint is None or not path.startswith("/api/jobs"):
+            continue
+        if endpoint.__name__ in exempt:
+            continue
+        if "_redact_job_secrets(" not in inspect.getsource(endpoint):
+            unredacted.append(f"{path} ({endpoint.__name__})")
+    assert unredacted == [], f"job-returning proxy routes missing redaction: {unredacted}"
 
 
 def test_delete_job_forwards_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,3 +409,117 @@ def test_se_metrics_alias_returns_502_on_non_json_body(monkeypatch: pytest.Monke
     _patch_async_client(monkeypatch, handler)
     resp = client.get("/api/se/metrics")
     assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# Redaction denylist drift guard
+# ---------------------------------------------------------------------------
+
+# Job records carry free-form extra fields (there is no single model to
+# introspect), so the source itself is the only source of truth for which
+# credential-bearing fields exist. Every team writes them the same way: a
+# literal key assigned into the ``*_fields`` dict handed to ``create_job`` /
+# ``update_job``.
+_JOB_FIELD_ASSIGNMENT_RE = re.compile(r"""\b\w*_fields\[["'](?P<key>[\w.-]+)["']\]\s*=""")
+_CREDENTIAL_FIELD_RE = re.compile(r"token|secret|credential|password|passphrase|api[_-]?key", re.I)
+
+# Fields the name-based scan matches that are deliberately NOT redacted, each
+# with the reason it is safe. A new match must be resolved here explicitly --
+# either by adding it to ``_REDACTED_JOB_FIELDS`` or by justifying it below --
+# which is the whole point of the guard: no credential field can be added to
+# the job record without someone making that call.
+_NON_CREDENTIAL_JOB_FIELDS = {
+    # A HITL pause CORRELATION id, not a secret: a client that discovers the
+    # pause by polling the job record has no other way to obtain the token it
+    # must echo back on SubmitAnswersRequest, so redacting it here would break
+    # the documented resume contract.
+    "resume_token",
+}
+
+
+# Directory names that never contain this repository's own source. ``tests`` and
+# ``__pycache__`` were always excluded; the rest are the environment/build
+# directories a real checkout accumulates -- ``backend/.venv`` in particular
+# exists here and holds an order of magnitude more Python files than the
+# repository itself.
+_NON_SOURCE_DIRS = frozenset(
+    {
+        "tests",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        "build",
+        "dist",
+        "site-packages",
+        "node_modules",
+    }
+)
+
+
+def _credential_job_fields() -> set[str]:
+    """Every credential-looking job-record field name assigned anywhere in ``backend``.
+
+    Preconditions:
+        - ``_backend`` points at the repository's ``backend`` directory.
+    Postconditions:
+        - Returns the set of literal ``*_fields["<key>"] = ...`` keys found in
+          FIRST-PARTY, non-test Python sources whose name matches
+          :data:`_CREDENTIAL_FIELD_RE`. Directories named in
+          :data:`_NON_SOURCE_DIRS` are skipped: a developer checkout has
+          ``backend/.venv`` in it, whose thousands of third-party modules are
+          neither this repository's source nor able to add a field to the job
+          record -- reading them all is pure cost, and a match inside one would
+          be an unfixable false failure. Pure apart from reading the tree; an
+          unreadable file is skipped rather than failing the scan.
+        - KNOWN BLIND SPOT: only the SUBSCRIPT spelling is matched. A field
+          introduced as part of a dict LITERAL (``fields = {"x_token": ...}``)
+          or merged in with ``fields.update({...})`` is invisible to this scan.
+          Both spellings are absent from the current source -- every team
+          assigns keys one at a time -- and matching them would mean either
+          parsing the AST or matching bare ``"key":`` pairs anywhere in a file,
+          which over the whole backend tree produces false failures a
+          contributor cannot resolve. Documented rather than closed, because a
+          guard that cries wolf gets deleted; the assignment spelling stays the
+          convention this guard enforces.
+    """
+    found: set[str] = set()
+    for py in _backend.rglob("*.py"):
+        parts = py.parts
+        if _NON_SOURCE_DIRS.intersection(parts) or py.name.startswith("test_"):
+            continue
+        try:
+            text = py.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):  # pragma: no cover - unreadable source
+            continue
+        for m in _JOB_FIELD_ASSIGNMENT_RE.finditer(text):
+            key = m.group("key")
+            if _CREDENTIAL_FIELD_RE.search(key):
+                found.add(key)
+    return found
+
+
+def test_redacted_job_fields_covers_every_credential_job_field() -> None:
+    """The denylist must not drift behind the job record it protects.
+
+    ``_REDACTED_JOB_FIELDS`` is a NAME-based denylist: it fails closed against
+    envelope drift (the redaction walks every dict, whatever the wrapper), but
+    it fails OPEN against field drift -- a team adding a second credential
+    column to the job row would have it proxied to every job reader until
+    someone remembered to update the set. Nothing else ties the two together,
+    so this scan does: any ``*_fields["...token/secret/credential/..."]``
+    assignment in backend source that is neither in the denylist nor in the
+    justified :data:`_NON_CREDENTIAL_JOB_FIELDS` allowlist fails here.
+
+    Bounded by the scan's spelling: see :func:`_credential_job_fields` for the
+    dict-literal/``.update()`` blind spot this therefore inherits.
+    """
+    credential_fields = _credential_job_fields()
+    # Self-check: the scan is only a guard if it actually finds the field the
+    # denylist was written for. A regex that silently matched nothing would
+    # make the assertion below vacuously true forever.
+    assert "github_token_encrypted" in credential_fields
+    leaky = credential_fields - main._REDACTED_JOB_FIELDS - _NON_CREDENTIAL_JOB_FIELDS
+    assert not leaky, f"credential job fields missing from _REDACTED_JOB_FIELDS: {sorted(leaky)}"

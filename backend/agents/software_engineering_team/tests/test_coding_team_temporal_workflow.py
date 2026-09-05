@@ -24,12 +24,37 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 
 import pytest
 
 from shared.temporal.testing import workflow_environment as _workflow_environment
 from software_engineering_team.api.coding_team_models import RunRequest
 from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
+
+
+def _forbid_wait_condition(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assert the workflow under test never reaches ``wait_condition``.
+
+    One shared spelling of the "this run has no HITL pause, so it must never
+    park on ``wait_condition``" guard, replacing the variants this file had
+    grown (a dense ``(_ for _ in ()).throw(...)`` lambda in most places and a
+    hand-rolled ``async def _no_wait`` in others) that all meant the same thing.
+
+    Preconditions:
+        - ``monkeypatch`` is the calling test's own fixture, so the patch is
+          undone at that test's teardown.
+    Postconditions:
+        - ``temporalio.workflow.wait_condition`` is replaced by a coroutine
+          function that raises ``AssertionError`` when awaited -- async,
+          matching the real API's shape, so what fails is the call itself and
+          not an unawaited-coroutine artifact.
+    """
+
+    async def _no_wait(*_a, **_kw):
+        raise AssertionError("wait_condition must not be called")
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
 
 
 def test_activities_export_includes_mark_job_cancelled() -> None:
@@ -42,6 +67,7 @@ def test_activities_export_includes_mark_job_cancelled() -> None:
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
         github_failure_notice_activity,
+        github_pr_publish_activity,
         github_publish_activity,
     )
     from software_engineering_team.temporal.coding_team_workflow import (
@@ -55,6 +81,7 @@ def test_activities_export_includes_mark_job_cancelled() -> None:
         run_pipeline_activity,
         github_branch_prep_activity,
         github_publish_activity,
+        github_pr_publish_activity,
         github_failure_notice_activity,
         mark_coding_team_job_failed_activity,
         mark_coding_team_job_cancelled_activity,
@@ -430,10 +457,7 @@ def test_github_run_calls_prep_then_pipeline_then_publish(monkeypatch: pytest.Mo
     ]
     calls, snapshots = _patch_execute(monkeypatch, results)
 
-    async def _no_wait(*_a, **_kw):
-        raise AssertionError("wait_condition must not be called")
-
-    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
+    _forbid_wait_condition(monkeypatch)
 
     result = asyncio.run(workflow_obj.run(_github_request()))
 
@@ -445,11 +469,91 @@ def test_github_run_calls_prep_then_pipeline_then_publish(monkeypatch: pytest.Mo
     assert snapshots[0]["job_id"] == "job-1"
     assert snapshots[0]["default_branch"] == "main"
     assert snapshots[0]["integration_branch"] == "khala/issue-9"
+    # The plain issue-driven flow has no prior-plan snapshot to pin to.
+    assert snapshots[0]["expected_head_sha"] is None
     assert snapshots[0]["expected_base_sha"] == "a" * 40
     assert "token" not in snapshots[0]
     assert snapshots[2]["issue_title"] == "Fix the widget"
     assert "token" not in snapshots[2]
     assert result["github_pr_url"] == "https://example/pull/1"
+
+
+def test_github_branch_prep_forwards_expected_head_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the caller (review-comment remediation) supplies ``expected_head_sha``
+    on the ``github`` payload, it must reach ``github_branch_prep_activity``'s
+    request unchanged, so branch prep can pin to the exact head the plan was
+    grounded on -- see ``_prepare_issue_branch``'s own contract for the check
+    this enables."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": True, "error": None, "notes": []},
+        {"job_id": "job-1", "status": "completed"},
+        {"job_id": "job-1", "status": "completed", "github_pr_url": "https://example/pull/1"},
+    ]
+    calls, snapshots = _patch_execute(monkeypatch, results)
+
+    _forbid_wait_condition(monkeypatch)
+
+    request = _github_request(github={**_GITHUB, "expected_head_sha": "deadbeef"})
+    asyncio.run(workflow_obj.run(request))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_publish_activity,
+    ]
+    assert snapshots[0]["expected_head_sha"] == "deadbeef"
+
+
+def test_pr_comment_run_uses_existing_pr_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``publish_mode == "existing_pr"``, publishing routes to
+    ``github_pr_publish_activity`` (not ``github_publish_activity``), forwarding
+    ``pr_number``/``integration_branch`` and omitting issue-driven fields
+    (``issue_title``) and the token from the publish payload."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_pr_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    github = {
+        **_GITHUB,
+        "publish_mode": "existing_pr",
+        "pr_number": 7,
+        "pr_url": "https://example/pull/7",
+        "integration_branch": "feature/pr-7",
+    }
+    calls, snapshots = _patch_execute(
+        monkeypatch,
+        [
+            {"ok": True, "error": None, "notes": []},
+            {"job_id": "job-1", "status": "completed"},
+            {"job_id": "job-1", "status": "completed", "github_pr_url": github["pr_url"]},
+        ],
+    )
+    # The github flow never waits (no HITL pause in this run) -- enforced through
+    # the shared helper every sibling test in this file uses.
+    _forbid_wait_condition(monkeypatch)
+
+    result = asyncio.run(CodingTeamWorkflow().run(_github_request(github=github)))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_pr_publish_activity,
+    ]
+    assert snapshots[2]["pr_number"] == 7
+    assert snapshots[2]["integration_branch"] == "feature/pr-7"
+    assert "issue_title" not in snapshots[2]
+    assert "token" not in snapshots[2]
+    assert result["status"] == "completed"
+    assert result["github_pr_url"] == github["pr_url"]
 
 
 def test_github_prep_failure_calls_failure_notice_skips_pipeline(
@@ -466,10 +570,7 @@ def test_github_prep_failure_calls_failure_notice_skips_pipeline(
         {"job_id": "job-1", "status": "failed"},
     ]
     calls, snapshots = _patch_execute(monkeypatch, results)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     result = asyncio.run(workflow_obj.run(_github_request()))
 
@@ -507,10 +608,7 @@ def test_github_pipeline_exception_calls_failure_notice(monkeypatch: pytest.Monk
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="orchestrator boom"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -553,10 +651,7 @@ def test_github_failure_notice_failure_still_reraises_pipeline_error(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="orchestrator boom"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -597,10 +692,7 @@ def test_github_empty_pipeline_exception_message_still_posts_nonempty_notice(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(_EmptyStrError):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -632,10 +724,7 @@ def test_github_missing_resume_token_skips_failure_notice(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(ValueError, match="missing a valid resume_token"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -655,10 +744,7 @@ def test_github_failed_pipeline_status_skips_publish(monkeypatch: pytest.MonkeyP
         {"job_id": "job-1", "status": "failed", "error": "timed out"},
     ]
     calls, _ = _patch_execute(monkeypatch, results)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     result = asyncio.run(workflow_obj.run(_github_request()))
 
@@ -693,10 +779,7 @@ def test_github_prep_ok_false_notice_failure_still_marks_job_failed(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     result = asyncio.run(workflow_obj.run(_github_request()))
 
@@ -731,10 +814,7 @@ def test_github_prep_exception_notices_and_marks_job_failed(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="token missing"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -770,10 +850,7 @@ def test_github_prep_exception_notice_failure_falls_back_to_mark_failed(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="prep boom"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -811,10 +888,7 @@ def test_github_prep_exception_preserves_original_when_mark_failed_also_fails(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="prep boom"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -855,10 +929,7 @@ def test_github_pipeline_exception_preserves_original_when_mark_failed_also_fail
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="orchestrator boom"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -900,10 +971,7 @@ def test_github_publish_exception_notices_and_reraises(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="push rejected"):
         asyncio.run(workflow_obj.run(_github_request()))
@@ -916,6 +984,149 @@ def test_github_publish_exception_notices_and_reraises(
     ]
     assert notice_requests[0]["kind"] == "failure"
     assert "push rejected" in notice_requests[0]["message"]
+
+
+def test_unrecognized_publish_mode_fails_closed_with_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A near-miss publish_mode (e.g. "existing-pr", "Existing_PR") must not
+    silently fall through to issue-driven publishing -- which would fail later
+    at github["issue_number"] with a bare, misleading KeyError -- but raise a
+    diagnostic naming the actual misconfiguration. This is a caller-contract
+    violation (bad payload wiring), not an orchestrator/activity failure, so
+    (mirroring the resume_token ValueError above) it fails the workflow task
+    directly without a "publish failed" notice on the issue/PR.
+
+    publish_mode is now validated up front, before branch prep or the
+    pipeline activity ever run (a payload-wiring bug should fail immediately,
+    not burn an entire pipeline run first) -- so neither branch prep nor the
+    pipeline is called here. The ONE activity that does run is the
+    mark-job-failed terminalize: the workflow task fails before reaching any
+    other activity, so the job record would otherwise stay non-terminal and
+    wedge checkout admission for every sibling run. Posting a notice and
+    terminalizing the record are separate concerns, and only the notice is
+    suppressed for a caller-wiring bug."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+        run_pipeline_activity,
+    )
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+    mark_failed_requests: list[dict] = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            return {"job_id": "job-1", "status": "running", "phase": "publishing"}
+        if fn is mark_coding_team_job_failed_activity:
+            mark_failed_requests.append(request)
+            return {"job_id": request["job_id"], "status": "failed"}
+        if fn is github_failure_notice_activity:
+            raise AssertionError("no failure notice expected for a caller-contract violation")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    _forbid_wait_condition(monkeypatch)
+
+    github = {**_GITHUB, "publish_mode": "existing-pr"}
+    with pytest.raises(ValueError, match=r"unsupported github\.publish_mode: 'existing-pr'"):
+        asyncio.run(workflow_obj.run(_github_request(github=github)))
+
+    assert calls == [mark_coding_team_job_failed_activity]
+    # The recorded error must be the validation diagnostic itself, so an
+    # operator reading the job record sees the actual misconfiguration.
+    assert mark_failed_requests[0]["error"] == "unsupported github.publish_mode: 'existing-pr'"
+
+
+@pytest.mark.parametrize(
+    ("github_overrides", "match"),
+    [
+        ({"owner": None}, r"'owner' must be a non-empty string"),
+        ({"repo": ""}, r"'repo' must be a non-empty string"),
+        ({"base": "   "}, r"'base' must be a non-empty string"),
+        ({"integration_branch": 7}, r"'integration_branch' must be a non-empty string"),
+        ({"issue_number": "9"}, r"'issue_number' must be a positive int"),
+        ({"issue_number": 0}, r"'issue_number' must be a positive int"),
+        ({"issue_number": True}, r"'issue_number' must be a positive int"),
+        ({"issue_title": ""}, r"'issue_title' must be a non-empty string"),
+        (
+            {"publish_mode": "existing_pr", "pr_number": "12"},
+            r"'pr_number' must be a positive int",
+        ),
+        ({"publish_mode": "existing_pr", "pr_number": -1}, r"'pr_number' must be a positive int"),
+        # Pins the no-case-normalization contract the sibling test's docstring
+        # names but never exercised: validation is exact-match, so a future
+        # `mode.strip().lower()` would silently accept this and must not.
+        ({"publish_mode": "Existing_PR"}, r"unsupported github\.publish_mode: 'Existing_PR'"),
+        # `remote` is optional, and `github.get("remote") or "origin"` rescues
+        # only FALSY values -- a truthy non-string would otherwise reach branch
+        # prep verbatim and fail there as an activity failure.
+        ({"remote": 123}, r"'remote' must be a non-empty string when present"),
+        ({"remote": "   "}, r"'remote' must be a non-empty string when present"),
+        ({"remote": ["origin"]}, r"'remote' must be a non-empty string when present"),
+    ],
+    ids=[
+        "owner-none",
+        "repo-empty",
+        "base-blank",
+        "integration-branch-int",
+        "issue-number-str",
+        "issue-number-zero",
+        "issue-number-bool",
+        "issue-title-empty",
+        "pr-number-str",
+        "pr-number-negative",
+        "publish-mode-case-variant",
+        "remote-int",
+        "remote-blank",
+        "remote-list",
+    ],
+)
+def test_unusable_github_payload_values_fail_closed_up_front(
+    monkeypatch: pytest.MonkeyPatch, github_overrides: dict, match: str
+) -> None:
+    """A PRESENT-but-unusable value must fail exactly like an absent key.
+
+    Presence alone is not enough: ``owner=None`` or ``integration_branch=""``
+    would otherwise be forwarded verbatim to branch prep, fail there as an
+    ACTIVITY failure, and take the terminalize-with-notice path -- burning a
+    run and posting a misleading "publish failed" notice for what is really a
+    caller-wiring bug. Like the ``publish_mode`` check, this raises before
+    branch prep or the pipeline runs; the ONLY activity permitted is the
+    mark-job-failed terminalize, which must run so the record does not stay
+    non-terminal and wedge checkout admission.
+    """
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+    )
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+    mark_failed_requests: list[dict] = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is mark_coding_team_job_failed_activity:
+            mark_failed_requests.append(request)
+            return {"job_id": request["job_id"], "status": "failed"}
+        raise AssertionError(f"no other activity expected for a caller-contract violation: {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    _forbid_wait_condition(monkeypatch)
+
+    github = {**_GITHUB, **github_overrides}
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(workflow_obj.run(_github_request(github=github)))
+
+    assert calls == [mark_coding_team_job_failed_activity]
+    assert re.search(match, mark_failed_requests[0]["error"]), mark_failed_requests[0]["error"]
 
 
 def test_github_publish_exception_preserves_original_when_terminalize_fails(
@@ -950,10 +1161,7 @@ def test_github_publish_exception_preserves_original_when_terminalize_fails(
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
-    monkeypatch.setattr(
-        "temporalio.workflow.wait_condition",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
-    )
+    _forbid_wait_condition(monkeypatch)
 
     with pytest.raises(RuntimeError, match="push rejected"):
         asyncio.run(workflow_obj.run(_github_request()))

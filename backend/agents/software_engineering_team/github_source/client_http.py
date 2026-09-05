@@ -105,6 +105,15 @@ class _GitHubHttpMixin:
             return path_or_url
         if not path_or_url.startswith("/"):
             path_or_url = "/" + path_or_url
+        if path_or_url == "/graphql" and self._base_url.endswith("/api/v3"):
+            # GitHub Enterprise Server's REST base is conventionally
+            # "https://host/api/v3", but GHES exposes GraphQL at
+            # "https://host/api/graphql" — NOT "https://host/api/v3/graphql".
+            # Naively joining would 404 (or otherwise fail) every GraphQL call
+            # against a GHES deployment. github.com Cloud's base has no
+            # "/api/v3" suffix, so this is a no-op there: joining "/graphql"
+            # directly onto "https://api.github.com" is already correct.
+            return f"{self._base_url[: -len('/v3')]}/graphql"
         return f"{self._base_url}{path_or_url}"
 
     def _retry_secondary_rate_limit(

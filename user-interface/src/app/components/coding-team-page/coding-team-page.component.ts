@@ -29,14 +29,26 @@ import {
   PendingQuestionsComponent,
   type AnswersSubmittedStatus,
 } from '../pending-questions/pending-questions.component';
-import type { GitHubIssueItem, GitHubRepoItem, OutOfScopeProposalItem, RunGitHubIssueResponse } from '../../models/integrations.model';
-import type { CodingTeamGitHubContext, CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
+import type {
+  AddressPrCommentsResponse,
+  GitHubIssueItem,
+  GitHubPullRequestItem,
+  GitHubRepoItem,
+  OutOfScopeProposalItem,
+  RunGitHubIssueResponse,
+} from '../../models/integrations.model';
+import type {
+  CodingTeamGitHubContext,
+  CodingTeamJobListItem,
+  CodingTeamJobStatus,
+} from '../../models/coding-team.model';
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { deferFocus } from '../../shared/defer-focus';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
+import { resultCountAnnouncement } from '../../shared/result-count-announcement';
 import { NotificationService } from '../../core/notification.service';
 import {
   appendActivityNarrative,
@@ -88,6 +100,9 @@ interface RunRowVm {
  */
 type RunIdentity = { type: 'issue'; number: number } | { type: 'pr'; number: number };
 
+/** The coding-team page's available sub-views. */
+type CodingTeamPageView = 'chat' | 'github' | 'pulls' | 'jobs' | 'issues';
+
 /**
  * The run identity carried by a job's GitHub context, or null when it carries neither.
  * If both `issue_number` and `pr_number` are present, the issue identity wins so the Runs
@@ -107,6 +122,11 @@ function runIdentity(ctx: CodingTeamGitHubContext | undefined): RunIdentity | nu
 function runKey(owner: string | undefined, repo: string | undefined, identity: RunIdentity): string {
   const suffix = identity.type === 'pr' ? `pr-${identity.number}` : `${identity.number}`;
   return `${(owner ?? '').toLowerCase()}/${(repo ?? '').toLowerCase()}#${suffix}`;
+}
+
+/** Stable identity for an in-flight PR-comment remediation request. */
+function prAddressKey(owner: string, repo: string, prNumber: number): string {
+  return `${owner.toLowerCase()}/${repo.toLowerCase()}#${prNumber}`;
 }
 
 /**
@@ -174,17 +194,26 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   /** Which single view is visible. The page opens on the job Runs panel. */
-  private _activeView: 'chat' | 'github' | 'jobs' | 'issues' = 'jobs';
+  private _activeView: CodingTeamPageView = 'jobs';
 
-  get activeView(): 'chat' | 'github' | 'jobs' | 'issues' {
+  get activeView(): CodingTeamPageView {
     return this._activeView;
   }
 
-  set activeView(view: 'chat' | 'github' | 'jobs' | 'issues') {
+  set activeView(view: CodingTeamPageView) {
     this._activeView = view;
     // Auto-load out-of-scope issues when switching to the Issues tab with a repo selected.
     if (view === 'issues' && this.selectedRepo && this.oosProposals.length === 0 && !this.oosLoading) {
       this.loadOutOfScopeIssues();
+    }
+    // Auto-load open PRs when switching to the Pull Requests tab with a repo selected.
+    // Gated on `pullsLoaded`, NOT on `pulls.length === 0`: a repo with no open PRs
+    // is a successful load that legitimately leaves the array empty, and a
+    // length-based guard would re-fetch it on every single tab switch. The flag
+    // still permits a retry after a failure — `loadPulls` sets it only on success
+    // — and `selectRepo` clears it so a repo switch always re-fetches.
+    if (view === 'pulls' && this.selectedRepo && !this.pullsLoaded && !this.loadingPulls) {
+      this.loadPulls();
     }
   }
 
@@ -268,6 +297,20 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this._selectedIssue = issue;
     this.selectedIssueOpenDepsText = issue ? this.openDepRefs(issue) : '';
   }
+
+  // Pull Requests tab — open PRs for the expanded repo, each with an "address
+  // unresolved comments" action.
+  /** Open pull requests for the expanded repo (GET /github/pulls). */
+  pulls: GitHubPullRequestItem[] = [];
+  loadingPulls = false;
+  pullsLoaded = false;
+  pullError: string | null = null;
+  /** PRs whose "address comments" job is currently being started, keyed by `owner/repo#number`
+   * (see {@link prAddressKey}) so a double-click can't submit the same PR twice and identical PR
+   * numbers across repos never collide. */
+  private readonly addressingPrs = new Set<string>();
+  // "Latest wins" guard so a slow PR load superseded by a newer one (repo switch) is discarded.
+  private readonly pullsLoad = new LatestOnly();
 
   // Runs panel — the persistent, non-dismissable status panel.
   /** Every coding-team run for this repo (running + recent terminal), newest snapshot from /jobs. */
@@ -582,6 +625,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // configured default applied, and the toggle is a transient override for that repo only
     // (so turning it off for one repo doesn't silently unfilter every other repo).
     this.labelFilterActive = true;
+    // PR-tab state is repo-scoped too: clear it so switching repos re-fetches the new repo's
+    // open PRs (the Pull Requests tab auto-loads while `pullsLoaded` is false). The in-flight guard
+    // set is not cleared — a job already being started for the previous repo's PR must still
+    // clear its own key when its request settles.
+    this.pulls = [];
+    this.pullsLoaded = false;
+    this.pullError = null;
+    // Invalidate any in-flight loadPulls() for the PREVIOUS repo and reset the loading flag:
+    // without this, switching away mid-load leaves `loadingPulls` stuck true until that stale
+    // request settles, blocking the Pulls-tab auto-load guard (`!loadingPulls`) for the newly
+    // selected repo — its panel would stay blank until a manual Refresh. Advancing the token
+    // here (rather than only in loadPulls) makes the stale response's own `isCurrent` check
+    // fail too, so it can never overwrite the new repo's state even if it lands afterward.
+    this.pullsLoad.next();
+    this.loadingPulls = false;
   }
 
   /** Repos matching `repoSearch` (case-insensitive substring of `full_name`); all repos when empty. */
@@ -589,6 +647,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const query = this.repoSearch.trim().toLowerCase();
     if (!query) return this.repos;
     return this.repos.filter((repo) => repo.full_name.toLowerCase().includes(query));
+  }
+
+  /**
+   * Polite live-region text for how many repos `filteredRepos` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before `repos` has loaded or when the token has no repo access
+   * at all (`repos.length === 0`) — in both cases the search field isn't rendered, so there's
+   * nothing to announce and announcing "0 repositories shown" would contradict the no-access
+   * empty state. Otherwise returns
+   * `resultCountAnnouncement(filteredRepos.length, 'repository', 'repositories')`.
+   */
+  get repoCountAnnouncement(): string {
+    if (!this.reposLoaded || this.repos.length === 0) return '';
+    return resultCountAnnouncement(this.filteredRepos.length, 'repository', 'repositories');
   }
 
   /** True when there are repos to show but the search excludes every one. */
@@ -685,6 +758,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const query = this.issueSearch.trim().toLowerCase();
     if (!query) return this.issues;
     return this.issues.filter((issue) => issue.title.toLowerCase().includes(query));
+  }
+
+  /**
+   * Polite live-region text for how many issues `filteredIssues` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before the expanded repo's issues have loaded or when it has no
+   * open issues at all (`issues.length === 0`) — in both cases the search field isn't rendered, so
+   * there's nothing to announce and announcing "0 issues shown" would contradict the no-open-issues
+   * empty state. Otherwise returns
+   * `resultCountAnnouncement(filteredIssues.length, 'issue', 'issues')`.
+   */
+  get issueCountAnnouncement(): string {
+    if (!this.issuesLoaded || this.issues.length === 0) return '';
+    return resultCountAnnouncement(this.filteredIssues.length, 'issue', 'issues');
   }
 
   /** True when there are issues to show but the search excludes every one. */
@@ -1502,6 +1590,90 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         error: (err) => {
           this.oosError = extractErrorDetail(err, 'Failed to load out-of-scope issues.');
           this.oosLoading = false;
+        },
+      });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pull Requests (Pull Requests tab)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Load the open pull requests for the currently expanded repo.
+   *
+   * Preconditions: `selectedRepo` is set (a repo was expanded in the GitHub tab).
+   * Postconditions: on success `pulls` holds every open PR for the repo and `pullsLoaded`
+   * is true; on error `pullError` is set. A slow load superseded by a repo switch is
+   * discarded (latest-wins), and the loading flag is always cleared by the current handler.
+   */
+  loadPulls(): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
+    const token = this.pullsLoad.next();
+    this.loadingPulls = true;
+    this.pullError = null;
+    this.integrationsApi
+      .getGitHubPullRequests({ owner: repo.owner, repo: repo.name })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (pulls) => {
+          if (!this.pullsLoad.isCurrent(token)) return;
+          this.loadingPulls = false;
+          // Guard against a repo switch mid-flight (pullError/pulls belong to the expanded repo).
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
+          this.pulls = pulls;
+          this.pullsLoaded = true;
+        },
+        error: (err) => {
+          if (!this.pullsLoad.isCurrent(token)) return;
+          this.loadingPulls = false;
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
+          this.pullError = extractErrorDetail(err, 'Failed to load pull requests.');
+        },
+      });
+  }
+
+  /** True while the "address comments" job for `pr` in the expanded repo is being started. */
+  isAddressingPr(pr: GitHubPullRequestItem): boolean {
+    const repo = this.selectedRepo;
+    if (!repo) return false;
+    return this.addressingPrs.has(prAddressKey(repo.owner, repo.name, pr.number));
+  }
+
+  /**
+   * Start the flow that addresses & responds to every unresolved review comment on `pr`.
+   *
+   * Preconditions: none enforced — a no-op when no repo is expanded or a job for this PR is
+   * already starting (`isAddressingPr`), so a double-click can't submit the same PR twice.
+   * Postconditions: on success a toast reports the started job and its unresolved-comment count,
+   * and the Runs list is refreshed so the job appears there; on error `pullError` is surfaced
+   * (only while still on the PR's repo). The per-PR in-flight flag is cleared across the call.
+   */
+  addressPrComments(pr: GitHubPullRequestItem): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
+    const key = prAddressKey(repo.owner, repo.name, pr.number);
+    if (this.addressingPrs.has(key)) return;
+    this.addressingPrs.add(key);
+    this.pullError = null;
+    this.integrationsApi
+      .addressPrComments(pr.number, { owner: repo.owner, repo: repo.name })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp: AddressPrCommentsResponse) => {
+          this.addressingPrs.delete(key);
+          this.notifications.saved(
+            `Addressing ${resp.unresolved_comment_count} unresolved comment(s) on PR #${resp.pr_number} — run ${resp.job_id}.`,
+          );
+          // The new job shows in the Runs list; nudge its poll so it appears promptly.
+          this.refreshTrigger$.next();
+        },
+        error: (err: unknown) => {
+          this.addressingPrs.delete(key);
+          // Only surface the failure while still on the repo the PR belongs to (see confirmAndRun).
+          if (this.selectedRepo?.full_name === repo.full_name) {
+            this.pullError = extractErrorDetail(err, 'Failed to start addressing comments.');
+          }
         },
       });
   }

@@ -293,6 +293,36 @@ describe('IntegrationsApiService', () => {
     req.flush({ job_id: 'j1', pr_number: 7, pr_url: 'u', status: 'pending', message: '' });
   });
 
+  it('addressPrComments POST hits the PR-scoped path with the owner/repo body', () => {
+    service.addressPrComments(7, { owner: 'acme', repo: 'widget' }).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/pulls/7/address-comments`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ owner: 'acme', repo: 'widget' });
+    req.flush({
+      job_id: 'a1',
+      pr_number: 7,
+      pr_url: 'u',
+      unresolved_comment_count: 3,
+      status: 'pending',
+      message: '',
+    });
+  });
+
+  it('addressPrComments POST defaults to an empty body', () => {
+    service.addressPrComments(9).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/pulls/9/address-comments`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({});
+    req.flush({
+      job_id: 'a2',
+      pr_number: 9,
+      pr_url: 'u',
+      unresolved_comment_count: 0,
+      status: 'pending',
+      message: '',
+    });
+  });
+
   it('getGitHubReviewHistory GET with no options sends no params', () => {
     service.getGitHubReviewHistory().subscribe();
     const req = httpMock.expectOne(`${baseUrl}/github/reviews`);

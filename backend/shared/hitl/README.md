@@ -135,3 +135,12 @@ via `pythonpath = agents .` in `backend/pytest.ini`. Design-by-Contract docstrin
 throughout. `tests/` runs locally via `make test` and stands as the standalone
 "prove the reconciled behavior" suite; in CI the moved code is coverage-gated at 90%
 through the `combine-shared-infra` job (SE + coding_team suites exercise it).
+
+Two modules are deliberately **not** re-exported from `shared/hitl/__init__.py`, so
+`temporalio` doesn't become a transitive import for every `shared.hitl` consumer
+(e.g. FastAPI routes that only need `models`/`validation`/`progress`/`status`):
+
+| Module | Purpose |
+|---|---|
+| `temporal_signal` | `HitlAnswerSignalMixin` -- a Temporal `submit_answers` signal-handler primitive (validate/buffer/reject/accept an answer batch against a workflow's active pause), extracted from `CodingTeamWorkflow`'s inline state machine so `PlanningWorkflow` can compose the identical contract. Production code; imported by workflow modules. |
+| `testing` | Test-only assertion helpers (`assert_workflow_registers_submit_answers`, `get_workflow_definition`) for verifying a workflow class registers the `submit_answers` signal, following the sibling `shared/temporal/testing.py` / `shared/postgres/testing.py` convention of keeping test-support utilities out of the production surface. Imported only from test files. |

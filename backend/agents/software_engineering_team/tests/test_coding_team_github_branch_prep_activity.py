@@ -21,8 +21,12 @@ import pytest
 
 from software_engineering_team.tests.conftest import (
     _ensure_real_modules,
-    _expected_basic_header,
     _stub_orchestrator_only,
+)
+from software_engineering_team.tests.git_test_helpers import (
+    commit_on_branch,
+    current_branch,
+    expected_basic_header,
 )
 
 
@@ -118,13 +122,77 @@ def test_branch_prep_activity_clean_checkout_returns_ok_true(api, monkeypatch, t
     )
 
     assert out == {"ok": True, "error": None, "notes": []}
-    head = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head = current_branch(repo)
     assert head == "khala/issue-9"
+
+
+def test_branch_prep_activity_expected_head_sha_match_succeeds(api, monkeypatch, tmp_path) -> None:
+    """``expected_head_sha`` is forwarded to ``_prepare_issue_branch``; when it
+    matches the branch's live remote tip, prep proceeds normally."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+    )
+
+    _seed_job_token(monkeypatch, api, "job-1")
+    repo = _init_repo(tmp_path)
+    live_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+
+    out = github_branch_prep_activity(
+        {
+            "job_id": "job-1",
+            "repo_path": repo,
+            "remote": "origin",
+            "default_branch": "main",
+            "integration_branch": "khala/issue-9",
+            "expected_head_sha": live_sha,
+        }
+    )
+
+    assert out["ok"] is True, out["error"]
+    # An `ok=True` alone can't distinguish "expected_head_sha was honored and
+    # prep actually ran" from "the parameter was silently ignored" — both
+    # produce True. Pin the observable postcondition: prep actually checked
+    # out the integration branch.
+    head = current_branch(repo)
+    assert head == "khala/issue-9"
+
+
+def test_branch_prep_activity_expected_head_sha_mismatch_fails_closed(
+    api, monkeypatch, tmp_path
+) -> None:
+    """Reproduces the P1 race this parameter exists to close: the review-
+    comment remediation flow triaged/planned against ``stale_sha``, but by the
+    time this Temporal activity actually runs (it may have been queued) a
+    newer commit landed on the PR branch. The activity must report ok=False
+    rather than silently checking out the newer code the plan was never
+    grounded on."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+    )
+
+    _seed_job_token(monkeypatch, api, "job-1")
+    repo = _init_repo(tmp_path)
+    stale_sha = commit_on_branch(repo, "khala/issue-9", "a.txt", "v1\n")
+    commit_on_branch(repo, "khala/issue-9", "a.txt", "v2\n")
+
+    out = github_branch_prep_activity(
+        {
+            "job_id": "job-1",
+            "repo_path": repo,
+            "remote": "origin",
+            "default_branch": "main",
+            "integration_branch": "khala/issue-9",
+            "expected_head_sha": stale_sha,
+        }
+    )
+
+    # `out`, not `out["error"]`: in the regression this test pins (the activity
+    # stops failing closed) `error` is None, so the sibling `, out["error"]`
+    # convention would print nothing -- the full result dict carries the notes.
+    assert out["ok"] is False, out
+    assert stale_sha in (out["error"] or "")
+    head = current_branch(repo)
+    assert head == "main"
 
 
 def test_branch_prep_activity_unsafe_ref_returns_ok_false(api, monkeypatch) -> None:
@@ -252,7 +320,12 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
     assert len(fetches) == 1
     for _args, env in fetches:
         assert env is not None
-        assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
+        # Pin the whole config entry, not just its value: git only applies the
+        # header when the COUNT and KEY are right too, so asserting the value
+        # alone would still pass with a wrong/missing key that git ignores.
+        assert env["GIT_CONFIG_COUNT"] == "1"
+        assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
+        assert env["GIT_CONFIG_VALUE_0"] == expected_basic_header("tok-123")
     assert all(env is None for args, env in calls if args[0] != "fetch")
 
 

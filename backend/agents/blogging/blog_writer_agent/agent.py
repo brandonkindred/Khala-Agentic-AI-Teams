@@ -28,9 +28,14 @@ from agents.blogging.shared.system_prompt_assembly import (
     build_headed_blogging_system_prompt_content,
     build_system_prompt_with_content,
 )
+from agents.blogging.shared.text_parsing import (
+    extract_draft_after_marker,
+    extract_json_array_from_text,
+    format_feedback_item_line,
+    unwrap_llm_cause,
+)
 from pydantic import ValidationError
 from strands import Agent
-from strands.types.exceptions import EventLoopException
 
 from llm_service import (
     LLMError,
@@ -80,115 +85,6 @@ _SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
 # The model context (e.g. 262K tokens ≈ 917K chars) is large enough that
 # compaction should rarely be needed.
 COMPACT_OUTLINE_CHARS = 200_000
-
-
-def _unwrap_llm_cause(exc: BaseException) -> BaseException:
-    """Return the underlying model error when strands wraps it in EventLoopException.
-
-    Preconditions:
-        - ``exc`` is the exception caught at an LLM call boundary.
-    Postconditions:
-        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
-          returns that original exception.
-        - Otherwise returns ``exc`` unchanged.
-    """
-    if isinstance(exc, EventLoopException):
-        original = getattr(exc, "original_exception", None)
-        if isinstance(original, BaseException):
-            return original
-    return exc
-
-
-def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
-    """
-    Extract draft content from model output that uses the hybrid format:
-    first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
-    Falls back to scanning the response for extractable JSON (whole-response,
-    fenced, or prose-wrapped, via ``extract_json_from_response``) and returning
-    the value of its \"draft\" key.
-    """
-    if not raw_response or not isinstance(raw_response, str):
-        return ""
-    text = raw_response.strip()
-    for marker in ("\n---DRAFT---\n", "\n---DRAFT---", "---DRAFT---\n", "---DRAFT---"):
-        if marker in text:
-            after = text.split(marker, 1)[1].strip()
-            if after:
-                return after
-    try:
-        data = extract_json_from_response(text)
-        if isinstance(data, dict):
-            d = data.get("draft")
-            if isinstance(d, str) and d.strip():
-                return d.strip()
-    except LLMJsonParseError:
-        pass
-    return ""
-
-
-def _extract_json_array_from_text(
-    text: str, *, required_keys: tuple[str, ...] = ()
-) -> Optional[list]:
-    """Parse a JSON array of objects from ``text``, including when prefixed by prose.
-
-    Preconditions:
-        - ``text`` is a string (may be empty).
-        - ``required_keys``, if given, are the keys used to recognize the real
-          payload (e.g. ``("issue",)`` for self-review issues, ``("question",)``
-          for uncertainty questions): at least one element of a candidate array
-          must contain all of them. This rejects an unrelated dict array (e.g. a
-          ``references`` list salvaged from surrounding prose) that would
-          otherwise pass a bare "is it a list of dicts" check, while still
-          tolerating a real payload where some items are individually malformed
-          (the caller's own per-item validation skips those).
-    Postconditions:
-        - Returns the dict elements of the first decoded JSON array containing at
-          least one dict with every key in ``required_keys``, found by scanning
-          for ``[`` and using ``json.JSONDecoder.raw_decode``. Non-dict elements
-          in that array (e.g. a stray string) are dropped rather than rejecting
-          the whole array — callers already tolerate individually malformed dict
-          items via their own per-item validation.
-        - A syntactically valid but schema-mismatched non-empty array (e.g. a
-          numeric citation like ``[1]``, or a dict array none of whose elements
-          have ``required_keys``) does not short-circuit the scan; scanning
-          continues past it toward the real payload.
-        - If no matching array of dicts is found, returns the first syntactically
-          valid empty ``[]`` encountered — this cannot be distinguished from a
-          literally empty Markdown link ``[]()`` (an empty pair of brackets is
-          valid JSON), so a response containing only such a link and no real
-          array-of-dicts payload also returns ``[]`` here. A Markdown link with
-          non-empty text, e.g. ``[label](url)``, is not valid JSON at that
-          ``[`` and is simply skipped like any other non-match. Returns
-          ``None`` if no array matched at all.
-
-    Limitation: the scan looks for a literal ``[`` anywhere in ``text``,
-    including inside a JSON string value (e.g. an object field whose value is
-    the literal text ``"[{...}]"``), so it can extract an array nested inside
-    a string rather than only a true top-level/prose array. This has not been
-    observed in practice for the reviewer/uncertainty response shapes this is
-    used for, but is a known edge case if a future prompt's schema puts
-    JSON-looking text inside a string field.
-    """
-    decoder = json.JSONDecoder()
-    search_from = 0
-    empty_fallback = None
-    while True:
-        i = text.find("[", search_from)
-        if i == -1:
-            break
-        try:
-            value, _end = decoder.raw_decode(text, i)
-        except json.JSONDecodeError:
-            search_from = i + 1
-            continue
-        if isinstance(value, list):
-            dict_elements = [el for el in value if isinstance(el, dict)]
-            if dict_elements and any(all(k in el for k in required_keys) for el in dict_elements):
-                return dict_elements
-            if not value and empty_fallback is None:
-                empty_fallback = value
-        search_from = i + 1
-    return empty_fallback
 
 
 _NO_ALLOWED_CLAIMS_SECTION = (
@@ -849,9 +745,9 @@ class BlogWriterAgent(_BlogAgentBase):
             raw_response = self._call_text(
                 prompt, system_prompt=self._writing_system_prompt_with_content
             )
-            draft = _extract_draft_after_marker(raw_response)
+            draft = extract_draft_after_marker(raw_response)
         except Exception as e:
-            cause = _unwrap_llm_cause(e)
+            cause = unwrap_llm_cause(e)
             if not isinstance(cause, LLMJsonParseError):
                 raise
             logger.warning(
@@ -867,7 +763,7 @@ class BlogWriterAgent(_BlogAgentBase):
                     if isinstance(raw_draft, str) and raw_draft.strip():
                         draft = raw_draft.strip()
             except Exception as e2:
-                cause2 = _unwrap_llm_cause(e2)
+                cause2 = unwrap_llm_cause(e2)
                 if not isinstance(cause2, LLMJsonParseError):
                     raise
                 logger.warning("JSON draft fallback also failed: %s", cause2)
@@ -888,31 +784,21 @@ class BlogWriterAgent(_BlogAgentBase):
     def _format_feedback_item_line(self, item: Any, index: int) -> str:
         """One numbered feedback line (+ optional suggestion) for batch revise prompts.
 
+        Delegates to ``text_parsing.format_feedback_item_line``; see that
+        function for the authoritative contract.
+
         Preconditions:
-            ``index`` is a positive int. ``item`` exposes ``severity``, ``category``,
-            and ``issue`` (via attribute or duck typing); empty/missing values are
-            rejected. ``location`` and ``suggestion`` are optional.
+            ``index`` is a positive int (``bool`` is rejected). ``item`` exposes
+            ``severity``, ``category``, and ``issue`` via attribute or duck
+            typing; ``location`` and ``suggestion`` are optional.
         Postconditions:
-            Returns a numbered feedback line; includes a location bracket and a
-            suggestion sub-line when those optional fields are present.
+            Returns the numbered feedback line produced by
+            ``text_parsing.format_feedback_item_line``.
         Raises:
-            ValueError: if ``index`` is not a positive int, or required item
-                fields are missing.
+            ValueError: per ``text_parsing.format_feedback_item_line`` — a
+                non-positive/non-int index or a missing required item field.
         """
-        if not isinstance(index, int) or index <= 0:
-            raise ValueError(f"index must be a positive int, got {index!r}")
-        severity = getattr(item, "severity", None)
-        category = getattr(item, "category", None)
-        issue = getattr(item, "issue", None)
-        if not all([severity, category, issue]):
-            raise ValueError(f"Feedback item missing required fields: {item!r}")
-        location = getattr(item, "location", None)
-        loc = f" [{location}]" if location else ""
-        line = f"{index}. [{severity}] {category}{loc}: {issue}"
-        suggestion = getattr(item, "suggestion", None)
-        if suggestion:
-            line += f"\n   Suggestion: {suggestion}"
-        return line
+        return format_feedback_item_line(item, index)
 
     def revise(
         self,
@@ -1037,7 +923,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 raw_response = self._call_text(
                     prompt, system_prompt=self._writing_system_prompt_with_content
                 )
-                revised = _extract_draft_after_marker(raw_response)
+                revised = extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
                     primary_succeeded = True
@@ -1052,7 +938,7 @@ class BlogWriterAgent(_BlogAgentBase):
                     e,
                 )
             except Exception as e:
-                cause = _unwrap_llm_cause(e)
+                cause = unwrap_llm_cause(e)
                 if isinstance(cause, LLMJsonParseError):
                     logger.warning(
                         "Batch revise failed (attempt %s/%s): %s",
@@ -1078,7 +964,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 if fallback:
                     current_draft = fallback
             except Exception as e:
-                cause = _unwrap_llm_cause(e)
+                cause = unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     raise cause
                 logger.warning(
@@ -1118,14 +1004,14 @@ class BlogWriterAgent(_BlogAgentBase):
             # NOTE: use ``_call_text`` (not ``_call_agent_json``). The prompt asks
             # for a top-level JSON *array*, but JSON-mode adapters constrain
             # output to a single object, so a JSON-mode call can wrap or empty
-            # the array. ``_extract_json_array_from_text`` extracts ``[...]``
+            # the array. ``extract_json_array_from_text`` extracts ``[...]``
             # from prose, skipping Markdown links and other non-array ``[``.
             raw = self._call_text(
                 prompt,
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
             )
             cleaned = raw.strip()
-            items = _extract_json_array_from_text(cleaned, required_keys=("question",))
+            items = extract_json_array_from_text(cleaned, required_keys=("question",))
             if not items:
                 return []
             questions = []
@@ -1147,7 +1033,7 @@ class BlogWriterAgent(_BlogAgentBase):
             logger.info("Identified %s uncertainty question(s) in draft", len(questions))
             return questions
         except Exception as e:
-            cause = _unwrap_llm_cause(e)
+            cause = unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
             if not isinstance(cause, (LLMError, json.JSONDecodeError, TypeError, ValueError)):
@@ -1209,7 +1095,7 @@ class BlogWriterAgent(_BlogAgentBase):
             logger.info("Extracted %s writing guideline update(s) from user feedback", len(updates))
             return updates
         except Exception as e:
-            cause = _unwrap_llm_cause(e)
+            cause = unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
             if not isinstance(cause, LLMError):
@@ -1342,7 +1228,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 raw_response = self._call_text(
                     prompt, system_prompt=self._writing_system_prompt_with_content
                 )
-                revised = _extract_draft_after_marker(raw_response)
+                revised = extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
                     primary_succeeded = True
@@ -1357,7 +1243,7 @@ class BlogWriterAgent(_BlogAgentBase):
                     e,
                 )
             except Exception as e:
-                cause = _unwrap_llm_cause(e)
+                cause = unwrap_llm_cause(e)
                 if isinstance(cause, LLMJsonParseError):
                     logger.warning(
                         "User-feedback revision failed (attempt %s/%s): %s",
@@ -1384,7 +1270,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 if fallback:
                     current_draft = fallback
             except Exception as e:
-                cause = _unwrap_llm_cause(e)
+                cause = unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     raise cause
                 if not isinstance(cause, LLMError):
@@ -1437,7 +1323,7 @@ class BlogWriterAgent(_BlogAgentBase):
             summary = self._call_text(prompt)
             return (summary or "").strip()
         except Exception as e:
-            cause = _unwrap_llm_cause(e)
+            cause = unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
             if not isinstance(cause, LLMError):

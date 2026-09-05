@@ -30,6 +30,21 @@ _PER_ISSUE_PREFIX = "issue-"
 PER_ISSUE_DIR_TEMPLATE = _PER_ISSUE_PREFIX + "{issue_number}"
 _PER_ISSUE_DIR_RE = re.compile(re.escape(_PER_ISSUE_PREFIX) + r"\d+")
 
+# Per-PR checkout directory name, for the address-comments flow (unified_api's
+# ``_resolve_repo_path`` with ``pr_number`` set). A distinct ``pr-`` prefix (rather
+# than reusing ``issue-``) is required, not stylistic: the ``issue-`` shape is
+# MEANINGFUL to consumers that read the number back out of it. ``is_per_issue_dir``
+# classifies a directory as a per-issue checkout from the name alone, and the
+# issue-scoped rescue tooling (``_latest_issue_rescue_ref``) selects branches by
+# the same ``issue-<number>`` tag. Naming a PR checkout ``issue-42`` would
+# therefore make a PR's workspace and rescue history indistinguishable from
+# issue 42's -- a misclassification, not a directory-name clash (issues and pull
+# requests share one numbering sequence, so no repository has both an issue 42
+# and a PR 42).
+_PER_PR_PREFIX = "pr-"
+PER_PR_DIR_TEMPLATE = _PER_PR_PREFIX + "{pr_number}"
+_PER_PR_DIR_RE = re.compile(re.escape(_PER_PR_PREFIX) + r"\d+")
+
 
 def is_per_issue_dir(name: str) -> bool:
     """True iff ``name`` is an auto-derived per-issue checkout directory name.
@@ -40,6 +55,17 @@ def is_per_issue_dir(name: str) -> bool:
         - Returns True iff ``name`` exactly matches ``issue-<digits>``. Pure.
     """
     return _PER_ISSUE_DIR_RE.fullmatch(name) is not None
+
+
+def is_per_pr_dir(name: str) -> bool:
+    """True iff ``name`` is an auto-derived per-PR checkout directory name.
+
+    Preconditions:
+        - ``name`` is a path's final component (``Path.name``), not a full path.
+    Postconditions:
+        - Returns True iff ``name`` exactly matches ``pr-<digits>``. Pure.
+    """
+    return _PER_PR_DIR_RE.fullmatch(name) is not None
 
 
 def clone_lock_path(repo_path: str | Path) -> Path:

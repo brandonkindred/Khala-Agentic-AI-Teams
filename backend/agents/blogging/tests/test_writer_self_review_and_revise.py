@@ -218,7 +218,7 @@ def test_writer_llm_self_review_unrelated_dict_array_before_issues_applies_fixes
 def test_writer_llm_self_review_mixed_array_keeps_valid_dict_issue(monkeypatch) -> None:
     """A non-dict element alongside a valid issue dict must not drop the real issue.
 
-    Regression test: ``_extract_json_array_from_text`` used to reject the whole
+    Regression test: ``extract_json_array_from_text`` used to reject the whole
     array unless every element was a dict, discarding a valid issue whenever
     the model's array also contained a stray non-dict entry.
     """

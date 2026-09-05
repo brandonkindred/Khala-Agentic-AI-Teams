@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import pytest
 from code_review_agent.models import CodeReviewIssue
 from code_review_agent.systemic_synthesis import (
     MIN_FINDINGS_FOR_SYNTHESIS,
     _parse_systemic_findings,
+    _scrub_token_from_text,
     synthesize_systemic_findings,
 )
 
@@ -286,3 +288,98 @@ def test_parse_systemic_findings_defensive() -> None:
             ],
         }
     ]
+
+
+# Synthetic credential shapes for the scrubber-parity cases below. Each is built
+# by f-string interpolation rather than written as one contiguous literal, so no
+# line here reads as a hardcoded ``user:password@host`` basic-auth string to a
+# source scanner. None of these is, or ever was, a valid credential; the padding
+# only satisfies the scrubbers' >=20-character length bound. The same convention
+# (and the same reason) applies in ``shared/git/tests/test_git_utils.py``.
+_FAKE = "placeholder"
+_GHP = f"ghp_{'A' * 22}"
+_GHU = f"ghu_{'B' * 22}"
+_GHS = f"ghs_{'C' * 22}"
+_GHR = f"ghr_{'D' * 22}"
+_GHP2 = f"ghp_{'E' * 22}"
+_GHO = f"gho_{'H' * 24}"
+# Fine-grained PAT shape. The ``gh[pousr]_[A-Za-z0-9]+`` alternative can never
+# match it, but NOT because of the underscores in its body: the prefix
+# ``github_pat_`` contains no ``gh`` digraph at all (it reads g-i-t-h-u-b), so
+# that alternative has nothing to anchor on anywhere in the string. This shape
+# therefore only ever matches via the scrubber's dedicated fine-grained-PAT
+# alternative, which is what these parity cases exist to prove.
+_PAT = f"github_pat_{'F' * 12}_{'G' * 12}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "no credentials here",
+        f"clone https://x-access-token:{_GHP}@github.com/o/r",
+        f"token {_GHO} quoted inside a finding",
+        f"{_GHU} and {_GHS} and {_GHR}",
+        f"https://{_FAKE}@example.com/path plus {_GHP2}",
+        f"fine-grained {_PAT} quoted inside a finding",
+        "short ghp_tooshort is left alone",
+        # Two more benign near-misses. A bare prefix with NO body must not be
+        # redacted (the length bound is what separates a credential from a
+        # word), and an ordinary word merely CONTAINING the "gh" digraph must
+        # not trip the classic alternative -- a scrubber that mangled either
+        # would corrupt finding text while redacting nothing.
+        "bare github_pat_ prefix with no body",
+        "rough_estimate and through_put are ordinary words",
+    ],
+)
+def test_local_scrubber_stays_in_lockstep_with_github_source(text: str) -> None:
+    """The local copy must behave IDENTICALLY to the canonical scrubber.
+
+    ``systemic_synthesis`` deliberately carries its own copy of
+    ``github_source.client.scrub_token_from_text`` (``code_review_agent`` is the
+    generic review engine and must not depend on the PR-specific package), and
+    that copy is otherwise guarded only by a comment. If the canonical regex is
+    later widened (a new credential prefix, say) and the copy is not, a
+    credential quoted inside a code-review finding would reach the synthesis
+    prompt un-redacted -- exactly the leak the scrubber exists to prevent. This
+    test is what makes the documented lockstep enforceable.
+    """
+    from software_engineering_team.github_source.client import scrub_token_from_text
+
+    assert _scrub_token_from_text(text) == scrub_token_from_text(text)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [_GHP, _GHU, _GHS, _GHR, _GHO, _GHP2, _PAT],
+    ids=["classic", "ghu", "ghs", "ghr", "gho", "classic2", "fine-grained"],
+)
+def test_local_scrubber_actually_redacts_a_full_length_token(token: str) -> None:
+    """Positive control for the parity test above.
+
+    Parity alone would still pass if the canonical scrubber and this local copy
+    regressed IDENTICALLY -- the regex narrowed on both sides, or both routed
+    through a helper that became a no-op -- and a credential quoted inside a
+    finding would then reach the synthesis prompt un-redacted with this file
+    still green. A full-length token is required here because the parametrized
+    case ``"short ghp_tooshort is left alone"`` is deliberately NOT redacted,
+    so no blanket "contains a token prefix implies redacted" check would hold.
+    """
+    text = f"token {token} quoted inside a finding"
+    scrubbed = _scrub_token_from_text(text)
+    assert scrubbed != text
+    assert token not in scrubbed
+    assert "***" in scrubbed
+
+
+def test_local_scrubber_actually_redacts_a_credentialed_url() -> None:
+    """Positive control for the ``user:password@host`` redaction path.
+
+    The parametrized case above only covers the token-prefix alternatives; the
+    URL-embedded credential is otherwise guarded by parity alone, so an
+    identical regression on both sides would go unnoticed. Asserted on the FULL
+    output (not just "the secret is gone") so a partial redaction that leaves
+    the credential's head or tail visible still fails.
+    """
+    scrubbed = _scrub_token_from_text(f"clone https://x-access-token:{_GHP}@github.com/o/r")
+    assert scrubbed == "clone https://***@github.com/o/r"

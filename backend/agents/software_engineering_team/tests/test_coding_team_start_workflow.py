@@ -8,10 +8,21 @@ workflow id, and the coding-team task queue.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from software_engineering_team.temporal import coding_team_start_workflow as sw
 from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
+
+
+@pytest.fixture(autouse=True)
+def _stub_execute_workflow_sync(monkeypatch):
+    """Safety net so the validation-only tests below never reach the real
+    Temporal call after their expected ValueError. A test that needs to
+    observe the call (e.g. to assert on its arguments) overrides this with
+    its own monkeypatch.setattr, which simply takes precedence."""
+    monkeypatch.setattr(sw, "execute_workflow_sync", lambda *a, **k: {"status": "completed"})
 
 
 def test_start_coding_team_workflow_forwards_run_payload_id_and_queue(monkeypatch):
@@ -38,13 +49,13 @@ def test_start_coding_team_workflow_forwards_run_payload_id_and_queue(monkeypatc
 
 def test_start_coding_team_workflow_requires_job_id(monkeypatch):
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
-    with pytest.raises(AssertionError, match="non-empty job_id"):
+    with pytest.raises(ValueError, match="non-empty job_id"):
         sw.start_coding_team_workflow("", "/repo", {"objective": "x"})
 
 
 def test_start_coding_team_workflow_requires_repo_path(monkeypatch):
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
-    with pytest.raises(AssertionError, match="non-empty repo_path"):
+    with pytest.raises(ValueError, match="non-empty repo_path"):
         sw.start_coding_team_workflow("job-7", "", {"objective": "x"})
 
 
@@ -85,3 +96,410 @@ def test_start_coding_team_workflow_omits_github_when_none(monkeypatch):
     sw.start_coding_team_workflow("job-7", "/repo", {"objective": "x"}, github=None)
     (payload,) = captured["args"]
     assert "github" not in payload
+
+
+def test_execute_coding_team_workflow_waits_for_terminal_result(monkeypatch):
+    captured: dict = {}
+
+    def _fake_execute(workflow_run, *args, **kwargs):
+        captured.update({"workflow_run": workflow_run, "args": args, **kwargs})
+        return {"status": "completed", "github_pr_url": "https://example/pr/7"}
+
+    monkeypatch.setattr(sw, "execute_workflow_sync", _fake_execute)
+    github = {
+        "owner": "acme",
+        "repo": "widgets",
+        "pr_number": 7,
+        "publish_mode": "existing_pr",
+        "base": "main",
+        "integration_branch": "feature",
+    }
+
+    plan_input = {"x": 1}
+    result = sw.execute_coding_team_workflow("parent:comment:2", "/repo", plan_input, github)
+
+    assert result["status"] == "completed"
+    # Composed from the constant, not a copy of its value: the behavior under
+    # test is the dispatcher composing PREFIX + job_id, so a deliberate change
+    # to WORKFLOW_ID_PREFIX must not fail this test for an unrelated reason.
+    assert captured["workflow_id"] == f"{WORKFLOW_ID_PREFIX}parent:comment:2"
+    assert captured["task_queue"] == TASK_QUEUE
+    # The WHOLE payload, not just its `github` block: `plan_input` and
+    # `repo_path` are what the workflow actually runs on, and a regression that
+    # dropped either from the durable payload would leave every `github`-only
+    # assertion green while the workflow started with nothing to do.
+    assert captured["args"][0] == {
+        "job_id": "parent:comment:2",
+        "repo_path": "/repo",
+        "plan_input": plan_input,
+        "github": github,
+    }
+    assert captured["execute_timeout_s"] == sw._COMMENT_WORKFLOW_TIMEOUT_S
+    # A client-side timeout must never be mistaken for workflow failure: this
+    # caller reattaches to the same still-running workflow rather than giving
+    # up after one wait window (see runner.execute_workflow_sync's docstring).
+    assert captured["reattach_on_timeout"] is True
+    # The dispatcher must hand the runner CodingTeamWorkflow.run itself, not some
+    # other callable: this value was captured but never checked, which read as
+    # verification that did not exist.
+    assert captured["workflow_run"] is sw.CodingTeamWorkflow.run
+
+
+def test_execute_coding_team_workflow_names_the_workflow_id_on_a_non_dict_result(
+    monkeypatch,
+):
+    """The non-dict-result RuntimeError must identify WHICH run misbehaved.
+
+    This raise surfaces on a per-comment background worker, far from the
+    dispatch call site; the observed type name alone does not say which
+    workflow produced it, so the id has to be in the message.
+    """
+
+    def _fake_execute(workflow_run, *args, **kwargs):
+        return ["not", "a", "dict"]
+
+    monkeypatch.setattr(sw, "execute_workflow_sync", _fake_execute)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sw.execute_coding_team_workflow(
+            "parent:comment:5", "/repo", None, dict(_VALID_GITHUB)
+        )
+
+    message = str(excinfo.value)
+    assert f"{WORKFLOW_ID_PREFIX}parent:comment:5" in message
+    assert "list" in message
+
+
+# A github payload that passes validation on its own, so the two argument-presence
+# tests below isolate the branch they name instead of silently depending on
+# validation ORDER (an empty `{}` is itself rejected by `_validate_github_arg`, so
+# either test would still pass with its own check removed).
+_VALID_GITHUB = {"owner": "acme", "repo": "widgets", "pr_number": 7}
+
+
+def test_execute_coding_team_workflow_requires_job_id():
+    with pytest.raises(ValueError, match="non-empty job_id"):
+        sw.execute_coding_team_workflow("", "/repo", {"x": 1}, dict(_VALID_GITHUB))
+
+
+def test_execute_coding_team_workflow_requires_repo_path():
+    with pytest.raises(ValueError, match="non-empty repo_path"):
+        sw.execute_coding_team_workflow("job-7", "", {"x": 1}, dict(_VALID_GITHUB))
+
+
+def test_execute_coding_team_workflow_rejects_plaintext_token():
+    # Preconditions must be enforced reliably (not via `assert`, which is
+    # stripped under python -O) since this rejects a real secret-leak risk.
+    with pytest.raises(ValueError, match="must not include a credential-named key"):
+        sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {"token": "ghp_secret"})
+
+
+def test_execute_coding_team_workflow_rejects_nested_plaintext_token():
+    """P1 regression: a token buried under a sub-dict (e.g. `github["auth"]
+    ["token"]`) must be rejected too — a top-level-only check would let it
+    slip into the durable Temporal event history."""
+    with pytest.raises(ValueError, match="must not include a credential-named key"):
+        sw.execute_coding_team_workflow(
+            "job-7", "/repo", {"x": 1}, {"auth": {"token": "ghp_secret"}}
+        )
+
+
+def test_execute_coding_team_workflow_rejects_token_nested_in_list():
+    with pytest.raises(ValueError, match="must not include a credential-named key"):
+        sw.execute_coding_team_workflow(
+            "job-7", "/repo", {"x": 1}, {"extra": [{"token": "ghp_secret"}]}
+        )
+
+
+def test_execute_coding_team_workflow_rejects_non_dict_github():
+    """A caller passing None (or any non-dict) for github must get a clear
+    ValueError, not a raw TypeError from `"token" in github`."""
+    with pytest.raises(ValueError, match="non-empty github dict"):
+        sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, None)  # type: ignore[arg-type]
+
+
+def test_execute_coding_team_workflow_rejects_empty_github_dict():
+    """An empty dict passes isinstance(github, dict) but carries no PR/comment
+    context at all -- must fail fast rather than starting a durable workflow
+    that can never reply to or resolve anything."""
+    with pytest.raises(ValueError, match="non-empty github dict"):
+        sw.execute_coding_team_workflow("job-7", "/repo", {"x": 1}, {})
+
+
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        lambda bad: sw.start_coding_team_workflow("job-7", "/repo", bad),
+        lambda bad: sw.execute_coding_team_workflow("job-7", "/repo", bad, dict(_VALID_GITHUB)),
+    ],
+    ids=["start", "execute"],
+)
+def test_dispatchers_reject_non_dict_plan_input(monkeypatch, dispatch):
+    """`plan_input` is serialized into the same durable payload as `github`, so a
+    truthy NON-dict (a bare token string, say) must be rejected outright:
+    `_contains_token_key` only traverses dicts/lists/tuples, so the token check
+    alone returns False for it and the value would be written into Temporal
+    history verbatim -- the identical hole `github` already guards against."""
+    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="requires plan_input to be a dict when provided"):
+        dispatch("ghp_secret")
+
+
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        lambda bad: sw.start_coding_team_workflow("job-7", "/repo", bad),
+        lambda bad: sw.execute_coding_team_workflow("job-7", "/repo", bad, dict(_VALID_GITHUB)),
+    ],
+    ids=["start", "execute"],
+)
+def test_dispatchers_reject_token_in_plan_input(monkeypatch, dispatch):
+    """A dict `plan_input` is still token-scanned at any nesting depth.
+
+    Parametrized over BOTH dispatchers rather than `start` alone: they serialize
+    `plan_input` into the same durable Temporal payload, so a check present on
+    one and absent from the other writes the secret into the same permanent
+    event history -- an asymmetry only a test that exercises both can catch.
+    """
+    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="plan_input to not include a credential-named key"):
+        dispatch({"auth": {"token": "ghp_secret"}})
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "token",
+        "GITHUB_TOKEN",
+        "authorization",
+        "Authorization",
+        "api_key",
+        "API-KEY",
+        # Unseparated spellings: substring matching is literal, so "apikey"
+        # contains neither "api_key" nor "api-key" and needs its own marker.
+        "apikey",
+        "APIKey",
+        "x-apikey",
+        "client_secret",
+        "password",
+        # "passphrase" does NOT contain "password" -- a separate marker.
+        "passphrase",
+        "ssh_passphrase",
+        # GitHub App signing keys / SSH PEMs. All three separator spellings
+        # are listed for the same literal-substring reason as "apikey":
+        # "private-key" and "privateKey" contain neither of the others.
+        "private_key",
+        "PRIVATE_KEY",
+        "app_private_key",
+        "private-key",
+        "PRIVATE-KEY",
+        "privateKey",
+        "x_privatekey",
+        "credentials",
+    ],
+)
+def test_contains_token_key_flags_every_credential_marker(key):
+    """Defense in depth: a credential smuggled under any of the common key
+    spellings -- not just "token" -- must be caught before it reaches Temporal's
+    permanent event history."""
+    assert sw._contains_token_key({key: "value"}) is True
+    assert sw._contains_token_key({"outer": [{key: "value"}]}) is True
+    # A TUPLE container too, not just a list: the traversal guard admits
+    # dict/list/tuple, and a regression narrowing it to ``isinstance(v, list)``
+    # would otherwise pass this whole suite while a tuple-carried credential
+    # reached Temporal's permanent event history unscanned.
+    assert sw._contains_token_key({"outer": ({key: "value"},)}) is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "owner",
+        "repo",
+        "issue_number",
+        "issue_title",
+        "remote",
+        "base",
+        "integration_branch",
+        "expected_base_sha",
+        "expected_head_sha",
+        "pr_number",
+        "pr_url",
+        "publish_mode",
+        "cleanup_checkout_on_success",
+        "requirements_title",
+        "requirements_description",
+        "project_overview",
+        "completed_work_summary",
+        "repo_path",
+    ],
+)
+def test_contains_token_key_does_not_flag_real_payload_keys(key):
+    """Every key the real `github`/`plan_input` payloads actually carry must stay
+    dispatchable -- the broadened marker list must not false-positive on them."""
+    assert sw._contains_token_key({key: "value"}) is False
+
+
+def test_contains_token_key_terminates_on_a_reference_cycle():
+    """A self-referential payload must not recurse forever: the visited set is
+    identity-keyed, so the cycle is closed on the second encounter."""
+    cyclic: dict = {"a": 1}
+    cyclic["self"] = cyclic
+    assert sw._contains_token_key(cyclic) is False
+
+    cyclic_with_token: dict = {"token": "ghp_secret"}
+    cyclic_with_token["self"] = cyclic_with_token
+    assert sw._contains_token_key(cyclic_with_token) is True
+
+
+def test_contains_token_key_visits_a_shared_substructure_once():
+    """The visited set accumulates across the WHOLE traversal, not per path: a
+    diamond-shaped payload (one shared child referenced from many parents) is
+    walked once per container, not once per reference -- otherwise k levels of
+    sharing cost O(2**k)."""
+    shared: dict = {"leaf": "v"}
+    for _ in range(30):
+        shared = {"l": shared, "r": shared}
+    # With a per-path (copied) visited set this is 2**30 traversals and would
+    # never return; with one accumulated set it is linear in container count.
+    assert sw._contains_token_key(shared) is False
+
+
+def test_contains_token_key_still_finds_a_token_inside_a_shared_substructure():
+    """Deduplicating shared containers must not lose a real finding: the FIRST
+    visit still walks the shared child in full."""
+    shared = {"nested": {"github_token": "ghp_secret"}}
+    diamond = {"l": shared, "r": shared}
+    assert sw._contains_token_key(diamond) is True
+
+
+# ---------------------------------------------------------------------------
+# Docstring credential-marker enumeration
+# ---------------------------------------------------------------------------
+
+
+def _docstring_marker_enumerations(doc: str) -> list[set[str]]:
+    """Every inline ``_TOKEN_KEY_MARKERS`` enumeration found in ``doc``.
+
+    Preconditions:
+        - ``doc`` is a docstring that may contain zero or more spellings of
+          ``(any of :data:`_TOKEN_KEY_MARKERS` — a, b, c/d)``.
+    Postconditions:
+        - Returns one set of listed marker strings per enumeration, in order of
+          appearance: comma-separated entries split further on ``/`` (the
+          docstrings spell alternative separator forms as ``api_key/api-key``).
+          Whitespace, including a line wrap inside the parentheses, is
+          normalized away. Pure.
+    """
+    normalized = " ".join(doc.split())
+    return [
+        {part.strip() for chunk in body.split(",") for part in chunk.split("/") if part.strip()}
+        for body in re.findall(
+            r"\(any of :data:`_TOKEN_KEY_MARKERS` — ([^)]*)\)", normalized
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        sw.start_coding_team_workflow,
+        sw.execute_coding_team_workflow,
+        sw._validate_plan_input_arg,
+        sw._validate_github_arg,
+    ],
+)
+def test_docstring_marker_enumeration_matches_the_data(func):
+    """The enumeration is spelled out ONCE per docstring, and pinned to the data.
+
+    Naming the markers inline is what makes the precondition satisfiable
+    without opening the source -- but a hand-copied list is exactly the thing
+    that drifts once ``_TOKEN_KEY_MARKERS`` changes. This test makes drift
+    impossible in both directions: adding a marker without documenting it, or
+    documenting one that is not enforced, fails here. Every OTHER mention in
+    these docstrings carries the bare ``:data:`` cross-reference, so there is
+    only ever one list to keep true.
+
+    The rule this pins, deliberately covering EVERY docstring that describes
+    the screen (both public dispatchers AND the two shared validators they
+    delegate to, which is where the enumerations previously drifted apart
+    unnoticed): each such docstring enumerates the markers exactly once, in
+    the single canonical spelling
+    ``(any of :data:`_TOKEN_KEY_MARKERS` — a, b/c)``. Keeping the list rather
+    than dropping it is what makes the contract readable without opening the
+    source; parametrizing over every docstring that carries one is what keeps
+    it honest. A new function documenting the screen must be added here too.
+    """
+    enumerations = _docstring_marker_enumerations(func.__doc__ or "")
+    assert len(enumerations) == 1, f"{func.__name__} should enumerate the markers exactly once"
+    assert enumerations[0] == set(sw._TOKEN_KEY_MARKERS)
+
+
+def test_is_token_key_matches_a_tuple_key_containing_a_marker():
+    """Documented behavior, pinned: ``str(("token", 0))`` contains "token", so a
+    tuple key IS a match. The guard errs toward detecting more, which is the
+    safe direction for a permanent Temporal event history."""
+    assert sw._is_token_key(("token", 0)) is True
+    assert sw._is_token_key(123) is False
+    assert sw._is_token_key(("owner", "repo")) is False
+
+
+@pytest.mark.parametrize("falsy", [[], "", 0, False], ids=["list", "str", "int", "bool"])
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        lambda bad: sw.start_coding_team_workflow("job-7", "/repo", bad),
+        lambda bad: sw.execute_coding_team_workflow("job-7", "/repo", bad, dict(_VALID_GITHUB)),
+    ],
+    ids=["start", "execute"],
+)
+def test_dispatchers_reject_falsy_non_dict_plan_input(monkeypatch, dispatch, falsy):
+    """A FALSY non-dict is neither `None` nor a plan, and must be rejected too.
+
+    `None` is the single spelling for "no plan". A truthiness guard here would
+    let `[]`/`""`/`0`/`False` through unvalidated and forward them verbatim
+    across the durable Temporal workflow boundary -- the one input path this
+    validator exists to close, and the contract the docstring states.
+    """
+    # Record instead of no-op: `pytest.raises` alone would also pass for an
+    # implementation that dispatched FIRST and validated afterwards, since a
+    # silent stub swallows the premature dispatch. The empty-calls assertion
+    # is what actually pins "validated before the durable boundary".
+    calls: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: calls.append((a, k)))
+    with pytest.raises(ValueError, match="requires plan_input to be a dict when provided"):
+        dispatch(falsy)
+    assert calls == [], "dispatcher forwarded plan_input across the Temporal boundary before validating it"
+
+
+@pytest.mark.parametrize(
+    "github,plan_input,expected",
+    [
+        ({"token": "x"}, None, "github workflow payload"),
+        (None, {"nested": {"api_key": "x"}}, "plan_input workflow payload"),
+    ],
+    ids=["github", "plan_input"],
+)
+def test_payload_builder_raises_on_a_credential_named_key(github, plan_input, expected):
+    """The serialization-boundary re-check covers BOTH payload dicts, and raises.
+
+    `plan_input` is copied into the same permanent Temporal event history as
+    `github`, so a boundary check that screened only `github` left the other
+    half of the payload unguarded. It must also RAISE rather than assert:
+    `python -O` strips asserts, which would remove the last stop entirely in
+    exactly the deployments least likely to be watched.
+    """
+    with pytest.raises(ValueError, match="must not include a credential-named key") as exc:
+        sw._build_workflow_payload("job-7", "/repo", plan_input, github)
+    assert expected in str(exc.value)
+
+
+def test_payload_builder_accepts_clean_dicts():
+    """The re-check is a screen, not a rewrite: a clean payload round-trips."""
+    payload = sw._build_workflow_payload("job-7", "/repo", {"title": "t"}, {"owner": "o"})
+    assert payload == {
+        "job_id": "job-7",
+        "repo_path": "/repo",
+        "plan_input": {"title": "t"},
+        "github": {"owner": "o"},
+    }
