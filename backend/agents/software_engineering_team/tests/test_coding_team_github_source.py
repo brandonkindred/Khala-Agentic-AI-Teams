@@ -4239,24 +4239,50 @@ def test_prepare_issue_branch_routes_its_fetch_through_the_choke_point() -> None
     """
     from unittest.mock import patch
 
-    # ``git_ops`` first, then its already-bound ``_main``: the two modules import
-    # each other, so importing ``coding_team_main`` directly here leaves a
-    # partially-initialized ``git_ops`` behind and breaks the sibling test.
+    # Patch the attribute on the ``coding_team_main`` MODULE OBJECT, reached
+    # directly rather than through a ``git_ops._main`` alias. ``git_ops`` no
+    # longer binds ``_main`` at module scope -- it imports it inside each
+    # function that needs it, deliberately, to break the
+    # git_ops <-> coding_team_main import cycle in production code (an entry
+    # point reaching ``git_ops`` first used to hit a partially-initialized
+    # module). Because both spellings resolve to the same object in
+    # ``sys.modules``, patching it here is still seen by those function-local
+    # imports, so this pins the routing exactly as before. Import order between
+    # the two modules no longer matters here for the same reason the alias is
+    # gone: with the cycle broken, neither can be reached half-initialized.
+    from software_engineering_team.api import coding_team_main as _main
     from software_engineering_team.api import git_ops
 
-    with patch.object(git_ops._main, "resolve_remote_branch_sha") as resolver:
-        resolver.return_value = (False, "unsafe remote name: 'ext::sh -c id'")
+    # A SAFE remote is used to exercise the routing, because an unsafe one no
+    # longer gets this far: ``_prepare_issue_branch`` now rejects a malicious
+    # remote at its own ``_is_safe_ref`` guard ("unsafe base remote"), before
+    # any fetch is attempted. That earlier rejection is asserted separately
+    # below, so both properties stay pinned -- the routing here, and the
+    # fail-closed guard there.
+    with patch.object(_main, "resolve_remote_branch_sha") as resolver:
+        resolver.return_value = (False, "boom from the choke point")
         ok, msg, _notes = git_ops._prepare_issue_branch(
-            "/nonexistent", "ext::sh -c id", "main", "khala/issue-1", token="tok"
+            "/nonexistent", "origin", "main", "khala/issue-1", token="tok"
         )
 
     # The arguments matter as much as the call: a refactor that validated a
-    # substituted value (a hardcoded "origin", say) while still fetching with
-    # the payload's raw remote would leave ``resolver.called`` true and reopen
-    # the validate-one-value/fetch-with-another hole. Pinning the exact call
+    # substituted value while still fetching with the payload's raw remote
+    # would leave ``resolver.called`` true and reopen the
+    # validate-one-value/fetch-with-another hole. Pinning the exact call
     # means such a change fails here rather than passing silently -- and a
     # deliberate signature change is a security-relevant edit that should have
     # to come back through this test.
-    resolver.assert_called_once_with("/nonexistent", "ext::sh -c id", "main", "tok")
+    resolver.assert_called_once_with("/nonexistent", "origin", "main", "tok")
     assert ok is False
-    assert "unsafe remote name" in msg
+    assert msg == "boom from the choke point"
+
+    # The unsafe remote the routing guard was originally written against is
+    # now refused before the choke point is reached at all -- strictly earlier
+    # than a fetch-time rejection, and never routed to git.
+    with patch.object(_main, "resolve_remote_branch_sha") as resolver:
+        ok, msg, _notes = git_ops._prepare_issue_branch(
+            "/nonexistent", "ext::sh -c id", "main", "khala/issue-1", token="tok"
+        )
+    assert resolver.called is False
+    assert ok is False
+    assert "unsafe base remote" in msg
