@@ -921,6 +921,7 @@ def test_stop_loss_passes_when_resting_attachment_credits_firing_via_apply_fill_
     ``test_resting_stop_loss_attachment.py``.
     """
     from investment_team.trading_service.engine.fill_simulator import (
+        ENGINE_EXIT_REASON_PREFIX,
         FillDiagnosticEvent,
         FillOutcome,
     )
@@ -939,7 +940,7 @@ def test_stop_loss_passes_when_resting_attachment_credits_firing_via_apply_fill_
                 symbol="AAA",
                 side="short",
                 order_type="stop",
-                reason="engine_exit:stop_loss",
+                reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
             )
         ],
     )

@@ -913,7 +913,7 @@ def test_gap_through_resting_only_close_does_not_trip_conformance_gate_false_cri
         exit_rules=[rule],
         trades=[trade],
         diagnostics=diagnostics,
-        config=BacktestConfig(start_date="2024-01-01", end_date="2024-12-31", slippage_bps=0.0),
+        config=BacktestConfig(start_date="2024-01-01", end_date="2024-01-03", slippage_bps=0.0),
     )
     fails = [r for r in results if not r.passed]
     assert fails == [], [r.details for r in fails]

@@ -609,10 +609,11 @@ class FillSimulator:
         or ``order_book.requeue`` based on the order's ``unfilled_policy``.
         The rejection reason is consumed by ``process_bar`` to emit a
         ``FillDiagnosticEvent`` (#410) for downstream zero-trade analysis.
-        When the order carries a resting stop-loss attachment
-        (``sl.entry_price_pct`` is not ``None``), an ``engine_exit_attached``
-        ``FillDiagnosticEvent`` is appended to ``events`` at materialization
-        time so the conformance gate credits the firing.
+        When the order's stop-loss attachment carries a resting entry-price
+        marker (the attached leg's ``entry_price_pct`` is not ``None``), an
+        ``engine_exit_attached`` ``FillDiagnosticEvent`` is appended to
+        ``events`` at materialization time so the conformance gate credits
+        the firing.
         """
         req = po.request
         ref_price = terms.reference_price
@@ -742,6 +743,7 @@ class FillSimulator:
         # mirrored block in ``_continue_entry`` so the children are sized to
         # the *cumulative* position rather than just the first slice.
         if req.has_attached_exits and po.order_id not in self.order_book:
+            # First (and here, terminal) slice: filled_qty == this fill's qty.
             self._materialize_attached_exit_children(
                 po=po, bar=bar, filled_qty=filled_qty, events=events
             )
@@ -923,6 +925,8 @@ class FillSimulator:
         # bracket entry would silently run unprotected once the parent
         # eventually completes.
         if req.has_attached_exits and po.order_id not in self.order_book:
+            # Terminal slice of a partial-fill entry: filled_qty == the
+            # cumulative position size across all prior continuations.
             self._materialize_attached_exit_children(
                 po=po, bar=bar, filled_qty=pos.original_qty, events=events
             )
