@@ -314,15 +314,19 @@ class StopLossRule(_SpecNode):
     # ``trading_service.service._is_resting_stop_loss``; the stable entry
     # point a caller resolves it through is
     # ``trading_service.service.resolve_resting_stop_loss_attachment``),
-    # ``_EngineEntryDispatcher`` ALSO attaches a resting STOP order at
-    # entry-fill that can close the position intrabar. That resting order's
-    # level is re-anchored to the entry's actual fill price at
-    # materialization (not the signal-bar-close preview it was first
-    # resolved from — see ``StopAttachment.entry_price_pct``), so it always
-    # agrees with this bar-by-bar evaluator's own (also fill-anchored) level;
-    # the two paths are not yet deduplicated, though (a known transitional
-    # state; see the dispatcher's own comment), so both may still independently
-    # act on the same trigger — redundantly, but consistently.
+    # ``_EngineEntryDispatcher`` can INSTEAD attach a resting STOP order at
+    # entry-fill that closes the position intrabar, when the run's feature
+    # check (``trading_service.service._resting_stop_loss_enabled``, off by
+    # default) selects that mechanism. That resting order's level is
+    # re-anchored to the entry's actual fill price at materialization (not
+    # the signal-bar-close preview it was first resolved from — see
+    # ``StopAttachment.entry_price_pct``), so it always agrees with this
+    # bar-by-bar evaluator's own (also fill-anchored) level. The two
+    # mechanisms are mutually exclusive by construction, not merely in
+    # agreement: when the resting order is selected for this rule, the
+    # bar-by-bar evaluator excludes that same rule from its own evaluation
+    # (``rule_compiler._filtered_intent_for_rule``'s ``exclude_rule_index``),
+    # so exactly one of the two ever acts on a given trigger — never both.
     # ``"limit"`` emits a *resting* STOP_LIMIT at the rule's price floor/ceiling
     # with the limit placed ``limit_offset_pct`` away on the protective side; it
     # may **not** fill on a gap-through (the position stays open), which is the

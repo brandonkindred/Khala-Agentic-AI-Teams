@@ -155,13 +155,16 @@ class StopAttachment(BaseModel):
     # forecast of where the entry will actually fill — on a gap
     # (``fill_price != signal_close``) the preview and the true
     # entry-anchored level diverge. This matters specifically for a leg
-    # whose trigger geometry is *also* independently recomputed elsewhere
-    # from the real fill price (e.g. the bar-close stop-loss evaluator's
-    # ``rule_compiler.stop_loss_level``, which the entry_price/market
-    # resting-stop-loss migration leaves active alongside this resting
-    # order) — without re-anchoring here, the two would disagree about
-    # where the stop sits. Unused (``None``) by every other leg kind/source,
-    # including bracket legs, which have no such competing live evaluator.
+    # whose trigger geometry is *also* independently recomputable from the
+    # real fill price by another mechanism (e.g. the bar-close stop-loss
+    # evaluator's ``rule_compiler.stop_loss_level``, which the
+    # entry_price/market resting-stop-loss migration excludes from
+    # evaluating this same rule while this resting order is selected for it
+    # — see ``trading_service.service._resting_stop_loss_enabled``) — even
+    # though the two mechanisms never act on the same trigger at once, they
+    # must still agree on where the stop sits, since a run can select either
+    # one. Unused (``None``) by every other leg kind/source, including
+    # bracket legs, which have no such alternate evaluator to agree with.
     # Precondition: 0 < entry_price_pct < 1.0 (same bound as ExitLegSpec.pct /
     # _is_resting_stop_loss); enforced in OrderRequest.validate_prices.
     entry_price_pct: Optional[float] = None
@@ -341,13 +344,17 @@ class OrderRequest(BaseModel):
     # ``trading_service/service.py``) for a resting-eligible ``StopLossRule``
     # (``basis="entry_price"``, ``style="market"``, ``0 < pct < 1.0`` — the
     # exact predicate is the module-level ``_is_resting_stop_loss``, not a
-    # method of the dispatcher); other rule kinds/bases are not yet migrated
-    # onto this path and remain bar-close-only. The migrated rule kind is
-    # NOT resting-only, though: the bar-close evaluator still independently
-    # evaluates it too until a tracked follow-up adds the skip
-    # ``OcoBracketRule`` already gets at that chokepoint — see
-    # ``StopLossRule.style``'s docstring for the current, redundant-but-
-    # consistent (see ``StopAttachment.entry_price_pct``) dual-action state.
+    # method of the dispatcher) when the run's feature check
+    # (``_resting_stop_loss_enabled``, off by default) selects this
+    # mechanism; other rule kinds/bases are not yet migrated onto this path
+    # and remain bar-close-only regardless. When this mechanism IS selected
+    # for a rule, the bar-close evaluator excludes that exact rule from its
+    # own evaluation at the ``rule_compiler._filtered_intent_for_rule``
+    # chokepoint — the same one ``OcoBracketRule`` is unconditionally
+    # skipped at — so the two mechanisms are mutually exclusive per rule; see
+    # ``StopLossRule.style``'s docstring for the full contract and
+    # ``StopAttachment.entry_price_pct`` for why the two must still agree on
+    # price even though only one ever fires.
     attached_exits: List[Union[StopAttachment, LimitAttachment]] = Field(default_factory=list)
     parent_order_id: Optional[str] = None
     oco_group_id: Optional[str] = None

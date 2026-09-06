@@ -198,6 +198,7 @@ def evaluate_exit_rules(
     views: Optional[Mapping[str, HistoryView]] = None,
     first_only: bool = True,
     scaled_cursors: Optional[Mapping[str, Mapping[int, int]]] = None,
+    exclude_rule_index: Optional[int] = None,
 ) -> list[ExitIntent]:
     """Return triggered ``ExitIntent``\\ s per open position, in spec priority order.
 
@@ -219,13 +220,18 @@ def evaluate_exit_rules(
         rungs fire in strict order one tranche per bar, the cursor rung is the
         only one that can fire next, so the evaluator never allocates intents for
         rungs that already fired or are not yet actionable.
+      * ``exclude_rule_index``, when set, drops the rule at that exact spec
+        index for every symbol — used when a resting-order mechanism has
+        been attached for that rule instead of this bar-close evaluator (see
+        :func:`_filtered_intent_for_rule`).
 
     Preconditions: each ``positions``/``bars`` value is keyed by symbol; ``rules``
     are ``ExitRule`` members; ``views`` (if given) maps symbols to ``HistoryView``;
     ``scaled_cursors`` (if given) maps symbol to a ``rule_index -> rung`` cursor map.
     Postconditions: returns one ``ExitIntent`` per (open position × triggered rule)
     in spec order — at most one per position when ``first_only``, all triggered
-    otherwise; a scaled rule contributes at most its cursor rung. Positions with
+    otherwise; a scaled rule contributes at most its cursor rung; the rule at
+    ``exclude_rule_index`` never contributes an intent. Positions with
     non-positive qty or no matching bar yield none. Each limit-style stop intent
     carries its fully-resolved ``stop_price``/``limit_price`` regardless of
     ``first_only`` (``first_only`` controls only how many intents are returned).
@@ -251,6 +257,7 @@ def evaluate_exit_rules(
                 view=sym_view,
                 first_only=first_only,
                 cursor_map=cursor_map,
+                exclude_rule_index=exclude_rule_index,
             )
         )
     return intents
@@ -267,6 +274,7 @@ def evaluate_exit_rules_for_position(
     cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
     exclude_limit_style: bool = False,
     exclude_scaled: bool = False,
+    exclude_rule_index: Optional[int] = None,
 ) -> list[ExitIntent]:
     """Triggered ``ExitIntent``\\ s for ONE open position, in spec priority order.
 
@@ -280,7 +288,10 @@ def evaluate_exit_rules_for_position(
     drops any scaled-take-profit rung (regardless of ``qty_fraction``) — used when
     the position's entry is still filling, so a deferred rung (which must be sized
     off the not-yet-settled original qty) does not pre-empt a lower-priority
-    full-position exit (e.g. a stop) that should still fire this bar.
+    full-position exit (e.g. a stop) that should still fire this bar. ``exclude_rule_index``
+    drops the rule at that exact spec index outright — used when a resting-order
+    mechanism has been attached for that rule instead of this bar-close evaluator
+    (see :func:`_filtered_intent_for_rule`).
 
     ``position`` is read-only here and is NOT retained past this call — the engine
     may pass a single mutable view it reuses each bar (``_PositionStateView``), so a
@@ -293,8 +304,9 @@ def evaluate_exit_rules_for_position(
     un-fired rung.
     Postconditions: returns the triggered intents in spec order — at most one when
     ``first_only`` — each ``ScaledTakeProfitRule`` contributing at most its cursor
-    rung; limit-style intents omitted when ``exclude_limit_style`` and scaled rungs
-    omitted when ``exclude_scaled``.
+    rung; the rule at ``exclude_rule_index`` omitted outright, limit-style intents
+    omitted when ``exclude_limit_style``, and scaled rungs omitted when
+    ``exclude_scaled``.
     """
     if first_only:
         # Hot path: the per-bar dispatcher wants only the spec-priority winner, so
@@ -308,6 +320,7 @@ def evaluate_exit_rules_for_position(
             cursor_map=cursor_map,
             exclude_limit_style=exclude_limit_style,
             exclude_scaled=exclude_scaled,
+            exclude_rule_index=exclude_rule_index,
         )
         return [intent] if intent is not None else []
     intents: list[ExitIntent] = []
@@ -322,6 +335,7 @@ def evaluate_exit_rules_for_position(
             cursor_map,
             exclude_limit_style=exclude_limit_style,
             exclude_scaled=exclude_scaled,
+            exclude_rule_index=exclude_rule_index,
         )
         if intent is not None:
             intents.append(intent)
@@ -339,20 +353,39 @@ def _filtered_intent_for_rule(
     *,
     exclude_limit_style: bool,
     exclude_scaled: bool,
+    exclude_rule_index: Optional[int] = None,
 ) -> Optional[ExitIntent]:
-    """:func:`_intent_for_rule` with the dispatcher's two skip filters applied.
+    """:func:`_intent_for_rule` with the dispatcher's skip filters applied.
 
     Single source of the "does this rule produce an actionable intent this bar"
     decision, shared by the list-returning :func:`evaluate_exit_rules_for_position`
     and the allocation-free :func:`first_exit_intent_for_position` so the filter
-    logic (exclude already-resting limit stops / deferred scaled rungs) lives in one
-    place and the two entry points can never diverge.
+    logic (exclude already-resting limit stops / deferred scaled rungs / a rule
+    ceded to a resting-order mechanism) lives in one place and the two entry
+    points can never diverge.
+
+    ``exclude_rule_index`` drops the rule at that exact spec index outright,
+    before ``_intent_for_rule`` is even called — unlike the two intent-shape
+    filters below, which act on what the produced intent looks like,
+    exclusion here is by rule identity (its position in ``exit_rules``), since
+    the excluded rule's intent would otherwise be indistinguishable from a
+    same-kind rule that must keep firing here (e.g. the short-safety auto-stop
+    shares ``rule_kind``/``basis``/``style`` with the resting-eligible variant
+    but is never resting-attached — see ``_is_resting_stop_loss`` in
+    ``trading_service.service``). Used when a resting-order mechanism (the
+    entry_price/market stop-loss migration) has been attached for that rule
+    instead, so the bar-close evaluator must never also produce an intent for
+    it — see ``_EngineExitDispatcher.exclude_rule_index`` for the mutual-
+    exclusion contract this enforces.
 
     Preconditions: as :func:`_intent_for_rule`.
-    Postconditions: returns the rule's intent, or ``None`` when the rule does not
-    fire OR the intent is a limit-style stop and ``exclude_limit_style`` OR the
-    intent is a scaled rung and ``exclude_scaled``.
+    Postconditions: returns the rule's intent, or ``None`` when ``idx ==
+    exclude_rule_index`` OR the rule does not fire OR the intent is a
+    limit-style stop and ``exclude_limit_style`` OR the intent is a scaled
+    rung and ``exclude_scaled``.
     """
+    if idx == exclude_rule_index:
+        return None
     intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
     if intent is None:
         return None
@@ -373,6 +406,7 @@ def first_exit_intent_for_position(
     cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
     exclude_limit_style: bool = False,
     exclude_scaled: bool = False,
+    exclude_rule_index: Optional[int] = None,
 ) -> Optional[ExitIntent]:
     """The highest-priority triggered ``ExitIntent`` for ONE position, or ``None``.
 
@@ -380,17 +414,24 @@ def first_exit_intent_for_position(
     :func:`evaluate_exit_rules_for_position`. The per-bar dispatcher evaluates one
     open position per symbol per bar and acts on a single intent, so this walks the
     rules in spec order and returns the first that fires and survives the
-    ``exclude_limit_style`` / ``exclude_scaled`` filters — without building the
-    throwaway one-element list the list-returning variant would allocate on every
-    bar of every open position.
+    ``exclude_limit_style`` / ``exclude_scaled`` / ``exclude_rule_index`` filters —
+    without building the throwaway one-element list the list-returning variant
+    would allocate on every bar of every open position.
+
+    ``exclude_rule_index``, when set, is the spec index of a rule ceded to a
+    resting-order mechanism for this run (e.g. the entry_price/market
+    stop-loss migration's resting ``STOP`` attachment) — see
+    :func:`_filtered_intent_for_rule` for why this is an index match rather
+    than an intent-shape filter like the other two.
 
     Preconditions: as :func:`evaluate_exit_rules_for_position` — ``position.qty >
     0``; ``bar`` exposes ``high``/``low``/``close``; ``cursor_map`` maps a ladder
     ``rule_index`` to its next un-fired rung.
-    Postconditions: returns the spec-priority winning intent — a limit-style intent
-    skipped when ``exclude_limit_style``, a scaled rung skipped when
-    ``exclude_scaled`` — or ``None`` when no rule fires (or the only triggers are
-    excluded). Allocates no result list.
+    Postconditions: returns the spec-priority winning intent — the rule at
+    ``exclude_rule_index`` skipped outright, a limit-style intent skipped when
+    ``exclude_limit_style``, a scaled rung skipped when ``exclude_scaled`` — or
+    ``None`` when no rule fires (or the only triggers are excluded). Allocates
+    no result list.
     """
     for idx, rule in enumerate(rules):
         intent = _filtered_intent_for_rule(
@@ -403,6 +444,7 @@ def first_exit_intent_for_position(
             cursor_map,
             exclude_limit_style=exclude_limit_style,
             exclude_scaled=exclude_scaled,
+            exclude_rule_index=exclude_rule_index,
         )
         if intent is not None:
             return intent
