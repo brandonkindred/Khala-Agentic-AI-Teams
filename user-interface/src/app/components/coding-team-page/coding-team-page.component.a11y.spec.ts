@@ -322,6 +322,24 @@ describe('CodingTeamPageComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
+  it('has no axe violations on the Jobs view with a run selected but no status yet ("Starting…")', async () => {
+    await setup();
+    const run = ghRun({ job_id: 'j-run', status: 'running' });
+    component.runs = [run];
+    component.runningRuns = [run];
+    component.recentRuns = [];
+    component['buildRunVms']();
+    // toggleRun selects and starts polling on a timer, so jobStatus stays null until the
+    // poller's first (async) tick — the hoisted run-detail container's pending branch.
+    component.toggleRun(run);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(component.jobStatus).toBeNull();
+    expect(el.querySelector('[id="run-detail-j-run"]')).not.toBeNull();
+    expect(el.querySelector('app-loading-spinner')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
   it('has no axe violations on the Jobs view with a running run open', async () => {
     await setup();
     openRun(ghRun({ status: 'running' }), { job_id: 'j-run', status: 'running', phase: 'coding' });

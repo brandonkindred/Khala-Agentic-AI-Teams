@@ -897,6 +897,18 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * After a run's detail panel renders, move focus into its hoisted `.run-detail-focus`
+   * container (`#runDetail` in the template) — the one node that survives every
+   * jobStatus/jobStatusError/pending branch swap, so this single move (even while the panel is
+   * still showing "Starting…") is never stranded when the first status response lands and
+   * swaps the id-less pending branch for the populated one.
+   */
+  private moveFocusToRunDetail(jobId: string): void {
+    const id = `run-detail-${jobId}`;
+    this.scheduleFocusMove((root) => root.querySelector<HTMLElement>(`[id="${id}"]`));
+  }
+
+  /**
    * After the confirm panel for `issueNumber` unmounts, move focus back to its row's button
    * (found via `data-issue-number`, which — unlike `aria-controls` — stays on the row regardless
    * of selection state, since `aria-controls` is removed the same tick `selectedIssue` clears).
@@ -1033,8 +1045,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Preconditions: none enforced — a no-op when `selectedIssue`/`selectedRepo` is null or a run is
    * already starting (`runningIssue`), so a double-click can't submit the same issue twice.
    * Postconditions: on success the issue is marked in progress (`activeRunKeys`), the returned
-   * run is selected (so its live detail shows immediately), the Runs list is refreshed, and the
-   * selection is cleared; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
+   * run is selected (so its live detail shows immediately) and focus is moved into that detail
+   * (the disabled "Confirm & Start" button is blurred by the browser and the confirmation panel
+   * is unmounted, so without this the user would otherwise be stranded on `<body>`), the Runs
+   * list is refreshed, and the selection is cleared; on error `issueError` is surfaced.
+   * `runningIssue` is toggled across the call.
    */
   confirmAndRun(): void {
     const repo = this.selectedRepo;
@@ -1057,7 +1072,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.selectedRunRepo = repo.name;
         this.selectRun(resp.job_id);
         this.recomputeIssueVms();
+        // Trigger the runs-list refresh before scheduling the focus move: the new run's row (and
+        // hence its detail's hoisted container) only exists once that refresh lands, and this
+        // ordering gives it a chance to resolve first rather than racing it.
         this.refreshTrigger$.next();
+        this.moveFocusToRunDetail(resp.job_id);
       },
       error: (err: unknown) => {
         this.runningIssue = false;
@@ -1078,8 +1097,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * number/repository, is a PR-remediation run (`selectedRunKind === 'pr'` — there is no "issue" to
    * re-run), or a run is already starting (`runningIssue`).
    * Postconditions: on success a fresh run for the same issue (in the same repository) is started
-   * and selected, and the issue is marked in progress; on error `issueError` is surfaced.
-   * `runningIssue` is toggled across the call.
+   * and selected, focus is moved into its detail (the disabled "Run again" button is blurred by
+   * the browser on click, so without this the user would otherwise be stranded on `<body>`), and
+   * the issue is marked in progress; on error `issueError` is surfaced. `runningIssue` is toggled
+   * across the call.
    */
   retrySelectedRun(): void {
     if (this.selectedRunKind === 'pr') return;
@@ -1103,7 +1124,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.selectedRunRepo = repo;
         this.selectRun(resp.job_id);
         this.recomputeIssueVms();
+        // See confirmAndRun: trigger the runs-list refresh before scheduling the focus move, so
+        // the new run's row has a chance to land before deferFocus looks for its container.
         this.refreshTrigger$.next();
+        this.moveFocusToRunDetail(resp.job_id);
       },
       error: (err: unknown) => {
         this.issueError = extractErrorDetail(err, 'Failed to start job.');
@@ -1224,7 +1248,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Preconditions: called once, from the first `applyRuns`; `runs` is this repo's filtered snapshot.
    * Postconditions: a no-op when a run is already selected or none is non-terminal; otherwise selects
    * a run paused on questions (so human-in-the-loop runs are reachable immediately) when present,
-   * else the most recently updated non-terminal run.
+   * else the most recently updated non-terminal run. Never moves focus — this fires on a page load
+   * or list refresh, not a user action, so `document.activeElement` is left untouched.
    */
   private autoSelectRun(runs: CodingTeamJobListItem[]): void {
     if (this.selectedRunId) return;
@@ -1253,7 +1278,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * list is pre-filtered to issue-/PR-bearing runs, so this is a defensive fallback), and left
    * untouched when the run is not yet in `runs` (e.g. just started, so the caller's pre-set number
    * survives); `activityNarrative`/`activityAnnouncement` are cleared, `jobStatus`/`issueError`/
-   * `jobStatusError` are cleared, and status polling for `jobId` is (re)started.
+   * `jobStatusError` are cleared, and status polling for `jobId` is (re)started. Never moves focus:
+   * this method is shared by four callers (`toggleRun`'s expand path, `confirmAndRun`,
+   * `retrySelectedRun`, `autoSelectRun`) with opposite focus requirements, so each user-initiated
+   * caller moves focus itself, afterward, via `moveFocusToRunDetail` — `autoSelectRun` deliberately
+   * does not, and neither does a later status-poll tick (which calls `jobStatus =` directly, never
+   * back through here).
    */
   selectRun(jobId: string): void {
     if (this.selectedRunId === jobId) return;
@@ -1282,8 +1312,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Preconditions: `run` is a row in `runs`.
    * Postconditions: when `run` was the selected row, `selectedRunId`/`selectedRunNumber`/`jobStatus`
    * are cleared and the status poll is stopped (the 15s list poll keeps the row's badge fresh) — so a
-   * later snapshot can't re-add a stale "In progress" chip for the deselected run; otherwise `run`
-   * becomes the selected, expanded row and its status poll starts.
+   * later snapshot can't re-add a stale "In progress" chip for the deselected run; focus is left where
+   * it is (on the row button that was just clicked), never moved away. Otherwise `run` becomes the
+   * selected, expanded row, its status poll starts, and focus moves into its detail panel (even while
+   * still showing "Starting…") — the only one of `selectRun`'s four callers where the reveal is a
+   * direct user action on this row, so the focus move lives here rather than inside `selectRun` itself.
    */
   toggleRun(run: CodingTeamJobListItem): void {
     if (this.selectedRunId === run.job_id) {
@@ -1300,6 +1333,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       return;
     }
     this.selectRun(run.job_id);
+    this.moveFocusToRunDetail(run.job_id);
   }
 
   /** The currently selected run's list row, or null. */

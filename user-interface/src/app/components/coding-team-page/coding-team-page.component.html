@@ -582,189 +582,203 @@
       </button>
     </ng-template>
 
-    <!-- The selected run's live progress, expanded inline beneath its row. -->
+    <!--
+      The selected run's live progress, expanded inline beneath its row. The jobStatus/
+      jobStatusError/pending branches below are *siblings in an @if chain* — Angular destroys
+      and recreates the node when the first status response swaps the pending branch for the
+      populated one. The <section> wrapper is hoisted outside that chain so it is the one node
+      that survives every branch swap: it carries the stable id (aria-controls on the row points
+      here), so a focus move made once at reveal time is never lost to a later poll tick.
+    -->
     <ng-template #runDetail>
-      @if (jobStatus) {
-        <div class="run-detail" [id]="'run-detail-' + selectedRunId">
-          <div class="run-detail__header">
-            <mat-icon aria-hidden="true">engineering</mat-icon>
-            <h3>
-              Working on {{ selectedRunKindLabel }}
-              @if (selectedIssueUrl) {
-                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">{{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}</a>
-              } @else {
-                {{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}
+      <section
+        class="run-detail-focus"
+        [id]="'run-detail-' + selectedRunId"
+        aria-label="Run detail"
+        tabindex="-1"
+      >
+        @if (jobStatus) {
+          <div class="run-detail">
+            <div class="run-detail__header">
+              <mat-icon aria-hidden="true">engineering</mat-icon>
+              <h3>
+                Working on {{ selectedRunKindLabel }}
+                @if (selectedIssueUrl) {
+                  <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">{{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}</a>
+                } @else {
+                  {{ selectedRunOwnerRepo }}#{{ selectedRunDisplayNumber }}
+                }
+              </h3>
+              @if (jobStatus.waiting_for_answers) {
+                <span class="kh-badge kh-badge--warning">waiting for answers</span>
               }
-            </h3>
-            @if (jobStatus.waiting_for_answers) {
-              <span class="kh-badge kh-badge--warning">waiting for answers</span>
-            }
-          </div>
-
-          <div class="run-detail__body">
-            <div class="github-job-panel__field">
-              <span class="github-job-panel__label">Job</span>
-              <code>{{ jobStatus.job_id | slice:0:12 }}…</code>
-              <button
-                mat-icon-button
-                class="run-detail__copy"
-                (click)="copyJobId()"
-                [matTooltip]="jobIdCopied ? 'Copied!' : 'Copy full job id'"
-                aria-label="Copy full job id"
-              >
-                <mat-icon aria-hidden="true">{{ jobIdCopied ? 'check' : 'content_copy' }}</mat-icon>
-              </button>
             </div>
-            <div class="github-job-panel__field">
-              <span class="github-job-panel__label">Status</span>
-              <span class="kh-badge kh-badge--{{ jobStatusBadgeClass }}">{{ jobStatus.status }}</span>
-            </div>
-            @if (jobStatus.phase) {
-              <div class="github-job-panel__field">
-                <span class="github-job-panel__label">Phase</span>
-                <span>{{ jobStatus.phase }}</span>
-              </div>
-            }
-            @if (jobStatus.status_text) {
-              <div class="github-job-panel__field">
-                <span class="github-job-panel__label">Detail</span>
-                <span>{{ jobStatus.status_text }}</span>
-              </div>
-            }
 
-            <!-- Live monitor: objective, overall progress + phase stepper, sub-agent activity,
-                 and the per-agent roster (who is working and each agent's status). -->
-            <app-coding-team-monitor [status]="jobStatus" />
+            <div class="run-detail__body">
+              <div class="github-job-panel__field">
+                <span class="github-job-panel__label">Job</span>
+                <code>{{ jobStatus.job_id | slice:0:12 }}…</code>
+                <button
+                  mat-icon-button
+                  class="run-detail__copy"
+                  (click)="copyJobId()"
+                  [matTooltip]="jobIdCopied ? 'Copied!' : 'Copy full job id'"
+                  aria-label="Copy full job id"
+                >
+                  <mat-icon aria-hidden="true">{{ jobIdCopied ? 'check' : 'content_copy' }}</mat-icon>
+                </button>
+              </div>
+              <div class="github-job-panel__field">
+                <span class="github-job-panel__label">Status</span>
+                <span class="kh-badge kh-badge--{{ jobStatusBadgeClass }}">{{ jobStatus.status }}</span>
+              </div>
+              @if (jobStatus.phase) {
+                <div class="github-job-panel__field">
+                  <span class="github-job-panel__label">Phase</span>
+                  <span>{{ jobStatus.phase }}</span>
+                </div>
+              }
+              @if (jobStatus.status_text) {
+                <div class="github-job-panel__field">
+                  <span class="github-job-panel__label">Detail</span>
+                  <span>{{ jobStatus.status_text }}</span>
+                </div>
+              }
 
-            @if (jobStatus.task_graph_snapshot && jobStatus.task_graph_snapshot.length > 0) {
-              <div class="github-job-tasks">
-                <span class="github-job-panel__label">Tasks</span>
-                <div class="github-job-tasks__list">
-                  @for (task of jobStatus.task_graph_snapshot; track task.id) {
-                    <div
-                      class="github-task-chip github-task-chip--{{ task.status }}"
-                      tabindex="0"
-                      role="img"
-                      [attr.aria-label]="task.title + ' — ' + task.status"
-                      [matTooltip]="task.title"
-                    >
-                      {{ task.title | slice:0:40 }}
-                      <span class="github-task-chip__status">{{ task.status }}</span>
+              <!-- Live monitor: objective, overall progress + phase stepper, sub-agent activity,
+                   and the per-agent roster (who is working and each agent's status). -->
+              <app-coding-team-monitor [status]="jobStatus" />
+
+              @if (jobStatus.task_graph_snapshot && jobStatus.task_graph_snapshot.length > 0) {
+                <div class="github-job-tasks">
+                  <span class="github-job-panel__label">Tasks</span>
+                  <div class="github-job-tasks__list">
+                    @for (task of jobStatus.task_graph_snapshot; track task.id) {
+                      <div
+                        class="github-task-chip github-task-chip--{{ task.status }}"
+                        tabindex="0"
+                        role="img"
+                        [attr.aria-label]="task.title + ' — ' + task.status"
+                        [matTooltip]="task.title"
+                      >
+                        {{ task.title | slice:0:40 }}
+                        <span class="github-task-chip__status">{{ task.status }}</span>
+                      </div>
+                    }
+                  </div>
+                </div>
+              }
+              @if (jobStatusHasPendingQuestions) {
+                <app-inline-banner
+                  variant="warning"
+                  live="polite"
+                  icon="help_outline"
+                  message="The coding team is paused and needs your decisions before it can continue."
+                />
+                <app-pending-questions
+                  [jobId]="selectedRunId!"
+                  [questions]="jobStatus.pending_questions!"
+                  [resumeToken]="jobStatus.resume_token ?? null"
+                  submitEndpoint="coding-team"
+                  (answersSubmitted)="onAnswersSubmitted($event)"
+                />
+              }
+              @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers && jobStatus.resume_token) {
+                <app-inline-banner
+                  variant="warning"
+                  live="polite"
+                  icon="play_circle_outline"
+                  message="Answers were received. Signal the Temporal workflow to continue this run."
+                >
+                  <button
+                    mat-flat-button
+                    color="accent"
+                    (click)="resumeJob()"
+                    [disabled]="resumingJob"
+                    aria-label="Resume the coding-team run"
+                  >
+                    @if (resumingJob) {
+                      <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
+                      Resuming…
+                    } @else {
+                      <ng-container>
+                        <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                        Resume Run
+                      </ng-container>
+                    }
+                  </button>
+                </app-inline-banner>
+              } @else if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
+                <app-inline-banner
+                  variant="warning"
+                  live="polite"
+                  icon="info"
+                  message="Answers were stored. If a wait loop is still alive it will continue; otherwise this pause cannot be resumed from here (no Temporal resume_token)."
+                />
+              }
+              @if (showThoughtStreamPanel) {
+                @if (jobStatus.thinking) {
+                  <div class="visually-hidden thinking-announcement" aria-live="polite">{{ thinkingAnnouncement }}</div>
+                } @else if (activityAnnouncement) {
+                  <div class="visually-hidden activity-announcement" aria-live="polite">{{ activityAnnouncement }}</div>
+                }
+                <mat-expansion-panel class="thinking-panel thought-stream-panel">
+                  <mat-expansion-panel-header>
+                    <mat-panel-title>
+                      <mat-icon aria-hidden="true">psychology</mat-icon>
+                      {{ thoughtStreamTitle }}
+                    </mat-panel-title>
+                  </mat-expansion-panel-header>
+                  @if (jobStatus.thinking) {
+                    <div class="reasoning-section">
+                      <span class="thought-stream-label">Reasoning</span>
+                      <pre class="thinking-stream">{{ jobStatus.thinking }}</pre>
                     </div>
                   }
-                </div>
-              </div>
-            }
-            @if (jobStatusHasPendingQuestions) {
-              <app-inline-banner
-                variant="warning"
-                live="polite"
-                icon="help_outline"
-                message="The coding team is paused and needs your decisions before it can continue."
-              />
-              <app-pending-questions
-                [jobId]="selectedRunId!"
-                [questions]="jobStatus.pending_questions!"
-                [resumeToken]="jobStatus.resume_token ?? null"
-                submitEndpoint="coding-team"
-                (answersSubmitted)="onAnswersSubmitted($event)"
-              />
-            }
-            @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers && jobStatus.resume_token) {
-              <app-inline-banner
-                variant="warning"
-                live="polite"
-                icon="play_circle_outline"
-                message="Answers were received. Signal the Temporal workflow to continue this run."
-              >
-                <button
-                  mat-flat-button
-                  color="accent"
-                  (click)="resumeJob()"
-                  [disabled]="resumingJob"
-                  aria-label="Resume the coding-team run"
-                >
-                  @if (resumingJob) {
-                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
-                    Resuming…
-                  } @else {
-                    <ng-container>
-                      <mat-icon aria-hidden="true">play_arrow</mat-icon>
-                      Resume Run
-                    </ng-container>
+                  @if (activityNarrative.lines.length > 0) {
+                    <div class="activity-section">
+                      <span class="thought-stream-label">Activity</span>
+                      <pre class="thinking-stream activity-stream">{{ activityStreamText }}</pre>
+                    </div>
                   }
-                </button>
-              </app-inline-banner>
-            } @else if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
-              <app-inline-banner
-                variant="warning"
-                live="polite"
-                icon="info"
-                message="Answers were stored. If a wait loop is still alive it will continue; otherwise this pause cannot be resumed from here (no Temporal resume_token)."
-              />
-            }
-            @if (showThoughtStreamPanel) {
-              @if (jobStatus.thinking) {
-                <div class="visually-hidden thinking-announcement" aria-live="polite">{{ thinkingAnnouncement }}</div>
-              } @else if (activityAnnouncement) {
-                <div class="visually-hidden activity-announcement" aria-live="polite">{{ activityAnnouncement }}</div>
+                </mat-expansion-panel>
               }
-              <mat-expansion-panel class="thinking-panel thought-stream-panel">
-                <mat-expansion-panel-header>
-                  <mat-panel-title>
-                    <mat-icon aria-hidden="true">psychology</mat-icon>
-                    {{ thoughtStreamTitle }}
-                  </mat-panel-title>
-                </mat-expansion-panel-header>
-                @if (jobStatus.thinking) {
-                  <div class="reasoning-section">
-                    <span class="thought-stream-label">Reasoning</span>
-                    <pre class="thinking-stream">{{ jobStatus.thinking }}</pre>
-                  </div>
-                }
-                @if (activityNarrative.lines.length > 0) {
-                  <div class="activity-section">
-                    <span class="thought-stream-label">Activity</span>
-                    <pre class="thinking-stream activity-stream">{{ activityStreamText }}</pre>
-                  </div>
-                }
-              </mat-expansion-panel>
-            }
-            @if (jobStatus.github_pr_url) {
-              <div class="github-job-panel__field github-job-panel__field--pr">
-                <mat-icon aria-hidden="true">merge_type</mat-icon>
-                <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener noreferrer">
-                  {{ jobStatus.github_pr_url }}
-                </a>
-              </div>
-            }
-            @if (jobStatusTerminal && selectedRunKind !== 'pr') {
-              <div class="run-detail__retry">
-                <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
-                  @if (runningIssue) {
-                    <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
-                    Starting…
-                  } @else {
-                    <ng-container>
-                      <mat-icon aria-hidden="true">replay</mat-icon>
-                      Run again
-                    </ng-container>
-                  }
-                </button>
-              </div>
-            }
-            @if (jobStatus.error) {
-              <app-inline-banner variant="error" [message]="jobStatus.error" />
-            }
+              @if (jobStatus.github_pr_url) {
+                <div class="github-job-panel__field github-job-panel__field--pr">
+                  <mat-icon aria-hidden="true">merge_type</mat-icon>
+                  <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener noreferrer">
+                    {{ jobStatus.github_pr_url }}
+                  </a>
+                </div>
+              }
+              @if (jobStatusTerminal && selectedRunKind !== 'pr') {
+                <div class="run-detail__retry">
+                  <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
+                    @if (runningIssue) {
+                      <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
+                      Starting…
+                    } @else {
+                      <ng-container>
+                        <mat-icon aria-hidden="true">replay</mat-icon>
+                        Run again
+                      </ng-container>
+                    }
+                  </button>
+                </div>
+              }
+              @if (jobStatus.error) {
+                <app-inline-banner variant="error" [message]="jobStatus.error" />
+              }
+            </div>
           </div>
-        </div>
-      } @else if (jobStatusError) {
-        <div class="run-detail run-detail--error">
-          <app-inline-banner variant="error" [message]="jobStatusError" />
-        </div>
-      } @else {
-        <app-loading-spinner [diameter]="18" message="Starting…" />
-      }
+        } @else if (jobStatusError) {
+          <div class="run-detail run-detail--error">
+            <app-inline-banner variant="error" [message]="jobStatusError" />
+          </div>
+        } @else {
+          <app-loading-spinner [diameter]="18" message="Starting…" />
+        }
+      </section>
     </ng-template>
   </section>
 }

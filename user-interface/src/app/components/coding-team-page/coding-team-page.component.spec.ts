@@ -2625,4 +2625,210 @@ describe('CodingTeamPageComponent', () => {
       }
     });
   });
+
+  describe('focus management — run detail reveal', () => {
+    /** Put a run into the Jobs accordion (unexpanded) so its row exists to toggle. */
+    function seedRunningRow(run: CodingTeamJobListItem): void {
+      component.runs = [run];
+      component.runningRuns = [run];
+      component.recentRuns = [];
+      component['buildRunVms']();
+      fixture.detectChanges();
+    }
+
+    it(
+      'toggleRun lands focus in the hoisted run-detail container while still "Starting…", ' +
+        'and it survives the branch swap once the first status snapshot arrives',
+      async () => {
+        const statusSubject = new Subject<CodingTeamJobStatus>();
+        apiSpy.getJobStatus.mockReturnValue(statusSubject.asObservable());
+        await setup();
+        // Drain the initial (empty) runs poll before manually seeding a row — otherwise it lands
+        // later and overwrites the seeded run with the default empty list.
+        await flushAsync();
+        const run = ghRun({ job_id: 'r1', status: 'running' });
+        seedRunningRow(run);
+
+        component.toggleRun(run);
+        fixture.detectChanges();
+        await flushAsync();
+        fixture.detectChanges();
+
+        const el: HTMLElement = fixture.nativeElement;
+        let container = el.querySelector('[id="run-detail-r1"]');
+        expect(container).not.toBeNull();
+        expect(component.jobStatus).toBeNull();
+        expect(el.querySelector('app-loading-spinner')).not.toBeNull();
+        expect(container!.contains(document.activeElement)).toBe(true);
+
+        // The first status snapshot lands: Angular destroys the pending branch and creates the
+        // populated one as a sibling — the hoisted container is the one node that survives, so
+        // the focus already placed there is never lost to the branch swap.
+        statusSubject.next({ job_id: 'r1', status: 'running', phase: 'coding' });
+        fixture.detectChanges();
+
+        container = el.querySelector('[id="run-detail-r1"]');
+        expect(container).not.toBeNull();
+        expect(el.querySelector('app-loading-spinner')).toBeNull();
+        expect(container!.contains(document.activeElement)).toBe(true);
+      },
+    );
+
+    it('collapsing the expanded run row does not move focus away from it', async () => {
+      await setup();
+      await flushAsync(); // drain the initial (empty) runs poll before seeding
+      const run = ghRun({ job_id: 'r1', status: 'running' });
+      seedRunningRow(run);
+
+      component.toggleRun(run);
+      fixture.detectChanges();
+      await flushAsync();
+      fixture.detectChanges();
+
+      const el: HTMLElement = fixture.nativeElement;
+      const row = el.querySelector<HTMLButtonElement>('.coding-run-item');
+      expect(row).not.toBeNull();
+      // Simulate the row still holding focus (e.g. a mouse click) right before it collapses.
+      row!.focus();
+      expect(document.activeElement).toBe(row);
+
+      component.toggleRun(run);
+      fixture.detectChanges();
+
+      expect(component.selectedRunId).toBeNull();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it('autoSelectRun never moves focus on a first list load', async () => {
+      apiSpy.listJobs.mockReturnValue(of([ghRun({ job_id: 'auto-run', status: 'running' })]));
+      const before = document.activeElement;
+      await setup();
+      await flushAsync();
+      expect(component.selectedRunId).toBe('auto-run');
+      expect(document.activeElement).toBe(before);
+    });
+
+    it('a later status snapshot for an already-expanded run never moves focus', async () => {
+      await setup();
+      await flushAsync(); // drain the initial (empty) runs poll before seeding
+      const run = ghRun({ job_id: 'r1', status: 'running' });
+      seedRunningRow(run);
+
+      component.toggleRun(run);
+      fixture.detectChanges();
+      await flushAsync();
+      fixture.detectChanges();
+      expect(component.jobStatus).not.toBeNull();
+
+      const el: HTMLElement = fixture.nativeElement;
+      const legend = el.querySelector<HTMLElement>('.jobs-panel__legend');
+      expect(legend).not.toBeNull();
+      legend!.focus();
+      expect(document.activeElement).toBe(legend);
+
+      // A later poll tick delivers a fresh snapshot for the same run — this is exactly what the
+      // real poller callback does (`this.jobStatus = status`), never routed back through a
+      // focus-moving call.
+      component.jobStatus = { job_id: 'r1', status: 'running', phase: 'reviewing' };
+      fixture.detectChanges();
+
+      expect(document.activeElement).toBe(legend);
+    });
+
+    it('confirmAndRun moves focus into the revealed run detail', async () => {
+      await setup();
+      await flushAsync(); // drain the initial (empty) runs poll
+      expandFirstRepo();
+      const issue = component.issues[0];
+      const newRun = ghRun({
+        job_id: 'j-new',
+        status: 'running',
+        github_context: { owner: 'acme', repo: 'widgets', issue_number: issue.number },
+      });
+      // Seed the run's row ahead of time (as if the runs-list refresh had already landed), so its
+      // detail's hoisted container exists in the DOM as soon as selectedRunId flips to it — the
+      // very next (synchronous) render, well before the deferred focus move's timer fires. This
+      // isolates the focus-wiring assertion from the runs-list refetch's own async timing.
+      seedRunningRow(newRun);
+      apiSpy.listJobs.mockReturnValue(of([newRun]));
+      integrationsSpy.runGitHubIssue.mockReturnValue(
+        of({ job_id: 'j-new', issue_number: issue.number, issue_url: 'u', status: 'queued', message: '' }),
+      );
+
+      component.selectIssue(issue);
+      component.confirmAndRun();
+      fixture.detectChanges();
+      await flushAsync();
+      fixture.detectChanges();
+
+      const el: HTMLElement = fixture.nativeElement;
+      const container = el.querySelector('[id="run-detail-j-new"]');
+      expect(container).not.toBeNull();
+      expect(component.selectedRunId).toBe('j-new');
+      expect(container!.contains(document.activeElement)).toBe(true);
+    });
+
+    it('retrySelectedRun moves focus into the revealed run detail', async () => {
+      await setup();
+      await flushAsync(); // drain the initial (empty) runs poll
+      component.selectedRunNumber = 5;
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
+      const retryRun = ghRun({
+        job_id: 'j-retry',
+        status: 'running',
+        github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 },
+      });
+      // Same reasoning as confirmAndRun above: seed the run's row ahead of time so its detail's
+      // hoisted container exists as soon as retrySelectedRun flips selectedRunId to it.
+      seedRunningRow(retryRun);
+      apiSpy.listJobs.mockReturnValue(of([retryRun]));
+      integrationsSpy.runGitHubIssue.mockReturnValue(
+        of({ job_id: 'j-retry', issue_number: 5, issue_url: 'u', status: 'queued', message: '' }),
+      );
+
+      component.retrySelectedRun();
+      fixture.detectChanges();
+      await flushAsync();
+      fixture.detectChanges();
+
+      const el: HTMLElement = fixture.nativeElement;
+      const container = el.querySelector('[id="run-detail-j-retry"]');
+      expect(container).not.toBeNull();
+      expect(component.selectedRunId).toBe('j-retry');
+      expect(container!.contains(document.activeElement)).toBe(true);
+    });
+
+    it('reuses the shared focus timer across reveal paths, superseding a still-pending move, and cancels it on destroy', async () => {
+      await setup();
+      await flushAsync(); // drain the initial (empty) runs poll before seeding
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const run = ghRun({ job_id: 'r1', status: 'running' });
+      seedRunningRow(run);
+
+      component.toggleRun(run);
+      const firstTimer = component['focusTimer'];
+      expect(firstTimer).not.toBeNull();
+
+      // retrySelectedRun schedules its own focus move through the same private field — proving
+      // it's genuinely shared across reveal paths (not one timer per call site) — and, because
+      // the first move is still pending at this point, that scheduling the second one clears it
+      // rather than leaving both to fire.
+      component.selectedRunNumber = 5;
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
+      integrationsSpy.runGitHubIssue.mockReturnValue(
+        of({ job_id: 'r2', issue_number: 5, issue_url: 'u', status: 'queued', message: '' }),
+      );
+      component.retrySelectedRun();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(firstTimer);
+      expect(component['focusTimer']).not.toBeNull();
+      expect(component['focusTimer']).not.toBe(firstTimer);
+
+      fixture.destroy();
+      expect(component['focusTimer']).toBeNull();
+      clearTimeoutSpy.mockRestore();
+    });
+  });
 });
