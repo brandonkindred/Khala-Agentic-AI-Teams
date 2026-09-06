@@ -1,5 +1,5 @@
-"""Unit tests for ``executor.reference_exits`` (``StopLossRule`` and
-take-profit-family modelling)."""
+"""Unit tests for ``executor.reference_exits`` (``StopLossRule``,
+take-profit-family, and ``SignalExitRule`` modelling)."""
 
 from __future__ import annotations
 
@@ -10,16 +10,25 @@ from dataclasses import dataclass
 import pytest
 
 from investment_team.models import StrategySpec
-from investment_team.strategy_lab.executor.reference_entries import ReferenceEntryFill
+from investment_team.strategy_lab.executor.predicate_evaluator import PandasHistoryView
+from investment_team.strategy_lab.executor.reference_entries import (
+    ReferenceEntryFill,
+    bars_to_frame,
+)
 from investment_team.strategy_lab.executor.reference_exits import (
+    ReferenceSignalExit,
     ReferenceStopLossExit,
     ReferenceTakeProfitExit,
+    _PrefixHistoryView,
     entry_price_basis,
+    replay_signal_exits,
     replay_stop_loss_exits,
     replay_take_profit_family_exits,
+    resolve_signal_exit,
     resolve_stop_loss_exit,
     resolve_take_profit_family_exit,
     scaled_take_profit_rules,
+    signal_exit_rules,
     stop_loss_rules_for_side,
     take_profit_rules,
     working_exit_rules,
@@ -27,9 +36,11 @@ from investment_team.strategy_lab.executor.reference_exits import (
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
     ExitRule,
+    IndicatorRef,
     OcoBracketRule,
     Predicate,
     ScaledTakeProfitRule,
+    SignalExitRule,
     StopLossRule,
     TakeProfitLevel,
     TakeProfitRule,
@@ -1534,3 +1545,512 @@ def test_take_profit_replay_is_deterministic():
     assert replay_take_profit_family_exits(spec, bars) == replay_take_profit_family_exits(
         spec, bars
     )
+
+
+# ---------------------------------------------------------------------------
+# signal_exit_rules
+# ---------------------------------------------------------------------------
+
+
+def _sig(rhs: float = 95.0, op: str = "<") -> SignalExitRule:
+    """A signal-exit rule on the bar's own close.
+
+    ``bar.close < 95`` against the suite's 100-priced bars means "the exit
+    predicate fires on a bar that closed at least 5% down" — a decision only
+    the bar's CLOSE can make, which is exactly why this kind fills at the next
+    bar's open rather than resting on the book.
+    """
+    return SignalExitRule(when=Predicate(lhs="bar.close", op=op, rhs=rhs))
+
+
+def test_signal_exit_rules_returns_only_signal_exit_rule_instances_in_spec_order():
+    rules = [
+        StopLossRule(pct=0.05),
+        _sig(95.0),
+        TakeProfitRule(pct=0.1),
+        _sig(90.0),
+    ]
+    got = signal_exit_rules(rules)
+    assert [i for i, _ in got] == [1, 3]
+    assert all(isinstance(r, SignalExitRule) for _, r in got)
+
+
+def test_signal_exit_rules_is_not_side_filtered():
+    """Unlike a stop's ``basis``, a predicate carries no side concept — the same
+    rule list is a candidate set for a long and a short alike."""
+    rules = [_sig(95.0)]
+    assert signal_exit_rules(rules) == [(0, rules[0])]
+
+
+# ---------------------------------------------------------------------------
+# _PrefixHistoryView
+# ---------------------------------------------------------------------------
+
+
+def _view(bars) -> PandasHistoryView:
+    return PandasHistoryView(bars_to_frame(bars), {})
+
+
+def test_prefix_view_reports_length_one_past_its_index():
+    """``length() - 1`` is the index the shared evaluator resolves a signal
+    predicate at, so this identity is the whole point of the adapter."""
+    view = _view([_flat(100.0), _flat(101.0), _flat(102.0)])
+    assert [_PrefixHistoryView(view, i).length() for i in range(3)] == [1, 2, 3]
+
+
+def test_prefix_view_delegates_reads_to_the_wrapped_view():
+    bars = [_flat(100.0), _flat(101.0), _flat(102.0)]
+    view = _view(bars)
+    prefixed = _PrefixHistoryView(view, 1)
+    assert prefixed.bar_field("close", 1) == 101.0
+    ref = IndicatorRef(name="sma", params={"period": 2})
+    assert prefixed.indicator(ref, 1) == view.indicator(ref, 1)
+
+
+@pytest.mark.parametrize("i", [-1, 3, 99])
+def test_prefix_view_rejects_an_out_of_range_index(i):
+    view = _view([_flat(100.0), _flat(101.0), _flat(102.0)])
+    with pytest.raises(ValueError, match="out of range"):
+        _PrefixHistoryView(view, i)
+
+
+# ---------------------------------------------------------------------------
+# resolve_signal_exit — next-bar-open fill mechanics
+# ---------------------------------------------------------------------------
+
+
+def _resolve_sig(rules, bars, side="long", entry_bar=1, price=100.0):
+    return resolve_signal_exit(rules, _entry(side=side, entry_bar=entry_bar, price=price), bars)
+
+
+def test_signal_exit_fills_at_the_next_bars_open():
+    """The defining difference from every resting kind: trigger bar and fill
+    bar are not the same bar."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),  # entry bar; close 100 does not satisfy close < 95
+        _bar(100.0, 101.0, 90.0, 94.0),  # trigger bar: closes below 95
+        _bar(93.0, 95.0, 92.0, 93.0),  # fill bar: settles at this open
+        _flat(93.0),
+    ]
+    got = _resolve_sig([_sig(95.0)], bars)
+    assert (got.exit_bar, got.exit_price, got.exit_rule_kind) == (3, 93.0, "signal_exit")
+    assert got.exit_rule_index == 0
+
+
+def test_signal_exit_is_eligible_on_the_entry_bar_itself():
+    """The other half of the non-resting treatment: a resting order is skipped
+    on its own materialization bar (see
+    ``test_stop_is_not_eligible_on_its_own_entry_bar``), a signal predicate is
+    not — only its FILL is deferred."""
+    bars = [
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),  # entry bar AND trigger bar
+        _bar(93.0, 95.0, 92.0, 93.0),
+        _flat(93.0),
+    ]
+    got = _resolve_sig([_sig(95.0)], bars, entry_bar=1)
+    assert got.exit_bar == 2  # entry_bar + 1, the earliest fill this kind allows
+    assert got.exit_bar > got.entry_bar  # the record invariant still holds
+
+
+def test_signal_exit_date_comes_from_the_fill_bar_not_the_trigger_bar():
+    bars = [
+        _flat(100.0, "2024-03-01T00:00:00"),
+        _flat(100.0, "2024-03-02T00:00:00"),
+        _bar(100.0, 101.0, 90.0, 94.0, "2024-03-03T00:00:00"),
+        _bar(93.0, 95.0, 92.0, 93.0, "2024-03-04T00:00:00"),
+    ]
+    assert _resolve_sig([_sig(95.0)], bars).exit_date == "2024-03-04"
+
+
+def test_a_signal_firing_on_the_final_bar_emits_no_record():
+    """The documented final-bar rule, identical to the entry side's: no next
+    bar to fill against means no trade, never a fabricated fill past the end
+    of the data."""
+    bars = [_flat(100.0), _flat(100.0), _bar(100.0, 101.0, 90.0, 94.0)]
+    assert _resolve_sig([_sig(95.0)], bars) is None
+
+
+def test_a_signal_firing_on_the_second_to_last_bar_fills_on_the_last_bar():
+    """The boundary one bar earlier than the final-bar rule still produces a
+    record — guards an off-by-one in the other direction."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+        _bar(93.0, 95.0, 92.0, 93.0),
+    ]
+    assert _resolve_sig([_sig(95.0)], bars).exit_bar == 3
+
+
+def test_no_signal_exit_rule_produces_no_exit():
+    """Also pins cross-kind isolation: the stop below breaches on the trigger
+    bar and is still not selected, because this resolver owns one kind."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+        _bar(93.0, 95.0, 92.0, 93.0),
+    ]
+    assert _resolve_sig([StopLossRule(pct=0.05)], bars) is None
+
+
+def test_a_stop_that_would_also_fire_does_not_displace_the_signal_exit():
+    """The positive half of the same isolation: a spec carrying both kinds
+    still reports the signal close here. Which of the two production would
+    actually have filled is the combined simulator's FIFO question, not this
+    module's."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),  # breaches a 5% stop AND closes < 95
+        _bar(93.0, 95.0, 92.0, 93.0),
+    ]
+    got = _resolve_sig([StopLossRule(pct=0.05), _sig(95.0)], bars)
+    assert (got.exit_rule_kind, got.exit_rule_index, got.exit_bar) == ("signal_exit", 1, 3)
+
+
+def test_signal_exit_never_fires_when_no_predicate_is_satisfied():
+    bars = [_flat(100.0), _flat(100.0), _flat(101.0), _flat(102.0)]
+    assert _resolve_sig([_sig(95.0)], bars) is None
+
+
+def test_out_of_range_entry_bar_is_rejected_for_a_signal_exit():
+    with pytest.raises(ValueError, match="out of range"):
+        _resolve_sig([_sig(95.0)], [_flat(100.0), _flat(100.0)], entry_bar=5)
+
+
+# ---------------------------------------------------------------------------
+# resolve_signal_exit — spec-order priority
+# ---------------------------------------------------------------------------
+
+
+def test_lowest_spec_index_signal_rule_wins_when_two_fire_on_one_bar():
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),  # satisfies both thresholds below
+        _bar(93.0, 95.0, 92.0, 93.0),
+    ]
+    assert _resolve_sig([_sig(99.0), _sig(95.0)], bars).exit_rule_index == 0
+
+
+def test_a_later_signal_rule_still_fires_when_the_earlier_one_does_not():
+    """Proves the winner is chosen by spec index, not by rule order luck."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+        _bar(93.0, 95.0, 92.0, 93.0),
+    ]
+    assert _resolve_sig([_sig(50.0), _sig(95.0)], bars).exit_rule_index == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_signal_exit — look-ahead containment
+# ---------------------------------------------------------------------------
+
+
+def test_a_signal_satisfied_only_on_the_last_bar_never_fires_earlier():
+    """The look-ahead regression this module's prefix view exists to prevent.
+
+    The shared evaluator resolves a signal predicate at ``view.length() - 1``.
+    Handing it this module's whole-history view unwrapped would evaluate the
+    LAST bar's close on every step, so this spec would appear to exit at
+    ``entry_bar + 1``. Only the last bar satisfies ``close < 95`` here, and it
+    has no bar to fill against, so the correct answer is no record at all.
+    """
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+    ]
+    assert _resolve_sig([_sig(95.0)], bars) is None
+
+
+def test_a_signal_fires_on_its_own_bar_not_on_a_later_bars_history():
+    """Same containment, stated positively so a wrong answer is a wrong BAR
+    rather than only a missing record: the trigger is bar 3, so the fill is
+    bar 4 — not bar 2, which is what evaluating the last bar every step would
+    produce."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+        _bar(93.0, 95.0, 92.0, 93.0),
+    ]
+    assert _resolve_sig([_sig(95.0)], bars).exit_bar == 4
+
+
+def test_an_indicator_predicate_is_resolved_at_the_trigger_bar():
+    """Indicator reads carry the bar index too, not just bar fields.
+
+    ``close < sma(2)`` holds only on bar 3 (90 < 95); on bar 4 the average has
+    caught up (100 < 95 is false) and on the flat bars close equals the
+    average. Evaluating the final bar every step would find no trigger at all
+    and return ``None``.
+    """
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _flat(100.0),
+        _bar(90.0, 100.0, 90.0, 90.0),
+        _bar(93.0, 100.0, 93.0, 100.0),
+        _flat(100.0),
+    ]
+    rule = SignalExitRule(
+        when=Predicate(lhs="bar.close", op="<", rhs=IndicatorRef(name="sma", params={"period": 2}))
+    )
+    assert _resolve_sig([rule], bars).exit_bar == 4
+
+
+@pytest.mark.parametrize("price", [1.0, 100.0, 10_000.0])
+def test_the_signal_exit_is_independent_of_the_entry_price(price):
+    """Pins the reasoning behind the absent ``entry_slippage_bps`` parameter: a
+    signal predicate reads only the history view, and the non-signal intents
+    the shared evaluator also computes off ``PositionState.entry_price`` are
+    discarded unread. Nothing about the entry can move this record."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+        _bar(93.0, 95.0, 92.0, 93.0),
+    ]
+    got = _resolve_sig([_sig(95.0)], bars, price=price)
+    assert (got.exit_bar, got.exit_price) == (3, 93.0)
+
+
+# ---------------------------------------------------------------------------
+# resolve_signal_exit — fill-price rounding and degenerate fill bars
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("fill_open", "expected"),
+    [(9.123456, 9.1235), (100.123456, 100.12)],
+    ids=["four_decimals_below_ten", "two_decimals_at_or_above_ten"],
+)
+def test_signal_exit_price_is_rounded_to_the_production_bucket(fill_open, expected):
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+        _bar(fill_open, fill_open + 1.0, fill_open - 1.0, fill_open),
+    ]
+    assert _resolve_sig([_sig(95.0)], bars).exit_price == expected
+
+
+@pytest.mark.parametrize(
+    "bad_open",
+    [0.0, -5.0, float("nan"), float("inf"), 0.00004],
+    ids=["zero", "negative", "nan", "inf", "rounds_away_to_zero"],
+)
+def test_an_unusable_fill_bar_open_is_skipped_and_a_later_trigger_still_fires(bad_open):
+    """The design doc's uniform nonpositive-exit-reference rule: a degenerate
+    bar suppresses one candidate fill, it does not abort the walk. ``0.00004``
+    passes the positive-and-finite guard and is caught only by the
+    rounds-away-to-zero check, which is why it is exercised here too."""
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),  # trigger; its fill bar is unusable
+        _bar(bad_open, 95.0, 90.0, 93.0),  # unusable open, but closes < 95 too
+        _bar(93.0, 95.0, 92.0, 93.0),  # so this bar becomes the fill
+    ]
+    got = _resolve_sig([_sig(95.0)], bars)
+    assert (got.exit_bar, got.exit_price) == (4, 93.0)
+
+
+def test_an_unusable_fill_bar_open_with_no_later_trigger_produces_no_record():
+    bars = [
+        _flat(100.0),
+        _flat(100.0),
+        _bar(100.0, 101.0, 90.0, 94.0),
+        _bar(0.0, 101.0, 99.0, 100.0),  # unusable open and closes back above 95
+        _flat(100.0),
+    ]
+    assert _resolve_sig([_sig(95.0)], bars) is None
+
+
+# ---------------------------------------------------------------------------
+# ReferenceSignalExit value-object contract
+# ---------------------------------------------------------------------------
+
+
+def _record_sig(**overrides) -> ReferenceSignalExit:
+    """A valid signal-exit record; ``overrides`` bend one field at a time."""
+    kwargs = {
+        "symbol": "AAA",
+        "entry_bar": 1,
+        "exit_bar": 4,
+        "exit_date": "2024-01-05",
+        "exit_price": 93.0,
+        "exit_rule_kind": "signal_exit",
+        "exit_rule_index": 0,
+    }
+    kwargs.update(overrides)
+    return ReferenceSignalExit(**kwargs)
+
+
+def test_valid_signal_record_constructs():
+    assert _record_sig().exit_price == 93.0
+
+
+def test_signal_record_rejects_a_negative_entry_bar():
+    with pytest.raises(ValueError, match="entry_bar"):
+        _record_sig(entry_bar=-1)
+
+
+@pytest.mark.parametrize("exit_bar", [0, 1])
+def test_signal_record_exit_bar_must_be_strictly_after_entry_bar(exit_bar):
+    """Strict even though a signal predicate may FIRE on ``entry_bar``: the
+    fill is always the following bar, so a same-bar close is unrepresentable."""
+    with pytest.raises(ValueError, match="exit_bar"):
+        _record_sig(entry_bar=1, exit_bar=exit_bar)
+
+
+def test_signal_record_rejects_a_negative_exit_rule_index():
+    with pytest.raises(ValueError, match="exit_rule_index"):
+        _record_sig(exit_rule_index=-1)
+
+
+@pytest.mark.parametrize("price", [0.0, -1.0, float("nan"), float("inf")])
+def test_signal_record_rejects_nonpositive_or_nonfinite_exit_price(price):
+    with pytest.raises(ValueError, match="exit_price"):
+        _record_sig(exit_price=price)
+
+
+def test_signal_record_rejects_a_wrong_exit_rule_kind():
+    with pytest.raises(ValueError, match="exit_rule_kind"):
+        _record_sig(exit_rule_kind="stop_loss")
+
+
+def test_signal_record_is_frozen():
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        _record_sig().exit_price = 1.0
+
+
+def test_signal_record_carries_no_level_index():
+    """Absent by design rather than present-and-``None``, the same stance
+    ``ReferenceStopLossExit`` takes: a signal close never carries a rung."""
+    assert not hasattr(_record_sig(), "level_index")
+
+
+def test_signal_exit_kind_distinguishes_it_from_the_resting_kinds():
+    """The four modeled kinds are distinguishable by ``exit_rule_kind`` alone,
+    which is what a later matching step attributes trades by."""
+    assert {
+        _record_sig().exit_rule_kind,
+        _record().exit_rule_kind,
+        _record_tp().exit_rule_kind,
+        _record_tp(exit_rule_kind="scaled_take_profit", level_index=1).exit_rule_kind,
+    } == {
+        "signal_exit",
+        "stop_loss",
+        "take_profit",
+        "scaled_take_profit",
+    }
+
+
+# ---------------------------------------------------------------------------
+# replay_signal_exits
+# ---------------------------------------------------------------------------
+
+
+def test_signal_replay_opens_from_entry_rules_and_closes_on_the_signal():
+    spec = _spec(exit_rules=[_sig(95.0)])
+    bars = {
+        "AAA": [
+            _flat(101.0),  # entry predicate fires (close > 100)
+            _flat(100.0),  # entry fills here at open 100
+            _bar(100.0, 101.0, 90.0, 94.0),  # signal predicate fires
+            _bar(93.0, 95.0, 92.0, 93.0),  # fills at this open
+        ]
+    }
+    (got,) = replay_signal_exits(spec, bars)
+    assert (got.symbol, got.entry_bar, got.exit_bar, got.exit_price) == ("AAA", 1, 3, 93.0)
+
+
+def test_signal_replay_returns_nothing_when_no_entry_fires():
+    spec = _spec(exit_rules=[_sig(95.0)])
+    bars = {"AAA": [_flat(50.0), _flat(50.0), _bar(50.0, 50.0, 10.0, 20.0), _flat(20.0)]}
+    assert replay_signal_exits(spec, bars) == []
+
+
+def test_signal_replay_returns_nothing_when_the_position_never_signals():
+    spec = _spec(exit_rules=[_sig(95.0)])
+    bars = {"AAA": [_flat(101.0), _flat(100.0), _flat(101.0), _flat(102.0)]}
+    assert replay_signal_exits(spec, bars) == []
+
+
+def test_signal_replay_handles_symbols_independently():
+    spec = _spec(exit_rules=[_sig(95.0)])
+    signals = [_flat(101.0), _flat(100.0), _bar(100.0, 101.0, 90.0, 94.0), _flat(93.0)]
+    never_signals = [_flat(101.0), _flat(100.0), _flat(101.0), _flat(102.0)]
+    got = replay_signal_exits(spec, {"AAA": signals, "BBB": never_signals})
+    assert [r.symbol for r in got] == ["AAA"]
+
+
+def test_signal_replay_respects_target_symbol_gating():
+    spec = _spec(exit_rules=[_sig(95.0)], target_symbols=["AAA"])
+    series = [_flat(101.0), _flat(100.0), _bar(100.0, 101.0, 90.0, 94.0), _flat(93.0)]
+    got = replay_signal_exits(spec, {"AAA": list(series), "ZZZ": list(series)})
+    assert [r.symbol for r in got] == ["AAA"]
+
+
+def test_signal_replay_indexes_against_the_working_rule_list():
+    """A short spec gets the safety stop appended, so the authored signal rule
+    keeps its own index while the injected stop takes ``len(spec.exit_rules)``
+    — the indices must agree across every kind's replay."""
+    spec = _spec(exit_rules=[_sig(95.0)], entry_side="short")
+    bars = {
+        "AAA": [
+            _flat(101.0),
+            _flat(100.0),
+            _bar(100.0, 101.0, 90.0, 94.0),
+            _bar(93.0, 95.0, 92.0, 93.0),
+        ]
+    }
+    assert replay_signal_exits(spec, bars)[0].exit_rule_index == 0
+    assert len(working_exit_rules(spec)) == 2
+
+
+def test_signal_replay_rejects_a_custom_code_spec():
+    spec = _spec(exit_rules=[_sig(95.0)])
+    spec.requires_custom_code = True
+    with pytest.raises(ValueError, match="requires_custom_code"):
+        replay_signal_exits(spec, {"AAA": [_flat(101.0), _flat(100.0)]})
+
+
+def test_signal_replay_does_not_mutate_its_inputs():
+    spec = _spec(exit_rules=[_sig(95.0)], entry_side="short")
+    bars = {
+        "AAA": [
+            _flat(101.0),
+            _flat(100.0),
+            _bar(100.0, 101.0, 90.0, 94.0),
+            _bar(93.0, 95.0, 92.0, 93.0),
+        ]
+    }
+    exit_rules_before = list(spec.exit_rules)
+    bars_before = {k: list(v) for k, v in bars.items()}
+    replay_signal_exits(spec, bars)
+    assert list(spec.exit_rules) == exit_rules_before
+    assert {k: list(v) for k, v in bars.items()} == bars_before
+
+
+def test_signal_replay_is_deterministic():
+    spec = _spec(exit_rules=[_sig(95.0)])
+    bars = {
+        "AAA": [
+            _flat(101.0),
+            _flat(100.0),
+            _bar(100.0, 101.0, 90.0, 94.0),
+            _bar(93.0, 95.0, 92.0, 93.0),
+        ]
+    }
+    assert replay_signal_exits(spec, bars) == replay_signal_exits(spec, bars)

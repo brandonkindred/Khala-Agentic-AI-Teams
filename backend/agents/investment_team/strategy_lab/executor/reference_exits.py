@@ -1,16 +1,26 @@
-"""Exit-side replay for the reference-ledger simulator: resting-order exits.
+"""Exit-side replay for the reference-ledger simulator.
 
 Second half of the reference-ledger simulator designed in
 ``system_design/reference_ledger_trade_model.md``, attaching exit modelling to
-the entry-side replay in :mod:`reference_entries`. Two exit rule kinds are
-covered so far: ``StopLossRule`` across all four variants (``entry_price`` /
-trailing bases x ``market`` / ``limit`` styles), and the take-profit family —
-standalone ``TakeProfitRule`` and laddered ``ScaledTakeProfitRule``. Signal
-exits and the combined simulator that lets every kind compete on the same bar
-are later steps.
+the entry-side replay in :mod:`reference_entries`. All four exit rule kinds
+are covered: ``StopLossRule`` across all four variants (``entry_price`` /
+trailing bases x ``market`` / ``limit`` styles), the take-profit family —
+standalone ``TakeProfitRule`` and laddered ``ScaledTakeProfitRule`` — and
+``SignalExitRule``. The combined simulator that lets every kind compete on the
+same bar is a later step; each kind is still replayed here as if the others'
+rules did not exist.
+
+Three of the four are RESTING-ORDER kinds; ``SignalExitRule`` is not
+------------------------------------------------------------------
+The stop-loss and take-profit families are modeled as orders resting on the
+book: they fill on their own trigger bar, at a level fixed in advance, and are
+not eligible on the bar their order materializes. ``SignalExitRule`` is
+deliberately NOT modeled that way — see :func:`resolve_signal_exit` for the
+full argument and the two concrete behavioral differences (entry-bar trigger
+eligibility, and a fill deferred to the next bar's open).
 
 Trigger decisions and per-position rule-priority resolution are NOT
-re-derived here, for either exit kind this module covers: stop-loss comes
+re-derived here, for any exit kind this module covers: stop-loss comes
 from the shared, pure ``rule_compiler.stop_loss_triggers`` (and its
 ``stop_loss_level`` / ``stop_limit_prices`` geometry), and the take-profit
 family's trigger decision AND its per-bar winner resolution both come from
@@ -58,10 +68,13 @@ Scope limits deliberately left to later steps
 * No quantity/sizing, capital ledger, or risk-limit admission gates; no
   cross-symbol merged ``(timestamp, symbol)`` timeline; no competition between
   the two families this module DOES cover and the ones it does not
-  (``StopLossRule`` vs. the take-profit family, or either vs. a signal exit) —
-  a stop-loss replay and a take-profit-family replay over the same spec are
-  each modeled as if the other's rules did not exist, so either may fire on a
-  bar where the full simulator would not have had a position left to close.
+  (``StopLossRule`` vs. the take-profit family vs. ``SignalExitRule``) — each
+  of the three replays over the same spec is modeled as if the other kinds'
+  rules did not exist, so any of them may fire on a bar where the full
+  simulator would not have had a position left to close. In particular the
+  design doc's FIFO precedence rule — a resting order materialized at entry
+  beats a ``signal_exit`` close queued on the same bar — has no expression
+  here, because no single walk in this module ever sees both.
 * The take-profit family models no true multi-bar entry continuation: this
   simulator's entries always fill instantaneously in one shot
   (:func:`~.reference_entries.replay_entry_rules`), so the live engine's
@@ -73,9 +86,9 @@ Scope limits deliberately left to later steps
   ladder-advanced — is ever examined before the bar after it can legally
   fire. No separate "eligible bar" state is needed to enforce that; see
   ``_LadderCursor``'s and ``_RestingTakeProfitFamily``'s own docstrings.
-* ``ReferenceStopLossExit``/``ReferenceTakeProfitExit`` are correspondingly
-  narrower than the design doc's ``ReferenceTrade``, exactly as
-  ``ReferenceEntryFill`` is on the entry side: their fields match
+* ``ReferenceStopLossExit``/``ReferenceTakeProfitExit``/``ReferenceSignalExit``
+  are correspondingly narrower than the design doc's ``ReferenceTrade``,
+  exactly as ``ReferenceEntryFill`` is on the entry side: their fields match
   ``ReferenceTrade``'s exit-side fields 1:1 in name/type/semantics so a later
   step can join an entry fill and an exit into a full ``ReferenceTrade``
   without renaming anything.
@@ -90,13 +103,16 @@ from typing import TYPE_CHECKING, List, Literal, Mapping, NamedTuple, Optional, 
 from ...models import StrategySpec
 from ..spec_dsl import (
     ExitRule,
+    IndicatorRef,
     ScaledTakeProfitRule,
+    SignalExitRule,
     StopLossRule,
     TakeProfitRule,
     first_side_stop_factor,
     stop_caps_side,
 )
-from .reference_entries import ReferenceEntryFill, replay_entry_rules
+from .predicate_evaluator import HistoryView, PandasHistoryView
+from .reference_entries import ReferenceEntryFill, bars_to_frame, replay_entry_rules
 from .rule_compiler import (
     BarSnapshot,
     PositionState,
@@ -284,6 +300,73 @@ class ReferenceTakeProfitExit:
             raise ValueError(
                 f"level_index must be None when exit_rule_kind is 'take_profit', got {self.level_index!r}"
             )
+
+
+@dataclass(frozen=True)
+class ReferenceSignalExit:
+    """One reference position closed by a modeled ``SignalExitRule``.
+
+    Shaped exactly like :class:`ReferenceStopLossExit` — same fields, same
+    validation, ``level_index`` absent by design for the same reason (a
+    ``signal_exit`` close never carries a ladder rung, so a field that could
+    only ever hold ``None`` carries no information). Every field matches
+    ``ReferenceTrade``'s same-named field in type and semantics, so joining one
+    of these with its :class:`~.reference_entries.ReferenceEntryFill` yields a
+    ``ReferenceTrade`` with no renaming.
+
+    ``exit_bar`` is the FILL bar, one past the bar whose predicate fired — not
+    the trigger bar. That distinction is unique to this record type: for both
+    resting kinds the trigger bar and the fill bar are the same bar. It is also
+    what keeps the shared ``entry_bar < exit_bar`` invariant true even though a
+    ``signal_exit``'s predicate, unlike a resting order, IS eligible on
+    ``entry_bar`` itself: the earliest possible trigger is ``entry_bar``, so
+    the earliest possible fill is ``entry_bar + 1``. A future change that ever
+    filled a signal exit on its own trigger bar would break that invariant, and
+    should — the invariant is load-bearing, not incidental.
+
+    Invariants (all enforced in ``__post_init__``): ``0 <= entry_bar <
+    exit_bar``; ``exit_price`` is finite and positive; ``exit_rule_index >= 0``;
+    ``exit_rule_kind == "signal_exit"``.
+    """
+
+    symbol: str
+    entry_bar: int
+    exit_bar: int
+    exit_date: str
+    exit_price: float
+    exit_rule_kind: Literal["signal_exit"]
+    exit_rule_index: int
+
+    def __post_init__(self) -> None:
+        """Enforce this record's structural contract at construction.
+
+        Fail-fast at construction rather than trusting the one producer below,
+        matching ``ReferenceStopLossExit``/``ReferenceTakeProfitExit``: a record
+        built directly by a test or a later matching module's adapter cannot
+        exist in an invalid state either.
+
+        Preconditions: none beyond typing.
+        Postconditions: raises ``ValueError`` when ``entry_bar < 0``,
+        ``exit_bar <= entry_bar``, ``exit_rule_index < 0``, ``exit_price`` is
+        not a positive finite number, or ``exit_rule_kind`` is anything but
+        ``"signal_exit"``; otherwise the instance is structurally valid.
+        ``symbol`` and ``exit_date`` are recorded as given, not validated — the
+        same stance the sibling records take.
+        """
+        if self.entry_bar < 0:
+            raise ValueError(f"entry_bar must be >= 0, got {self.entry_bar!r}")
+        if self.exit_bar <= self.entry_bar:
+            raise ValueError(
+                f"exit_bar must be > entry_bar ({self.entry_bar!r}), got {self.exit_bar!r}"
+            )
+        if self.exit_rule_index < 0:
+            raise ValueError(f"exit_rule_index must be >= 0, got {self.exit_rule_index!r}")
+        if not (self.exit_price > 0 and math.isfinite(self.exit_price)):
+            raise ValueError(
+                f"exit_price must be a positive finite number, got {self.exit_price!r}"
+            )
+        if self.exit_rule_kind != "signal_exit":
+            raise ValueError(f"exit_rule_kind must be 'signal_exit', got {self.exit_rule_kind!r}")
 
 
 def _decimals_for(reference_price: float) -> int:
@@ -1250,6 +1333,318 @@ def replay_take_profit_family_exits(
             bars[entry.symbol],
             entry_slippage_bps=entry_slippage_bps,
         )
+        if found is not None:
+            out.append(found)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Signal exits: ``SignalExitRule`` — the one NON-resting kind
+# ---------------------------------------------------------------------------
+
+
+def signal_exit_rules(rules: Sequence[ExitRule]) -> List[Tuple[int, SignalExitRule]]:
+    """The ``SignalExitRule`` members of ``rules``, in spec order.
+
+    Same "no side filtering" stance as :func:`take_profit_rules` — and for a
+    stronger reason: a signal exit's trigger is a predicate over bar history
+    and indicator values, which carries no notion of the position's side at
+    all (contrast ``StopLossRule.basis``, where ``trailing_low`` is
+    structurally a short-side concept). Every ``SignalExitRule`` in ``rules``
+    is a live candidate for a position of either side.
+
+    Preconditions: ``rules`` are ``ExitRule`` members (non-signal members are
+    valid input and are skipped).
+    Postconditions: returns ``(spec_index, rule)`` pairs in ascending spec
+    index, containing exactly the ``SignalExitRule``\\ s in ``rules``. The
+    indices are indices into ``rules`` as given, so they are the
+    ``exit_rule_index`` values a fired rule records.
+    """
+    return [(idx, rule) for idx, rule in enumerate(rules) if isinstance(rule, SignalExitRule)]
+
+
+class _PrefixHistoryView:
+    """A ``HistoryView`` over ``view``'s first ``i + 1`` bars.
+
+    Exists to bridge one convention mismatch, and it is the sharpest trap in
+    this module. The shared evaluator resolves a ``SignalExitRule``'s predicate
+    at ``view.length() - 1`` (``rule_compiler._rule_triggers``), never at a
+    caller-supplied index: in the live engine the view is a STREAMING one whose
+    last bar is by construction the bar being processed, so "the last bar" and
+    "now" are the same thing. This module's view is a
+    :class:`~.predicate_evaluator.PandasHistoryView` over a symbol's WHOLE bar
+    history, where they are emphatically not. Passing that full view straight
+    to the evaluator would silently evaluate every position's signal predicate
+    against the FINAL bar of the dataset on every step — textbook look-ahead,
+    and one that raises no error and produces plausible-looking output (every
+    spec would appear to exit on ``entry_bar + 1``, or never). Truncating
+    ``length()`` is what makes "now" mean bar ``i`` again.
+
+    Delegating ``bar_field``/``indicator`` to the wrapped view rather than
+    rebuilding a truncated ``PandasHistoryView`` per bar is deliberate on two
+    counts. It is O(1) per bar instead of recomputing every indicator series
+    over a growing prefix (O(n^2) across the walk). More importantly it reuses
+    the SAME cached series the entry side already evaluates its predicates
+    against, so an entry predicate and a signal-exit predicate reading the same
+    indicator on the same bar can never disagree within this module.
+
+    Safety of that delegation is a property of the evaluator, not an
+    assumption: ``evaluate_predicate`` reads exactly two indices — ``i`` and,
+    for ``cross_above``/``cross_below`` only, ``i - 1`` — and ``evaluate_tree``
+    just recurses at the same ``i``. Nothing reads forward of ``i``, so
+    exposing the wrapped view's later rows through ``bar_field``/``indicator``
+    is unreachable rather than merely unlikely. (The indicator SERIES are
+    computed over the full frame, which is the entry side's own long-standing
+    stance for causal indicators; it is unchanged here, not newly introduced.)
+
+    Invariants: ``length()`` is constant at ``i + 1``; the wrapped view is
+    never mutated.
+    """
+
+    __slots__ = ("_view", "_length")
+
+    def __init__(self, view: HistoryView, i: int) -> None:
+        """Wrap ``view``, exposing its first ``i + 1`` bars.
+
+        Preconditions: ``0 <= i < view.length()`` — a prefix past the end of
+        the wrapped view would let the evaluator read an out-of-range index,
+        and a negative one would make ``length()`` non-positive, which
+        ``_rule_triggers`` reads as "no bars" rather than as the bug it is.
+        Postconditions: ``length()`` returns ``i + 1``; raises ``ValueError``
+        when the precondition is violated.
+        """
+        if not 0 <= i < view.length():
+            raise ValueError(f"prefix index {i!r} is out of range for {view.length()!r} bars")
+        self._view = view
+        self._length = i + 1
+
+    def length(self) -> int:
+        """Postconditions: returns ``i + 1``, so ``length() - 1`` is ``i``."""
+        return self._length
+
+    def bar_field(self, field_name: str, i: int) -> float:
+        """Postconditions: the wrapped view's value, unmodified.
+
+        Preconditions: ``i`` is within this prefix — guaranteed by the
+        evaluator, which only ever reads ``length() - 1`` and ``length() - 2``.
+        """
+        return self._view.bar_field(field_name, i)
+
+    def indicator(self, ref: IndicatorRef, i: int) -> Optional[float]:
+        """Postconditions: the wrapped view's value, unmodified.
+
+        Preconditions: as :meth:`bar_field`.
+        """
+        return self._view.indicator(ref, i)
+
+
+def resolve_signal_exit(
+    rules: Sequence[ExitRule],
+    entry: ReferenceEntryFill,
+    symbol_bars: "Sequence[Bar]",
+) -> Optional[ReferenceSignalExit]:
+    """Model the ``SignalExitRule`` close of one already-opened reference position.
+
+    The per-position core of :func:`replay_signal_exits`, exposed separately so
+    a later step can drive it against a position whose entry came from
+    somewhere other than a whole-spec replay — mirrors
+    :func:`resolve_stop_loss_exit`/:func:`resolve_take_profit_family_exit`.
+
+    Why resting-order semantics are deliberately NOT applied here
+    ------------------------------------------------------------
+    The other three rule kinds this module covers are modeled as resting
+    orders — filling on their own trigger bar, at a level fixed in advance —
+    because the engine's resting-exit migration makes that their target
+    behavior, and modelling today's next-bar-open approximation instead would
+    make every one of those trades diverge trivially the moment the migration
+    lands (see this module's "Target behavior, not shipped behavior" section).
+    ``SignalExitRule`` is the kind that migration deliberately leaves alone,
+    and for a reason that is not scheduling: a predicate over a bar's OHLC and
+    indicator values is only decidable once that bar has CLOSED, so there is no
+    resting level to sit on the book in advance and no honest way to fill
+    inside the trigger bar. Next-bar-open is the correct, look-ahead-safe fill,
+    today and after the migration. Modelling this kind like the other three
+    would therefore not anticipate a coming engine change — it would invent a
+    divergence on every single signal exit, in a module whose entire purpose is
+    to be an oracle the engine can be checked against.
+
+    Two behavioral differences follow, and both are load-bearing:
+
+    * **Eligible on ``entry_bar`` itself.** A resting order is stamped with its
+      materialization bar and skipped until strictly after it, so the resting
+      kinds start at ``entry_bar + 1``. A signal exit has no order to
+      materialize; production's dispatcher evaluates its predicate from the
+      first bar the position exists, with the ``just_opened`` gate already
+      ``False`` for the market entries this simulator fills. The walk below
+      therefore starts at ``entry.entry_bar``.
+    * **Fill bar is one past the trigger bar.** ``exit_bar = trigger_bar + 1``,
+      the only kind here where the two differ.
+
+    Cross-kind competition is still out of scope, exactly as it is for the
+    other two replays: the design doc's FIFO rule (a resting order
+    materialized at entry beats a ``signal_exit`` close queued on the same bar)
+    belongs to the combined simulator, not here. This walk selects only
+    ``signal_exit`` intents and ignores every other kind the shared evaluator
+    reports, the same way :class:`_RestingTakeProfitFamily` ignores stop-loss
+    intents.
+
+    Preconditions:
+        - ``rules`` is the WORKING exit-rule list from
+          :func:`working_exit_rules` (not raw ``spec.exit_rules``), so every
+          index is the one a fired rule should record.
+        - ``entry`` was produced against ``symbol_bars``: ``0 <= entry.entry_bar
+          < len(symbol_bars)``.
+
+    Postconditions:
+        - Returns the close produced by the FIRST bar at or after
+          ``entry.entry_bar`` whose lowest-spec-index ``SignalExitRule``
+          predicate fires and whose following bar supplies a usable fill price,
+          or ``None`` in any of three cases: ``rules`` contains no
+          ``SignalExitRule`` at all (returned immediately, before any bar
+          walk); no predicate ever fires; or every firing is dropped by one of
+          the two rules below.
+        - **Final-bar rule.** A predicate that fires on the last bar of
+          ``symbol_bars`` has no next bar to fill against and emits no record,
+          rather than fabricating a fill past the end of the data. This is the
+          exact treatment :func:`~.reference_entries.replay_entry_rules` gives
+          a final-bar entry trigger, and like it the walk then ends — there is
+          no later bar to retry from.
+        - **Nonpositive fill-bar open.** A firing whose fill bar's ``open`` is
+          not a positive finite number — or which rounds away to zero in
+          production's own price bucket — does not fire on that bar, exactly as
+          if the predicate had not been satisfied, and the walk continues: a
+          later bar's firing may still produce a record. Mirrors the design
+          doc's uniform nonpositive-exit-reference rule and the entry side's
+          identical fill-bar guard.
+        - The returned record's ``exit_price`` is the fill bar's open rounded
+          to production's own bid-price bucket (the pre-slippage reference
+          level ``ReferenceTrade.exit_price`` is defined as), its ``exit_date``
+          comes from the FILL bar, and its ``exit_rule_index`` indexes
+          ``rules``.
+
+    Note the absent ``entry_slippage_bps`` parameter, which both sibling
+    resolvers take: a ``SignalExitRule``'s trigger reads only the
+    ``HistoryView`` — never ``PositionState.entry_price`` or its watermarks —
+    and its fill price is the fill bar's own open, so slippage provably cannot
+    change any output on this path. Taking the parameter would be dead weight
+    with a live failure mode attached: routing it through
+    :func:`entry_price_basis` would let a degenerate anchor raise on a walk
+    that never uses the anchor.
+
+    Invariants: does not mutate ``rules``, ``entry``, or ``symbol_bars``, and
+    is deterministic in its inputs.
+    """
+    n = len(symbol_bars)
+    if not 0 <= entry.entry_bar < n:
+        raise ValueError(f"entry.entry_bar {entry.entry_bar!r} is out of range for {n} bars")
+    if not signal_exit_rules(rules):
+        return None
+    # Built once per position and shared by every bar's prefix wrapper, so each
+    # indicator series is computed at most once for the whole walk. Constructed
+    # from the same ``bars_to_frame`` the entry side uses, so both sides index
+    # identical rows.
+    view = PandasHistoryView(bars_to_frame(symbol_bars), {})
+    # Constant across the walk: a signal predicate reads none of these fields
+    # (see the docstring's note on the absent slippage parameter). ``qty`` is
+    # the nominal 1.0 this module's other resolvers also use — the shared
+    # evaluator only requires it to be positive — and the pre-slippage
+    # ``entry.entry_price`` stands in for the anchor the non-signal rules
+    # would want, since every intent they produce here is discarded unread.
+    position = PositionState(
+        symbol=entry.symbol,
+        side=entry.side,
+        qty=1.0,
+        entry_price=entry.entry_price,
+        high_since_entry=entry.entry_price,
+        low_since_entry=entry.entry_price,
+    )
+    for trigger_bar in range(entry.entry_bar, n):
+        intents = evaluate_exit_rules_for_position(
+            rules,
+            entry.symbol,
+            position,
+            _snapshot(symbol_bars[trigger_bar]),
+            view=_PrefixHistoryView(view, trigger_bar),
+            first_only=False,
+        )
+        winner = next(
+            (intent for intent in intents if intent.rule_kind == "signal_exit"),
+            None,
+        )
+        if winner is None:
+            continue
+        exit_bar = trigger_bar + 1
+        if exit_bar >= n:
+            break  # final-bar rule: no next bar to fill against
+        fill_bar = symbol_bars[exit_bar]
+        raw_open = fill_bar.open
+        if not (raw_open > 0 and math.isfinite(raw_open)):
+            continue  # fill-bar open guard: drop this firing, keep scanning
+        exit_price = _round_price(raw_open)
+        # A price below its own bucket's resolution survives the guard above
+        # and still rounds away to zero (``round(0.00004, 4)`` is ``0.0``),
+        # which ``ReferenceSignalExit`` would reject. Treat it as the same
+        # unusable-fill case rather than letting it raise: the design doc's
+        # uniform rule is that a degenerate bar suppresses one candidate fill,
+        # never aborts the run.
+        if not exit_price > 0:
+            continue
+        return ReferenceSignalExit(
+            symbol=entry.symbol,
+            entry_bar=entry.entry_bar,
+            exit_bar=exit_bar,
+            # ``Bar.timestamp`` is ISO-8601, so its first 10 characters are the
+            # date — production truncates ``bar.timestamp[:10]`` identically.
+            # Taken from the FILL bar, not the trigger bar: production stamps
+            # the close with the bar it settled on.
+            exit_date=fill_bar.timestamp[:10],
+            exit_price=exit_price,
+            exit_rule_kind="signal_exit",
+            exit_rule_index=winner.rule_index,
+        )
+    return None
+
+
+def replay_signal_exits(
+    spec: StrategySpec,
+    bars: "Mapping[str, Sequence[Bar]]",
+) -> List[ReferenceSignalExit]:
+    """Replay ``spec``'s ``SignalExitRule`` exits over ``bars``.
+
+    Opens reference positions with the shared entry-side replay, then models
+    each one's signal close at the next bar's open. Mirrors
+    :func:`replay_stop_loss_exits`'s shape, minus the slippage parameter that
+    cannot affect this kind (see :func:`resolve_signal_exit`).
+
+    Preconditions:
+        - ``spec`` is a validated ``StrategySpec`` with ``requires_custom_code``
+          False.
+        - ``bars`` maps symbol to a chronological ``Bar`` sequence (an empty
+          sequence is skipped, not an error, mirroring the sibling replays'
+          own stance).
+
+    Postconditions:
+        - Returns at most one ``ReferenceSignalExit`` per symbol, in the order
+          the entry replay yields positions. Fewer whenever a position is still
+          open when its bars run out, or the spec has no ``SignalExitRule`` at
+          all.
+        - Every returned record's ``exit_rule_index`` indexes
+          :func:`working_exit_rules`'s list.
+
+    Invariants:
+        - No side effects: does not mutate ``spec`` or ``bars``, and performs
+          no I/O.
+        - Deterministic: identical ``(spec, bars)`` always produces an
+          identical list — this function is a pure function of its two
+          arguments, with no live-engine dependency.
+        - Imports no module reaching ``trading_service/service.py`` or the four
+          forbidden ``trading_service/engine/`` modules (see this module's
+          docstring).
+    """
+    rules = working_exit_rules(spec)
+    out: List[ReferenceSignalExit] = []
+    for entry in replay_entry_rules(spec, bars):
+        found = resolve_signal_exit(rules, entry, bars[entry.symbol])
         if found is not None:
             out.append(found)
     return out
