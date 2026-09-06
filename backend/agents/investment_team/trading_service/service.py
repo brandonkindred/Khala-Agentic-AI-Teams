@@ -571,6 +571,13 @@ class _EngineExitDispatcher:
       ``client_order_id``\\ s. Strategy ids are emitted client-side; engine
       ids must not collide, hence the ``e`` prefix vs the strategy's
       ``c`` prefix.
+    * ``exclude_rule_index`` — the spec index of a rule ceded to a
+      resting-order mechanism for this run (currently only the
+      entry_price/market stop-loss migration's resting ``STOP``
+      attachment — see ``_EngineEntryDispatcher.resting_stop_loss_enabled``);
+      ``None`` (the default) evaluates every rule as today. Enforces mutual
+      exclusion between the two mechanisms: see
+      ``rule_compiler._filtered_intent_for_rule`` for where this is applied.
 
     Empty ``exit_rules`` makes :meth:`maybe_emit` a no-op.
 
@@ -585,6 +592,7 @@ class _EngineExitDispatcher:
     engine_exit_bindings: Dict[str, str] = field(default_factory=dict)
     _next_seq: int = 0
     views: Optional[Dict[str, StreamingHistoryView]] = None
+    exclude_rule_index: Optional[int] = None
 
     # ------------------------------------------------------------------
 
@@ -1078,11 +1086,17 @@ class _EngineExitDispatcher:
         after the ladder) must still be free to fire this bar, so the rung is
         skipped rather than standing the whole bar down.
 
+        ``self.exclude_rule_index`` (constructor-set, not a ``maybe_emit`` parameter
+        since it is fixed for the whole run) drops the rule ceded to a resting-order
+        mechanism outright, before the pure evaluator even builds its intent — see
+        :class:`_EngineExitDispatcher`'s docstring for the mutual-exclusion contract
+        this enforces.
+
         Preconditions: ``tracked``/``pos`` describe the same open position
         (``pos.qty > 0``); ``cur_bar`` exposes ``high``/``low``/``close``.
         Postconditions: returns an ``ExitIntent`` to emit, or ``None`` (no rule
-        triggered, or the only trigger is an excluded resting limit stop / deferred
-        partial scale-out).
+        triggered, the only trigger is an excluded resting limit stop / deferred
+        partial scale-out, or the only trigger is the rule at ``exclude_rule_index``).
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         # Hot path: evaluate this one position directly — no per-bar ``{sym: ...}``
@@ -1107,6 +1121,7 @@ class _EngineExitDispatcher:
             cursor_map=cursor_map,
             exclude_limit_style=exclude_resting_limit_stop,
             exclude_scaled=exclude_scaled,
+            exclude_rule_index=self.exclude_rule_index,
         )
 
     @cached_property
@@ -1885,6 +1900,66 @@ def _is_resting_stop_loss(rule: Any) -> bool:
     )
 
 
+# Env var gating which of the two mechanisms handles the resting-eligible
+# entry_price/market stop-loss variant for a run — see
+# ``_resting_stop_loss_enabled`` for the default and
+# ``_first_resting_stop_loss_index`` for how the two mechanisms are kept
+# mutually exclusive once this selects the resting path.
+_STOP_LOSS_RESTING_ORDER_ENV = "STOP_LOSS_RESTING_ORDER_ENABLED"
+
+
+def _resting_stop_loss_enabled() -> bool:
+    """Whether this run submits the resting-eligible entry_price/market
+    stop-loss variant as a resting ``STOP`` order (the #7495 migration)
+    instead of leaving it to the legacy bar-close evaluator.
+
+    Defaults to ``False`` — the bar-close evaluator (``_EngineExitDispatcher``
+    / ``rule_compiler.stop_loss_level``) is the long-established mechanism
+    every existing spec already runs against, including the vast majority of
+    ``StopLossRule`` usage across the test suite, which relies on that
+    rule's own defaults (``basis="entry_price"``, ``style="market"``) and so
+    is resting-eligible by construction. The resting-order path stays
+    opt-in, via ``STOP_LOSS_RESTING_ORDER_ENABLED=true``, until the
+    migration's remaining variants exist and the bar-close detection path is
+    removed for good — a run that sets no explicit configuration keeps
+    today's bar-close behavior unchanged.
+
+    The two mechanisms are mutually exclusive for the affected rule by
+    construction, not by convention: see ``_first_resting_stop_loss_index``
+    (the single source of "which ``exit_rules`` entry this migration step
+    affects") and its two call sites — ``_EngineEntryDispatcher.__post_init__``
+    attaches the resting order only when this returns ``True``, and
+    ``TradingService.run`` excludes that same rule index from
+    ``_EngineExitDispatcher``'s bar-close evaluation only when this returns
+    ``True`` — so a bar can never see both a resting-stop fill and a
+    bar-close exit for the same rule.
+    """
+    return os.environ.get(_STOP_LOSS_RESTING_ORDER_ENV, "false").strip().lower() in {
+        "true",
+        "1",
+        "yes",
+    }
+
+
+def _first_resting_stop_loss_index(exit_rules: Sequence[Any]) -> Optional[int]:
+    """Index of the first resting-eligible ``StopLossRule`` in ``exit_rules``.
+
+    Single source of "which rule this migration step affects" — shared by
+    ``_EngineEntryDispatcher.__post_init__`` (which rule to resolve a resting
+    attachment for) and ``TradingService.run`` (which rule index to exclude
+    from the bar-close evaluator), so the two can never pick different rules
+    when a spec carries more than one resting-eligible ``StopLossRule``
+    (unusual, but not DSL-forbidden) — both mirror ``first_side_stop_factor``'s
+    spec-order "first wins" precedent by construction, since both scan the
+    same list with the same predicate.
+
+    Postconditions: returns the lowest ``i`` such that
+    ``_is_resting_stop_loss(exit_rules[i])``, or ``None`` if no rule
+    qualifies.
+    """
+    return next((i for i, r in enumerate(exit_rules) if _is_resting_stop_loss(r)), None)
+
+
 def _stop_loss_rule_to_leg_specs(rule: StopLossRule) -> List[ExitLegSpec]:
     """Translate a resting-eligible ``StopLossRule`` into a generic exit leg.
 
@@ -1997,6 +2072,14 @@ class _EngineEntryDispatcher:
     #: sizes. Empty (the default, used by raw-sizing unit tests) is treated as
     #: whole-share.
     asset_class: str = ""
+    #: Whether the resting-eligible entry_price/market ``StopLossRule`` (if
+    #: any) is attached here as a resting ``STOP`` order. Defaults to
+    #: ``_resting_stop_loss_enabled()`` (env-gated, off by default) so a
+    #: dispatcher built without this argument matches the run's feature
+    #: check; unit tests exercising this path directly override it explicitly.
+    #: See that function's docstring for the full mutual-exclusion contract
+    #: with ``_EngineExitDispatcher.exclude_rule_index``.
+    resting_stop_loss_enabled: bool = field(default_factory=_resting_stop_loss_enabled)
     _next_seq: int = 0
 
     def __post_init__(self) -> None:
@@ -2034,66 +2117,60 @@ class _EngineEntryDispatcher:
         )
         # First resting-eligible entry_price/market StopLossRule (if any),
         # attached to every entry order the same way ``self._bracket`` is —
-        # see ``_is_resting_stop_loss`` for the eligibility bound and why the
-        # short-safety auto-stop is deliberately excluded. "First" mirrors
-        # ``first_side_stop_factor``'s spec-order precedent for picking among
-        # multiple candidate stop rules.
+        # but ONLY when ``resting_stop_loss_enabled`` selects this mechanism
+        # for the run (see ``_resting_stop_loss_enabled`` for the default and
+        # the mutual-exclusion contract). ``None`` when the flag is off, so
+        # ``_resting_stop_loss_attachments`` is a no-op and the rule is left
+        # exactly as it behaves without this migration — bar-close-only.
+        # ``_first_resting_stop_loss_index`` is the single source of "which
+        # rule", shared with ``TradingService.run``'s exclusion of that same
+        # index from ``_EngineExitDispatcher`` (see ``_is_resting_stop_loss``
+        # for the eligibility bound and why the short-safety auto-stop is
+        # deliberately excluded).
         #
-        # UNLIKE ``self._bracket``, this rule is NOT also excluded from the
-        # bar-by-bar exit evaluator (``_EngineExitDispatcher`` still calls
-        # ``evaluate_exit_rules``/``first_exit_intent_for_position`` over the
-        # unmodified ``exit_rules``, and ``rule_compiler._intent_for_rule``
-        # has no skip for this rule kind, unlike its unconditional
-        # ``OcoBracketRule`` skip). So on a bar where the level is crossed,
-        # BOTH the resting STOP child (intrabar) and the bar-close evaluator
-        # (next bar's open) can act on the same rule — a known, deliberate
-        # transitional state for this migration step. The stale-continuation
-        # guard in ``FillSimulator.process_bar`` drops a bar-close close that
-        # arrives after the resting child already closed the position, so
-        # this does not double-close in practice.
+        # UNLIKE ``self._bracket``, this rule is not unconditionally excluded
+        # from the bar-by-bar exit evaluator at the ``rule_compiler``
+        # chokepoint (``OcoBracketRule`` is, unconditionally, since a bracket
+        # is never bar-close-evaluated regardless of any run configuration).
+        # This rule kind CAN be bar-close-evaluated — via
+        # ``rule_compiler._intent_for_rule`` — so the two mechanisms must be
+        # kept mutually exclusive by construction instead: when this dispatcher
+        # attaches the resting order for a rule, ``TradingService.run`` passes
+        # that same rule's index as ``_EngineExitDispatcher.exclude_rule_index``,
+        # so ``rule_compiler._filtered_intent_for_rule`` drops it before the
+        # bar-close evaluator ever produces an intent for it. A bar can
+        # therefore never see both a resting-stop fill and a bar-close exit
+        # for the same rule — the exact failure this coexistence step exists
+        # to prevent (closing the position twice / a duplicate exit trade).
         #
-        # The two paths' ``exit_rule_firings``/``exit_rule_firings_by_symbol``
-        # credit is coexistence-safe, not just double-close-safe:
+        # When the resting order IS attached, its firing credit is carried
+        # independent of the (now-excluded) bar-close evaluator:
         # ``FillSimulator._materialize_stop_child`` emits its own
         # ``"engine_exit_attached"`` diagnostic event at materialization time
         # (``_apply_fill_outcome_events`` in this module translates it into
         # the same counters ``_record_emission`` bumps for the bar-close
-        # evaluator), so the resting path now carries its own firing credit
-        # independent of whether the bar-close evaluator also fires that bar.
-        # This closes the gap the bar-close evaluator's zero visibility into
-        # resting orders would otherwise leave: a bar where the resting child
-        # alone closes the position (e.g. the bar-close evaluator skips
-        # evaluation for an unrelated reason) still credits the counter
-        # ``exit_rule_conformance.py::_check_stop_loss`` reconciles against.
-        # On a bar where BOTH paths fire, the counter is intentionally
-        # over-counted — per that gate's own existing tolerance principle
-        # (already applied to a limit-style "fired but unfilled" stop), an
-        # inflated firing count can only make the leak check more lenient,
-        # never trip a false critical. Materialization-time counting is
-        # similarly one-directional-safe: an entry that gets a resting stop
-        # attached but never triggers merely inflates the denominator
-        # without a corresponding trade. Deduplicating the two paths'
-        # *evaluation* (mirroring the bracket's unconditional skip, or the
-        # order-book-aware ``exclude_resting_limit_stop`` mechanism the
-        # limit-style stop uses) — as opposed to reconciling their
-        # diagnostics, which this does — is reserved for a later step of
-        # this same migration, once the fill-semantics verification step
-        # has settled exactly when the resting child is and isn't in flight.
+        # evaluator), so ``exit_rule_conformance.py::_check_stop_loss`` never
+        # sees a below-floor resting-stop trade with zero firing credit.
+        # Materialization-time counting is one-directional-safe on its own:
+        # an entry that gets a resting stop attached but never triggers
+        # merely inflates the denominator without a corresponding trade.
         #
-        # This redundancy is safe only because the two paths are also kept
-        # in PRICE agreement: the resting child's ``stop_price`` is resolved
-        # here at entry-EMISSION time off the signal bar's close (a preview
-        # that can gap away from where the entry actually fills), but
+        # The resting child's ``stop_price`` is resolved here at
+        # entry-EMISSION time off the signal bar's close (a preview that can
+        # gap away from where the entry actually fills), but
         # ``FillSimulator._materialize_stop_child`` re-anchors it to the
         # entry's real fill price before submitting the child (see
         # ``StopAttachment.entry_price_pct``) — the same
         # ``entry_price * (1 ∓ pct)`` formula ``rule_compiler.stop_loss_level``
-        # uses for the bar-close evaluator. Without that re-anchor, a gap
-        # entry would leave the two paths disagreeing about the stop level
-        # (not just redundantly re-evaluating it), which is a materially
-        # worse bug than the redundancy this comment otherwise accepts.
-        self._resting_stop_loss: Optional[StopLossRule] = next(
-            (r for r in self.exit_rules if _is_resting_stop_loss(r)), None
+        # uses for the bar-close evaluator, so a spec that flips this flag
+        # between runs sees the same stop level either way.
+        resting_idx = (
+            _first_resting_stop_loss_index(self.exit_rules)
+            if self.resting_stop_loss_enabled
+            else None
+        )
+        self._resting_stop_loss: Optional[StopLossRule] = (
+            self.exit_rules[resting_idx] if resting_idx is not None else None
         )
 
     def maybe_emit(
@@ -2936,7 +3013,22 @@ class TradingService:
         # :meth:`_EngineExitDispatcher.maybe_emit` sub-steps. No-op
         # when ``self._exit_rules`` is empty.
         streaming_views: Dict[str, StreamingHistoryView] = {}
-        engine_exits = _EngineExitDispatcher(exit_rules=self._exit_rules, views=streaming_views)
+        # Read once so both dispatchers below agree for the whole run — see
+        # ``_resting_stop_loss_enabled`` for the default and
+        # ``_first_resting_stop_loss_index`` for why the two dispatchers,
+        # scanning the same ``self._exit_rules``, always pick the same rule.
+        # When disabled (the default), ``exclude_rule_idx`` stays ``None`` so
+        # ``_EngineExitDispatcher`` evaluates every rule exactly as it does
+        # today.
+        resting_stop_loss_enabled = _resting_stop_loss_enabled()
+        exclude_rule_idx = (
+            _first_resting_stop_loss_index(self._exit_rules) if resting_stop_loss_enabled else None
+        )
+        engine_exits = _EngineExitDispatcher(
+            exit_rules=self._exit_rules,
+            views=streaming_views,
+            exclude_rule_index=exclude_rule_idx,
+        )
         engine_entries = _EngineEntryDispatcher(
             entry_rules=self._entry_rules,
             sizing=self._sizing,
@@ -2944,6 +3036,7 @@ class TradingService:
             target_symbols=self._target_symbols,
             risk_limits=self._risk.limits,
             asset_class=self._asset_class,
+            resting_stop_loss_enabled=resting_stop_loss_enabled,
         )
         execution_model = build_execution_model(
             self.config.execution_model,

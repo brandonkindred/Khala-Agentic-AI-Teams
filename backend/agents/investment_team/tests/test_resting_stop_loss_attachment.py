@@ -1,5 +1,15 @@
 """Tests for migrating ``StopLossRule(basis="entry_price", style="market")`` to a
-resting ``STOP`` order attached at entry-fill (step 1 of 3 for that migration).
+resting ``STOP`` order attached at entry-fill.
+
+Exercises that resting-order mechanism directly and so opts into it
+explicitly (via ``_EngineEntryDispatcher(resting_stop_loss_enabled=True, ...)``
+in the shared ``_emit`` helper below) — the run feature check
+(``trading_service.service._resting_stop_loss_enabled``) defaults it off, so a
+run configured with no explicit override stays on the bar-close evaluator this
+suite is not exercising. See ``test_stop_loss_mechanism_coexistence.py`` for
+the mutual-exclusion contract between the two mechanisms and the bar-close
+path's own unit tests, which stay on the default (bar-close) mechanism and
+require no changes here.
 
 Covers:
 
@@ -365,6 +375,10 @@ def _emit(exit_rules: Sequence[ExitRule], side: str = "long", close: float = 100
         exit_rules=exit_rules,
         risk_limits=RiskLimits(max_position_pct=100),
         asset_class="stocks",
+        # This suite exercises the resting-order mechanism directly; the run
+        # feature check defaults it off (see ``_resting_stop_loss_enabled``),
+        # so every test in this file opts in explicitly here.
+        resting_stop_loss_enabled=True,
     )
     pending: list[OrderRequest] = []
     dispatcher.maybe_emit(
