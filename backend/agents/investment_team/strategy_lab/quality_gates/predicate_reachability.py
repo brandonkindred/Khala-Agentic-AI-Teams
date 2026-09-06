@@ -268,7 +268,8 @@ class _RuleStarvation:
     def verdict(self) -> _StarvationVerdict:
         """Which rung of the starvation ladder this rule lands on.
 
-        Postconditions: returns the FIRST matching rung, in this order —
+        Postconditions: returns the FIRST matching rung, checked in this
+        order —
           * ``"abstained_bars"`` — fewer than ``_MIN_EVALUATED_BARS`` bars
             judged against every earlier rule; a window-coverage problem, not a
             reachability verdict.
@@ -276,14 +277,18 @@ class _RuleStarvation:
             rule, by :meth:`PredicateReachabilityProbe.to_gate_results`, so
             starvation reporting deliberately stays silent about it rather than
             double-reporting the same rule under two finding kinds.
+          * ``"reachable"`` — fires at least once on a bar no earlier rule
+            covers, so first-match-wins can actually select it.
           * ``"abstained_thin"`` — fires, none of them independent, but fewer
             than ``_MIN_STARVATION_FIRES`` of them: too few observations to
             separate structural starvation from a merely rarely-firing rule.
           * ``"starved"`` — fires enough times, and never on a bar that no
             earlier rule covers. This is the reportable finding.
-          * ``"reachable"`` — fires at least once on a bar no earlier rule
-            covers, so first-match-wins can actually select it.
-        Deterministic; depends only on this instance's counts.
+        The last three rungs are mutually exclusive regardless of check
+        order (a rule with an independent fire cannot also satisfy the
+        "zero independent fires" precondition ``abstained_thin``/``starved``
+        share), so only the first two need their listed order to match the
+        code exactly. Deterministic; depends only on this instance's counts.
         """
         if self.evaluated < _MIN_EVALUATED_BARS:
             return "abstained_bars"
@@ -599,8 +604,9 @@ class PredicateReachabilityProbe(GateResultsMixin):
         multi-leaf rule, decomposing the STARVED rule's own leaves against its
         :attr:`_RuleStarvation.dominant_index` coverer — the earlier rule that
         explains most of the shadowing — so the diagnostic reads exactly like
-        the dead-rule and pairwise ones. One sweep per rule is shared with the
-        verdict computation, so the indicator cache is warm throughout.
+        the dead-rule and pairwise ones. The per-rule sweeps are shared with
+        the verdict computation, so the indicator cache is already warm when
+        a starved multi-leaf rule's additional per-leg sweeps run.
         """
         assert spec is not None, "spec must be a StrategySpec"
         entry_rules = _entry_rules(spec)
@@ -733,8 +739,8 @@ class PredicateReachabilityProbe(GateResultsMixin):
             results: List[QualityGateResult] = []
             for v in verdicts:
                 rule_id = f"entry[{v.rule_index}]"
-                verdict = v.verdict
-                if verdict == "abstained_bars":
+                kind = v.verdict
+                if kind == "abstained_bars":
                     results.append(
                         self._info(
                             f"Entry rule {rule_id} (side={v.side}): only {v.evaluated} bar(s) "
@@ -743,7 +749,7 @@ class PredicateReachabilityProbe(GateResultsMixin):
                             rule_id=rule_id,
                         )
                     )
-                elif verdict == "abstained_thin":
+                elif kind == "abstained_thin":
                     results.append(
                         self._info(
                             f"Entry rule {rule_id} (side={v.side}) fires on {v.fires}/"
@@ -755,7 +761,7 @@ class PredicateReachabilityProbe(GateResultsMixin):
                             rule_id=rule_id,
                         )
                     )
-                elif verdict == "starved":
+                elif kind == "starved":
                     detail = (
                         f"Entry rule {rule_id} (side={v.side}) is structurally starved: it fires "
                         f"on {v.fires}/{v.evaluated} post-warmup bar(s), and an earlier, "

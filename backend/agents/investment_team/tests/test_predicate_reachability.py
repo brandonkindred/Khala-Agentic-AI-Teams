@@ -12,6 +12,7 @@ from investment_team.market_data_service import OHLCVBar
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.quality_gates.predicate_reachability import (
     PredicateReachabilityProbe,
+    _RuleStarvation,
 )
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
@@ -721,7 +722,7 @@ def test_check_starvation_convenience_wraps_probe_and_format() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _verdict(later: list[str], *earlier: list[str]):
+def _verdict(later: list[str], *earlier: list[str]) -> _RuleStarvation:
     from investment_team.strategy_lab.quality_gates.predicate_reachability import (
         _starvation_verdicts,
     )
