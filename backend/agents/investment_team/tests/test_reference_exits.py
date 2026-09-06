@@ -1947,10 +1947,12 @@ def test_signal_exit_kind_distinguishes_it_from_the_resting_kinds():
         _record_sig().exit_rule_kind,
         _record().exit_rule_kind,
         _record_tp().exit_rule_kind,
+        _record_tp(exit_rule_kind="scaled_take_profit", level_index=1).exit_rule_kind,
     } == {
         "signal_exit",
         "stop_loss",
         "take_profit",
+        "scaled_take_profit",
     }
 
 
