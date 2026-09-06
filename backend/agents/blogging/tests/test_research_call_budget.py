@@ -66,6 +66,13 @@ def _categorize(prompt: str) -> str:
     anchor tokens; the generate_queries check (on tokens unique to it: the
     literal quoted "queries" key and "query_text") must run first so the two
     steps aren't folded together.
+
+    Every branch matches on tokens unique to one prompt (verified directly
+    against blog_research_agent/prompts.py) and an unrecognized prompt raises
+    rather than falling through to a default bucket, so a new LLM step added
+    to ResearchAgent without a matching pattern here fails loudly and points
+    at the actual unhandled prompt instead of silently inflating some other
+    step's count.
     """
     lowered = prompt.lower()
     if '"queries"' in lowered and "query_text" in lowered:
@@ -76,7 +83,15 @@ def _categorize(prompt: str) -> str:
         return "evaluate_document"
     if "similar_topics" in lowered and "similarity_score" in lowered:
         return "similar_topics"
-    return "synthesize_overview"
+    # FINAL_SYNTHESIS_PROMPT's own text never contains the word "overview" --
+    # only QUERY_GENERATION_PROMPT's "intent" example does -- so this matches
+    # on the two response-shape keys the prompt's "Response shape" section
+    # actually asks for instead.
+    if '"analysis"' in lowered and '"outline"' in lowered:
+        return "synthesize_overview"
+    raise AssertionError(
+        f"Unrecognized LLM prompt step; add a pattern to _categorize:\n{prompt[:200]}"
+    )
 
 
 def _install_compact_spy(monkeypatch) -> List[bool]:
