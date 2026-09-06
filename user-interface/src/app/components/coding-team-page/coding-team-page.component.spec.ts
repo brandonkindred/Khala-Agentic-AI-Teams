@@ -2383,7 +2383,7 @@ describe('CodingTeamPageComponent', () => {
         expect(container).not.toBeNull();
         expect(component.jobStatus).toBeNull();
         expect(el.querySelector('app-loading-spinner')).not.toBeNull();
-        expect(container?.contains(document.activeElement)).toBe(true);
+        expect(container!.contains(document.activeElement)).toBe(true);
 
         // The first status snapshot lands: Angular destroys the pending branch and creates the
         // populated one as a sibling — the hoisted container is the one node that survives, so
@@ -2394,7 +2394,7 @@ describe('CodingTeamPageComponent', () => {
         container = el.querySelector('[id="run-detail-r1"]');
         expect(container).not.toBeNull();
         expect(el.querySelector('app-loading-spinner')).toBeNull();
-        expect(container?.contains(document.activeElement)).toBe(true);
+        expect(container!.contains(document.activeElement)).toBe(true);
       },
     );
 
@@ -2424,7 +2424,7 @@ describe('CodingTeamPageComponent', () => {
     });
 
     it('autoSelectRun never moves focus on a first list load', async () => {
-      apiSpy.listJobs.mockReturnValue(of([ghRun({ job_id: 'auto-run' })]));
+      apiSpy.listJobs.mockReturnValue(of([ghRun({ job_id: 'auto-run', status: 'running' })]));
       const before = document.activeElement;
       await setup();
       await flushAsync();
@@ -2489,7 +2489,7 @@ describe('CodingTeamPageComponent', () => {
       const container = el.querySelector('[id="run-detail-j-new"]');
       expect(container).not.toBeNull();
       expect(component.selectedRunId).toBe('j-new');
-      expect(container?.contains(document.activeElement)).toBe(true);
+      expect(container!.contains(document.activeElement)).toBe(true);
     });
 
     it('retrySelectedRun moves focus into the revealed run detail', async () => {
@@ -2520,18 +2520,39 @@ describe('CodingTeamPageComponent', () => {
       const container = el.querySelector('[id="run-detail-j-retry"]');
       expect(container).not.toBeNull();
       expect(component.selectedRunId).toBe('j-retry');
-      expect(container?.contains(document.activeElement)).toBe(true);
+      expect(container!.contains(document.activeElement)).toBe(true);
     });
 
-    it('reuses the shared focus timer and cancels it on destroy', async () => {
+    it('reuses the shared focus timer across reveal paths, superseding a still-pending move, and cancels it on destroy', async () => {
       await setup();
       await flushAsync(); // drain the initial (empty) runs poll before seeding
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
       const run = ghRun({ job_id: 'r1', status: 'running' });
       seedRunningRow(run);
+
       component.toggleRun(run);
+      const firstTimer = component['focusTimer'];
+      expect(firstTimer).not.toBeNull();
+
+      // retrySelectedRun schedules its own focus move through the same private field — proving
+      // it's genuinely shared across reveal paths (not one timer per call site) — and, because
+      // the first move is still pending at this point, that scheduling the second one clears it
+      // rather than leaving both to fire.
+      component.selectedRunNumber = 5;
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
+      integrationsSpy.runGitHubIssue.mockReturnValue(
+        of({ job_id: 'r2', issue_number: 5, issue_url: 'u', status: 'queued', message: '' }),
+      );
+      component.retrySelectedRun();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(firstTimer);
       expect(component['focusTimer']).not.toBeNull();
+      expect(component['focusTimer']).not.toBe(firstTimer);
+
       fixture.destroy();
       expect(component['focusTimer']).toBeNull();
+      clearTimeoutSpy.mockRestore();
     });
   });
 });
