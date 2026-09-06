@@ -299,8 +299,8 @@ def test_resting_and_bar_close_mechanisms_never_both_claim_the_same_rule(
     )
     bar_close_fired = result.execution_diagnostics.exit_rule_firings.get("stop_loss", 0) == 1
 
-    # Exactly one mechanism claims the rule: attachment XOR bar-close firing.
-    assert attached != bar_close_fired
+    # XOR: exactly one mechanism claims the rule — attachment fires iff resting
+    # is enabled, and the bar-close evaluator fires iff it is not.
     assert attached is resting_enabled
     assert bar_close_fired is not resting_enabled
 

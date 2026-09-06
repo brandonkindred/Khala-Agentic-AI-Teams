@@ -1934,7 +1934,7 @@ def _resting_stop_loss_enabled() -> bool:
     ``True`` — so a bar can never see both a resting-stop fill and a
     bar-close exit for the same rule.
     """
-    return os.environ.get(_STOP_LOSS_RESTING_ORDER_ENV, "false").lower() in {
+    return os.environ.get(_STOP_LOSS_RESTING_ORDER_ENV, "false").strip().lower() in {
         "true",
         "1",
         "yes",
