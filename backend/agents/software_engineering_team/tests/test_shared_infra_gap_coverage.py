@@ -15,16 +15,16 @@ CI job or ``CodingTeamWorkflow`` migrates onto this shared primitive (see
 ``shared/hitl/temporal_signal.py``'s module docstring).
 
 More thorough, standalone-mixin behavioral coverage lives in
-``shared/hitl/tests/test_temporal_signal.py`` (the canonical suite for the
-mixin's contract -- update it first when the contract changes, then mirror
-here) and ``planning_team/tests/test_temporal_workflow_signal.py`` -- useful
-for local development and as documentation, but neither runs in CI today for
-the same reason (no CI job passes ``shared/hitl/tests/`` or
-``planning_team/tests/`` to pytest). This file is therefore the only
-CI-enforced regression coverage for this behavior, so it also carries a
-minimal check that the real ``PlanningWorkflow`` class (not just the
-standalone mixin) actually wires up correctly -- the composition-level
-assertions those uncollected suites would otherwise be the sole guard for.
+``shared/hitl/tests/test_temporal_signal.py`` -- the canonical suite for the
+mixin's contract; update it first when the contract changes, then mirror here.
+That suite IS collected in CI now (the shared-packages job passes
+``../shared/hitl/tests`` to pytest and feeds the same combined shared-infra
+gate), so this block is no longer the sole guard for the mixin itself. It stays
+because ``planning_team/tests/test_temporal_workflow_signal.py`` is still
+uncollected -- no CI job passes ``planning_team/tests/`` to pytest -- which
+leaves the composition-level check below (that the real ``PlanningWorkflow``
+class, not just the standalone mixin, wires up correctly) with no other
+CI-enforced home.
 """
 
 from __future__ import annotations
@@ -534,3 +534,177 @@ def test_planning_workflow_submit_answers_accepts_and_rejects() -> None:
     wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
     assert wf._submitted_answers == [_answer("q1")]
     assert wf._buffered_signals == {}
+
+
+# ---------------------------------------------------------------------------
+# shared.hitl.temporal_signal -- wait_for_answers
+# ---------------------------------------------------------------------------
+
+
+class _FakeWaitCondition:
+    """Stand-in for ``workflow.wait_condition``. Records whether the predicate
+    already held at call time and what kwargs it got, then runs the next queued
+    deliverer to simulate a signal landing while the workflow is parked."""
+
+    def __init__(self, *deliverers) -> None:
+        self._deliverers = list(deliverers)
+        self.satisfied_at_call: list[bool] = []
+        self.kwargs: list[dict] = []
+
+    async def __call__(self, predicate, **kwargs) -> None:
+        self.satisfied_at_call.append(bool(predicate()))
+        self.kwargs.append(kwargs)
+        if predicate():
+            return
+        assert self._deliverers, "wait_condition parked with nothing left to deliver"
+        self._deliverers.pop(0)()
+        assert predicate(), "the scripted deliverer did not satisfy the wait predicate"
+
+
+class _Verifier:
+    """Stand-in for the caller's durable-store reconciliation, scripted per call."""
+
+    def __init__(self, *results: bool) -> None:
+        self._results = list(results)
+        self.calls = 0
+
+    async def __call__(self) -> bool:
+        self.calls += 1
+        assert self._results, "verify was awaited more times than the test scripted"
+        return self._results.pop(0)
+
+
+def _install_wait(monkeypatch, fake: _FakeWaitCondition) -> _FakeWaitCondition:
+    monkeypatch.setattr(_temporal_signal_module.workflow, "wait_condition", fake)
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_returns_the_batch_and_resets_state(monkeypatch) -> None:
+    wf = _Workflow()
+    fake = _install_wait(
+        monkeypatch,
+        _FakeWaitCondition(
+            lambda: wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+        ),
+    )
+
+    assert await wf.wait_for_answers("tok-1") == [_answer("q1")]
+    assert fake.satisfied_at_call == [False]
+    assert wf._active_resume_token is None
+    assert wf._submitted_answers is None
+    assert wf._buffered_signals == {}
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_consumes_a_signal_that_beat_the_wait(monkeypatch) -> None:
+    """The signal-before-wait race: a batch buffered while no pause was active is
+    applied when the wait arms, so the predicate already holds and the wait never
+    parks. The flag is checked, not only awaited."""
+    wf = _Workflow()
+    wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+    wf.submit_answers({"resume_token": "stale", "answers": [_answer("q0")]})
+    fake = _install_wait(monkeypatch, _FakeWaitCondition())
+
+    assert await wf.wait_for_answers("tok-1") == [_answer("q1")]
+    assert fake.satisfied_at_call == [True]
+    assert wf._buffered_signals == {}
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_arms_the_token_before_parking(monkeypatch) -> None:
+    """A signal landing while parked must hit the active-pause branch, not the
+    buffer branch -- otherwise the workflow stays paused on an answer it has."""
+    wf = _Workflow()
+    observed: list = []
+
+    def _deliver() -> None:
+        observed.append(wf._active_resume_token)
+        wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+
+    _install_wait(monkeypatch, _FakeWaitCondition(_deliver))
+
+    await wf.wait_for_answers("tok-1")
+
+    assert observed == ["tok-1"]
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_never_passes_a_timeout(monkeypatch) -> None:
+    """A timeout would release the wait without a real answer -- the fabricated
+    resume this mechanism exists to prevent."""
+    wf = _Workflow()
+    fake = _install_wait(
+        monkeypatch,
+        _FakeWaitCondition(
+            lambda: wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+        ),
+    )
+
+    await wf.wait_for_answers("tok-1")
+
+    assert fake.kwargs == [{}]
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_rejects_a_bad_resume_token(monkeypatch) -> None:
+    wf = _Workflow()
+    _install_wait(monkeypatch, _FakeWaitCondition())
+
+    with pytest.raises(AssertionError, match="non-empty resume_token"):
+        await wf.wait_for_answers("")
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_rejects_a_non_callable_verify(monkeypatch) -> None:
+    wf = _Workflow()
+    _install_wait(monkeypatch, _FakeWaitCondition())
+
+    with pytest.raises(AssertionError, match="zero-argument callable"):
+        await wf.wait_for_answers("tok-1", verify="tok-1")
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_verify_releases_the_wait_with_no_signal(monkeypatch) -> None:
+    """A durable batch can exist with no signal to match it (evicted past the
+    buffer cap, or never sent), so verify is checked before parking."""
+    wf = _Workflow()
+    verifier = _Verifier(True)
+    fake = _install_wait(monkeypatch, _FakeWaitCondition())
+
+    assert await wf.wait_for_answers("tok-1", verify=verifier) is None
+    assert verifier.calls == 1
+    assert fake.satisfied_at_call == []
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_verify_rejects_an_unbacked_signal(monkeypatch) -> None:
+    """A signal is a wake-up hint, never the answer itself: one the durable store
+    cannot confirm re-arms the latch instead of resuming the workflow."""
+    wf = _Workflow()
+    verifier = _Verifier(False, False, True)
+    _install_wait(
+        monkeypatch,
+        _FakeWaitCondition(
+            lambda: wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+        ),
+    )
+
+    assert await wf.wait_for_answers("tok-1", verify=verifier) is None
+    assert verifier.calls == 3
+    assert wf._active_resume_token is None
+
+
+@pytest.mark.asyncio
+async def test_hitl_wait_for_answers_verify_returns_the_confirmed_batch(monkeypatch) -> None:
+    wf = _Workflow()
+    verifier = _Verifier(False, True)
+    _install_wait(
+        monkeypatch,
+        _FakeWaitCondition(
+            lambda: wf.submit_answers({"resume_token": "tok-1", "answers": [_answer("q1")]})
+        ),
+    )
+
+    assert await wf.wait_for_answers("tok-1", verify=verifier) == [_answer("q1")]
+    assert verifier.calls == 2
