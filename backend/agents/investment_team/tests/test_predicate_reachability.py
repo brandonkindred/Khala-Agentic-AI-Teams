@@ -12,6 +12,7 @@ from investment_team.market_data_service import OHLCVBar
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.quality_gates.predicate_reachability import (
     PredicateReachabilityProbe,
+    _RuleStarvation,
 )
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
@@ -487,138 +488,350 @@ def test_sweep_statuses_matches_sweep_aggregate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# to_starvation_gate_results / check_pairs: turning the pairwise co-occurrence
-# analysis into a distinct "structurally starved" finding, separate from dead
-# code.
+# to_starvation_gate_results / check_starvation: turning the union-based
+# starvation verdict into a distinct "structurally starved" finding, separate
+# from dead code — and, above all, one that does not cry wolf.
+#
+# Fixtures here use bare close thresholds rather than indicators wherever the
+# point is a set relation: on the rising series `close > 250` is a strict
+# subset of `close > 150` BY CONSTRUCTION, so the test can never flake on the
+# window happening not to produce an overlap.
 # ---------------------------------------------------------------------------
 
+_BROAD = Predicate(lhs="bar.close", op=">", rhs=150.0)  # fires i >= 51
+_NARROW = Predicate(lhs="bar.close", op=">", rhs=250.0)  # fires i >= 151 (subset of _BROAD)
 
-def test_starved_pair_compiled_is_critical_and_names_both_rules() -> None:
-    # Same shape as test_pair_later_never_fires_independently_of_earlier:
-    # the later rule fires, but only inside _ALIVE's judged, always-firing
-    # window, so it never fires independently of entry[0].
-    later = Predicate(lhs="bar.close", op=">", rhs=310.0)  # fires i > 210
-    probe = PredicateReachabilityProbe()
-    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=later)])
-    pairs = probe.probe_pairs(spec, _MD)
-    results = probe.to_starvation_gate_results(pairs, spec)
+
+def _entry(when, side: str = "long") -> EntryRule:
+    return EntryRule(side=side, when=when)
+
+
+def _starvation(spec, market_data=_MD):
+    return PredicateReachabilityProbe().check_starvation(spec, market_data)
+
+
+def test_genuinely_starved_second_rule_is_reported() -> None:
+    # Broad-then-narrow: entry[1]'s firing set is a strict subset of entry[0]'s,
+    # so it can never win the first-match-wins scan.
+    spec = _spec(_BROAD, extra_entries=[_entry(_NARROW)])
+    results = _starvation(spec)
     assert len(results) == 1
     r = results[0]
     assert r.severity == "critical"
     assert r.passed is False
     assert r.rule_id == "entry[1]"
     assert "structurally starved" in r.details
-    assert "entry[0]" in r.details and "entry[1]" in r.details
+    assert "entry[0] covers" in r.details
     # Distinct from the dead-code phrasing used by to_gate_results.
     assert "never satisfies its predicate" not in r.details
 
 
-def test_starved_pair_custom_is_warning_not_critical() -> None:
-    later = Predicate(lhs="bar.close", op=">", rhs=310.0)
-    probe = PredicateReachabilityProbe()
-    spec = _spec(_ALIVE, custom=True, extra_entries=[EntryRule(side="long", when=later)])
-    pairs = probe.probe_pairs(spec, _MD)
-    results = probe.to_starvation_gate_results(pairs, spec)
+def test_starved_rule_custom_path_is_warning_not_critical() -> None:
+    spec = _spec(_BROAD, custom=True, extra_entries=[_entry(_NARROW)])
+    results = _starvation(spec)
     assert len(results) == 1
     assert results[0].severity == "warning"
-    assert not any(r.severity == "critical" for r in results)
+    assert "custom-code path" in results[0].details
 
 
-def test_independently_reachable_pair_yields_no_starvation_finding() -> None:
-    # Same shape as test_pair_later_fires_independently_of_earlier: disjoint
-    # firing sets, so the later rule is not starved.
+def test_independently_reachable_rules_yield_no_starvation_finding() -> None:
+    # Disjoint firing sets: neither shadows the other.
     earlier = Predicate(lhs="bar.close", op="<", rhs=150.0)
     later = Predicate(lhs="bar.close", op=">", rhs=250.0)
+    spec = _spec(earlier, extra_entries=[_entry(later)])
+    assert _starvation(spec) == []
+
+
+def test_narrow_then_broad_priority_ordering_is_not_flagged() -> None:
+    # THE false-positive case. Exactly the two rules of
+    # test_genuinely_starved_second_rule_is_reported, listed the other way
+    # round: the narrow rule takes precedence and the broad one still wins the
+    # scan on every bar between the two thresholds. Deliberate priority
+    # ordering must produce nothing at all.
+    spec = _spec(_NARROW, extra_entries=[_entry(_BROAD)])
+    assert _starvation(spec) == []
+
+
+def test_starvation_finding_leads_with_evidence_and_names_remedies() -> None:
+    # The finding has to be adjudicable: an author must be able to see how much
+    # evidence stands behind it and what to do about it, without leaving the
+    # message.
+    spec = _spec(_BROAD, extra_entries=[_entry(_NARROW)])
+    detail = _starvation(spec)[0].details
+    assert "fires on 149/300 post-warmup bar(s)" in detail  # the evidence
+    assert "entry[0] covers 149" in detail  # who shadows it, and by how much
+    assert "folding its conditions" in detail  # remedy 1: fold
+    assert "listing it BEFORE the broader rule" in detail  # remedy 2: reorder
+    assert "loosening it" in detail  # remedy 3: loosen
+
+
+def test_three_rule_mixed_reachability_reports_only_the_starved_rule() -> None:
+    # entry[1] is shadowed by entry[0]; entry[2] fires only on early bars that
+    # neither of them reaches. Exactly one finding, and it names entry[1].
+    spec = _spec(
+        _BROAD,
+        extra_entries=[
+            _entry(_NARROW),
+            _entry(Predicate(lhs="bar.close", op="<", rhs=120.0)),  # fires i <= 19
+        ],
+    )
+    results = _starvation(spec)
+    assert [r.rule_id for r in results] == ["entry[1]"]
+    assert results[0].severity == "critical"
+
+
+def test_jointly_starved_rule_is_reported_once_naming_every_coverer() -> None:
+    # entry[0] and entry[1] partition the bars between them, so entry[2] is
+    # covered by their UNION while neither is a superset of it on its own.
+    # The pairwise view cannot see this; the union verdict must.
     probe = PredicateReachabilityProbe()
-    spec = _spec(earlier, extra_entries=[EntryRule(side="long", when=later)])
-    pairs = probe.probe_pairs(spec, _MD)
-    assert probe.to_starvation_gate_results(pairs, spec) == []
+    spec = _spec(
+        Predicate(lhs="bar.close", op="<", rhs=200.0),  # fires i <= 99
+        extra_entries=[
+            _entry(Predicate(lhs="bar.close", op=">", rhs=199.5)),  # fires i >= 100
+            _entry(_BROAD),  # fires i >= 51 — every one of them covered
+        ],
+    )
+
+    # Pairwise: entry[2] fires independently of EACH earlier rule, so the
+    # per-pair analysis finds nothing to report.
+    for pair in probe.probe_pairs(spec, _MD):
+        if pair.later_index == 2:
+            assert pair.later_independent_fires > 0
+
+    results = probe.check_starvation(spec, _MD)
+    assert [r.rule_id for r in results] == ["entry[2]"]
+    # One finding, not one per coverer, and the most-covering rule is named
+    # first so the reader sees the dominant cause up front.
+    assert "entry[1] covers 200, entry[0] covers 49" in results[0].details
+
+
+def test_rarely_firing_rule_below_the_evidence_floor_abstains_with_info() -> None:
+    # entry[1] fires 4 times, all of them inside entry[0]'s range. Four covered
+    # fires is ordinary coincidence, not proof of structure — so this abstains
+    # loudly rather than accusing.
+    spec = _spec(_BROAD, extra_entries=[_entry(Predicate(lhs="bar.close", op=">", rhs=395.0))])
+    results = _starvation(spec)
+    assert len(results) == 1
+    r = results[0]
+    assert r.severity == "info"
+    assert r.passed is True
+    assert r.rule_id == "entry[1]"
+    assert "fires on 4/300" in r.details
+    assert "rarely-firing" in r.details
+    assert "structurally starved" not in r.details
+
+
+def test_evidence_floor_boundary_four_versus_five_covered_fires() -> None:
+    # The exact edge: 4 covered fires abstains, 5 is reported.
+    four = _spec(_BROAD, extra_entries=[_entry(Predicate(lhs="bar.close", op=">", rhs=395.0))])
+    five = _spec(_BROAD, extra_entries=[_entry(Predicate(lhs="bar.close", op=">", rhs=394.0))])
+
+    below = _starvation(four)
+    assert [r.severity for r in below] == ["info"]
+
+    at = _starvation(five)
+    assert [r.severity for r in at] == ["critical"]
+    assert "fires on 5/300" in at[0].details
+
+
+def test_a_single_independent_fire_makes_a_rare_rule_reachable() -> None:
+    # Same rare rule as above, plus ONE bar it wins outright. That is enough:
+    # first-match-wins can select it, so there is nothing to report.
+    later = AnyOf(
+        of=[
+            Predicate(lhs="bar.close", op=">", rhs=395.0),  # 4 covered fires
+            Predicate(lhs="bar.close", op="<", rhs=101.0),  # 1 independent fire (i == 0)
+        ]
+    )
+    spec = _spec(_BROAD, extra_entries=[_entry(later)])
+    assert _starvation(spec) == []
 
 
 def test_dead_later_rule_not_double_reported_as_starved() -> None:
     # A later rule that never fires at all must be reported as dead code
     # (by to_gate_results) but NOT additionally as structurally starved.
     probe = PredicateReachabilityProbe()
-    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=_DEAD)])
+    spec = _spec(_ALIVE, extra_entries=[_entry(_DEAD)])
 
     dead_results = probe.to_gate_results(probe.probe(spec, _MD), spec)
-    assert any(r.severity == "critical" and "entry[1]" == r.rule_id for r in dead_results)
+    assert any(r.severity == "critical" and r.rule_id == "entry[1]" for r in dead_results)
 
-    starvation_results = probe.to_starvation_gate_results(probe.probe_pairs(spec, _MD), spec)
-    assert starvation_results == []
+    assert probe.check_starvation(spec, _MD) == []
 
 
-def test_starvation_leg_diagnostic_never_independent_branch() -> None:
-    # Same shape as test_pair_leg_diagnostics_decompose_later_rule_two_leg_all_of:
-    # both legs of the later all_of never fire independently of _ALIVE.
+def test_unjudged_window_abstains_with_info_rather_than_silence() -> None:
+    # Too short a window is a coverage problem, not a reachability verdict —
+    # but silence would be indistinguishable from "checked, nothing found".
+    spec = _spec(
+        Predicate(lhs="bar.close", op=">", rhs=0.0),
+        extra_entries=[_entry(Predicate(lhs="bar.close", op=">", rhs=50.0))],
+    )
+    results = _starvation(spec, {"AAA": _rising_bars(19)})
+    assert len(results) == 1
+    assert results[0].severity == "info"
+    assert results[0].rule_id == "entry[1]"
+    assert "too few to judge structural starvation" in results[0].details
+
+
+def test_starved_all_of_rule_reports_the_per_leg_diagnostic() -> None:
+    # Both legs of the later all_of never fire independently of _ALIVE, so the
+    # finding carries the same per-leg detail dead-rule findings do.
     later = AllOf(
         of=[
             Predicate(lhs="bar.close", op=">", rhs=300.0),
             Predicate(lhs="bar.close", op="<", rhs=360.0),
         ]
     )
-    probe = PredicateReachabilityProbe()
-    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=later)])
-    pairs = probe.probe_pairs(spec, _MD)
-    results = probe.to_starvation_gate_results(pairs, spec)
+    spec = _spec(_ALIVE, extra_entries=[_entry(later)])
+    results = _starvation(spec)
     assert len(results) == 1
     assert "never fire independently of entry[0]" in results[0].details
 
 
-def test_starvation_leg_diagnostic_co_occur_branch() -> None:
-    # Direct unit test of the diagnostic: when every leg CAN fire
-    # independently on its own but the whole pair never does, report the
-    # co-occurrence message (mirrors test_leg_diagnostic_never_co_occur_branch).
-    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
-        _pair_leg_diagnostic,
-        _PairCooccurrence,
-        _PairLegCooccurrence,
-    )
-
-    pair = _PairCooccurrence(
-        earlier_index=0,
-        later_index=1,
-        earlier_side="long",
-        later_side="long",
-        evaluated=100,
-        later_fires=0,
-        later_independent_fires=0,
-        legs=(
-            _PairLegCooccurrence("A>B", evaluated=100, fires=40, independent_fires=10),
-            _PairLegCooccurrence("C>D", evaluated=100, fires=60, independent_fires=5),
-        ),
-    )
-    assert "only co-occur" in _pair_leg_diagnostic(pair)
+def test_starvation_probe_mixed_side_still_pairs() -> None:
+    # Priority applies across long/short alike, matching evaluate_entry_rules'
+    # default side_filter=None.
+    spec = _spec(_BROAD, extra_entries=[_entry(_NARROW, side="short")])
+    results = _starvation(spec)
+    assert len(results) == 1
+    assert "side=short" in results[0].details
 
 
-def test_starvation_leg_diagnostic_empty_legs_generic_message() -> None:
-    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
-        _pair_leg_diagnostic,
-        _PairCooccurrence,
-    )
-
-    pair = _PairCooccurrence(
-        earlier_index=0,
-        later_index=1,
-        earlier_side="long",
-        later_side="long",
-        evaluated=100,
-        later_fires=5,
-        later_independent_fires=0,
-        legs=(),
-    )
-    assert (
-        _pair_leg_diagnostic(pair) == "The predicate never fires independently of the earlier rule."
-    )
-
-
-def test_check_pairs_convenience_wraps_probe_pairs_and_format() -> None:
-    later = Predicate(lhs="bar.close", op=">", rhs=310.0)
+def test_starvation_probe_fewer_than_two_rules_or_no_data_returns_empty() -> None:
     probe = PredicateReachabilityProbe()
-    spec = _spec(_ALIVE, extra_entries=[EntryRule(side="long", when=later)])
-    results = probe.check_pairs(spec, _MD, phase="synthesis")
+    assert probe.probe_starvation(_spec(_ALIVE), _MD) == []
+    spec = _spec(_BROAD, extra_entries=[_entry(_NARROW)])
+    assert probe.probe_starvation(spec, None) == []
+    assert probe.probe_starvation(spec, {}) == []
+    assert probe.probe_starvation(spec, {"AAA": []}) == []
+
+
+def test_check_starvation_convenience_wraps_probe_and_format() -> None:
+    spec = _spec(_BROAD, extra_entries=[_entry(_NARROW)])
+    results = PredicateReachabilityProbe().check_starvation(spec, _MD, phase="synthesis")
     assert all(
         r.phase == "synthesis" and r.gate_name == "predicate_reachability_probe" for r in results
     )
-    assert any(r.severity == "critical" for r in results)
-    assert any(r.rule_id == "entry[1]" for r in results)
+    assert any(r.severity == "critical" and r.rule_id == "entry[1]" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# _starvation_verdicts: the pure union computation, driven directly from
+# hand-built status sequences — every rung of the ladder, no bars, no specs.
+# ---------------------------------------------------------------------------
+
+
+def _verdict(later: list[str], *earlier: list[str]) -> _RuleStarvation:
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _starvation_verdicts,
+    )
+
+    rows = [*earlier, later]
+    sides = ["long"] * len(rows)
+    return _starvation_verdicts(rows, sides)[-1]
+
+
+def _pattern(total: int, satisfied: range) -> list[str]:
+    return ["satisfied" if i in satisfied else "miss" for i in range(total)]
+
+
+def test_starvation_verdict_abstains_below_min_evaluated_bars() -> None:
+    v = _verdict(_pattern(19, range(19)), _pattern(19, range(19)))
+    assert v.evaluated == 19
+    assert v.verdict == "abstained_bars"
+
+
+def test_starvation_verdict_dead_rule_takes_precedence_over_starvation() -> None:
+    v = _verdict(_pattern(30, range(0)), _pattern(30, range(30)))
+    assert v.fires == 0
+    assert v.verdict == "dead"
+
+
+def test_starvation_verdict_reachable_when_any_fire_is_independent() -> None:
+    v = _verdict(_pattern(30, range(0, 10)), _pattern(30, range(10, 30)))
+    assert v.independent_fires == 10
+    assert v.verdict == "reachable"
+    assert v.coverage == ()
+
+
+def test_starvation_verdict_thin_evidence_abstains() -> None:
+    v = _verdict(_pattern(30, range(0, 4)), _pattern(30, range(30)))
+    assert (v.fires, v.independent_fires) == (4, 0)
+    assert v.verdict == "abstained_thin"
+
+
+def test_starvation_verdict_starved_at_the_evidence_floor() -> None:
+    v = _verdict(_pattern(30, range(0, 5)), _pattern(30, range(30)))
+    assert (v.fires, v.independent_fires) == (5, 0)
+    assert v.verdict == "starved"
+    assert v.dominant_index == 0
+
+
+def test_starvation_verdict_excludes_bars_where_an_earlier_rule_is_warming_up() -> None:
+    # A bar the earlier rule cannot be judged on is not evidence either way —
+    # it must not be counted as an independent fire.
+    later = ["satisfied"] * 30
+    earlier = ["warmup"] * 10 + ["satisfied"] * 20
+    v = _verdict(later, earlier)
+    assert v.evaluated == 20
+    assert (v.fires, v.independent_fires) == (20, 0)
+    assert v.verdict == "starved"
+
+
+def test_starvation_verdict_coverage_is_ordered_by_descending_share() -> None:
+    # entry[0] covers 4 of the fires, entry[1] covers 8 — the dominant coverer
+    # is named first regardless of listing order.
+    later = _pattern(40, range(0, 12))
+    first = _pattern(40, range(0, 4))
+    second = _pattern(40, range(4, 12))
+    v = _verdict(later, first, second)
+    assert v.rule_index == 2
+    assert v.coverage == ((1, 8), (0, 4))
+    assert v.dominant_index == 1
+    assert v.verdict == "starved"
+
+
+def test_starvation_verdicts_empty_for_a_single_rule() -> None:
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _starvation_verdicts,
+    )
+
+    assert _starvation_verdicts([["satisfied"] * 30], ["long"]) == []
+
+
+# ---------------------------------------------------------------------------
+# _independence_leg_diagnostic / _coverage_text: rendering helpers.
+# ---------------------------------------------------------------------------
+
+
+def test_independence_leg_diagnostic_co_occur_branch() -> None:
+    # Every leg CAN fire independently on its own, but the rule as a whole
+    # never does — report the co-occurrence message rather than blaming a leg.
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _independence_leg_diagnostic,
+        _PairLegCooccurrence,
+    )
+
+    legs = (
+        _PairLegCooccurrence("A>B", evaluated=100, fires=40, independent_fires=10),
+        _PairLegCooccurrence("C>D", evaluated=100, fires=60, independent_fires=5),
+    )
+    assert "only co-occur" in _independence_leg_diagnostic(legs, 0)
+
+
+def test_independence_leg_diagnostic_empty_legs_generic_message() -> None:
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import (
+        _independence_leg_diagnostic,
+    )
+
+    assert (
+        _independence_leg_diagnostic((), 0)
+        == "The predicate never fires independently of the earlier rule."
+    )
+
+
+def test_coverage_text_names_every_coverer_with_its_share() -> None:
+    from investment_team.strategy_lab.quality_gates.predicate_reachability import _coverage_text
+
+    assert _coverage_text(((1, 200), (0, 49))) == "entry[1] covers 200, entry[0] covers 49"

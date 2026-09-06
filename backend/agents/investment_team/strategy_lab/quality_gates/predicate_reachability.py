@@ -16,6 +16,16 @@ exact same ``evaluate_tree`` the compiled engine uses. So on the compiled path
 orders" — the strategy cannot generate a single trade as authored — and the
 probe reports it, per-rule and per-leg, as an early authoring-time signal.
 
+Beyond a rule that never fires at all, the probe also reports a rule that fires
+plenty on its own but whose every fire lands on a bar some earlier,
+higher-priority rule already covers — "structurally starved" in
+``evaluate_entry_rules``' terms, a distinct finding kind from dead code because
+it calls for a different fix (reorder or loosen, not delete). The verdict is
+taken against the UNION of every earlier rule, and only once at least
+``_MIN_STARVATION_FIRES`` covered fires have been observed; below that the probe
+abstains with an ``info`` rather than mistaking a rarely-firing rule for a
+starved one.
+
 Path semantics:
   * Compiled path (``requires_custom_code=False``): the engine decides entries
     with this very evaluator, so an unreachable predicate is a **critical** — the
@@ -28,8 +38,8 @@ Path semantics:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, ClassVar, Dict, List, Literal, Sequence
 
 from ..executor.predicate_evaluator import EvalStatus, PandasHistoryView, evaluate_tree
 from ..spec_dsl import EntryRule, iter_leaf_predicates
@@ -43,6 +53,18 @@ GATE = "predicate_reachability_probe"
 # Below this the probe abstains (an ``info``) — a short window is a coverage
 # problem the warmup / data checks own, not a reachability verdict.
 _MIN_EVALUATED_BARS = 20
+
+# Minimum COVERED fires a later rule must show before "every one of its fires is
+# also covered by an earlier rule" is read as structural starvation rather than
+# coincidence. Under the null hypothesis that the later rule's fires land
+# independently of the earlier rules' coverage fraction ``p``, seeing all ``f``
+# of them covered has probability ``p ** f``: at ``p = 0.5`` one fire is a coin
+# flip and four fires is ~6%, while five is ~3% — the first count at which "all
+# covered" stops being ordinary luck. Below this the probe abstains (an
+# ``info``) rather than reporting a rarely-firing rule as starved: a false
+# critical costs the author's trust in every later finding, a missed rare case
+# costs one window.
+_MIN_STARVATION_FIRES = 5
 
 
 def _entry_rules(spec: Any) -> List[EntryRule]:
@@ -179,6 +201,106 @@ class _PairCooccurrence:
         return self.judged and self.later_fires > 0 and self.later_independent_fires == 0
 
 
+_StarvationVerdict = Literal["abstained_bars", "dead", "abstained_thin", "starved", "reachable"]
+
+
+@dataclass(frozen=True)
+class _RuleStarvation:
+    """Union-based starvation verdict for ONE entry rule against every rule
+    listed before it.
+
+    This is the verdict ``evaluate_entry_rules``' docstring defines: rule ``j``
+    is starved when its firing set is non-empty but contained in the UNION of
+    the earlier rules' firing sets. It is strictly stronger than
+    :class:`_PairCooccurrence`'s per-pair view, which can only see a single
+    earlier rule at a time and therefore misses rules that several earlier
+    rules jointly cover without any one of them being a superset.
+
+    Fields are all counted over the SAME denominator: the bars where rule
+    ``rule_index`` and EVERY rule before it are post-warmup — the only bars on
+    which "did any earlier rule already fire here" is a judged fact.
+
+    Invariants: ``rule_index >= 1`` (rule 0 has nothing before it and can never
+    be starved); ``0 <= independent_fires <= fires <= evaluated``; ``coverage``
+    is ordered by descending covered-fire count then ascending rule index, and
+    holds only earlier rules that covered at least one fire — enforced in
+    :meth:`__post_init__`.
+    """
+
+    rule_index: int
+    side: str
+    evaluated: int
+    fires: int
+    independent_fires: int
+    coverage: tuple[tuple[int, int], ...]
+    legs: tuple[_PairLegCooccurrence, ...]
+
+    def __post_init__(self) -> None:
+        """Enforce the counting and ordering invariants at construction time."""
+        assert self.rule_index >= 1, "rule_index must be >= 1 (rule 0 has no earlier rule)"
+        assert 0 <= self.independent_fires <= self.fires <= self.evaluated, (
+            "independent_fires <= fires <= evaluated must hold"
+        )
+        assert all(count > 0 for _, count in self.coverage), (
+            "coverage must hold only earlier rules that covered at least one fire"
+        )
+        assert all(index < self.rule_index for index, _ in self.coverage), (
+            "coverage may only name rules listed before rule_index"
+        )
+        assert list(self.coverage) == sorted(self.coverage, key=lambda kv: (-kv[1], kv[0])), (
+            "coverage must be ordered by descending covered fires, then ascending index"
+        )
+
+    @property
+    def dominant_index(self) -> int:
+        """Index of the earlier rule covering the most of this rule's fires.
+
+        Preconditions: ``coverage`` is non-empty (true whenever ``fires >
+        independent_fires``).
+        Postconditions: returns the first entry's rule index — the coverer the
+        per-leg diagnostic is computed against, so the diagnostic names the
+        single earlier rule that explains most of the shadowing.
+        """
+        assert self.coverage, "dominant_index requires a non-empty coverage set"
+        return self.coverage[0][0]
+
+    @property
+    def verdict(self) -> _StarvationVerdict:
+        """Which rung of the starvation ladder this rule lands on.
+
+        Postconditions: returns the FIRST matching rung, checked in this
+        order —
+          * ``"abstained_bars"`` — fewer than ``_MIN_EVALUATED_BARS`` bars
+            judged against every earlier rule; a window-coverage problem, not a
+            reachability verdict.
+          * ``"dead"`` — the rule never fires at all. Already reported once, per
+            rule, by :meth:`PredicateReachabilityProbe.to_gate_results`, so
+            starvation reporting deliberately stays silent about it rather than
+            double-reporting the same rule under two finding kinds.
+          * ``"reachable"`` — fires at least once on a bar no earlier rule
+            covers, so first-match-wins can actually select it.
+          * ``"abstained_thin"`` — fires, none of them independent, but fewer
+            than ``_MIN_STARVATION_FIRES`` of them: too few observations to
+            separate structural starvation from a merely rarely-firing rule.
+          * ``"starved"`` — fires enough times, and never on a bar that no
+            earlier rule covers. This is the reportable finding.
+        The last three rungs are mutually exclusive regardless of check
+        order (a rule with an independent fire cannot also satisfy the
+        "zero independent fires" precondition ``abstained_thin``/``starved``
+        share), so only the first two need their listed order to match the
+        code exactly. Deterministic; depends only on this instance's counts.
+        """
+        if self.evaluated < _MIN_EVALUATED_BARS:
+            return "abstained_bars"
+        if self.fires == 0:
+            return "dead"
+        if self.independent_fires > 0:
+            return "reachable"
+        if self.fires < _MIN_STARVATION_FIRES:
+            return "abstained_thin"
+        return "starved"
+
+
 def _sweep(node: Any, views: List[PandasHistoryView]) -> tuple[int, int]:
     """Count ``(evaluated, fires)`` for ``node`` across every bar of every view.
 
@@ -262,6 +384,82 @@ def _cooccurrence_counts(
     return evaluated, later_fires, later_independent_fires
 
 
+def _starvation_verdicts(
+    statuses: Sequence[Sequence[EvalStatus]], sides: Sequence[str]
+) -> List[_RuleStarvation]:
+    """Union-based starvation verdict for every rule after the first.
+
+    Preconditions: ``statuses`` holds one per-bar status sequence per entry
+    rule, in authored order, all of equal length and positionally aligned (all
+    produced by ``_sweep_statuses`` over the SAME ``views`` list, so index
+    ``k`` names the same bar in every sequence); ``sides`` is the matching
+    ``EntryRule.side`` per rule.
+    Postconditions: pure (no I/O, no bar-walking, no predicate evaluation);
+    returns one :class:`_RuleStarvation` per rule index ``j >= 1``, in
+    ascending ``j`` order — an empty list when there are fewer than 2 rules.
+    Every count is taken over the bars where rule ``j`` AND all rules before it
+    are non-``"warmup"``: ``fires`` counts rule ``j``'s satisfied bars there,
+    ``independent_fires`` the subset where NO earlier rule is satisfied (the
+    bars on which first-match-wins could actually select ``j``), and
+    ``coverage`` attributes each remaining fire to every earlier rule satisfied
+    on it. ``legs`` is always empty here — the per-leg diagnostic needs the
+    views this function deliberately does not take, and is filled in by
+    :meth:`PredicateReachabilityProbe.probe_starvation`.
+
+    The earlier-rule state is folded in one rule at a time as ``j`` advances,
+    so the whole sweep is O(rules x bars) plus the per-fire attribution work,
+    not O(rules^2 x bars).
+    """
+    rule_count = len(statuses)
+    assert len(sides) == rule_count, "sides must have one entry per status sequence"
+    if rule_count < 2:
+        return []
+    bar_count = len(statuses[0])
+    assert all(len(row) == bar_count for row in statuses), "status sequences must be aligned"
+
+    any_earlier_warmup = [False] * bar_count
+    earlier_hits: List[List[int]] = [[] for _ in range(bar_count)]
+
+    out: List[_RuleStarvation] = []
+    for j in range(1, rule_count):
+        for k, status in enumerate(statuses[j - 1]):
+            if status == "warmup":
+                any_earlier_warmup[k] = True
+            elif status == "satisfied":
+                earlier_hits[k].append(j - 1)
+
+        evaluated = 0
+        fires = 0
+        independent_fires = 0
+        covered: Dict[int, int] = {}
+        for k, status in enumerate(statuses[j]):
+            if status == "warmup" or any_earlier_warmup[k]:
+                continue
+            evaluated += 1
+            if status != "satisfied":
+                continue
+            fires += 1
+            hits = earlier_hits[k]
+            if not hits:
+                independent_fires += 1
+                continue
+            for index in hits:
+                covered[index] = covered.get(index, 0) + 1
+
+        out.append(
+            _RuleStarvation(
+                rule_index=j,
+                side=sides[j],
+                evaluated=evaluated,
+                fires=fires,
+                independent_fires=independent_fires,
+                coverage=tuple(sorted(covered.items(), key=lambda kv: (-kv[1], kv[0]))),
+                legs=(),
+            )
+        )
+    return out
+
+
 class PredicateReachabilityProbe(GateResultsMixin):
     """Evaluate each entry rule's authored predicate against the real bars.
 
@@ -330,6 +528,13 @@ class PredicateReachabilityProbe(GateResultsMixin):
         pure computation over already-evaluated predicate results: no
         severity, no ``QualityGateResult`` — finding emission is a separate,
         later step.
+
+        This is the per-pair view of shadowing. Finding emission uses the
+        stronger union verdict (:func:`_starvation_verdicts`, via
+        :meth:`probe_starvation`), which also catches a rule that several
+        earlier rules jointly cover without any one of them being a superset;
+        this method stays as the directly-inspectable pairwise analysis and as
+        the source of the per-leg co-occurrence tally.
         """
         assert spec is not None, "spec must be a StrategySpec"
         entry_rules = _entry_rules(spec)
@@ -379,6 +584,59 @@ class PredicateReachabilityProbe(GateResultsMixin):
                         legs=legs,
                     )
                 )
+        return out
+
+    def probe_starvation(self, spec: Any, market_data: Any) -> List[_RuleStarvation]:
+        """Union-based starvation verdict for every entry rule after the first.
+
+        Preconditions: ``spec`` is a ``StrategySpec``; ``market_data`` is
+        ``Optional[Dict[str, List[OHLCVBar]]]`` (the fetched bars) or falsy.
+        Postconditions: one :class:`_RuleStarvation` per rule index ``j >= 1``
+        over ``spec.entry_rules`` (same ``EntryRule`` filtering, and hence the
+        same index space, as :meth:`probe` and :meth:`probe_pairs`) — empty
+        when there are fewer than 2 entry rules or no usable bars. Each rule's
+        verdict is taken against the UNION of every rule listed before it, per
+        ``evaluate_entry_rules``' definition, rather than one earlier rule at a
+        time. Every rule pairs with every earlier rule regardless of ``side``,
+        matching ``evaluate_entry_rules``' default ``side_filter=None``.
+
+        Per-leg diagnostics are computed only for a ``"starved"`` verdict on a
+        multi-leaf rule, decomposing the STARVED rule's own leaves against its
+        :attr:`_RuleStarvation.dominant_index` coverer — the earlier rule that
+        explains most of the shadowing — so the diagnostic reads exactly like
+        the dead-rule and pairwise ones. The per-rule sweeps are shared with
+        the verdict computation, so the indicator cache is already warm when
+        a starved multi-leaf rule's additional per-leg sweeps run.
+        """
+        assert spec is not None, "spec must be a StrategySpec"
+        entry_rules = _entry_rules(spec)
+        if len(entry_rules) < 2 or not market_data:
+            return []
+        views = _build_views(market_data)
+        if not views:
+            return []
+
+        statuses = [_sweep_statuses(rule.when, views) for rule in entry_rules]
+        verdicts = _starvation_verdicts(statuses, [rule.side for rule in entry_rules])
+
+        out: List[_RuleStarvation] = []
+        for verdict in verdicts:
+            if verdict.verdict != "starved":
+                out.append(verdict)
+                continue
+            leaves = list(iter_leaf_predicates(entry_rules[verdict.rule_index].when))
+            if len(leaves) <= 1:
+                out.append(verdict)
+                continue
+            dominant = statuses[verdict.dominant_index]
+            legs = tuple(
+                _PairLegCooccurrence(
+                    _format_predicate(leaf),
+                    *_cooccurrence_counts(_sweep_statuses(leaf, views), dominant),
+                )
+                for leaf in leaves
+            )
+            out.append(replace(verdict, legs=legs))
         return out
 
     def all_entries_dead(self, reach: List[_RuleReachability]) -> bool:
@@ -447,54 +705,86 @@ class PredicateReachabilityProbe(GateResultsMixin):
             return results
 
     def to_starvation_gate_results(
-        self, pairs: List[_PairCooccurrence], spec: Any, *, phase: StrategyLabPhase = "synthesis"
+        self, verdicts: List[_RuleStarvation], spec: Any, *, phase: StrategyLabPhase = "synthesis"
     ) -> List[QualityGateResult]:
-        """Render a :meth:`probe_pairs` tally into phase-tagged starvation findings.
+        """Render a :meth:`probe_starvation` verdict list into phase-tagged findings.
 
-        Pre: ``pairs`` is the output of :meth:`probe_pairs` for ``spec``.
-        Post: one result per pair where the later rule is judged, fires, and
-        never fires independently of that earlier rule
-        (``pair.later_never_independent``) — ``critical`` on the compiled
-        path, ``warning`` on the custom path, mirroring
-        :meth:`to_gate_results`'s severity model exactly. A pair that is
-        unjudged, dead (``pair.later_dead``), or independently reachable
-        emits NOTHING: a dead later rule is already reported once, per rule,
-        by :meth:`to_gate_results` — this is a DISTINCT finding kind, so it
-        must not also report that rule as starved (``later_never_independent``
-        is defined to be False whenever ``later_dead`` is True, so this falls
-        out of the dataclass without extra branching); and repeating an
-        "info" per O(entry_rules^2) pair would drown out the existing O(entry_rules)
-        per-rule reporting. A rule starved independently by more than one
-        earlier rule yields one finding per qualifying pair, each naming a
-        genuinely sufficient, distinct cause.
+        Pre: ``verdicts`` is the output of :meth:`probe_starvation` for ``spec``.
+        Post: at most ONE result per rule — never the O(entry_rules^2)
+        one-result-per-pair reporting a pairwise view would imply, so a rule
+        shadowed by several earlier rules yields one finding naming all of them
+        rather than one finding per coverer. By verdict:
+
+          * ``"starved"`` → ``critical`` on the compiled path, ``warning`` on
+            the custom path, mirroring :meth:`to_gate_results`' severity model
+            exactly: under the union verdict plus the ``_MIN_STARVATION_FIRES``
+            evidence floor, a starved rule provably contributes zero entries on
+            this data — the same grade of fact a dead rule is. The wording
+            leads with the evidence (fire counts and which earlier rules cover
+            them) and ends with the three resolutions the design prompt already
+            teaches, so a deliberate priority ordering is adjudicable rather
+            than merely accused.
+          * ``"abstained_bars"`` / ``"abstained_thin"`` → ``info``, so an
+            abstention is visible on the gate timeline instead of being
+            indistinguishable from "checked, nothing found".
+          * ``"dead"`` → NOTHING. A rule that never fires at all is already
+            reported once, per rule, by :meth:`to_gate_results`; this is a
+            DISTINCT finding kind and must not double-report it.
+          * ``"reachable"`` → NOTHING. :meth:`to_gate_results` already reports
+            every rule's firing count, so a per-rule "not starved" info would
+            only dilute it.
         """
         custom = bool(getattr(spec, "requires_custom_code", False))
         with self._using_phase(phase):
             results: List[QualityGateResult] = []
-            for pair in pairs:
-                if not pair.later_never_independent:
-                    continue
-                rule_id = f"entry[{pair.later_index}]"
-                earlier_id = f"entry[{pair.earlier_index}]"
-                detail = (
-                    f"Entry rule {rule_id} (side={pair.later_side}) is structurally starved by "
-                    f"{earlier_id} (side={pair.earlier_side}): it fires on {pair.later_fires}/"
-                    f"{pair.evaluated} post-warmup bar(s) also evaluated against {earlier_id}, "
-                    f"but never on a bar {earlier_id} doesn't also fire on — first-match-wins "
-                    f"priority means {rule_id} can never actually be selected. "
-                    f"{_pair_leg_diagnostic(pair)}"
-                )
-                if custom:
+            for v in verdicts:
+                rule_id = f"entry[{v.rule_index}]"
+                kind = v.verdict
+                if kind == "abstained_bars":
                     results.append(
-                        self._warning(
-                            detail
-                            + " (custom-code path: the executed code may differ from the spec, "
-                            "but the authored entry logic is unreachable on this data.)",
+                        self._info(
+                            f"Entry rule {rule_id} (side={v.side}): only {v.evaluated} bar(s) "
+                            "judged against every earlier rule — too few to judge structural "
+                            "starvation; skipped.",
                             rule_id=rule_id,
                         )
                     )
-                else:
-                    results.append(self._critical(detail, rule_id=rule_id))
+                elif kind == "abstained_thin":
+                    results.append(
+                        self._info(
+                            f"Entry rule {rule_id} (side={v.side}) fires on {v.fires}/"
+                            f"{v.evaluated} post-warmup bar(s), all of them also covered by an "
+                            f"earlier rule ({_coverage_text(v.coverage)}) — fewer than "
+                            f"{_MIN_STARVATION_FIRES} covered fires is too few to separate "
+                            "structural starvation from a merely rarely-firing rule, so it is "
+                            "not reported as starved.",
+                            rule_id=rule_id,
+                        )
+                    )
+                elif kind == "starved":
+                    detail = (
+                        f"Entry rule {rule_id} (side={v.side}) is structurally starved: it fires "
+                        f"on {v.fires}/{v.evaluated} post-warmup bar(s), and an earlier, "
+                        f"higher-priority rule fires on every one of them "
+                        f"({_coverage_text(v.coverage)}) — under first-match-wins priority "
+                        f"{rule_id} is never the rule selected, so it contributes no entries as "
+                        "ordered. Resolve by folding its conditions into the earlier rule's "
+                        "all_of, listing it BEFORE the broader rule if it is the intended "
+                        "higher priority, or loosening it so it can fire where the earlier "
+                        f"rules don't. {_independence_leg_diagnostic(v.legs, v.dominant_index)}"
+                    )
+                    if custom:
+                        results.append(
+                            self._warning(
+                                detail
+                                + " (custom-code path: the executed code may differ from the "
+                                "spec, but the authored entry logic is unreachable on this "
+                                "data.)",
+                                rule_id=rule_id,
+                            )
+                        )
+                    else:
+                        results.append(self._critical(detail, rule_id=rule_id))
             return results
 
     def check(
@@ -503,12 +793,12 @@ class PredicateReachabilityProbe(GateResultsMixin):
         """Convenience: :meth:`probe` then :meth:`to_gate_results` (used in tests)."""
         return self.to_gate_results(self.probe(spec, market_data), spec, phase=phase)
 
-    def check_pairs(
+    def check_starvation(
         self, spec: Any, market_data: Any, *, phase: StrategyLabPhase = "synthesis"
     ) -> List[QualityGateResult]:
-        """Convenience: :meth:`probe_pairs` then :meth:`to_starvation_gate_results`."""
+        """Convenience: :meth:`probe_starvation` then :meth:`to_starvation_gate_results`."""
         return self.to_starvation_gate_results(
-            self.probe_pairs(spec, market_data), spec, phase=phase
+            self.probe_starvation(spec, market_data), spec, phase=phase
         )
 
 
@@ -532,27 +822,40 @@ def _leg_diagnostic(r: _RuleReachability) -> str:
     )
 
 
-def _pair_leg_diagnostic(pair: _PairCooccurrence) -> str:
-    """Human diagnostic for a starved pair, naming the bottleneck leg(s).
+def _coverage_text(coverage: tuple[tuple[int, int], ...]) -> str:
+    """Render a starvation coverage set as "entry[0] covers 37, entry[1] covers 12".
 
-    Pre: ``pair.later_never_independent`` is True — the later rule fires but
-    never independently of ``pair.earlier_index``.
-    Post: for a single-condition rule, states it never fires independently of
-    the earlier rule; for a conjunction, names the leaf(ves) that never fire
-    independently on their own, or — when every leaf CAN fire independently
-    on its own — reports that they only co-occur with each other on bars the
-    earlier rule also covers (mirrors :func:`_leg_diagnostic`'s two branches,
-    keyed on ``independent_fires`` instead of ``fires``). Empty legs → a
-    generic message.
+    Preconditions: ``coverage`` is a non-empty :attr:`_RuleStarvation.coverage`
+    tuple (already ordered by descending covered-fire count).
+    Postconditions: names every earlier rule that covered at least one of the
+    starved rule's fires, most-covering first, with the count each accounts
+    for — so the reader can see whether one earlier rule explains the shadowing
+    or several jointly do. Pure.
     """
-    if not pair.legs:
+    assert coverage, "coverage must be non-empty to be rendered"
+    return ", ".join(f"entry[{index}] covers {count}" for index, count in coverage)
+
+
+def _independence_leg_diagnostic(legs: tuple[_PairLegCooccurrence, ...], earlier_index: int) -> str:
+    """Human diagnostic for a shadowed rule, naming the bottleneck leg(s).
+
+    Preconditions: ``legs`` is the per-leaf co-occurrence tally of the shadowed
+    rule against the rule at ``earlier_index`` (empty for a single-condition
+    rule, or when no per-leg breakdown was computed).
+    Postconditions: for a single-condition rule, states it never fires
+    independently of the earlier rule; for a conjunction, names the leaf(ves)
+    that never fire independently on their own, or — when every leaf CAN fire
+    independently on its own — reports that they only co-occur with each other
+    on bars the earlier rule also covers (mirrors :func:`_leg_diagnostic`'s two
+    branches, keyed on ``independent_fires`` instead of ``fires``). Empty legs
+    → a generic message. Pure.
+    """
+    if not legs:
         return "The predicate never fires independently of the earlier rule."
-    never = [leg.predicate for leg in pair.legs if leg.fires > 0 and leg.independent_fires == 0]
+    never = [leg.predicate for leg in legs if leg.fires > 0 and leg.independent_fires == 0]
     if never:
-        return (
-            f"These condition(s) never fire independently of entry[{pair.earlier_index}]: {never}."
-        )
+        return f"These condition(s) never fire independently of entry[{earlier_index}]: {never}."
     return (
-        f"Every condition can fire independently of entry[{pair.earlier_index}] on its own, "
-        f"but they only co-occur with each other on bars entry[{pair.earlier_index}] also covers."
+        f"Every condition can fire independently of entry[{earlier_index}] on its own, "
+        f"but they only co-occur with each other on bars entry[{earlier_index}] also covers."
     )

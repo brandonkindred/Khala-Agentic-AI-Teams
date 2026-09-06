@@ -771,8 +771,11 @@ class SynthesisMixin:
         on the compiled path where zero fires ⇒ zero entries; warning on the
         custom path where the executed code may differ) onto
         ``all_gate_results`` in place, plus the distinct structurally-starved
-        findings from the pairwise co-occurrence check (same severity model;
-        a later rule that fires only on bars an earlier rule also fires on).
+        findings (same severity model; a later rule whose every fire lands on a
+        bar some earlier, higher-priority rule already covers, judged against
+        the union of all earlier rules and only once enough covered fires have
+        been observed to rule out coincidence — an abstention below that floor
+        is recorded as an ``info`` rather than dropped).
         Findings never short-circuit the round — the post-backtest zero-trade
         path still owns routing.
         """
@@ -790,10 +793,10 @@ class SynthesisMixin:
             all_gate_results,
             refinement_round=round_num,
         )
-        pairs = self.predicate_reachability_probe.probe_pairs(spec, market_data)
+        starvation = self.predicate_reachability_probe.probe_starvation(spec, market_data)
         self.record_gates(
             self.predicate_reachability_probe.to_starvation_gate_results(
-                pairs, spec, phase="synthesis"
+                starvation, spec, phase="synthesis"
             ),
             all_gate_results,
             refinement_round=round_num,

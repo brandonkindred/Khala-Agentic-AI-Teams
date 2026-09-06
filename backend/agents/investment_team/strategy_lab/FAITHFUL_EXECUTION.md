@@ -94,17 +94,29 @@ bottleneck (a leg that never holds, or legs that never co-occur). Findings are r
 gate timeline; routing stays with the existing post-backtest zero-trade path.
 
 Beyond dead rules, the probe also reports a rule that fires plenty on its own but is always
-shadowed by an earlier, higher-priority rule in `evaluate_entry_rules`'s first-match-wins scan
-("structurally starved") as a distinct finding kind — `probe_pairs()` computes, for every ordered
-(earlier, later) entry-rule pair, whether the later rule ever fires independently of the earlier
-one, and `to_starvation_gate_results()` renders that into a critical/warning finding (same
-compiled-vs-custom severity split as dead-code findings) naming both rules, with the same
-per-leg diagnostic pattern. A rule already reported dead is never additionally reported as
-starved. This is a pairwise, sufficient-condition check: it catches a later rule shadowed by one
-specific earlier rule, but not (yet) the case where several earlier rules jointly cover it without
-any single one being a superset on its own — the full union-based verdict `evaluate_entry_rules`'s
-docstring defines. The authoritative priority decision and the formal "structurally starved"
-definition are documented on `evaluate_entry_rules` in `executor/predicate_evaluator.py`.
+shadowed by earlier, higher-priority rules in `evaluate_entry_rules`'s first-match-wins scan
+("structurally starved") as a distinct finding kind. `probe_starvation()` evaluates the
+**union-based** verdict `evaluate_entry_rules`'s docstring defines — for each rule, whether any of
+its fires lands on a bar that *no* earlier rule covers — so it also catches a rule several earlier
+rules jointly starve without any single one being a superset of it, which a pairwise check misses.
+`probe_pairs()` remains as the directly-inspectable per-pair analysis and supplies the per-leg
+co-occurrence tally. `to_starvation_gate_results()` renders one finding per rule (never one per
+pair) with the same compiled-vs-custom severity split as dead-code findings, naming every earlier
+rule that covers the starved rule's fires and how many each accounts for.
+
+Precision is what makes the finding worth having: a finding on a correct spec would train authors
+to ignore the finding entirely. Three things guard it. A rule already reported dead is never
+additionally reported as starved. A rule whose fires are all covered but number fewer than
+`_MIN_STARVATION_FIRES` abstains with an `info` — under the null hypothesis that its fires land
+independently of the earlier rules' coverage fraction `p`, seeing all `f` covered has probability
+`p ** f`, so a handful of covered fires is coincidence, not structure. And a window with too few
+jointly-judged bars abstains with an `info` too, rather than staying silent in a way that reads as
+"checked, nothing found". A deliberate narrow-then-broad priority ordering produces nothing at all
+(the broad rule still wins the scan wherever the narrow one does not fire); when the ordering
+genuinely cannot work, the finding leads with the evidence and names the three resolutions
+`design_system.md` teaches — fold, reorder, or loosen — so the author can adjudicate it. The
+authoritative priority decision and the formal "structurally starved" definition are documented on
+`evaluate_entry_rules` in `executor/predicate_evaluator.py`.
 
 ### 6. Design-time spec-quality hardening (`design_system.md`, `strategy_validator.py`, `orchestrator.py`)
 
