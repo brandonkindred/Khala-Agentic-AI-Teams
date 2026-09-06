@@ -28,13 +28,20 @@ resolved ``qty``, neither of which this module produces. Its entry-side
 fields match ``ReferenceTrade``'s 1:1 in name/type/semantics so a later
 exit-side step can extend/wrap one into a full ``ReferenceTrade`` with no
 renaming.
+
+:func:`fill_entry_at` is the per-trigger fill mechanics factored out of
+:func:`replay_entry_rules`'s own loop, so the combined multi-kind simulator in
+``reference_simulator.py`` can fill a trigger it detects itself, bar by bar,
+without duplicating the final-bar drop or the fill-bar-open guard —
+:func:`replay_entry_rules` remains the whole-series, first-match-per-symbol
+convenience wrapper around it.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, List, Literal, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -122,6 +129,65 @@ def bars_to_frame(symbol_bars: "Sequence[Bar]") -> pd.DataFrame:
     )
 
 
+def fill_entry_at(
+    symbol: str,
+    symbol_bars: "Sequence[Bar]",
+    trigger_bar: int,
+    rule_side: Literal["long", "short"],
+    rule_index: int,
+) -> Optional[ReferenceEntryFill]:
+    """Fill one already-matched entry trigger at the next bar's open, or drop it.
+
+    The per-trigger core of :func:`replay_entry_rules`, factored out so a
+    caller driving its own bar-by-bar walk — the combined multi-kind simulator
+    in :mod:`reference_simulator`, which must resolve a symbol's exits before
+    re-evaluating its entries on the same bar and so cannot use
+    :func:`replay_entry_rules`'s own whole-series, first-match-per-symbol loop
+    — can fill a trigger it detected itself via ``evaluate_entry_rules``,
+    without duplicating the final-bar drop or the fill-bar-open guard.
+
+    Preconditions:
+        - ``0 <= trigger_bar < len(symbol_bars)`` — the bar at which
+          ``evaluate_entry_rules`` matched a rule.
+        - ``rule_side``/``rule_index`` are that matched rule's own ``side``
+          and its index in ``spec.entry_rules`` — ``evaluate_entry_rules``'s
+          own ``(rule, rule_idx)`` return value, unpacked by the caller.
+
+    Postconditions:
+        - Returns ``None`` when ``trigger_bar`` is the final bar of
+          ``symbol_bars`` (no next bar to fill against — the documented
+          final-bar rule) or when the fill bar's ``open`` is not a positive
+          finite number (``Bar`` does not itself validate OHLC
+          positivity/finiteness) — both cases mean "this trigger produces no
+          fill," not an error.
+        - Otherwise returns a ``ReferenceEntryFill`` at
+          ``entry_bar = trigger_bar + 1``, priced at that bar's ``open``,
+          dated from that same bar's truncated ISO timestamp.
+
+    Invariants:
+        - No side effects: does not mutate ``symbol_bars``.
+        - Deterministic: identical inputs always produce an identical result.
+    """
+    entry_bar = trigger_bar + 1
+    if entry_bar >= len(symbol_bars):
+        return None  # final-bar rule: no next bar to fill against
+    fill_bar = symbol_bars[entry_bar]
+    open_px = fill_bar.open
+    if not (open_px > 0 and math.isfinite(open_px)):
+        return None  # fill-bar open guard
+    return ReferenceEntryFill(
+        symbol=symbol,
+        side=rule_side,
+        entry_bar=entry_bar,
+        # ``Bar.timestamp`` is ISO-8601 (contract.py's own docstring), so its
+        # first 10 characters are always the date, matching production's
+        # identical ``pos.entry_timestamp[:10]`` truncation.
+        entry_date=fill_bar.timestamp[:10],
+        entry_rule_index=rule_index,
+        entry_price=open_px,
+    )
+
+
 def replay_entry_rules(
     spec: StrategySpec,
     bars: "Mapping[str, Sequence[Bar]]",
@@ -177,25 +243,12 @@ def replay_entry_rules(
             if match is None:
                 continue
             rule, rule_idx = match
-            entry_bar = i + 1
-            if entry_bar >= n:
-                break  # final-bar rule: no next bar to fill against
-            fill_bar = symbol_bars[entry_bar]
-            open_px = fill_bar.open
-            if not (open_px > 0 and math.isfinite(open_px)):
-                continue  # fill-bar open guard: drop, keep scanning
-            out.append(
-                ReferenceEntryFill(
-                    symbol=symbol,
-                    side=rule.side,
-                    entry_bar=entry_bar,
-                    # ``Bar.timestamp`` is ISO-8601 (contract.py's own docstring),
-                    # so its first 10 characters are always the date, matching
-                    # production's identical ``pos.entry_timestamp[:10]`` truncation.
-                    entry_date=fill_bar.timestamp[:10],
-                    entry_rule_index=rule_idx,
-                    entry_price=open_px,
-                )
-            )
+            fill = fill_entry_at(symbol, symbol_bars, i, rule.side, rule_idx)
+            if fill is None:
+                # Either the final-bar rule (the outer loop ends next anyway,
+                # so continuing vs. breaking here are equivalent) or the
+                # fill-bar-open guard (keep scanning for a later trigger).
+                continue
+            out.append(fill)
             break  # suppression: never re-open a symbol once filled
     return out

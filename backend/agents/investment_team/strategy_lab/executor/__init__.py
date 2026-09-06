@@ -27,13 +27,25 @@ here is genuinely shared plumbing:
   the engine's current and unchanged semantics for that kind. Reuses
   :mod:`rule_compiler`'s trigger geometry and adds the fill mechanics that
   geometry deliberately omits.
+* :mod:`reference_simulator` — the combined driver that joins the two
+  modules above into complete entry-plus-exit ``ReferenceTrade`` records over
+  a full backtest window: races the stop-loss and take-profit-family
+  candidates bar by bar via their ``peek``/``commit``/``advance`` split,
+  interleaves the ``signal_exit`` FIFO/retirement rules, and re-evaluates
+  entries after each bar's exits so a symbol can re-enter after a close.
+  ``simulate()`` is the module's public entry point.
 """
 
-from .reference_entries import ReferenceEntryFill, bars_to_frame, replay_entry_rules
+from .reference_entries import ReferenceEntryFill, bars_to_frame, fill_entry_at, replay_entry_rules
 from .reference_exits import (
+    PrefixHistoryView,
     ReferenceSignalExit,
     ReferenceStopLossExit,
     ReferenceTakeProfitExit,
+    RestingStopLoss,
+    RestingTakeProfitFamily,
+    bar_snapshot,
+    decimals_for,
     entry_price_basis,
     replay_signal_exits,
     replay_stop_loss_exits,
@@ -41,12 +53,14 @@ from .reference_exits import (
     resolve_signal_exit,
     resolve_stop_loss_exit,
     resolve_take_profit_family_exit,
+    round_reference_price,
     scaled_take_profit_rules,
     signal_exit_rules,
     stop_loss_rules_for_side,
     take_profit_rules,
     working_exit_rules,
 )
+from .reference_simulator import ReferenceTrade, simulate
 from .rule_compiler import (
     BarSnapshot,
     ExitIntent,
@@ -63,15 +77,22 @@ __all__ = [
     "BarSnapshot",
     "ExitIntent",
     "PositionState",
+    "PrefixHistoryView",
     "ReferenceEntryFill",
     "ReferenceSignalExit",
     "ReferenceStopLossExit",
     "ReferenceTakeProfitExit",
+    "ReferenceTrade",
+    "RestingStopLoss",
+    "RestingTakeProfitFamily",
     "StopLimitPrices",
+    "bar_snapshot",
     "bars_to_frame",
     "build_trade_records",
+    "decimals_for",
     "entry_price_basis",
     "evaluate_exit_rules",
+    "fill_entry_at",
     "replay_entry_rules",
     "replay_signal_exits",
     "replay_stop_loss_exits",
@@ -79,8 +100,10 @@ __all__ = [
     "resolve_signal_exit",
     "resolve_stop_loss_exit",
     "resolve_take_profit_family_exit",
+    "round_reference_price",
     "scaled_take_profit_rules",
     "signal_exit_rules",
+    "simulate",
     "stop_limit_prices",
     "stop_loss_level",
     "stop_loss_rules_for_side",
