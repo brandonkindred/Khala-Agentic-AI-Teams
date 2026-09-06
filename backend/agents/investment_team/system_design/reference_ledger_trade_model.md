@@ -1617,3 +1617,52 @@ a possible missing or extra trade (an insertion/deletion, not just a
 reordering) is a sequence-alignment problem the matching module must solve
 explicitly — e.g. aligning by closest `entry_price`/`exit_price`/`qty`
 match within the colliding group, or an edit-distance-style algorithm.
+
+## 7. Implementation status
+
+`simulate(spec, bars, *, entry_slippage_bps=0.0)`
+(`strategy_lab/executor/reference_simulator.py`) implements this design's
+`ReferenceTrade` record and joins the entry-side and exit-side replays into
+complete trade records over a full backtest window, with the following
+deviations from this document, all intentional and all pending later work:
+
+- **`qty` is always the nominal `1.0`.** None of §5's sizing formulas
+  (`FixedFractionSizing`/`FixedNotionalSizing`/`VolatilityTargetSizing`, the
+  ATR resolution order, the `max_position_pct` clamp, whole-share handling),
+  the risk-limit admission gates (`max_open_positions`/
+  `max_gross_leverage`/`max_symbol_concentration_pct`), or the capital/equity
+  ledger are implemented yet. `1.0` is the same nominal quantity
+  `RestingStopLoss`/`RestingTakeProfitFamily` already use internally, and it
+  satisfies `ReferenceTrade`'s own `qty > 0` invariant. A later matching
+  module must not expect `ReferenceTrade.qty` to match production's real,
+  sized `TradeRecord.shares` until this layer lands.
+- **`simulate()` omits the `starting_equity` parameter.** This document's §2
+  signature includes it; with sizing unimplemented (previous bullet), the
+  parameter would have no use, and accepting-but-ignoring it would be
+  misleading. It will be added back once sizing is built.
+- **`oco_bracket` is out of scope and rejected outright.** `simulate()`
+  raises `ValueError` for any spec whose working exit rules contain an
+  `OcoBracketRule`, rather than silently ignoring it (which would produce
+  trades with a missing exit) or modelling only one leg. §5's `oco_bracket`
+  subsection remains the design for whichever later step implements both
+  legs (OCO sibling cancellation, the same-bar double-touch tie-break where
+  the stop leg wins).
+- **No reference-side analogue of `open_position_entry_reasons`.** A
+  position still open when its symbol's bars run out — including one
+  holding only a partially-reduced `scaled_take_profit` remainder —
+  produces no `ReferenceTrade`, matching §2's own postcondition, but this
+  module has no list to populate the way `TradingServiceResult` does; a
+  caller that needs to know *why* an entry rule never closed cannot get that
+  from this module today.
+- **Cross-symbol processing is independent walks plus a final sort, not a
+  genuinely merged timeline.** §2's "Cross-symbol processing order"
+  subsection mandates a merged `(timestamp, symbol)` walk because equity
+  tracking couples symbols together. With sizing/capital unimplemented
+  (first bullet), no state actually couples one symbol's decisions to
+  another's, so walking each symbol independently and then stably sorting
+  every emitted trade by `(exit bar timestamp, symbol)` before assigning
+  `trade_num` produces an IDENTICAL result to a genuinely merged walk, at
+  lower implementation cost. This equivalence ends the moment sizing lands:
+  a real walk will then need to interleave symbols bar by bar so each
+  entry's sizing decision sees every other open position's latest
+  mark-to-market value, not merely to keep trades in the right order.

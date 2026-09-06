@@ -16,10 +16,12 @@ from investment_team.strategy_lab.executor.reference_entries import (
     bars_to_frame,
 )
 from investment_team.strategy_lab.executor.reference_exits import (
+    PrefixHistoryView,
     ReferenceSignalExit,
     ReferenceStopLossExit,
     ReferenceTakeProfitExit,
-    _PrefixHistoryView,
+    RestingStopLoss,
+    RestingTakeProfitFamily,
     entry_price_basis,
     replay_signal_exits,
     replay_stop_loss_exits,
@@ -643,6 +645,85 @@ def test_slippage_can_change_which_bar_the_stop_fires_on():
     ]
     assert _resolve(rules, bars, entry_slippage_bps=0.0).exit_bar == 3
     assert _resolve(rules, bars, entry_slippage_bps=200.0).exit_bar == 2
+
+
+# ---------------------------------------------------------------------------
+# RestingStopLoss.peek/advance vs. step — the split the combined simulator
+# needs to race this book against a competing exit kind on the same bar
+# ---------------------------------------------------------------------------
+
+
+def _stop_book(pct=0.05, side="long", anchor=100.0, style="market", **rule_kwargs):
+    rule = StopLossRule(pct=pct, style=style, **rule_kwargs)
+    return RestingStopLoss(side=side, symbol="AAA", anchor=anchor, rules=[(0, rule)])
+
+
+def test_step_equals_peek_then_advance():
+    """Two freshly constructed, identical books: one driven by ``step``, the
+    other by ``peek`` then ``advance`` — both must land in the same state."""
+    bar = _bar(99.0, 99.0, 94.0, 96.0)  # breaches the 5% (100 -> 95) level
+    via_step = _stop_book()
+    via_split = _stop_book()
+
+    step_result = via_step.step(bar)
+    peek_result = via_split.peek(bar)
+    via_split.advance(bar)
+
+    assert step_result == peek_result == (0, 95.0)
+
+
+def test_peek_alone_does_not_ratchet_the_watermark():
+    """Calling ``peek`` twice for the same bar, with no ``advance`` in
+    between, must return the same result both times — the watermark check
+    inside ``peek`` reads state ``advance`` alone is responsible for moving."""
+    book = _stop_book(side="short", pct=0.05, anchor=100.0)  # entry_price basis
+    bar = _bar(101.0, 106.0, 99.0, 105.0)  # short stop at 105, touched by this bar's high
+    first = book.peek(bar)
+    second = book.peek(bar)
+    assert first == second == (0, 105.0)
+
+
+def test_advance_extends_the_watermark_even_when_peek_finds_no_winner():
+    """``advance`` must run regardless of whether this bar's ``peek`` fired —
+    mirrors ``step``'s own "watermark extended either way" postcondition."""
+    book = _stop_book(pct=0.05, basis="trailing_high", style="market")
+    quiet_bar = _bar(101.0, 108.0, 100.0, 107.0)  # no stop touch; ratchets the high to 108
+    assert book.peek(quiet_bar) is None
+    book.advance(quiet_bar)
+    # The trailing floor is now 108 * 0.95 = 102.6 -- a bar that would have
+    # been safe against the ORIGINAL 100 * 0.95 = 95 floor now breaches it.
+    # Opens ABOVE the new floor so this is a through-bar (exact-level fill),
+    # not a gap, isolating the watermark-ratchet effect from the separate
+    # worse-of-open-and-level mechanic.
+    later_bar = _bar(103.0, 103.0, 101.0, 101.5)
+    assert book.peek(later_bar) == (0, 102.6)
+
+
+def test_retire_limit_style_rules_removes_only_the_limit_style_rule():
+    """A mixed book (one market stop, one limit stop) must keep the market
+    rule fully live after retirement — only the limit-style rule is dropped."""
+    market_rule = StopLossRule(pct=0.05, basis="entry_price")
+    limit_rule = StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.02)
+    book = RestingStopLoss(
+        side="long", symbol="AAA", anchor=100.0, rules=[(0, market_rule), (1, limit_rule)]
+    )
+    book.retire_limit_style_rules()
+    # The limit rule's stop (97) arms (low <= 97) and its limit
+    # (97 * 0.98 = 95.06) is reachable this same bar (high >= 95.06) -- it
+    # would win if not retired. The market rule's own level (95) stays
+    # UNTOUCHED (low=95.5 > 95), so "no candidate fires" can only be
+    # explained by the limit rule being truly gone, not by the market rule
+    # winning a tie-break it was never in.
+    bar = _bar(96.0, 96.5, 95.5, 96.0)
+    assert book.peek(bar) is None
+
+
+def test_retire_limit_style_rules_is_idempotent_and_harmless_with_none_present():
+    book = _stop_book(style="market")
+    book.retire_limit_style_rules()
+    book.retire_limit_style_rules()  # second call: no-op, must not raise
+    bar = _bar(99.0, 99.0, 94.0, 96.0)
+    assert book.peek(bar) == (0, 95.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1350,7 +1431,7 @@ def test_two_ladders_on_one_position_fire_at_most_one_rung_per_bar_even_when_bot
 
 
 # ---------------------------------------------------------------------------
-# _RestingTakeProfitFamily.step — re-invocation after a full close
+# RestingTakeProfitFamily.step — re-invocation after a full close
 # ---------------------------------------------------------------------------
 
 
@@ -1359,18 +1440,99 @@ def test_step_returns_none_on_any_call_after_the_position_has_fully_closed():
     itself never calls ``step`` again after a non-None result, so this exercises
     the contract a future direct caller (the docstring's anticipated combined
     multi-kind simulator) would rely on instead."""
-    from investment_team.strategy_lab.executor.reference_exits import (
-        _RestingTakeProfitFamily,
-    )
-
     rules = [TakeProfitRule(pct=0.05)]
-    family = _RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
+    family = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
     closing_bar = _bar(101.0, 106.0, 100.0, 105.0)
     assert family.step(closing_bar) is not None
     # A second bar that would ALSO reach the target if evaluated fresh proves
     # the guard suppresses re-evaluation, not merely that nothing fired.
     also_reaches_target = _bar(101.0, 106.0, 100.0, 105.0)
     assert family.step(also_reaches_target) is None
+
+
+# ---------------------------------------------------------------------------
+# RestingTakeProfitFamily.peek/commit vs. step, plus remaining_qty and
+# blend_terminal — the split and the accessors the combined simulator needs to
+# race this family against a competing exit kind and blend a foreign close
+# ---------------------------------------------------------------------------
+
+
+def test_take_profit_step_equals_peek_then_commit():
+    rules = [TakeProfitRule(pct=0.05)]
+    via_step = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
+    via_split = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
+    bar = _bar(101.0, 106.0, 100.0, 105.0)  # reaches the 105 target
+
+    step_result = via_step.step(bar)
+    candidate = via_split.peek(bar)
+    split_result = via_split.commit(candidate)
+
+    assert step_result == split_result
+    assert step_result is not None
+    assert (step_result.raw_price, step_result.terminal_price) == (105.0, 105.0)
+
+
+def test_peek_alone_does_not_apply_the_candidate():
+    """Calling ``peek`` without a matching ``commit`` must leave the ladder's
+    cursor and remaining quantity untouched — proven by peeking the SAME bar
+    twice and getting an equivalent candidate both times."""
+    ladder = ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=0.5)])
+    family = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=[ladder])
+    bar = _bar(101.0, 106.0, 100.0, 105.0)  # reaches the 105 rung target
+
+    first = family.peek(bar)
+    second = family.peek(bar)
+    assert first == second
+    assert family.remaining_qty == 1.0  # unchanged: nothing has been committed yet
+
+
+def test_commit_advances_remaining_qty_and_the_ladder_cursor():
+    ladder = ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=0.5)])
+    family = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=[ladder])
+    bar = _bar(101.0, 106.0, 100.0, 105.0)
+
+    candidate = family.peek(bar)
+    fired = family.commit(candidate)
+
+    assert fired is None  # only half the position closed -- rung fired, not the position
+    assert family.remaining_qty == 0.5
+
+
+def test_remaining_qty_starts_at_the_nominal_original_quantity():
+    rules = [TakeProfitRule(pct=0.05)]
+    family = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
+    assert family.remaining_qty == 1.0
+
+
+def test_blend_terminal_reduces_to_the_closing_price_with_no_prior_fills():
+    rules = [TakeProfitRule(pct=0.05)]
+    family = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
+    raw_price, terminal_price = family.blend_terminal(90.0)
+    assert (raw_price, terminal_price) == (90.0, 90.0)
+
+
+def test_blend_terminal_weights_by_quantity_across_a_prior_rung():
+    """A ladder rung already closed half the position at 105; a FOREIGN rule
+    (a stop or signal exit, not this family) now closes the other half at 80 —
+    the blend must weight both slices by their own quantity, matching the
+    design doc's exit-aggregation rule."""
+    ladder = ScaledTakeProfitRule(levels=[TakeProfitLevel(pct=0.05, qty_fraction=0.5)])
+    family = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=[ladder])
+    rung_bar = _bar(101.0, 106.0, 100.0, 105.0)
+    family.commit(family.peek(rung_bar))
+    assert family.remaining_qty == 0.5
+
+    raw_price, terminal_price = family.blend_terminal(80.0)
+    assert raw_price == pytest.approx(0.5 * 105.0 + 0.5 * 80.0)
+    assert terminal_price == 80.0  # the FOREIGN close's own price, not re-derived
+
+
+@pytest.mark.parametrize("bad_price", [0.0, -1.0, float("nan"), float("inf")])
+def test_blend_terminal_rejects_a_nonpositive_or_nonfinite_closing_price(bad_price):
+    rules = [TakeProfitRule(pct=0.05)]
+    family = RestingTakeProfitFamily(side="long", symbol="AAA", anchor=100.0, rules=rules)
+    with pytest.raises(ValueError, match="closing_price"):
+        family.blend_terminal(bad_price)
 
 
 # ---------------------------------------------------------------------------
@@ -1583,7 +1745,7 @@ def test_signal_exit_rules_is_not_side_filtered():
 
 
 # ---------------------------------------------------------------------------
-# _PrefixHistoryView
+# PrefixHistoryView
 # ---------------------------------------------------------------------------
 
 
@@ -1595,13 +1757,13 @@ def test_prefix_view_reports_length_one_past_its_index():
     """``length() - 1`` is the index the shared evaluator resolves a signal
     predicate at, so this identity is the whole point of the adapter."""
     view = _view([_flat(100.0), _flat(101.0), _flat(102.0)])
-    assert [_PrefixHistoryView(view, i).length() for i in range(3)] == [1, 2, 3]
+    assert [PrefixHistoryView(view, i).length() for i in range(3)] == [1, 2, 3]
 
 
 def test_prefix_view_delegates_reads_to_the_wrapped_view():
     bars = [_flat(100.0), _flat(101.0), _flat(102.0)]
     view = _view(bars)
-    prefixed = _PrefixHistoryView(view, 1)
+    prefixed = PrefixHistoryView(view, 1)
     assert prefixed.bar_field("close", 1) == 101.0
     ref = IndicatorRef(name="sma", params={"period": 2})
     assert prefixed.indicator(ref, 1) == view.indicator(ref, 1)
@@ -1611,7 +1773,7 @@ def test_prefix_view_delegates_reads_to_the_wrapped_view():
 def test_prefix_view_rejects_an_out_of_range_index(i):
     view = _view([_flat(100.0), _flat(101.0), _flat(102.0)])
     with pytest.raises(ValueError, match="out of range"):
-        _PrefixHistoryView(view, i)
+        PrefixHistoryView(view, i)
 
 
 # ---------------------------------------------------------------------------
